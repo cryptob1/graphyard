@@ -26,7 +26,7 @@ const parent = { id: '11111111-1111-4111-8111-111111111111', key: 'GY-1700', sta
 const item = (n: number, extra: Partial<Work> = {}): Work => ({
   id: `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`, key: `GY-${n}`, title: `Observation ${n}`, description: `Post-deploy follow-up: post-deploy:${parent.id}:AC-3:${proof}:${filed}\n\nowed`, type: 'chore', priority: 1, stage: 'ready', ready: true, epoch: 0, revision: 5, policyRevision: 1,
   createdAt: iso(now - 40 * hour), updatedAt: iso(now - 30 * hour), stageEnteredAt: iso(now - 30 * hour), lease: null, lastAssignment: null, systemDriven: true,
-  workspaces: [], sessions: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], plannedFiles: [],
+  workspaces: [], sessions: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], 
   criteria: [{ id: 'AC-1', text: 'The row clears and does not re-fire during 24h', proofs: [own] }], policy: { checks: ['test', 'typecheck'], review: true }, dependencies: [],
   observationWindow: { notBefore: iso(now - hour), basis: 'criterion-window', detail: 'the 24-hour live window ran' },
   gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
@@ -36,7 +36,7 @@ const reading = (extra: object = {}) => ({ id: 'r1', proof: own, trusted: true, 
 
 test('unit:loop-observation-waits-for-loop-recording — a due reading is a window wait on the loop, never an operator-proof escalation, for a ready item and for one left in build with an unsubmitted worker candidate', () => {
   const due = item(1724), windowed = item(1728, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'later' } });
-  const inBuild = item(1725, { stage: 'build', epoch: 3, plannedFiles: ['verification/post-deploy-github-budget-row.md'], candidate: { pr: 1172, sha: sha('d'), baseSha: sha('e'), author: 'graphyard-cryptob1-graphyard[bot]', branch: 'graphyard/gy-1725-3', createdAt: iso(now - 5 * hour) } } as Partial<Work>);
+  const inBuild = item(1725, { stage: 'build', epoch: 3, candidate: { pr: 1172, sha: sha('d'), baseSha: sha('e'), author: 'graphyard-cryptob1-graphyard[bot]', branch: 'graphyard/gy-1725-3', createdAt: iso(now - 5 * hour) } } as Partial<Work>);
   const all = [parent, due, windowed, inBuild];
   for (const work of [due, inBuild]) {
     assert.equal(loopObservation(work, new Date(now), all)?.due, true);
@@ -70,7 +70,7 @@ test('unit:loop-observation-waits-for-loop-recording — a due reading is a wind
 });
 
 test('unit:loop-observation-waits-for-loop-recording — master status lists a due item under the loop\'s pending readings with the loop\'s last record, counted waiting and never as a stalled-gate attention item, in build as in ready', () => {
-  const due = item(1724), inBuild = item(1725, { stage: 'build', epoch: 3, stageEnteredAt: iso(now - 30 * hour), plannedFiles: ['verification/post-deploy-github-budget-row.md'], candidate: { pr: 1172, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-1725-3', createdAt: iso(now - 5 * hour) } } as Partial<Work>);
+  const due = item(1724), inBuild = item(1725, { stage: 'build', epoch: 3, stageEnteredAt: iso(now - 30 * hour), candidate: { pr: 1172, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-1725-3', createdAt: iso(now - 5 * hour) } } as Partial<Work>);
   const windowed = item(1728, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'later' } });
   const loop = { projectMemory: null, actions: {
     [`reading:${due.id}`]: { kind: 'deployment', work: 'GY-1724', principal: null, state: 'waiting', detail: 'GY-1724\'s reading is due on release bbbbbbbbbbbb and cannot be taken from this host: the App\'s advanced delivery log needs a browser sign-in', attempts: 2, cycle: 9, at: iso(now - 300_000) },

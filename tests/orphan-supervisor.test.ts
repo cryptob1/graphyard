@@ -105,7 +105,7 @@ const worker = { name: 'opencode-1', principal: 'worker-a', agentName: 'graphyar
 function item(leaseExpiresAt: string | null, overrides: Partial<Work> = {}): Work {
   return { id: 'work-83', key: 'GY-83', title: 'An orphaned watch supervisor renews a lease forever', description: '', type: 'bug', priority: 0,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Stops', proofs: ['unit:orphan-supervisor-attention'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/supervisor.ts'], stage: 'build', revision: 9, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 9, policyRevision: 1,
     createdAt: at(-7_200_000), updatedAt: observedAt, stageEnteredAt: at(-600_000), ready: true, epoch: 2,
     lease: leaseExpiresAt ? { owner: 'worker-a', epoch: 2, expiresAt: leaseExpiresAt } : null,
     workspaces: [workspace], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],

@@ -57,7 +57,7 @@ function item(instance: Instance): Work {
   const candidate = { sha: instance.sha, baseSha: base, pr: 887, branch: 'graphyard/gy-1394-15', author: 'implementer' };
   const observation: Observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [],
     at: new Date(Date.parse(instance.requestedAt) - 30_000).toISOString(), prState: 'open', draft: false, baseTip: base, baseTree: '7b'.padEnd(40, '0'), baseTipContained: true };
-  const work = { id: 'work-GY-1394', key: 'GY-1394', title: 'Instance', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  const work = { id: 'work-GY-1394', key: 'GY-1394', title: 'Instance', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1,
     createdAt: instance.requestedAt, updatedAt: instance.requestedAt, stageEnteredAt: instance.requestedAt, ready: true, epoch: 15, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: candidate.branch, epoch: 15, owner: 'implementer' }], candidate, submission: { epoch: 15, pr: 887 }, reworkRequested: false,

@@ -39,7 +39,7 @@ async function setup() {
 const lapsed = (): Work => ({
   id: 'work-1984', key: 'GY-1984', title: 'One loop', description: '', type: 'chore', priority: 1,
   dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-  policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
+  policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1,
   createdAt: iso(-3_600_000), updatedAt: iso(-600_000), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 1,
   lease: { owner: 'alpha-principal', epoch: 1, expiresAt: iso(-600_000) },
   lastAssignment: { owner: 'alpha-principal', epoch: 1, claimedAt: iso(-3_600_000) },

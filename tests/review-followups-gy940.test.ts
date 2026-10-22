@@ -73,7 +73,7 @@ function held(id: string, key: string, principal: string, epoch: number, overrid
   return {
     id, key, title: `Follow-ups for ${key}`, description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-minutes(600)), updatedAt: iso(0), stageEnteredAt: iso(-minutes(300)), ready: true, epoch,
     lease: { owner: principal, epoch, expiresAt: iso(minutes(600)) },
     lastAssignment: { owner: principal, epoch, claimedAt: iso(-minutes(20)) },

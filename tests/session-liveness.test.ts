@@ -64,7 +64,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 const reload = async (item: Work | string) => (await store.list()).find(entry => entry.id === (typeof item === 'string' ? item : item.id))!;
 let sequence = 0;
 async function created(overrides: Record<string, unknown> = {}) {
-  return engine.execute(operator, 'create', null, { title: `Session liveness ${++sequence}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, randomUUID());
+  return engine.execute(operator, 'create', null, { title: `Session liveness ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, randomUUID());
 }
 /** An item whose only proof is a manual one no producer may run, so its candidate raises a review request and no producer request. */
 const reviewOnly = { criteria: [{ id: 'AC-1', text: 'Read it', proofs: ['manual:by-hand'] }] };

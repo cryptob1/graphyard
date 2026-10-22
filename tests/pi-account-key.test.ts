@@ -131,7 +131,7 @@ function piFleet(registry: ReturnType<typeof memoryRegistry>, host: string, acco
 }
 
 function item(key: string): Work {
-  return { id: `id-${key}`, key, title: 'Pi approver', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: [], criteria: [{ id: 'AC-1', text: 'Judge', proofs: ['unit:pi-account-key-by-reference'] }],
+  return { id: `id-${key}`, key, title: 'Pi approver', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Judge', proofs: ['unit:pi-account-key-by-reference'] }],
     policy: { checks: ['test'], review: true }, stage: 'review', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate: null,
     submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: [], observation: null, autoDispatch: { review: null, producers: [], history: [] } } as unknown as Work;
 }

@@ -90,7 +90,7 @@ function walk(root, directory) {
 export function fileEdges(file, text, files, directories) {
   const edges = new Set(), directory = posix.dirname(file);
   // A directory is a dependency only of a file that lists directories; elsewhere a named directory
-  // is data (a planned-files fixture, a scope pattern), as is any path an application module names.
+  // is data (a fixture, a scope pattern), as is any path an application module names.
   const scans = /\breaddir(?:Sync)?\b|\bglob\b/.test(text), application = /^(?:src|web)\//.test(file);
   const add = (path, named = false) => {
     const normal = posix.normalize(path).replace(/\/$/, '');

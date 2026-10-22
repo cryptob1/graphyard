@@ -42,7 +42,7 @@ function held(overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-710', key: 'GY-710', title: 'Fresh observations', description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-3_600_000), ready: true, epoch,
     lease: { owner: 'alpha-principal', epoch, expiresAt: iso(3_600_000) },
     lastAssignment: { owner: 'alpha-principal', epoch, claimedAt: iso(-3_600_000) },
@@ -174,7 +174,7 @@ const interrupted = (epoch: number, endsBlocker: boolean) => ({ event: 'exhauste
   reason: `${reblockedMarker}${epoch} after its blocker was cleared`, resetsAt: null, partialWork: { state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/x', detail: 'kept' }, ...(endsBlocker ? { endsBlocker: true } : {}) });
 
 async function blockedAttempt(title: string) {
-  let work = (await call(master.token, 'work', { title, plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: reblocked attempts end' })).body as Work;
+  let work = (await call(master.token, 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: reblocked attempts end' })).body as Work;
   work = (await call(master.token, `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready' })).body as Work;
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   const lease = work.lease!;

@@ -4,7 +4,6 @@ import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
 import { inheritedObligations, requiredProofs } from './bootstrap.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { mechanicalFailure, mechanicalVerdicts, evidenceProves, attestedProof } from './mechanical-proofs.js';
-import { regressionRefusals } from '../regression-guard.js';
 import { itemLane, laneRequiresProof } from './policy.js';
 import { riskOf } from './risk-class.js';
 import { postDeployProof } from './post-merge-proofs.js';
@@ -60,14 +59,13 @@ function buildFamily(work: Work, all: Work[], now: Date): LandabilityReason[] {
   // control-plane candidate ignores (GY-1528): the merge writer's trial judges its tests.
   const mechanical = current && work.submission && !work.reworkRequested && !controlPlaneObserved(work)
     ? mechanicalVerdicts(work, all, now).filter(verdict => verdict.outcome === 'failed').map(verdict => mechanicalFailure(verdict, candidate!.sha)) : [];
-  const regressions = current ? regressionRefusals(work, obs!, all) : [];
   const reasons: LandabilityReason[] = [
     ...(!work.submission || work.reworkRequested ? ['Worker has not submitted implementation for this attempt'] : []),
     ...(!candidate ? ['Pull request has not been independently observed'] : []),
     ...(!work.workspaces.length ? ['No workspace registered'] : []),
     ...(conflict ? [conflict] : []),
   ].map(reason => ({ gate: 'build' as const, reason }));
-  reasons.push(...regressions.map(reason => ({ gate: 'build' as const, reason })), ...mechanical.map(reason => ({ gate: 'build' as const, reason })));
+  reasons.push(...mechanical.map(reason => ({ gate: 'build' as const, reason })));
   return reasons;
 }
 

@@ -27,7 +27,7 @@ function observation(sha: string, reviews: Observation['reviews'] = []): Observa
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 116, branch: 'graphyard/gy-100-1', author: 'implementer' };
-  return { id: 'work-100', key: 'GY-100', title: 'Dismissed review match', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-100', key: 'GY-100', title: 'Dismissed review match', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 3,
     createdAt: now, updatedAt: now, stageEnteredAt: now, ready: true, epoch: 1, lease: null,
     workspaces: [], candidate, submission: { epoch: 1, pr: 116 }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: observation(H), blocker: null,

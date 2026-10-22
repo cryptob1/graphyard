@@ -1,6 +1,6 @@
 // Concern: fault classification (GY-173) — what the cycle saw standing wrong, classified; instances recorded; and each recurring class one master-status attention line (GY-2186, no work item filed).
 import type { Work } from '../model.js';
-import { classified, classifyAttention, faultClasses, faultClassPolicyFromEnv, recurringClasses, standingScopeRequest, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClass, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
+import { classified, classifyAttention, faultClasses, faultClassPolicyFromEnv, recurringClasses, statusFaults, trackFaults, unboundedAttemptKey, workFaults, type FaultClass, type FaultClassPolicy, type FaultKind, type FaultObservation } from '../model/fault-classes.js';
 import { buildMasterStatus, diskThresholdBytes, type AttentionItem, type ContainmentAssessment, type ControlPlaneStatus, type HerdrAgent, type MasterConfig } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { hostMemoryAttention } from '../master-resources.js';
@@ -42,14 +42,12 @@ export interface FaultSources {
   loop?: AttentionItem[];
   /** Herdr could not be read this cycle: every kind read from its inventory (herdrFaultKinds) goes unobserved. */
   herdrUnavailable?: boolean;
-  /** The loop puts a rule-refused scope request to the independent approver (GY-176), so that refusal is still being decided (GY-1085). */
-  scopeRoutes?: boolean;
   /** What is disposable now over the current worktree inventory (GY-1784): null when the plan could not be read, absent when the loop has no reading of it. */
   worktreeReclaimable?: number | null;
 }
 /**
  * What this cycle saw standing wrong, classified (GY-173): every open item's own faults
- * (escalations, fences, parks, scope requests, proof gaps, spent accounts, violations, blockers);
+ * (escalations, fences, parks, proof gaps, spent accounts, violations, blockers);
  * the attention `master status` derives from the same snapshot, Herdr and containment reads
  * (session liveness, review convergence, base conflicts, overlap holds, merge violations, installation
  * sources); the status-level problems (held or failed integration jobs, unserved executors); and
@@ -65,12 +63,11 @@ export interface FaultSources {
  * the action history retains failures long after they stopped mattering, so each is noted once, as it happens, by storeAction.
  */
 export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, sources: FaultSources = {}): FaultObservation[] {
-  const routes = sources.scopeRoutes ?? true;
   // A fence the loop settled — this cycle's reclaim step included — is gone, though the snapshot the cycle began with still shows it (GY-1299).
   const work = snapshot.map(item => fenceSettled(state, item) ? { ...item, containmentQuarantine: null } : item);
   const byKey = new Map(work.map(item => [item.key, item]));
   // An attempt inside the loop's own reclaim bound is the record's to name, not this step's to count (attemptReclaimInMotion, GY-1557).
-  const recorded = work.flatMap(item => workFaults(item, now, routes, attempt => attemptReclaimInMotion(state, item, attempt))).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
+  const recorded = work.flatMap(item => workFaults(item, now, attempt => attemptReclaimInMotion(state, item, attempt))).filter(fault => !(containmentKinds.has(fault.kind) && containmentInMotion(byKey.get(fault.subject), now)));
   // A blocker inside its actor's turn is not counted, nor is a derived line restating it (`shown` below keeps it).
   const own = recorded.filter(fault => !(fault.kind === 'blocker' && blockerInMotion(byKey.get(fault.subject), now)));
   const derived: FaultObservation[] = [], attributed: FaultObservation[] = [];
@@ -126,10 +123,7 @@ export function cycleFaults(state: DaemonState, snapshot: Work[], now: number, s
   // lines from the same status: the status's copy of those lines is not a second fault (distinct faults of one kind stay distinct).
   const derivedKinds = new Set(derived.map(fault => `${fault.kind}|${fault.subject}`));
   if (sources.status || sources.jobs?.length) derived.push(...statusFaults({ github: true, ...sources.status, jobs: sources.jobs ?? [] }).filter(fault => !(sources.reported && fault.kind === 'executor') && !derivedKinds.has(`${fault.kind}|${fault.subject}`)));
-  // A scope request the product is still settling (standingScopeRequest) is no fault however its attention line reads: the snapshot may
-  // predate the rule's decision this cycle took, so the line can still name a refusal the approver is about to judge (GY-1085).
-  const settling = new Set(work.filter(item => item.scopeRequest && !standingScopeRequest(item, now, routes)).map(item => item.key));
-  const shown = new Set([...recorded.map(fault => `${fault.subject}|${fault.kind}`), ...[...settling].map(key => `${key}|scope-request`)]);
+  const shown = new Set(recorded.map(fault => `${fault.subject}|${fault.kind}`));
   return [...own, ...derived.filter(fault => ![fault.kind, ...(restatements[fault.kind] ?? []), ...(fenceLines.has(fault) ? ['containment'] : [])].some(kind => shown.has(`${fault.subject}|${kind}`)))];
 }
 /**
@@ -454,7 +448,7 @@ export async function faultStep(cycle: Cycle, assessments: Record<string, Contai
   const invariants = checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals, docsSyncs: state.docsSyncs,
     agents: herdrRead.available ? seen : null, build: controlPlane?.build?.commit ?? null });
   const worktreeReclaimable = effects.worktreeReclaimable ? await effects.worktreeReclaimable(snapshot.work, clock).catch(() => null) : undefined;
-  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, scopeRoutes: !!effects.decide && !!effects.approver, worktreeReclaimable }), ...invariantFaults(invariants)],
+  trackFaults(state.faults, [...cycleFaults(state, snapshot.work, clock, { config, agents: seen, credentials, containment: assessments, status: controlPlane, jobs: snapshot.jobs, reported: reported?.items, attribute: reported?.attribute, loop, herdrUnavailable: !herdrRead.available, worktreeReclaimable }), ...invariantFaults(invariants)],
     new Date(clock).toISOString(), partial || (herdrRead.available ? false : new Set<string>([...herdrFaultKinds, invariantFaultKind('lingering-sessions')])));
 }
 

@@ -2,9 +2,9 @@
 import type { Principal } from '../model.js';
 import type { InterventionPolicy } from '../model/interventions.js';
 import { boundedSnapshot } from '../store/bounded-snapshot.js';
-import { LedgerRowCache, readAbsorbedPlans, readInterventionLedger } from './ledger.js';
+import { LedgerRowCache, readInterventionLedger } from './ledger.js';
 import type { Store } from '../store.js';
-import { readLoopRoutes, windowStart } from './report.js';
+import { windowStart } from './report.js';
 
 /**
  * Whether the server runs the pattern scan (GY-1372). On by default (GY-1381): the scan reads the
@@ -48,8 +48,7 @@ export async function readScanWindow(store: Store, policy: InterventionPolicy, o
   const snapshot = await boundedSnapshot(store.reportPool);
   const now = options.now ?? snapshot.now;
   const { rows, truncated } = await readInterventionLedger(store.reportPool, { limit: options.limit, since: windowStart(now, policy.windowDays), cache: options.cache });
-  await readAbsorbedPlans(store.reportPool, rows);
-  return { snapshot, now, rows, truncated, routes: await readLoopRoutes(store.reportPool) };
+  return { snapshot, now, rows, truncated };
 }
 export type ScanWindow = Awaited<ReturnType<typeof readScanWindow>>;
 

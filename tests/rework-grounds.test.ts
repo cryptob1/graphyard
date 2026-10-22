@@ -15,7 +15,7 @@ function item(reviews: { state: string; reviewer: string; submittedAt?: string }
   const candidate = { sha: head, baseSha: base, pr: 154, branch: 'graphyard/gy-163-1', author: 'worker' };
   return {
     id: 'gy-163', key: 'GY-163', title: 'Held fixes', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'review', revision: 4, policyRevision: 2,
+    criteria: [], policy: { checks: ['test'], review: true }, stage: 'review', revision: 4, policyRevision: 2,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 2, lease: null, workspaces: [], candidate,
     submission: { epoch: 2, pr: 154 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { candidate, checks: [], reviews: reviews.map(review => ({ submittedAt: at, ...review, sha: head })), merged: false, mergeSha: null, mergeable: true, protected: true,

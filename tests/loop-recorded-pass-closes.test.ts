@@ -44,7 +44,7 @@ after(async () => { await store?.close(); await database?.stop(); });
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 /** An item created through the engine, then written as the control plane would have left it. */
 async function plant(shape: Partial<Work>): Promise<Work> {
-  const created = await engine.execute(operator, 'create', null, { title: shape.title ?? 'Planted', plannedFiles: ['src/recorded/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:recorded'] }] }, randomUUID()) as Work;
+  const created = await engine.execute(operator, 'create', null, { title: shape.title ?? 'Planted', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:recorded'] }] }, randomUUID()) as Work;
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [created.id, JSON.stringify({ ...created, ...shape, id: created.id, key: created.key })]);
   return reload(created.id);
 }

@@ -60,7 +60,7 @@ function held(overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-174', key: 'GY-174', title: 'Regenerate the fixtures', description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'build', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-600_000), ready: true, epoch: 13,
     lease: { owner: 'alpha-principal', epoch: 13, expiresAt: iso(3_600_000) },
     lastAssignment: { owner: 'alpha-principal', epoch: 13, claimedAt: iso(-600_000) },

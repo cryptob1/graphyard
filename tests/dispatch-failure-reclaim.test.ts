@@ -180,7 +180,7 @@ const loopConfig = (credentialFile: string): MasterConfig => masterConfigSchema.
 function ready(overrides: Partial<Work> = {}): Work {
   const at = new Date(Date.now() - 3_600_000).toISOString();
   return { id: 'item-7', key: 'GY-7', title: 'GY-7', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
+    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides } as Work;
 }
@@ -387,7 +387,7 @@ test('dispatchblock is refused off a dispatchable stage, over a standing blocker
     const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' }, worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' }, loop: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
     const engine = new Engine(store, 120, 'owner/project'); engine.principals = [human, worker, loop];
     const refused = (work: Work, pattern: RegExp) => assert.rejects(engine.execute(loop, 'dispatchblock', work.id, { reason: 'fatal: held' }, randomUUID()), pattern);
-    let work = await engine.execute(human, 'create', null, { title: 'held', plannedFiles: ['src/held.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+    let work = await engine.execute(human, 'create', null, { title: 'held', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
     await refused(work, /not awaiting a dispatch/);
     work = await engine.execute(human, 'ready', work.id, {}, randomUUID());
     await refused(work, /did not each end without a submission/);

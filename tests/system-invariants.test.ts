@@ -26,7 +26,7 @@ function config(overrides: Partial<MasterConfig> = {}): MasterConfig {
 function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'backlog', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'backlog', revision: 1, policyRevision: 1,
     createdAt: iso(-hour), updatedAt: iso(0), stageEnteredAt: iso(-hour), ready: true, epoch: 0, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [], ...overrides,

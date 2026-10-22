@@ -12,8 +12,7 @@ import { reviewPrompt } from '../src/reviewer.js';
 import { collectScanInput } from '../src/onboarding.js';
 import { proposeDocumentation, readDocumentationConfig, writeDocumentationConfig } from '../src/repository-setup.js';
 import { documentationGlobMatches } from '../src/model/documentation-glob.js';
-import { decideScopeRequest, documentationScopes } from '../src/model/scope.js';
-import { configuredDocumentation, defaultDocumentationPolicy, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationDrift, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
+import { configuredDocumentation, defaultDocumentationPolicy, documentationScopes, itemDocumentationPaths, documentationAssignment, documentationCheck, documentationCriterionTitle, documentationDrift, documentationObligation, repositoryConfigFile, type DocumentationPolicy } from '../src/model/documentation.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -42,8 +41,10 @@ after(async () => {
   await rm(dataDirectory, { recursive: true, force: true });
 });
 
+/** Whether `path` is documentation the item carries: one of its repository's documentation globs covers it. */
+const documents = (item: Parameters<typeof itemDocumentationPaths>[0], path: string) => itemDocumentationPaths(item).some(glob => documentationGlobMatches(glob, path));
 const create = (type: 'feature' | 'bug' | 'chore', title: string) => engine.execute(operator, 'create', null,
-  { title, type, plannedFiles: ['src/cli/deploy.ts'], criteria: [{ id: 'AC-1', text: 'The deploy command takes --region', proofs: ['unit:deploy-region'] }] }, randomUUID());
+  { title, type, criteria: [{ id: 'AC-1', text: 'The deploy command takes --region', proofs: ['unit:deploy-region'] }] }, randomUUID());
 async function submitted(work: Work, files: string[] | null, statement?: string) {
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
@@ -55,7 +56,7 @@ async function submitted(work: Work, files: string[] | null, statement?: string)
   return engine.execute(implementer, 'submit', work.id, { epoch: work.epoch, pr, ...(statement ? { documentation: statement } : {}) }, randomUUID(), files ? { observation: observed } : {});
 }
 
-test('unit:docs-paths-per-repository — the repository configuration names its documentation paths, onboarding proposes them from the checkout, and scope reads them instead of the hardcoded default', async () => {
+test('unit:docs-paths-per-repository — the repository configuration names its documentation paths, onboarding proposes them from the checkout, and an item carries them instead of the hardcoded default', async () => {
   // Onboarding proposes what the repository actually holds: a site, a changelog, per-package READMEs.
   const proposed = proposeDocumentation({ files: ['site/index.md', 'site/guide/deploy.md', 'CHANGELOG.md', 'README.md', 'packages/api/README.md', 'packages/web/README.md', 'src/cli/deploy.ts', '.github/README.md'] });
   assert.deepEqual(proposed, { paths: ['site/', 'README.md', 'packages/*/README.md'], changelog: 'CHANGELOG.md' });
@@ -87,16 +88,14 @@ test('unit:docs-paths-per-repository — the repository configuration names its 
   assert.ok(!documentationGlobMatches('packages/*/README.md', 'packages/api/src/README.md'));
   assert.ok(documentationGlobMatches('site/', 'site/guide/deploy.md') && documentationGlobMatches('README*', 'README.md'));
 
-  // An item of a repository configured with site/ and CHANGELOG.md implies those paths, not docs/.
-  const item = { plannedFiles: ['src/cli/deploy.ts'], criteria: [{ id: 'AC-1', text: 'The deploy command takes --region' }], documentation: documentationObligation('feature', siteRepository) };
-  for (const path of ['site/guide/deploy.md', 'CHANGELOG.md'])
-    assert.equal(decideScopeRequest(item, { paths: [path] }).state, 'approved', `${path} is this repository's documentation`);
-  const docs = decideScopeRequest(item, { paths: ['docs/deploy.md'] });
-  assert.equal(docs.state, 'refused', 'docs/ is not this repository\'s documentation'); assert.match(docs.reason, /docs\/deploy\.md is outside/);
-  assert.equal(decideScopeRequest(item, { paths: ['README.md'] }).state, 'refused', 'nor is a README it does not configure');
+  // An item of a repository configured with site/ and CHANGELOG.md carries those paths, not docs/.
+  const item = { documentation: documentationObligation('feature', siteRepository) };
+  for (const path of ['site/guide/deploy.md', 'CHANGELOG.md']) assert.ok(documents(item, path), `${path} is this repository's documentation`);
+  assert.ok(!documents(item, 'docs/deploy.md'), 'docs/ is not this repository\'s documentation');
+  assert.ok(!documents(item, 'README.md'), 'nor is a README it does not configure');
   // An item created before any configuration keeps the default.
-  assert.equal(decideScopeRequest({ ...item, documentation: undefined }, { paths: ['docs/deploy.md'] }).state, 'approved');
-  assert.equal(decideScopeRequest({ ...item, documentation: undefined }, { paths: ['site/index.md'] }).state, 'refused');
+  assert.ok(documents({ documentation: undefined }, 'docs/deploy.md'));
+  assert.ok(!documents({ documentation: undefined }, 'site/index.md'));
 });
 
 test('unit:docs-obligation-on-every-item — create stamps "Documentation reflects this change" with the repository\'s paths on every feature and bug, submission satisfies it by a docs diff or a statement, and the worker request names the paths', async () => {
@@ -199,10 +198,10 @@ test('unit:graphyard-docs-policy-configured — Graphyard\'s own repository conf
   assert.deepEqual(proposeDocumentation(await collectScanInput(root)), own);
   // …the deployment value round-trips to the policy the control plane serves…
   assert.deepEqual(configuredDocumentation({ GRAPHYARD_DOCUMENTATION: documentationAssignment(own!).value }), own);
-  // …and an item created under it implies those paths.
-  const item = { criteria: [{ id: 'AC-1', text: 'A behaviour change' }], documentation: documentationObligation('feature', own!) };
-  for (const path of ['docs/onboarding.md', 'README.md', 'AGENTS.md']) assert.equal(decideScopeRequest(item, { paths: [path] }).state, 'approved', path);
-  assert.equal(decideScopeRequest(item, { paths: ['site/index.md'] }).state, 'refused');
+  // …and an item created under it carries those paths.
+  const item = { documentation: documentationObligation('feature', own!) };
+  for (const path of ['docs/onboarding.md', 'README.md', 'AGENTS.md']) assert.ok(documents(item, path), path);
+  assert.ok(!documents(item, 'site/index.md'));
 
   const guide = await readFile(join(root, 'docs/onboarding.md'), 'utf8');
   for (const needle of [repositoryConfigFile, 'GRAPHYARD_DOCUMENTATION', documentationCriterionTitle, '--no-docs', '"changelog"'])

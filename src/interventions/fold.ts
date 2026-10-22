@@ -11,18 +11,14 @@ export const ms = (from: string, to: string) => Math.max(0, Date.parse(to) - Dat
  * Fold the ledger rows into interventions and judgements. `work` is the current snapshot: it
  * names items, decides the stage of a row that embeds no document, and settles what is still
  * open — an ask the fold saw opened but whose item no longer carries a blocker was met by a
- * command the fold does not read, so it is not reported as waiting. `options.routes` is whether the
- * loop can route a refused scope ask (default: it can); a deployment that cannot has such an ask counted at once.
+ * command the fold does not read, so it is not reported as waiting.
  */
-export function foldInterventions(rows: InterventionLedgerRow[], work: readonly Work[], now: string, options: { routes?: boolean } = {}): { interventions: Intervention[]; judgements: Judgement[] } {
+export function foldInterventions(rows: InterventionLedgerRow[], work: readonly Work[], now: string): { interventions: Intervention[]; judgements: Judgement[] } {
   const items = new Map(work.map(item => [item.id, item]));
-  // The items the record closes as a duplicate of each key (GY-1719): their plan is carried in, not decided anew.
-  const duplicates = new Map<string, Work[]>();
-  for (const item of work) if (item.closure?.kind === 'duplicate' && item.closure.ref) duplicates.set(item.closure.ref, [...duplicates.get(item.closure.ref) ?? [], item]);
   const states = new Map<string, WorkState>();
   const state = (id: string): WorkState => {
     let entry = states.get(id);
-    if (!entry) { const item = items.get(id); entry = { key: item?.key ?? null, title: item?.title ?? null, stage: null, plannedFiles: null, asks: [], reworkDecision: null, bypass: null, quarantine: null, escalations: new Map(), human: null, routed: [] }; states.set(id, entry); }
+    if (!entry) { const item = items.get(id); entry = { key: item?.key ?? null, title: item?.title ?? null, stage: null, asks: [], reworkDecision: null, bypass: null, quarantine: null, escalations: new Map(), human: null }; states.set(id, entry); }
     return entry;
   };
   const interventions: Intervention[] = [], judgements: Judgement[] = [];
@@ -55,11 +51,6 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
     // row's own mutation moved it to (a park or a rework moves the stage it was needed at).
     const stage = stageOf(row.stageBefore) ?? entry.stage ?? stageOf(row.work?.stage);
     entry.stage = stageOf(row.work?.stage) ?? stage;
-    // The planned scope as the previous row left it, so a revision is judged against what it changed.
-    const plannedBefore = entry.plannedFiles;
-    if (Array.isArray(row.work?.plannedFiles)) entry.plannedFiles = row.work!.plannedFiles!;
-    const blockerBefore = entry.blocker;
-    if (row.work) entry.blocker = row.work.blocker ?? null;
     const source = { seq: row.seq, kind: row.kind };
     // Standing escalations, as every embedded document shows them: a trigger not seen before was
     // raised since the last row; one that vanished without a resolution row was auto-settled.
@@ -73,12 +64,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
       }
       for (const key of [...entry.escalations.keys()]) if (!standing.has(key) && row.kind !== 'escalation.resolved') entry.escalations.delete(key);
     }
-    const record = items.get(row.workId);
-    // The plan of every item the record closes as a duplicate of this one (GY-1719), as that item's own
-    // rows held it by this row: a path it gained later, or a duplicate created later, was not yet absorbed.
-    // `readAbsorbedPlans` carries it on the row from the whole ledger; rows read without it fall back to the folded rows.
-    const absorbed = () => row.absorbed ?? (entry.key ? duplicates.get(entry.key) ?? [] : []).flatMap(other => states.get(other.id)?.plannedFiles ?? []);
-    if (Object.hasOwn(foldRules, row.kind)) foldRules[row.kind]({ row, entry, details, stage, source, plannedBefore, blockerBefore, record, absorbed, emit });
+    if (Object.hasOwn(foldRules, row.kind)) foldRules[row.kind]({ row, entry, details, stage, source, emit });
   }
   // What is still open, settled against the current record so a need met by a command the fold
   // does not read is never reported as waiting.
@@ -87,7 +73,7 @@ export function foldInterventions(rows: InterventionLedgerRow[], work: readonly 
     if (!item || item.stage === 'done') continue;
     const row = { seq: 0, workId: id, actor: '', kind: 'open', at: now, details: {} };
     const open = (kind: InterventionKind, fields: EmitFields) => emit(row, kind, { ...fields, resolvedAt: null, resolvedBy: null, resolution: null });
-    for (const ask of entry.asks) if (!exemption({ at: 'open-ask', ask, item, now, routes: options.routes })) open(ask.kind === 'scope-request' ? 'scope-widening' : 'escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.trigger ?? ask.kind, sources: ask.sources });
+    for (const ask of entry.asks) if (!exemption({ at: 'open-ask', ask, item, now })) open('escalation', { requestedAt: ask.at, blocked: ask.blocked, stage: ask.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: ask.kind, sources: ask.sources });
     if (entry.reworkDecision && !exemption({ at: 'open-rework', decision: entry.reworkDecision, asked: false, grounds: item, candidate: item.candidate })) open('rework', { id: `rework:${id}:${entry.reworkDecision.id}`, requestedAt: entry.reworkDecision.at, blocked: item.candidate ? `candidate ${item.candidate.sha.slice(0, 12)} (PR #${item.candidate.pr})` : `attempt ${item.epoch}`, stage: entry.reworkDecision.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'decision', sources: [{ seq: entry.reworkDecision.seq, kind: 'decision.requested' }] });
     if (entry.bypass) open('bypass', { requestedAt: entry.bypass.at, blocked: entry.bypass.blocked, stage: entry.bypass.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'refused-reconciliation', sources: [{ seq: entry.bypass.seq, kind: 'merge.reconciliation.refused' }] });
     if (entry.quarantine?.concernAt && item.containmentQuarantine) open('containment-settlement', { requestedAt: entry.quarantine.concernAt, blocked: `containment fence of epoch ${entry.quarantine.epoch}`, stage: entry.quarantine.stage, resolvedAt: null, resolvedBy: null, resolution: null, trigger: 'unsettled', sources: [{ seq: entry.quarantine.seq, kind: 'quarantine' }] });

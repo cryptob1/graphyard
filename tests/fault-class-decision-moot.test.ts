@@ -41,7 +41,7 @@ function item(key: string, quiet = false): Work {
   return {
     id: `00000000-0000-4000-8000-${key.replace(/\D/g, '').padStart(12, '0')}`, key, title: key, description: '', type: 'bug', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/loop.ts'], stage: quiet ? 'build' : 'review', revision: 5, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0),
+    stage: quiet ? 'build' : 'review', revision: 5, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0),
     stageEnteredAt: iso(-1_800_000), ready: true, epoch: 1, lease: null, workspaces: [], submission: quiet ? null : { epoch: 1, pr: 42 },
     candidate: quiet ? null : candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: quiet ? null : observation, blocker: null, violations: [],
     gates: [{ name: 'build', passed: !quiet, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }],

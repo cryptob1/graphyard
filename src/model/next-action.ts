@@ -72,7 +72,7 @@ const canonical = (value: unknown) => JSON.stringify(value, (_key, entry) =>
  */
 export const sameAction = (left: NextAction | null | undefined, right: NextAction | null | undefined) => canonical(left ?? null) === canonical(right ?? null);
 
-const dispatchInputs = (work: Work): NextActionInputs => ({ kind: 'dispatch', target: 'implementation', epoch: work.epoch, priority: work.priority, plannedFiles: [...(work.plannedFiles ?? [])] });
+const dispatchInputs = (work: Work): NextActionInputs => ({ kind: 'dispatch', target: 'implementation', epoch: work.epoch, priority: work.priority });
 
 const resyncInputs = (work: Work): NextActionInputs => ({ kind: 'resync', pr: work.candidate?.pr ?? work.submission?.pr ?? null, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, baseTip: work.observation?.baseTip ?? null, observedAt: work.observation?.at ?? null });
 type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'defect'>;
@@ -97,8 +97,7 @@ export function nextAction(work: Work, all: Work[], now: Date): OpenAction | nul
  *
  * The order is the order a delivery actually unblocks in: a typed request an agent left behind
  * first, because a session gave up its lease waiting for that answer; then a delivered item, which
- * owes nothing; then an assignment nobody holds any more; then a live worker blocked
- * on a scope answer; then the first refusing gate; and finally the merge a fully proven candidate
+ * owes nothing; then an assignment nobody holds any more; then the first refusing gate; and finally the merge a fully proven candidate
  * is authorized for. A standing escalation is not in that order at all: it refuses delivery, the
  * merge gate carries its refusal like any other, and `carriedAction` (concerns.ts) decides what it
  * does to the step named here — which, for everything before delivery, is nothing.
@@ -129,9 +128,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
   if (!work.ready) return waits({ kind: 'human', on: 'operator', detail: `${key} has not been released from the backlog; releasing it is a goals-and-priorities decision, which is the operator's` },
     'ready', 'Not released from backlog');
 
-  // A typed request an agent recorded instead of blocking on a prose question. A scope ask is the
-  // control plane's own deterministic rule to apply; a two-party decision is somebody else's
-  // judgment, so it leaves the executor loop by the only door that exists for that — escalate.
+  // A typed request an agent recorded instead of blocking on a prose question. A two-party decision
+  // is somebody else's judgment, so it leaves the executor loop by the only door that exists for that — escalate.
   const decision = openAgentRequests(work, now).find(ask => ask.type === 'decision');
   if (decision) return make('escalate', `${decision.requestedBy} recorded a decision request on ${key} for ${decision.action ?? 'an action'}: ${decision.reason} — decided by ${decision.decider.who}`,
     { kind: 'escalate', trigger: 'decision', detail: decision.decider.command ?? decision.reason }, `request:${decision.id}`);
@@ -168,15 +166,6 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     const lease = work.lease;
     return make('reclaim', `${key} is held by ${lease.owner} under epoch ${lease.epoch}, whose lease expired at ${lease.expiresAt} with nothing submitted`,
       { kind: 'reclaim', epoch: lease.epoch, owner: lease.owner, leaseExpiresAt: lease.expiresAt }, `lease:${lease.epoch}:${lease.expiresAt}`);
-  }
-
-  // A worker that asked for scope is idle until it is answered, whatever the gates say. A request
-  // the rule has already decided is not waiting on anybody: an approved one is applied and gone,
-  // and a refused one carries its refusal as the item's blocker, which the ready gate reports. The executor claiming this row is its one decider (GY-955, executorDecidesScope).
-  const scope = work.scopeRequest;
-  if (scope && !scope.decision && liveLease && work.lease!.epoch === scope.epoch) {
-    return make('approve-scope', `${scope.requestedBy} needs files outside plannedFiles for ${key}: ${scope.paths.join(', ')} — ${scope.reason}`,
-      { kind: 'approve-scope', epoch: scope.epoch, paths: [...scope.paths], requestedBy: scope.requestedBy, detail: scope.reason }, `scope:${scope.epoch}:${scope.at}`);
   }
 
   const first = work.gates.find(gate => !gate.passed);

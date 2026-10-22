@@ -58,7 +58,7 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
   assert.equal(planning.stage, 'planning');
   goals.set('plan403', planning);
   const plan = { goal: planning.key, summary: 'Customers can sign up. One module ships it. It deploys with the release pipeline.', note: 'Node server, one module per outcome under src/, deployed by the release pipeline.', items: [{ ref: 'signup', title: 'Build signup', plain: 'Customers get signup.', description: 'The signup part', type: 'feature' as const, priority: 2,
-    outcomes: ['signup'], cases: ['signup-case'], criteria: [{ id: 'AC-1', text: 'signup works', proofs: ['unit:planned-behaviour'] }], plannedFiles: ['src/signup.ts'], dependsOn: [] as string[] }] };
+    outcomes: ['signup'], cases: ['signup-case'], criteria: [{ id: 'AC-1', text: 'signup works', proofs: ['unit:planned-behaviour'] }], dependsOn: [] as string[] }] };
   const planRunner: Runner = {
     name: 'soak-plan',
     start<T>(_prompt: string, options: RunOptions<T>) {

@@ -174,7 +174,7 @@ const baseEffects = (work: () => Promise<Work[]>, at: () => number) => ({
 
 test('unit:pr-era-history-loads — a work item whose history carries pull-request observations, PR numbers and GitHub check results loads and evaluates; it progresses through the merge writer\'s trial and merge with no GitHub request; master status shows no Main guard or GitHub budget line', { timeout: 300_000 }, async () => {
   // Submitted as today's workers submit, then rewritten as a release that still observed GitHub left it.
-  let work = await engine.execute(operator, 'create', null, { title: 'PR-era history before GY-2010', plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title: 'PR-era history before GY-2010', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'worker-host', path: join(checkout, '.graphyard', 'worktrees', 'GY-1-1'), branch }, randomUUID());

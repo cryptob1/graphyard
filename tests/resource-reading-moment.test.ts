@@ -46,7 +46,7 @@ const pane: HerdrAgent = { name: 'graphyard-claude-1', agent_status: 'done', pan
 /** GY-1331 as the cycle's snapshot held it: graphyard-claude-1's lease, renewed seconds before, and its session idle on the scope decision since 01:40Z. */
 const gy1331 = (leaseExpiresAt: number) => ({
   id: 'work-gy-1331', key: 'GY-1331', title: 'Soak review launch', description: '', type: 'bug', stage: 'build', epoch: 1, priority: 1, blocker: 'Scope request refused: src/landable-check.ts …',
-  dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], revision: 1, policyRevision: 1, createdAt: '2026-10-05T23:50:00.000Z', updatedAt: '2026-10-06T02:03:40.000Z',
+  dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: '2026-10-05T23:50:00.000Z', updatedAt: '2026-10-06T02:03:40.000Z',
   stageEnteredAt: '2026-10-05T23:58:00.000Z', ready: true, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, gates: [], violations: [],
   lease: { owner: 'graphyard-claude-1', epoch: 1, expiresAt: iso(leaseExpiresAt) },
   sessions: [{ id: 'graphyard-claude-1:1', kind: 'implementation', principal: 'graphyard-claude-1', epoch: 1, runtime: 'claude', host: 'vishrog', workspace: 'w1V', tab: null, pane: 'w1V:pJWW',

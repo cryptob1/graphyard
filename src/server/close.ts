@@ -61,12 +61,12 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     // A lapsed lease reconciliation never reached ends here, as released; so does a live one an approved close decision ends.
     // GY-1687: apply held requirements decisions before terminalizing — applyHeldDecisions refuses done items, and
     // close never enters Engine.execute, so without this the approval would stay held forever (Codex review of fe3b4e08db8e).
-    const heldBefore = { lease: work!.lease, containmentQuarantine: work!.containmentQuarantine, plannedFiles: work!.plannedFiles };
+    const heldBefore = { lease: work!.lease, containmentQuarantine: work!.containmentQuarantine };
     if (work!.lease) { endAttempt(work!, work!.lease.epoch, 'released', now); work!.lease = null; }
     const engine = services.engine as unknown as { applyHeldDecisions(db: Db, work: Work, all: Work[], before: typeof heldBefore, now: Date, ended: { command: string | null; submitted: boolean }): Promise<((db: Db) => Promise<void>)[]> };
     for (const write of await engine.applyHeldDecisions(db, work!, all, heldBefore, now, { command: 'work.closed', submitted: false })) await write(db);
     await settleHeldOnClose(db, work!, now, closure);
-    Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, scopeRequest: null, blocker: null });
+    Object.assign(work!, { closure, stage: 'done', stageEnteredAt: now.toISOString(), reviewRequest: null, blocker: null });
     services.engine.evaluate(work!, all, now);
     // Nothing closed may be merged, whatever its last gates said.
     Object.assign(work!, { mergeAuthorization: null });

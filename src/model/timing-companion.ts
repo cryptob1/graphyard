@@ -1,13 +1,10 @@
-// The timing baseline as an implied scope companion (GY-1023), apart from model/scope.ts so that
-// module keeps its budget.
-import { pathScope, testFile } from './scope.js';
+// The timing baseline a change to test files may write (GY-1023).
+import { testFile } from './documentation-glob.js';
 import type { ScopeFile } from './work.js';
 
 /**
  * The per-file test durations CI balances its shards by (scripts/ci-tests.mjs). A change that adds a
- * test file records that file's line here, so the baseline is implied by the test, exactly as the
- * guide a behaviour change touches is implied by the documentation rule: no operator widens
- * plannedFiles for it. The implication covers the lines of the candidate's own test files only.
+ * test file records that file's line here. Only the lines of the candidate's own test files may change.
  */
 export const timingBaselinePath = 'tests/helpers/timing-baseline.json';
 
@@ -82,11 +79,6 @@ export function resolveTimingBaseline(base: string, branch: string, files: reado
   const resolved = serialize({ ...baseSide, files: lines });
   return timingBaselineCompanion(base, resolved, own).allowed ? resolved : null;
 }
-
-/** True when the item's planned scope or observed diff holds a test file, so the baseline is implied by it. */
-export const addsTestFile = (item: { plannedFiles?: readonly string[]; observation?: { files?: readonly string[] } | null }) =>
-  (item.plannedFiles ?? []).some(planned => { const scope = pathScope(planned); return scope.path !== timingBaselinePath && (scope.prefix ? scope.path === 'tests/' : timedTestFile(scope.path)); })
-  || changedTestFiles((item.observation?.files ?? []).map(path => ({ path }))).length > 0;
 
 /**
  * Attaches the companion verdict to the baseline among compared files, reading the base and head

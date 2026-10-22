@@ -214,7 +214,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
       : { goal: goal.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
         items: [{ ref: 'greeting', title: 'Greet the customer', plain: 'Customers see a greeting.', description: 'Add the greeting module', type: 'feature', priority: 2,
           outcomes: ['greeting'], cases: ['greeting'],
-          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], plannedFiles: ['src/greeting.ts', 'public/greeting.json'], dependsOn: [] }] }, runs) }),
+          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], dependsOn: [] }] }, runs) }),
     plan: (goal, plan) => request(operatorAgent, `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
     invalid: (goal, reason) => request(operatorAgent, `goals/${goal.key}/plan-invalid`, { reason }, `planner:${goal.id}:${goal.revision}:invalid`),
     judge: (goal, judgement) => request(approver, `goals/${goal.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goal.id}:${goal.revision}:judged`),

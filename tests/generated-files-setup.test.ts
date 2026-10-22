@@ -147,7 +147,7 @@ test('integration:generated-files-setup — master status reports deployment dri
 });
 
 test('integration:generated-files-setup — the server refuses an unparseable value at start-up and reports the deployed one', async () => {
-  const child = spawnSync(process.execPath, ['--import', 'tsx', 'src/server/main.ts'], {
+  const child = spawnSync(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: repository, encoding: 'utf8', timeout: 60_000,
     env: { ...process.env, GRAPHYARD_GENERATED_FILES: '{"generated":["docs/README.md"]}' },
   });

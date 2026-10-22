@@ -159,13 +159,13 @@ test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from
     const dirty = dirtyCheckoutPaths(checkout);
     assert.match(coordinatorCheckoutRefusal(checkout, 'the master loop')!, /refuses to start, self-upgrade or restart/);
 
-    // The loop: refused, with the attention naming the paths and the live leases whose planned
-    // files they match — and no cycle, so no dirty code runs.
+    // The loop: refused, with the attention naming the paths and the live leases whose observed
+    // changed files they match — and no cycle, so no dirty code runs.
     const work = [
-      { key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) }, plannedFiles: ['src/loop.ts'] },
-      { key: 'GY-853', id: 'w2', lease: { epoch: 1, owner: 'graphyard-codex-1', expiresAt: iso(hour) }, plannedFiles: ['web/app.ts'] },
-      { key: 'GY-854', id: 'w3', lease: { epoch: 2, owner: 'graphyard-claude-2', expiresAt: iso(-hour) }, plannedFiles: ['src/loop.ts'] },
-      { key: 'G-Y855', id: 'w4', lease: null, plannedFiles: ['tests/scratch.test.ts'] },
+      { key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) }, observation: { files: ['src/loop.ts'] } },
+      { key: 'GY-853', id: 'w2', lease: { epoch: 1, owner: 'graphyard-codex-1', expiresAt: iso(hour) }, observation: { files: ['web/app.ts'] } },
+      { key: 'GY-854', id: 'w3', lease: { epoch: 2, owner: 'graphyard-claude-2', expiresAt: iso(-hour) }, observation: { files: ['src/loop.ts'] } },
+      { key: 'G-Y855', id: 'w4', lease: null },
     ];
     const state = emptyDaemonState(config);
     const log: string[] = [];
@@ -177,7 +177,7 @@ test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from
     assert.match(escalation.detail, /src\/loop\.ts/);
     assert.match(escalation.detail, /tests\/scratch\.test\.ts/);
     assert.match(escalation.detail, /the master loop refuses to start, self-upgrade or restart/);
-    assert.match(escalation.detail, /GY-852 epoch 3 \(graphyard-claude-1\): src\/loop\.ts/, 'the live lease whose planned files match is named');
+    assert.match(escalation.detail, /GY-852 epoch 3 \(graphyard-claude-1\): src\/loop\.ts/, 'the live lease whose changed files match is named');
     assert.ok(!escalation.detail.includes('GY-853'), 'a live lease matching none of the paths is not named');
     assert.ok(!escalation.detail.includes('GY-854'), 'an expired lease is not named');
     assert.ok(log.some(line => line.includes('escalation failed')), 'the refusal is logged');

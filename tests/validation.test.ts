@@ -280,7 +280,7 @@ test('requirement revisions invalidate reports and completed evidence; changing 
   await validation.result(collector, report(f, command), id());
   let w = await current(f.w.id);
   assert.equal(w.lease, null, 'submission ended the implementation lease');
-  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Refined acceptance requirement', criteria: w.criteria.map(ac => ({ ...ac, text: 'Updated behavior assertion' })), dependencies: [], plannedFiles: [], exclusiveResources: [] }, id());
+  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Refined acceptance requirement', criteria: w.criteria.map(ac => ({ ...ac, text: 'Updated behavior assertion' })), dependencies: [], exclusiveResources: [] }, id());
   await validation.reconcile();
   assert.equal((await validation.list()).requests.find(r => r.id === f.r.id)?.state, 'superseded');
   assert.equal(proven(await current(w.id), f.proof), false);

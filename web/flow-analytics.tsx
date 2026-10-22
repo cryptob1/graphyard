@@ -37,7 +37,7 @@ const flowShape: Shape = {
   window: leaves('from', 'to', 'boundaries'),
   coverage: {
     ...leaves('workItems', 'facts', 'truncated', 'workItemsTruncated', 'deploymentsTruncated', 'deploymentMergesTruncated', 'sliceFilterTruncated', 'sparse', 'scanLimit', 'workItemScanLimit', 'deploymentScanLimit', 'withObservedCandidate', 'providerTimestamps', 'controlPlaneTimestamps'),
-    projection: leaves('stale', 'pendingEvents'), slices: leaves('observed', 'declared', 'unclassified', 'limit', 'truncatedInRepository'),
+    projection: leaves('stale', 'pendingEvents'), slices: leaves('observed', 'unclassified', 'limit', 'truncatedInRepository'),
   },
   bottleneck: { ...leaves('narrative', 'observedAt'), categories: [leaves('id', 'label', 'count', 'definition')], scope: leaves('undelivered', 'workItems'), unclassified: ['leaf'] },
   cumulativeFlow: { buckets: ['day'], series: [{ stage: 'leaf', counts: ['leaf'] }] },
@@ -382,7 +382,7 @@ export default function FlowAnalytics({ request, token, canAudit, initial, folde
     {report && <>
       <section aria-labelledby="flow-provenance">
         <div className="section-title"><h2 id="flow-provenance">Coverage, exclusions and definitions</h2></div>
-        <p>{report.coverage.withObservedCandidate} of {report.coverage.workItems} selected item(s) have an independently observed candidate. {report.coverage.providerTimestamps} record(s) carry a provider timestamp and {report.coverage.controlPlaneTimestamps} carry a control-plane timestamp. Slice provenance: {report.coverage.slices.observed} observed, {report.coverage.slices.declared} declared, {report.coverage.slices.unclassified} unclassified. Projection is {report.coverage.projection.stale ? `behind by ${report.coverage.projection.pendingEvents} ledger event(s)` : 'current with the ledger'}.</p>
+        <p>{report.coverage.withObservedCandidate} of {report.coverage.workItems} selected item(s) have an independently observed candidate. {report.coverage.providerTimestamps} record(s) carry a provider timestamp and {report.coverage.controlPlaneTimestamps} carry a control-plane timestamp. Slice provenance: {report.coverage.slices.observed} observed, {report.coverage.slices.unclassified} unclassified. Projection is {report.coverage.projection.stale ? `behind by ${report.coverage.projection.pendingEvents} ledger event(s)` : 'current with the ledger'}.</p>
         {report.unavailable.length > 0 && <><h3>Unavailable</h3><ul>{report.unavailable.map((entry: any) => <li key={entry.metric}>{entry.metric}: {entry.reason}</li>)}</ul></>}
         {report.exclusions.length > 0 && <><h3>Exclusions</h3><ul>{report.exclusions.map((entry: any) => <li key={entry.reason}>{entry.reason}: {entry.count} — {entry.items.join(', ')}</li>)}</ul></>}
         <details><summary>Metric definitions, timezone and window semantics</summary>

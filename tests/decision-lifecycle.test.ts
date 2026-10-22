@@ -53,7 +53,7 @@ const decide = (credential: string, work: Work, action: string, input: unknown, 
 const withdraw = (credential: string, work: Work, decision: string, reason: string, key?: string) => call(credential, 'POST', `work/${work.key}/decide`, { action: 'withdraw', decision, reason }, key);
 const approve = (credential: string, work: Work, decision: string, reason: string) => call(credential, 'POST', `work/${work.key}/approve`, { decision, reason });
 const events = async (work: Work) => (await store.pool.query('SELECT actor, kind, payload FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows;
-const input = (title: string) => ({ title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal: decisions survive the races of the work they act on' });
+const input = (title: string) => ({ title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal: decisions survive the races of the work they act on' });
 function observation(work: Work): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
@@ -73,7 +73,7 @@ async function candidate(title: string) {
 }
 /** An unrelated requirement revision: strengthens the item without touching the standing escalation. */
 let extraId = 8;
-const extraCriterion = (work: Work) => engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [...work.criteria, { id: `AC-${++extraId}`, text: 'Changelog entry', proofs: ['manual:changelog'] }], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'Unrelated policy growth' }, randomUUID());
+const extraCriterion = (work: Work) => engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [...work.criteria, { id: `AC-${++extraId}`, text: 'Changelog entry', proofs: ['manual:changelog'] }], dependencies: [], exclusiveResources: [], producerProofs: [], reason: 'Unrelated policy growth' }, randomUUID());
 /** The exact state a resolve decision is pinned to, mirrored from the server side. */
 const pinOf = (work: Work) => ({ policyRevision: work.policyRevision, sha: work.candidate?.sha ?? null, baseSha: work.candidate?.baseSha ?? null, epoch: work.epoch, lease: work.lease?.epoch ?? null, escalations: standingEscalations(work).map(entry => ({ trigger: entry.trigger, at: entry.at })) });
 const overwrite = async (work: Work, mutate: (document: Work) => void) => {
@@ -129,7 +129,7 @@ test('integration:decision-stale-on-revision-race — an approval refused on a r
   assert.equal(applied.body.state, 'applied');
   // The policy-revision race settles the same way for a requirements decision.
   work = await reload(work.id);
-  const rewrite = { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [] };
+  const rewrite = { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: [], exclusiveResources: [], producerProofs: [] };
   const policyRequest = await decide(master.token, work, 'requirements', rewrite, 'Restate the standing policy');
   assert.equal(policyRequest.status, 200, JSON.stringify(policyRequest.body));
   work = await extraCriterion(work);
@@ -153,7 +153,7 @@ test('integration:decision-stale-on-revision-race — an approval refused on a r
 // rescoping requirements decision retired criteria a successor carries, the independent approver
 // judged "nothing is weakened" and approved it, and its application raised requirement-weakening
 // anyway — holding the merge gate and counting as a scope fault until a second resolve decision.
-const narrowing = (work: Work) => ({ expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [] });
+const narrowing = (work: Work) => ({ expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: [], exclusiveResources: [], producerProofs: [] });
 const weakeningFaults = (work: Work) => workFaults(work, Date.now()).filter(fault => fault.kind === 'escalation:requirement-weakening');
 const mergeReasons = (work: Work) => work.gates.find(gate => gate.name === 'merge')?.reasons ?? [];
 
@@ -221,7 +221,7 @@ test('integration:decision-pinning-scope — resolve is pinned to what it acts o
   // heartbeat, a workspace registration — and the approval still applies, because everything
   // the resolver's judgement rests on still holds.
   let work = await created('pinned-resolve');
-  work = await engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
+  work = await engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: [], exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
   assert.deepEqual(standingEscalations(work).map(entry => entry.trigger), ['requirement-weakening']);
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
@@ -264,7 +264,7 @@ test('integration:decision-pinning-scope — resolve is pinned to what it acts o
   // the approval refuses and settles stale instead of clearing the second, unreviewed
   // incident, and a fresh resolve of the same action is accepted immediately.
   let swapped = await created('swapped-resolve');
-  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [swapped.criteria[0]], dependencies: [], plannedFiles: swapped.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
+  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [swapped.criteria[0]], dependencies: [], exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
   const firstIncident = standingEscalations(swapped).find(entry => entry.trigger === 'requirement-weakening')!;
   const swapRequest = await decide(master.token, swapped, 'resolve', { trigger: 'requirement-weakening', expectedRevision: swapped.revision }, 'Resolve the narrowing this item records');
   assert.equal(swapRequest.status, 200, JSON.stringify(swapRequest.body));
@@ -274,8 +274,8 @@ test('integration:decision-pinning-scope — resolve is pinned to what it acts o
   assert.deepEqual(standingEscalations(swapped), []);
   // The scope widens with a fresh criterion, then narrows again: the same trigger is raised
   // for a new incident (AC-2 stays retired, so the widening adds AC-3).
-  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [...swapped.criteria, { id: 'AC-3', text: 'Changelog', proofs: ['manual:changelog'] }], dependencies: [], plannedFiles: swapped.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'Changelog criterion arrives' }, randomUUID());
-  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [swapped.criteria[0]], dependencies: [], plannedFiles: swapped.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-3 moves to a follow-up item' }, randomUUID());
+  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [...swapped.criteria, { id: 'AC-3', text: 'Changelog', proofs: ['manual:changelog'] }], dependencies: [], exclusiveResources: [], producerProofs: [], reason: 'Changelog criterion arrives' }, randomUUID());
+  swapped = await engine.execute(operator, 'requirements', swapped.id, { expectedPolicyRevision: swapped.policyRevision, criteria: [swapped.criteria[0]], dependencies: [], exclusiveResources: [], producerProofs: [], reason: 'AC-3 moves to a follow-up item' }, randomUUID());
   const secondIncident = standingEscalations(swapped).find(entry => entry.trigger === 'requirement-weakening')!;
   assert.ok(secondIncident, 'the trigger stands again');
   assert.ok(secondIncident.reason.includes('AC-3') && !firstIncident.reason.includes('AC-3'), 'the standing incident is the later one, not the incident the request named');
@@ -304,13 +304,13 @@ test('integration:decision-pinning-scope — resolve is pinned to what it acts o
   // and the set never grows — but the policy revision moves, and the policy revision is part
   // of the pin. The approval refuses instead of clearing both narrowings behind one review.
   let doubled = await created('suppressed-narrowing');
-  doubled = await engine.execute(operator, 'requirements', doubled.id, { expectedPolicyRevision: doubled.policyRevision, criteria: [doubled.criteria[0]], dependencies: [], plannedFiles: doubled.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
+  doubled = await engine.execute(operator, 'requirements', doubled.id, { expectedPolicyRevision: doubled.policyRevision, criteria: [doubled.criteria[0]], dependencies: [], exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
   const firstNarrowing = standingEscalations(doubled).find(entry => entry.trigger === 'requirement-weakening')!;
   const doubleRequest = await decide(master.token, doubled, 'resolve', { trigger: 'requirement-weakening', expectedRevision: doubled.revision }, 'Resolve the narrowing this item records');
   assert.equal(doubleRequest.status, 200, JSON.stringify(doubleRequest.body));
   const doublePin = pinOf(await reload(doubled.id));
   doubled = await extraCriterion(doubled);
-  doubled = await engine.execute(operator, 'requirements', doubled.id, { expectedPolicyRevision: doubled.policyRevision, criteria: [doubled.criteria[0]], dependencies: [], plannedFiles: doubled.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'The extra criterion moves to a follow-up item too' }, randomUUID());
+  doubled = await engine.execute(operator, 'requirements', doubled.id, { expectedPolicyRevision: doubled.policyRevision, criteria: [doubled.criteria[0]], dependencies: [], exclusiveResources: [], producerProofs: [], reason: 'The extra criterion moves to a follow-up item too' }, randomUUID());
   doubled = await reload(doubled.id);
   const repeatStanding = standingEscalations(doubled).find(entry => entry.trigger === 'requirement-weakening')!;
   assert.equal(repeatStanding.at, firstNarrowing.at, 'the suppressed repeat left the standing incident untouched');
@@ -456,7 +456,7 @@ test('master withdraw takes back the master\'s own request through the decide ro
   const operatorFile = join(credentialDirectory, 'operator.token');
   const decisionId = randomUUID();
   const now = () => new Date().toISOString();
-  const item = { id: 'blocked-1', key: 'GY-70', title: 'Needs an operator', stage: 'ready', ready: true, blocker: null, priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], workspaces: [], evidence: [], gates: [], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 12, policyRevision: 1 };
+  const item = { id: 'blocked-1', key: 'GY-70', title: 'Needs an operator', stage: 'ready', ready: true, blocker: null, priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, workspaces: [], evidence: [], gates: [], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 12, policyRevision: 1 };
   const decisions: any[] = [{ id: decisionId, workId: item.id, action: 'release', input: { expectedRevision: 11 }, reason: 'Next by priority', requestedBy: 'master-operator', requestedAt: now(), state: 'stale', approvedBy: null, approvedAt: null, approvalReason: null, outcome: 'Task revision changed (now 12); reload and request again; the decision was not applied', refusals: [], race: { expected: { revision: 11 }, current: { revision: 12 } } }];
   let withdrawalBody: any, authorization = '';
   const stub = createServer((req, res) => {

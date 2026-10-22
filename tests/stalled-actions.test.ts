@@ -60,7 +60,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 
 let sequence = 0;
 const created = (overrides: Record<string, unknown> = {}) => engine.execute(operator, 'create', null,
-  { title: `Stalled actions ${++sequence}`, plannedFiles: [`src/stall-${sequence}.ts`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, randomUUID());
+  { title: `Stalled actions ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, randomUUID());
 const release = (item: Work) => engine.execute(operator, 'ready', item.id, {}, randomUUID());
 const reload = async (item: Work) => (await store.list()).find(entry => entry.id === item.id)!;
 const dispatchRow = (item: Work) => (item.actionQueue?.actions ?? []).find(row => row.kind === 'dispatch')!;
@@ -99,7 +99,7 @@ async function attempt(item: Work, reason: () => Promise<string>) {
 test('unit:stalled-action-classified — a row whose failures stop changing is classified as stalled with its reason, attempts and age, from one threshold; a row whose reason keeps changing never is', () => {
   const at = '2026-09-21T09:00:00.000Z', clock = Date.parse(at);
   const item = {
-    id: 'work-1', key: 'GY-1', title: 'Stall', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: ['src/'],
+    id: 'work-1', key: 'GY-1', title: 'Stall', description: '', type: 'bug', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [],
@@ -319,7 +319,7 @@ let deliveries = 0;
 function leftover(item: Work, kind: 'dispatch' | 'merge', binding: string): ActionRow {
   const at = new Date(Date.now() - 3_600_000).toISOString();
   return { id: actionId(kind, item.id, binding), kind, work: item.id, key: item.key, binding, gate: kind === 'merge' ? 'merge' : 'build', refusal: null,
-    inputs: kind === 'merge' ? { kind: 'merge', sha: head, baseSha: base, policyRevision: 1 } as any : { kind: 'dispatch', target: 'implementation', epoch: 1, priority: 0, plannedFiles: ['src/'] },
+    inputs: kind === 'merge' ? { kind: 'merge', sha: head, baseSha: base, policyRevision: 1 } as any : { kind: 'dispatch', target: 'implementation', epoch: 1, priority: 0 },
     reason: `${item.key} left over from before its delivery`, requestedBy: 'graphyard', requestedAt: at, state: 'pending', claim: null, attempts: 957,
     history: [{ at, event: 'requested', requester: 'graphyard', executor: null, result: null, reason: 'left over' }] };
 }
@@ -335,7 +335,7 @@ const queueEntry = (sequence: number) => ({ sequence, enqueuedAt: new Date().toI
 /** A submitted item with a passing CI, an approval and trusted evidence: every gate passes, so GitHub merges it (GY-1235). */
 async function queuedCandidate() {
   const n = ++deliveries;
-  let w = await engine.execute(operator, 'create', null, { title: `Delivered ${n}`, plannedFiles: [`src/delivered-${n}.ts`], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title: `Delivered ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/stalled-delivery-${n}`, branch: `graphyard/stalled-delivery-${n}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, randomUUID());

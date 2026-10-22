@@ -144,7 +144,7 @@ test('integration:capacity-redispatch-preserves-attempt — worker WIP and an ap
   const state = emptyDaemonState(config);
 
   const filed = await ok(operator, 'POST', 'work', {
-    title: 'redispatch preserves', plannedFiles: ['src/model/capacity.ts'],
+    title: 'redispatch preserves', 
     criteria: [{ id: 'AC-1', text: 'redispatch', proofs: ['integration:capacity-redispatch-preserves-attempt'] }],
   }) as Work;
   let work = await ok(operator, 'POST', `work/${filed.id}/ready`, {}) as Work;
@@ -218,7 +218,7 @@ test('integration:capacity-redispatch-preserves-attempt — worker WIP and an ap
     endRegistrySession: async () => {},
   };
   const filedClose = await ok(operator, 'POST', 'work', {
-    title: 'approver redispatch', plannedFiles: ['src/model/capacity.ts'],
+    title: 'approver redispatch', 
     criteria: [{ id: 'AC-1', text: 'close', proofs: ['integration:capacity-redispatch-preserves-attempt'] }],
     origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: 'src/a.ts — a finding' }] } },
   }) as Work;

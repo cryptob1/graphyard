@@ -11,7 +11,7 @@ import { producerLedgerSpec } from '../producer.js';
 import { actionReport, sessionReport } from './loop-report.js';
 import { needsHumanActions } from './owed-report.js';
 import { loopAttestations } from './hand-actions.js';
-import { impliedScopeRequests, type Work } from '../model/work.js';
+import type { Work } from '../model/work.js';
 import { agentRequestReport } from './loop-report.js';
 import { timedStep } from '../master/timings.js';
 import { slowReportReader } from '../master/report-cache.js';
@@ -107,7 +107,6 @@ export async function assembleStatusSections<
     sessions: sessionReport(snapshot),
     releaseLag: lag.report,
     requests: agentRequestReport(snapshot),
-    impliedScopeRequests: impliedScopeRequests(snapshot.work),
     disk: {
       ...disk,
       worktreeRoot: managedRoot.health,

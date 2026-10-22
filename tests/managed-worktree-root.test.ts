@@ -81,7 +81,7 @@ function request(proofs = ['integration:managed-worktree-root']) {
 }
 function work(key: string, overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 88, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
-  return { id: `id-${key}`, key, title: 'Managed worktree root', description: '', type: 'bug', priority: 1, dependencies: [], plannedFiles: [],
+  return { id: `id-${key}`, key, title: 'Managed worktree root', description: '', type: 'bug', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:managed-worktree-root'] }], policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 2,
     createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 88 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     blocker: null, gates: [], violations: [], implementers: ['implementer'],
@@ -617,7 +617,7 @@ const config = masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:9',
   producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: '/nonexistent/producer-a.token' }],
   reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' }], reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/nonexistent/reviewer.json', boundAt: iso(at) } }) as MasterConfig;
 const ready = { id: 'work-ready', key: 'GY-44', title: 'Ready', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
-  policy: { checks: ['test'], review: true }, plannedFiles: ['src/ready.ts'], stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(at), updatedAt: iso(at), stageEnteredAt: iso(at), ready: true, epoch: 0,
+  policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(at), updatedAt: iso(at), stageEnteredAt: iso(at), ready: true, epoch: 0,
   lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
   gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] } as unknown as Work;
 function loopEffects(log: string[], memory: () => HostMemoryReading): DaemonEffects {
@@ -632,7 +632,7 @@ function loopEffects(log: string[], memory: () => HostMemoryReading): DaemonEffe
 /** A submitted head with open producer requests, as the control plane raises them at the build gate. */
 function submitted(): Work {
   const sha = 'a1'.padEnd(40, 'f'), baseSha = 'b1'.padEnd(40, 'f'), candidate = { sha, baseSha, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
-  const item = { id: 'work-64', key: 'GY-64', title: 'Submitted', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  const item = { id: 'work-64', key: 'GY-64', title: 'Submitted', description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Proof', proofs: ['unit:memory-proof'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1,
     createdAt: iso(at), updatedAt: iso(at), stageEnteredAt: iso(at), ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: iso(at), prState: 'open', draft: false, baseTip: baseSha, baseTree: '7b'.padEnd(40, 'f'), baseTipContained: true },

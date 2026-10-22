@@ -101,7 +101,7 @@ const dashboard = (actor: Principal, work: Work[], humanOnly: HumanRequestRow[] 
  */
 async function mergedWithRefusedReconciliation() {
   const n = ++serial;
-  let work = await engine.execute(operator, 'create', null, { title: `Human surface ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let work = await engine.execute(operator, 'create', null, { title: `Human surface ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   work = await engine.execute(worker, 'claim', work.id, {}, id());
   work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'test', path: `/tmp/human-surface-${n}`, branch: `graphyard/gy-102-${n}` }, id());
@@ -281,7 +281,7 @@ const advice = { recommendation: 'Approve', why: 'Nothing else unblocks the item
 /** A worker's item, claimed at epoch 1 and parked with `body` through the real route. */
 async function parked(body: Record<string, unknown>) {
   const n = ++serial;
-  let work = await engine.execute(operator, 'create', null, { title: `Short ask ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
+  let work = await engine.execute(operator, 'create', null, { title: `Short ask ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   work = await engine.execute(worker, 'claim', work.id, {}, id());
   await post(token(worker), `work/${work.id}/park`, { epoch: 1, kind: 'money-or-accounts', ...advice, ...body });
@@ -400,7 +400,7 @@ test('unit:park-refuses-host-doable — park refuses a NEEDED an agent identity 
     assert.ok(refusal.includes(command), `${label}: the refusal names ${command}`);
     // The server refuses it, and the item never reaches the human: the worker keeps its lease.
     const n = ++serial;
-    let work = await engine.execute(operator, 'create', null, { title: `Host-doable ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
+    let work = await engine.execute(operator, 'create', null, { title: `Host-doable ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
     work = await engine.execute(operator, 'ready', work.id, {}, id());
     work = await engine.execute(worker, 'claim', work.id, {}, id());
     const response = await request(token(worker), 'POST', `work/${work.id}/park`, { epoch: 1, kind, needed, reason: 'as recorded', ask: 'Do the thing' });

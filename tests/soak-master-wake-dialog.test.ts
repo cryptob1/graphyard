@@ -50,7 +50,7 @@ const cleanScreen = '❯ the session is awake and reading its instruction\n';
 
 const wakeItem = (key: string, at: number): Work => ({
   id: `work-${key}`, key, title: `A claimable ${key}`, description: '', type: 'bug', priority: 0, dependencies: [],
-  criteria: [{ id: 'AC-1', text: 'Delivered', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+  criteria: [{ id: 'AC-1', text: 'Delivered', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, 
   stage: 'ready', revision: 1, policyRevision: 1, createdAt: new Date(start - 2 * hour).toISOString(), updatedAt: new Date(at).toISOString(),
   stageEnteredAt: new Date(start - hour).toISOString(), ready: true, epoch: 0,
   lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,

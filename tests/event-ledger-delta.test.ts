@@ -40,7 +40,7 @@ const resolved = async (id: string) => (await store.pool.query(`SELECT seq, kind
 async function seeded(): Promise<Work> {
   const id = randomUUID(); const n = ++serial;
   const work = { id, key: `GY-D${n}`, title: `Delta ${n}`, stage: 'implementing', revision: 1, updatedAt: new Date().toISOString(), lease: { epoch: 1, owner: 'implementer', expiresAt: new Date().toISOString() },
-    submission: null, workspaces: [], plannedFiles: ['src/a.ts'], criteria: [{ id: 'AC-1', text: randomBytes(2000).toString('hex'), proofs: ['integration:x'] }], actionQueue: { actions: [] as any[] }, nested: { a: { b: 1, c: [1, 2, 3] }, gone: true, nothing: null } } as unknown as Work;
+    submission: null, workspaces: [], criteria: [{ id: 'AC-1', text: randomBytes(2000).toString('hex'), proofs: ['integration:x'] }], actionQueue: { actions: [] as any[] }, nested: { a: { b: 1, c: [1, 2, 3] }, gone: true, nothing: null } } as unknown as Work;
   await store.pool.query('INSERT INTO work_items(id, document) VALUES($1,$2)', [id, JSON.stringify(work)]);
   return work;
 }
@@ -139,7 +139,7 @@ test('unit:delta-chain-bounded — a full snapshot recurs at least every snapsho
 
 test('integration:delta-readers — events history, store.events, attestations, the intervention ledger and the timeline replay read deltas as the documents they stand for', async () => {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Readers ${n}`, plannedFiles: ['src/'], criteria: [1, 2, 3, 4].map(n => ({ id: `AC-${n}`, text: `Behaves ${randomBytes(900).toString('hex')}`, proofs: ['integration:x'] })) }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title: `Readers ${n}`, criteria: [1, 2, 3, 4].map(n => ({ id: `AC-${n}`, text: `Behaves ${randomBytes(900).toString('hex')}`, proofs: ['integration:x'] })) }, randomUUID());
   const records: Work[] = [plain(w)];
   const run = async (actor: Principal, command: Parameters<Engine["execute"]>[1], data: Record<string, unknown>) => { w = await engine.execute(actor, command, w.id, data, randomUUID()); records.push(plain(w)); };
   await run(operator, 'ready', {}); await run(worker, 'claim', {});

@@ -35,7 +35,7 @@ function work(overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-1', key: 'GY-42', title: 'Prove the durable loop', description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:loop'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 3, policyRevision: 1,
     createdAt: iso(-4 * hour), updatedAt: iso(0), stageEnteredAt: iso(-2 * hour), ready: true, epoch: 0,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null,

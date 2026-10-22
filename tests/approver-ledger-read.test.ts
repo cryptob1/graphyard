@@ -41,7 +41,7 @@ before(async () => {
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
 test('unit:approver-reads-ledger — an approver principal reads the whole events ledger, one item\'s events and the work snapshot with 200, and every mutation it could not make before is still refused and records nothing', async () => {
-  const created = await call(master.token, 'POST', 'work', { title: 'Measured', plannedFiles: ['src/measured.ts'], criteria: [{ id: 'AC-1', text: 'Measured from the ledger', proofs: ['unit:measured'] }], reason: 'Operator goal: approvers verify measurements' });
+  const created = await call(master.token, 'POST', 'work', { title: 'Measured', criteria: [{ id: 'AC-1', text: 'Measured from the ledger', proofs: ['unit:measured'] }], reason: 'Operator goal: approvers verify measurements' });
   assert.equal(created.status, 200, JSON.stringify(created.body));
   const work = created.body as Work;
 
@@ -65,7 +65,7 @@ test('unit:approver-reads-ledger — an approver principal reads the whole event
   const baseline = await call(credentials[0].token, 'GET', `work/${work.key}`);
   const revision = baseline.body.revision as number;
   const mutations: [string, unknown][] = [
-    ['work', { title: 'Approver-created', plannedFiles: ['src/x.ts'], criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], reason: 'An approver never creates work' }],
+    ['work', { title: 'Approver-created', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], reason: 'An approver never creates work' }],
     [`work/${work.key}/ready`, { expectedRevision: revision, reason: 'An approver never releases' }],
     [`work/${work.key}/block`, { expectedRevision: revision, reason: 'An approver never blocks' }],
     [`work/${work.key}/requirements`, { expectedRevision: revision, criteria: [{ id: 'AC-2', text: 'y', proofs: ['unit:y'] }], reason: 'An approver never adds requirements' }],

@@ -5,9 +5,9 @@
 
 Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:`: producer-runnable on exact head; `manual:`: two-party attestation unless in `producerProofs`; `e2e:`: [runner](validation.md). Any trusted pass proves it whatever it executed. `master create` plans; rewrite/removal/narrowing of requirements: two-party `master decide GY-N requirements`, lapsing evidence/review/authorization. Post-ship/production/host outcomes need `manual:post-deploy/NAME` or a per-clause observation; never merge-gating.
 
-## Dispatch optimistically, smallest scope first
+## Dispatch optimistically
 
-A dispatch plan (paths, `/`-ending prefixes) keeps parallel work apart and never locks: `sync` and the merge writer's trial integrate overlaps (`master status`: `overlap.concurrent`, `merge-tree` failures). Root-level directories (`highConflict`) need `--allow-broad-scope`; only `exclusiveResources` hold dispatch. Docs and `verification/AREA.md` maps whose `Paths:` cover planned files stay widen-time.
+Dispatch never locks paths: `sync` and the merge writer's trial integrate overlaps (`master status`: `overlap.concurrent` on observed files, `merge-tree` failures); only `exclusiveResources` hold dispatch. A session gets the `verification/AREA.md` maps whose `Paths:` cover a path its item's criteria or description name.
 
 **3** single-cause dispatch failures, fleet-idle and release-skew excluded: `dispatchblock` until `graphyard unblock GY-N REASON`. Release-skew, marked post-merge waits: no fault.
 

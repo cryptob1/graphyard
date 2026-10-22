@@ -24,7 +24,7 @@ const replacement: Principal = { id: 'engineer-b', role: 'worker', sessionKind: 
 let database: EmbeddedPostgres, store: Store, engine: Engine, expiring: Engine;
 let pr = 1200;
 const id = () => randomUUID();
-const input = (title: string) => ({ title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+const input = (title: string) => ({ title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 const events = async (work: Work, kind: string) => (await store.events(work.id)).filter(event => event.kind === kind);
 const merge = (work: Work) => work.gates.find(gate => gate.name === 'merge')!;
@@ -279,7 +279,7 @@ test('integration:lease-loss-backlog-attested: standing reconcile-raised lease-l
   await engine.execute(worker, 'blocked', blockedItem.id, { epoch: blockedEpoch, reason: 'plannedFiles could not cover the item' }, id());
   blockedItem = await standingLoss(blockedItem, blockedEpoch);
   blockedItem = await engine.execute(human, 'unblock', blockedItem.id, { reason: 'Widened plannedFiles', expectedRevision: blockedItem.revision }, id());
-  await engine.execute(human, 'requirements', blockedItem.id, { expectedPolicyRevision: 1, reason: 'Widen plannedFiles', criteria: blockedItem.criteria, dependencies: [], plannedFiles: ['src/', 'tests/'], exclusiveResources: [] }, id());
+  await engine.execute(human, 'requirements', blockedItem.id, { expectedPolicyRevision: 1, reason: 'Widen plannedFiles', criteria: blockedItem.criteria, dependencies: [], exclusiveResources: [] }, id());
   blockedItem = await reload(blockedItem);
   assert.deepEqual(standingEscalations(blockedItem).map(entry => entry.trigger), ['lease-loss'], 'the operator actions did not touch the standing incident');
   await engine.reconcile();

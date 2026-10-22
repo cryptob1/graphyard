@@ -5,7 +5,6 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { advisoryIdle, advisoryKeptDue, advisoryKeptRuns, mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { workerHarnessPlan } from '../src/master/harness.js';
 import type { MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { systemInvariants } from '../src/model/invariants.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
@@ -14,13 +13,13 @@ import type { Work } from '../src/model.js';
 
 /**
  * GY-1528: the control-plane switches over a simulated day of the real loop's cycles, in the real
- * step order. Items are submitted every quarter hour, each with a standing scope request, and the
+ * step order. Items are submitted every quarter hour and the
  * merge writer delivers them one at a time. After each merge the advisory budget tests run once on
  * its merge commit: some fail (filing nothing since GY-2086, one log line each), some cannot run at
  * all, one run hangs until the loop restarts, the loop restarts at other points too (its state read
  * back from JSON, every in-memory run lost), and the merger read fails for stretches. The loop must
  * run every delivered merge's advisory tests, file nothing for a failing one and never revert,
- * never decide, widen or re-plan a scope request, install no scope-guard hook, keep its state
+ * never request a decision, keep its state
  * bounded, and hold every system invariant docs/master-agent.md#system-invariants names.
  */
 const minute = 60_000;
@@ -66,10 +65,8 @@ class World {
       const candidate = { sha: this.head(n), baseSha: sha('base'), pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' };
       return {
         id: `w${n}`, key: `GY-${n}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
-        policy: { checks: ['test'], review: true }, plannedFiles: ['src/app.ts'], revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(submittedAt),
+        policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(submittedAt),
         ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: n }, candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], mergeLedger: ledger,
-        // A standing scope request for a file outside plannedFiles: under the control plane nothing decides, widens or re-plans it.
-        scopeRequest: { epoch: 1, at: iso(submittedAt), paths: ['src/other.ts'], requestedBy: 'worker', reason: 'needs it' },
         observation: { source: 'control-plane', candidate, files: ['src/app.ts', 'src/other.ts'], checks: [], reviews: [], merged: delivered, mergeSha: delivered ? ledger!.mergeSha : null, mergeable: true, protected: false, baseTip: this.main[0], baseTipContained: true, at: iso(now) },
         gates: ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: name === 'build' || name === 'ready' || name === 'review', reasons: [] })),
         ...(delivered ? { stage: 'done', delivery: { mergedAt: ledger!.pushedAt ?? iso(now), mergeSha: ledger!.mergeSha!, authorizationRevision: 1 } } : { stage: 'build' }),
@@ -100,7 +97,7 @@ class World {
   }
 }
 
-test('unit:scope-switches-control-plane — a simulated day on the real loop under the control-plane merger: every delivered merge gets its advisory run, a failing one files no work item through restarts, hung runs and unreadable merger stretches, nothing is reverted, no scope request is decided, widened or re-planned, no scope-guard hook is installed, state stays bounded, and every system invariant docs/master-agent.md names holds', { timeout: 300_000 }, async () => {
+test('unit:scope-switches-control-plane — a simulated day on the real loop under the control-plane merger: every delivered merge gets its advisory run, a failing one files no work item through restarts, hung runs and unreadable merger stretches, nothing is reverted, no decision is requested, state stays bounded, and every system invariant docs/master-agent.md names holds', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submitted.set(n, start + n * submitEveryMs);
@@ -111,7 +108,7 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: world.ports(),
-    decide: scopeSpy('decide'), decideScope: scopeSpy('decideScope'), widenScope: scopeSpy('widenScope'), replan: scopeSpy('replan'), baseSuccessions: scopeSpy('baseSuccessions') } as unknown as DaemonEffects;
+    decide: scopeSpy('decide') } as unknown as DaemonEffects;
   let state: DaemonState = emptyDaemonState(config);
   const invariantNames = new Set<string>();
   let restarts = 0;
@@ -125,13 +122,12 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
     const advisory = state.mergeWriter.advisory;
     assert.ok(!advisory || (advisory.due.length <= advisoryKeptDue && advisory.ran.length <= advisoryKeptRuns), `cycle ${cycle}: the advisory state is bounded`);
     for (const check of state.invariants.report) { invariantNames.add(check.invariant); assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`); }
-    if (cycle % 60 === 0) for (const item of world.snapshot()) assert.equal(workerHarnessPlan({ cliPath: '/bin/graphyard', branch: `graphyard/${item.key.toLowerCase()}-1`, baseBranch: 'main', credentialHome: '/creds', key: item.key, epoch: 1, mergeWriter: 'control-plane' }).hooks, undefined, `${item.key}: no scope-guard hook`);
   }
   // Settle what the last cycles left owed.
   for (let extra = 0; extra < 5; extra++) { now += cycleMs; world.cycle = cycles + extra; await runCycle(config, state, effects, () => now); await mergeWriterIdle(state); await advisoryIdle(state); }
 
   assert.ok(world.hung && restarts >= 3, 'the hung run and the scripted restarts happened');
-  assert.deepEqual(world.scopeCalls, [], 'no scope request was decided, widened or re-planned, the unreadable merger stretches included');
+  assert.deepEqual(world.scopeCalls, [], 'no decision was requested, the unreadable merger stretches included');
   const final = world.snapshot();
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => item.key), [], 'every item is delivered');
   assert.equal(new Set(world.pushes).size, items, 'each merge commit pushed once');

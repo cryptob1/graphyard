@@ -78,7 +78,7 @@ async function mergeDecision(work: Work, reason: string, requester = token(opera
 async function candidate(options: { approved?: boolean } = {}) {
   const { approved = true } = options;
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Reconciliation ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { title: `Reconciliation ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/reconciliation-${n}`, branch: `graphyard/gy-94-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 900 + n }, id());

@@ -105,7 +105,7 @@ function delivered(n: number, now: number): Work {
   return {
     id: uuid(n), key, title: `Item ${key} of the seeded history`, description: `What ${key} was for. `.repeat(10), type: 'feature', priority: 2, dependencies: [],
     criteria: [{ id: 'AC-1', text: `The behaviour ${key} asked for holds`, proofs: ['unit:proof-1'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: [n === 1 ? `${SLICE}/delivered.ts` : 'src/module.ts'], revision: 30, policyRevision: 1, createdAt: iso(created), updatedAt: iso(merged), stageEnteredAt: iso(merged),
+    revision: 30, policyRevision: 1, createdAt: iso(created), updatedAt: iso(merged), stageEnteredAt: iso(merged),
     ready: true, epoch: 2, stage: 'done', lease: null, workspaces: [{ host: 'machine-a', path: `/srv/worktrees/${key}-2`, epoch: 2, owner: 'graphyard-worker-1', branch: `graphyard/${key.toLowerCase()}-2` }],
     candidate, submission: { epoch: 2, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], blocker: null, gates: [], violations: [], closure: null,
     // GY-1824: each delivery carries the serving release the executor's verify-deployment row
@@ -165,17 +165,16 @@ before(async () => {
   url = `http://127.0.0.1:${(instance.http.address() as AddressInfo).port}`;
   for (let waited = 0; !instance.isReady(); waited += 200) { assert.ok(waited < 120_000, 'startup validation finished'); await sleep(200); }
 
-  // 150 open items, created and released as an operator does; two of them, and the first
-  // delivery, in a slice of their own for the drill-down proof.
+  // 150 open items, created and released as an operator does. Only an observed change classifies
+  // an item (GY-1992), so the first delivery alone is in the drill-down proof's slice.
   const engine = instance.http.services.engine;
   for (let index = 0; index < OPEN; index++) {
-    const area = index < 2 ? SLICE : `area-${index % 12}`;
-    let work = await engine.execute(operator, 'create', null, { title: `Open item ${index + 1}`, plannedFiles: [`${area}/file-${index}.ts`],
+    let work = await engine.execute(operator, 'create', null, { title: `Open item ${index + 1}`,
       criteria: [{ id: 'AC-1', text: 'The plane carries it', proofs: ['integration:plane-load-multi-user'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     openItems.push(work);
   }
-  sliceItems.push(uuid(1), openItems[0].id, openItems[1].id);
+  sliceItems.push(uuid(1));
   while ((await projectFlow(instance.store)).processed > 0);
 
   // The ledger's history: 500,000 rows in all, routine observations and heartbeats with blocked
@@ -231,7 +230,7 @@ const workItemsRead = (seen: { text: string }[]) => seen.filter(entry => /\bwork
 test('unit:flow-drilldown-narrow-read — a flow drill-down reads only the work-index and fact rows of the items and window it shows, never a work_items document, and concurrent identical drill-downs share one in-flight read', async () => {
   const store = instance.store;
   const uuidShape = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-  // The steps drill-down of one slice: two open items and one delivery.
+  // The steps drill-down of one slice: one delivery.
   invalidateFlowReports(store);
   const sliced = await statements(() => drill(`analytics/flow/drilldown?window=7&metric=steps&slice=${SLICE}`));
   assert.deepEqual(workItemsRead(sliced.seen), [], 'no statement reads work_items');
@@ -247,9 +246,10 @@ test('unit:flow-drilldown-narrow-read — a flow drill-down reads only the work-
   // The route answers exactly that.
   const served = await reader(viewers[0].token)(`analytics/flow/drilldown?window=7&metric=steps&slice=${SLICE}`);
   assert.deepEqual(served.rows, sliced.value.rows);
-  // Its open items, released and waiting for a builder, are outside the steps; work in progress shows them.
-  const waiting = await statements(() => drill(`analytics/flow/drilldown?window=7&metric=wip&slice=${SLICE}`));
-  assert.deepEqual(waiting.value.rows.map(row => row.workKey).sort(), [openItems[0].key, openItems[1].key].sort());
+  // Open items, released and waiting for a builder, are outside the steps; work in progress shows them.
+  const waiting = await statements(() => drill('analytics/flow/drilldown?window=7&metric=wip'));
+  const inProgress = waiting.value.rows.map(row => row.workKey);
+  assert.ok([openItems[0].key, openItems[1].key].every(key => inProgress.includes(key)), `work in progress shows the open items: ${inProgress.slice(0, 5).join(', ')}`);
   assert.deepEqual(workItemsRead(waiting.seen), [], 'no statement reads work_items');
 
   // The dashboard's own read — every item, every steps page — and each other narrowed metric reads no document either.

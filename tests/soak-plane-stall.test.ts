@@ -48,7 +48,7 @@ const shift = async (ms: number) => {
 };
 
 test('unit:soak-plane-stall — three simulated days of passes: one stall row per gap, no event per tick, and a lease that ran out inside a gap survives the pass that detects it', { timeout: 240_000 }, async () => {
-  let work = await engine.execute(human, 'create', null, { title: 'plane-stall-soak', plannedFiles: ['src/plane-stall-soak.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+  let work = await engine.execute(human, 'create', null, { title: 'plane-stall-soak', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
   work = await engine.execute(human, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   await engine.reconcile();

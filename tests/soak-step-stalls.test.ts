@@ -52,7 +52,7 @@ const config = (files: { coordinator: string; worker: string } = { coordinator: 
 /** A claimable item the day never delivers, so its dispatch is offered on every cycle. */
 const claimable = (now: number): Work => ({
   id: 'work-7', key: 'GY-7', title: 'Dispatch stall soak', description: '', type: 'feature', priority: 0, dependencies: [],
-  criteria: [], policy: { checks: [], review: false }, plannedFiles: [],
+  criteria: [], policy: { checks: [], review: false }, 
   stage: 'ready', revision: 1, policyRevision: 1, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
   stageEnteredAt: new Date(now).toISOString(), ready: true, epoch: 0,
   lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
@@ -61,7 +61,7 @@ const claimable = (now: number): Work => ({
 /** A submitted candidate the day never merges, so the merge writer offers it on every cycle. */
 const submitted = (now: number): Work => ({
   id: 'work-7', key: 'GY-7', title: 'Merge stall soak', description: '', type: 'feature', priority: 0, dependencies: [],
-  criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }], policy: { checks: ['test'], review: false }, plannedFiles: ['src/a.ts'],
+  criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }], policy: { checks: ['test'], review: false }, 
   stage: 'test', revision: 2, policyRevision: 1, createdAt: new Date(now).toISOString(), updatedAt: new Date(now).toISOString(),
   stageEnteredAt: new Date(now).toISOString(), ready: true, epoch: 1,
   lease: null, workspaces: [], submission: { epoch: 1, pr: 7 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null,

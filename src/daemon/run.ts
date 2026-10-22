@@ -524,7 +524,7 @@ export const checkoutRestoreDivergedRemedy = 'This HEAD is diverged: neither on 
 /**
  * GY-857/GY-866: the coordinator checkout guard the loop runs at startup and after every cycle.
  * A tree holding uncommitted work, or a HEAD that moved away from the commit the loop runs, is
- * attention naming the paths, the HEAD, the live leases whose planned files the paths match and
+ * attention naming the paths, the HEAD, the live leases and
  * the sessions whose panes point at the checkout — and the loop neither self-upgrades nor restarts
  * from it until it is clean and back at that commit. The commit the loop runs is the HEAD it
  * loaded its code from; every move its own alignment makes rewrites the expectation, and anything

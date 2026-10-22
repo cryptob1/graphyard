@@ -6,9 +6,7 @@ import { join } from 'node:path';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { DecisionSituation } from '../model/approval.js';
-import type { ScopeRequestState } from '../model/scope.js';
 import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, type BlockerProbeResult } from './blocker-probes.js';
-import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import type { MergeWriterSummary } from './cycle-merge-writer.js';
@@ -35,7 +33,6 @@ import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, type SuccessionRead, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
@@ -48,7 +45,6 @@ import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
-import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
@@ -93,36 +89,11 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   readThroughputOwner?: (owner: Work) => Promise<Work>;
   /** An item as the control plane holds it now, read outside any transaction (GY-2151): a containment settlement is judged on this record before it is posted, because the plane lowers the fence against its own record, not the cycle's snapshot. */
   readWork?: (work: Work) => Promise<Work>;
-  /** Asks the control plane to decide the item's open scope request and returns the decided document. */
-  decideScope?: (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => Promise<Work>; repositoryFiles?: () => Promise<ReadonlySet<string>>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
   /** GY-1984: the control plane's reconciliation of an item whose lease lapsed with nothing submitted (`POST work/:id/resync`). */
   reclaimLease?: (work: Work) => Promise<unknown>;
   /** Wake the item's own observation; the item once a newer reading is saved, else null (GY-793). */
   observe?: (work: Work, waitMs: number) => Promise<Work | null>;
-  /** The review findings standing against the item's head (unresolved threads, latest change request; review-scope.ts), read outside every transaction. */
-  reviewFindings?: (work: Work) => Promise<ReviewFinding[]>;
-  /** Which of the paths exist on the base branch, read from one fetch of it per decision. */
-  basePaths?: (paths: readonly string[]) => Promise<Set<string>>;
-  /** A file's text on the base branch as `basePaths` fetched it, or null when it has none: what the pinning-test rule reads (GY-199). */
-  baseText?: (path: string) => Promise<string | null>;
-  /** How many files on the base branch mention an identifier: the base-tree search the criteria-implied rule weighs a call by (GY-438). */
-  baseMentions?: (identifier: string) => Promise<number>;
-  /**
-   * The master's own additive scope widening — the revision `master scope` applies — with its
-   * audited reason, bound to the scope request it answers (`answeringWidening`).
-   */
-  widenScope?: (work: Work, request: ScopeRequestState, paths: string[], reason: string) => Promise<unknown>;
-  /**
-   * The successions on the base branch since `since` — git's renames and copies, and the successor
-   * map a split commit records — and which successors are files at the base tip (GY-394).
-   */
-  baseSuccessions?: (since: string) => Promise<SuccessionRead>;
-  /**
-   * Re-plans an open item onto the successors of its planned files: the master's own audited,
-   * additive requirements revision (`successorWidening`), which removes nothing.
-   */
-  replan?: (work: Work, paths: string[], reason: string) => Promise<unknown>;
   /**
    * The deployed release and which deliveries it serves. The containment the previous observation
    * retained is handed back so the cycle re-derives only what the release has not already been
@@ -337,7 +308,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   persist: (state: DaemonState) => Promise<void>;
   /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
   doctor?: DoctorEffects;
-  /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711 remedy 2): only for a scope refusal plannedFiles already covers. */
+  /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711): only for a blocker the loop verified moot. */
   unblock?: (work: Work, reason: string) => Promise<Work>;
   acceptance?: AcceptanceEffects; // the acceptance role (GY-1417); absent while either master identity is missing
   planner?: PlannerEffects; // the planner (GY-1418); absent while either master identity is missing — each acts only through the two identities a two-party decision needs

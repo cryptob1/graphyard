@@ -136,7 +136,7 @@ before(async () => {
 after(async () => { if (database) await database.stop(); });
 
 async function claimed(engine: Engine, title: string) {
-  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(engineer, 'claim', work.id, {}, randomUUID());
   return engine.execute(engineer, 'workspace', work.id, { epoch: work.epoch, host: 'renewal-host', path: `/tmp/renewal/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, randomUUID());

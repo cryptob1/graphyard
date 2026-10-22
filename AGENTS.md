@@ -36,9 +36,8 @@ Register the assigned host/path/branch before submission. Do not reuse another
 assignment's worktree or quietly remove historical reservations.
 
 Run `sync GY-N` before submitting. It merges the shared origin/BASE the merge writer
-advances (never rebase; nothing is fetched), and judges only merge conflicts:
-plannedFiles is the planned change list that keeps parallel work apart, a hint and not
-a limit. Commit on the assigned branch: nothing is pushed and no pull request is opened.
+advances (never rebase; nothing is fetched), and judges only merge conflicts.
+Commit on the assigned branch: nothing is pushed and no pull request is opened.
 
 Submit the commit with `complete GY-N EPOCH --head SHA` (the control plane is the merge
 writer; the shared object store already holds SHA). This reports implementation

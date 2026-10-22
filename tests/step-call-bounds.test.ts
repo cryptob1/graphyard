@@ -43,7 +43,7 @@ function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `00000000-0000-4000-8000-${key.replace(/\D/g, '').padStart(12, '0')}`, key, title: key, description: '', type: 'bug', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/loop.ts'], stage: 'review', revision: 5, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0),
+    stage: 'review', revision: 5, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0),
     stageEnteredAt: iso(-1_800_000), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 42 },
     candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null, violations: [], sessions: [],
     gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }],
@@ -138,15 +138,6 @@ test('unit:step-calls-applied-once — a retried call joins the one in flight un
   const joining = sb.boundedCalls(effects([], { closeSession: spent.call as DaemonEffects['closeSession'] }), kept, () => clock, () => 0, { step: 'sessions', calls: ['closeSession'] });
   await assert.rejects(joining.closeSession('pane-5') as Promise<void>, error => sb.stepCallCarried(error) && !sb.carriedCallSent(error) && /joining the call still in flight/.test((error as Error).message));
   assert.equal(spent.calls.length, 1, 'the retry joined the close in flight');
-  // A scope decision is keyed by the ask it decides: a withdrawn and re-asked request never joins the earlier ask's call.
-  const asks = hanging<Work>();
-  const asking = sb.boundedCalls(effects([], { decideScope: asks.call as DaemonEffects['decideScope'] }), {}, () => clock, () => 10_000, { step: 'scope', calls: ['decideScope'] });
-  const ask = (at: string) => quiet('GY-2', { scopeRequest: { epoch: 1, paths: ['src/other.ts'], reason: 'AC-1 needs it', requestedBy: 'graphyard-claude-a', at, decision: null } } as Partial<Work>);
-  await assert.rejects(asking.decideScope!(ask(iso(-30_000)), [], true) as Promise<Work>, sb.stepCallCarried);
-  await assert.rejects(asking.decideScope!(ask(iso(-30_000)), [], true) as Promise<Work>, sb.stepCallCarried);
-  assert.equal(asks.calls.length, 1, 'the same ask joins its call');
-  await assert.rejects(asking.decideScope!(ask(iso(-5_000)), [], true) as Promise<Work>, sb.stepCallCarried);
-  assert.equal(asks.calls.length, 2, 'a re-asked request, same item binding, is its own call');
   // An answer within the bound is the effect's own answer, untouched.
   const base = effects([], { decide: async (_work, action) => ({ id: `decided-${action}` }) });
   const quick = sb.boundedCalls(base, {}, () => clock, () => 10_000, { step: 'dispatch', calls: ['decide'] });
@@ -203,23 +194,6 @@ test('unit:step-calls-bounded — reclaim: a leftover pane close that does not a
   const unread = effects([], { panes: never.call as DaemonEffects['panes'] } as Partial<DaemonEffects>);
   await cycle(emptyDaemonState(config()), unread, clock);
   assert.equal(never.calls.length, 1, 'an inventory read that does not answer returns the step; the sweep waits for the next read');
-});
-
-test('unit:step-calls-bounded — scope: a scope decision that does not answer returns the step, is recorded carried and is retried next cycle, joining it', async () => {
-  const sb = await helper();
-  const slow = hanging<Work>();
-  const request = { epoch: 1, paths: ['src/other.ts'], reason: 'AC-1 needs it', requestedBy: 'graphyard-claude-a', at: iso(-30_000), decision: null };
-  const work = quiet('GY-2', { lease: { epoch: 1, owner: 'graphyard-claude-a', expiresAt: iso(3_600_000) }, scopeRequest: request } as Partial<Work>);
-  const fx = effects([work], { decideScope: slow.call as DaemonEffects['decideScope'] });
-  const state = emptyDaemonState(config());
-  await cycle(state, fx, clock);
-  assert.equal(slow.calls.length, 1, 'the decision was asked');
-  const [key, row] = carriedRows(state, sb).find(([, row]) => row.kind === 'scope') ?? [];
-  assert.ok(row, `the scope decision is recorded carried: ${JSON.stringify(state.actions)}`);
-  assert.match(row!.detail, /the scope step's 30 ms per-call bound passed before GY-2's decideScope call answered; the call stays owed and is retried next cycle/);
-  assert.deepEqual(faults(state), []);
-  await cycle(state, fx, clock + 60_000);
-  assert.equal(slow.calls.length, 1, `the next cycle asked again (${key}) and joined the call in flight`);
 });
 
 test('unit:step-calls-bounded — approvers: an approver launch that does not answer returns the decisions step, leaves the decision owed with no fault, and the next cycle joins the launch in flight', async () => {
@@ -340,7 +314,6 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
     blockers: { file: 'cycle-blockers.ts', calls: ['approver', 'closeSession', 'deferWindow', 'probeBlocker', 'decisions', 'approverLaunches', 'recordBlockerProbe', 'recordSession'] },
     dispatch: { file: 'cycle-dispatch.ts', calls: ['decide', 'approver', 'agents', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions', 'recordDecomposition', 'recordResearch'] },
     'review-cap': { file: 'cycle-review-cap.ts', calls: ['withdrawReview', 'wakeObservation', 'decisions'] },
-    scope: { file: 'cycle-scope.ts', calls: ['decideScope', 'widenScope', 'reviewFindings', 'basePaths', 'baseText', 'baseMentions', 'baseSuccessions', 'repositoryFiles', 'decisions', 'mergeWriter'] },
     sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'escalationSessions', 'recordSession', 'stopSupervisor', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork', 'endEscalation', 'markEscalation', 'relaunchEscalation', 'containment'] },
     resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'stopSupervisor', 'recordSession', 'preserveWork', 'reportCapacity', 'containment', 'controlPlaneClock', 'settleContainment'] },
     reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'] },
@@ -354,8 +327,7 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
   const decisions = readFileSync(`${root}src/daemon/cycle-decisions.ts`, 'utf8');
   assert.match(decisions, /boundedDecisions\(boundedCalls\(await decisionReads\(.*\), cycle\.heldDecisions, now, \(\) => budgetLeft\(\), \{ step: 'approvers', calls: approverCalls \}\)/, 'the approvers step\'s calls are bounded within the decisions step');
   assert.match(decisions, /const approverCalls: readonly \(keyof DaemonEffects\)\[\] = \['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'agents', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'\]/);
-  // The successor re-plan of the scope step runs under the same bound with its own calls; the approvers' isolation is carried-aware like every bounded step's.
-  assert.match(readFileSync(`${root}src/daemon/cycle-scope.ts`, 'utf8'), /withinStepBudget\(cycle, 'scope', \['baseSuccessions', 'replan', 'mergeWriter'\], bounded => successorStepWithin\(bounded, settled\)\)/);
+  // The approvers' isolation is carried-aware like every bounded step's.
   assert.match(readFileSync(`${root}src/daemon/cycle-approvers.ts`, 'utf8'), /isolate = carriedIsolate\(carried, 'approvers'\)/);
   // The preservation an ended attempt makes (sessions, resume, reclaim) carries like any other call: no failed preserve, no fault.
   assert.match(readFileSync(`${root}src/daemon/preserve.ts`, 'utf8'), /if \(stepCallCarried\(error\)\) \{ await recordCarried\(/);
@@ -377,34 +349,6 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
 });
 
 // --- the review's findings on b396b7b3, each pinned (GY-1774 rework) -----------------------------------------------
-
-test('unit:step-calls-bounded — scope: a finding-grounded widening carried past the bound is retried next cycle; the retry consumes the widening\'s answer once it has settled, so the ask is never left undecided', async () => {
-  const sb = await helper();
-  const { scopeKey } = await import('../src/daemon/reconcile.js');
-  const slow = hanging<Work>();
-  const asked = iso(-300_000), paths = ['src/other.ts'];
-  const request = { epoch: 1, paths, reason: 'the reviewer asked for it', requestedBy: 'graphyard-claude-a', at: asked,
-    decision: { state: 'refused', reason: 'outside what the criteria imply', at: iso(-200_000), decidedBy: 'graphyard', treeRead: true, waitedMs: 100_000, paths, requestedBy: 'graphyard-claude-a', requestedAt: asked, epoch: 1 } };
-  const work = quiet('GY-9', { lease: { epoch: 1, owner: 'graphyard-claude-a', expiresAt: iso(3_600_000) }, scopeRequest: request } as Partial<Work>);
-  const fx = effects([work], { widenScope: slow.call as DaemonEffects['widenScope'], reviewFindings: async () => [{ ground: 'review thread 1', text: 'src/other.ts must handle the empty case too' }],
-    basePaths: async (wanted: readonly string[]) => new Set(wanted), repositoryFiles: async () => new Set(['src/loop.ts', 'src/other.ts']) } as Partial<DaemonEffects>);
-  const state = emptyDaemonState(config());
-  await cycle(state, fx, clock);
-  const key = `${scopeKey(work, request as never)}:finding:${work.policyRevision}`;
-  assert.equal(slow.calls.length, 1, `the widening was sent: ${JSON.stringify(Object.keys(state.actions))}`);
-  assert.ok(sb.carriedRow(state.actions[key]), `the widening is recorded carried: ${JSON.stringify(state.actions[key])}`);
-  assert.match(state.actions[key]!.detail, /the scope step's 30 ms per-call bound passed before GY-9's widenScope call answered/);
-  await cycle(state, fx, clock + 60_000);
-  assert.equal(slow.calls.length, 1, 'the next cycle retried the widening and joined the one in flight');
-  assert.ok(sb.carriedRow(state.actions[key]), 'still carried');
-  slow.answer({ ...work, policyRevision: 2, plannedFiles: ['src/loop.ts', 'src/other.ts'], scopeRequest: null, scopeDecision: { state: 'approved', reason: 'widened', at: iso(100_000), decidedBy: 'graphyard', paths, requestedBy: 'graphyard-claude-a', requestedAt: asked, epoch: 1, waitedMs: 400_000 } } as unknown as Work);
-  await new Promise(resolve => setTimeout(resolve, 5));
-  await cycle(state, fx, clock + 120_000);
-  assert.equal(slow.calls.length, 1, 'the answer was consumed, not sent again');
-  assert.equal(state.actions[key]?.state, 'done', `the widening settled: ${JSON.stringify(state.actions[key])}`);
-  assert.match(state.actions[key]!.detail, /^Widened GY-9 with 1 file \(src\/other\.ts\) on the review finding that names it/);
-  assert.deepEqual(faults(state), []);
-});
 
 test('unit:step-calls-bounded — review-cap: a withdrawal in flight across cycles is one send, never counted toward the filing cap; a carried observation wake after the withdrawal is retried until it answers', async () => {
   const sb = await helper();
@@ -473,7 +417,7 @@ test('unit:step-calls-applied-once — triage: a judgement whose record is carri
   const { clearTriageRuns, owedTriageRecords, triageSettled, triageStep } = await import('../src/triage.js');
   const { researchSettings } = await import('../src/research.js');
   t.after(clearTriageRuns);
-  const filed = quiet('GY-11', { title: 'Recurring action:dispatch faults: 4 in 24 hours', type: 'bug', stage: 'backlog', ready: false, plannedFiles: [], origin: { faultClass: { class: 'action', threshold: 3, windowHours: 24, count: 4, detectedAt: iso(-7_200_000), instances: [{ id: 'a|b|0', kind: 'action', subject: 'action:dispatch', at: iso(-7_200_000) }] } } } as unknown as Partial<Work>);
+  const filed = quiet('GY-11', { title: 'Recurring action:dispatch faults: 4 in 24 hours', type: 'bug', stage: 'backlog', ready: false, origin: { faultClass: { class: 'action', threshold: 3, windowHours: 24, count: 4, detectedAt: iso(-7_200_000), instances: [{ id: 'a|b|0', kind: 'action', subject: 'action:dispatch', at: iso(-7_200_000) }] } } } as unknown as Partial<Work>);
   const fix = quiet('GY-12', { title: 'Stop the dispatch fault', stage: 'done', delivery: { mergedAt: iso(-3_600_000), mergeSha: 'a'.repeat(40), authorizationRevision: 1 }, origin: { faultClass: { class: 'action', threshold: 3, windowHours: 24, count: 1, detectedAt: iso(-86_400_000), instances: [] } } } as unknown as Partial<Work>);
   const carried = () => new sb.StepCallCarriedError("the triage step's 30 ms per-call bound passed before GY-11's recordTriage call answered; the call stays owed and is retried next cycle", true);
   const records: unknown[] = []; let answer: 'carried' | 'ok' | 'refused' = 'carried';
@@ -506,7 +450,7 @@ test('unit:step-calls-bounded — triage: the record a settled run makes after t
   const sb = await helper();
   const { clearTriageRuns, triageSettled } = await import('../src/triage.js');
   t.after(clearTriageRuns);
-  const filed = quiet('GY-13', { title: 'Recurring action:dispatch faults: 4 in 24 hours', type: 'bug', stage: 'backlog', ready: false, plannedFiles: [] } as unknown as Partial<Work>);
+  const filed = quiet('GY-13', { title: 'Recurring action:dispatch faults: 4 in 24 hours', type: 'bug', stage: 'backlog', ready: false } as unknown as Partial<Work>);
   const slow = hanging();
   // The run settles only once the test says so: after the step that started it has returned.
   let settle!: (result: unknown) => void;
@@ -908,8 +852,8 @@ test('unit:step-calls-bounded — an effect object named in the bound (the merge
   const kept = {}, slow = new Promise<string>(() => {}), now = () => clock;
   let merges = 0;
   const effects = { stepCallBoundMs: 30, mergeWriter: { merger: () => { merges += 1; return slow; } }, recordSession: async () => undefined } as unknown as DaemonEffects;
-  const bounded = boundedCalls(effects, kept, now, () => 1000, { step: 'scope', calls: ['mergeWriter', 'recordSession'] });
-  // The merge-mode read of the scope step: a slow answer is carried, never held; the retry joins it.
+  const bounded = boundedCalls(effects, kept, now, () => 1000, { step: 'triage', calls: ['mergeWriter', 'recordSession'] });
+  // The merge-mode read: a slow answer is carried, never held; the retry joins it.
   await assert.rejects(() => bounded.mergeWriter!.merger(), (error: unknown) => stepCallCarried(error));
   await assert.rejects(() => bounded.mergeWriter!.merger(), (error: unknown) => stepCallCarried(error));
   assert.equal(merges, 1);
@@ -937,20 +881,10 @@ test('unit:step-calls-bounded — an effect object named in the bound (the merge
   assert.equal(goals, 0);
 });
 
-test('unit:step-calls-bounded — a merge-mode read carried past its bound is recorded as a waiting attempt and keeps the known mode; a carried acceptance write is carried, never noted as a failure', async () => {
+test('unit:step-calls-bounded — a carried acceptance write is carried, never noted as a failure', async () => {
   const { boundedCalls, stepCallCarried, carriedRow } = await helper();
-  const { controlPlaneMerger } = await import('../src/daemon/cycle-scope.js');
   const { acceptanceStep } = await import('../src/daemon/acceptance.js');
   const now = () => clock;
-  let mode: Promise<string> = Promise.resolve('control-plane');
-  const raw = { stepCallBoundMs: 30, persist: async () => undefined, mergeWriter: { merger: () => mode } } as unknown as DaemonEffects;
-  const state = { actions: {}, cycle: 1 } as unknown as DaemonState;
-  const make = (effects: DaemonEffects) => ({ state, now, performed: [], effects: boundedCalls(effects, {}, now, () => 1000, { step: 'scope', calls: ['mergeWriter'] }) }) as unknown as Cycle;
-  assert.equal(await controlPlaneMerger(make(raw)), true, 'a read that answers is the control plane');
-  mode = new Promise<string>(() => {});
-  assert.equal(await controlPlaneMerger(make(raw)), true, 'a carried read is the control plane');
-  const row = (state.actions as Record<string, DaemonAction>)['carried:scope:mergeWriter'];
-  assert.ok(carriedRow(row), 'the carried read is recorded as a waiting attempt');
   // An acceptance write that is carried rethrows to the carried isolation, so the goal is recorded waiting and no failure note is written.
   const goal = { id: 'g1', key: 'GY-G1', stage: 'awaiting-approval', revision: 1 };
   const closing = { stepCallBoundMs: 30, persist: async () => undefined, acceptance: { settings: { enabled: true }, goals: async () => [{ ...goal, stage: 'acceptance-drafting', refusal: { pr: 9, reason: 'no', by: 'x' } }], close: () => new Promise<void>(() => {}) } } as unknown as DaemonEffects;

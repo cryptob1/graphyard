@@ -7,11 +7,8 @@ import { neededDecision } from './decisions.js';
  * GY-1490. A loop whose last cycle found nothing actionable sleeps `run.intervalSeconds` (300 s on
  * this project), and the dispatcher beside it ticks every `run.dispatchIntervalSeconds` (10 s) but
  * never woke it. Measured over the 88 items merged in the 24 h to 2026-10-07 23:40Z, that sleep was
- * the largest avoidable part of three waits the delivery budget judges:
+ * the largest avoidable part of the waits the delivery budget judges:
  *
- *   - ready→first push: an executor refuses a scope request in a second or two, and the loop's
- *     grounded widening (cycle-scope.ts) then waited out the sleep — 372 of 3,183 worker-minutes,
- *     2–5 min per ask (GY-1462: asked 15:30:59, widened by the next cycle at 15:36:04);
  *   - approval→merge: a standing verdict waits for the loop's decision step to request its round,
  *     and eleven verdict→rework waits sat at 5.0–5.7 min, one sleep each;
  *   - ready→claim: a worker slot that frees while ready work waits is filled by the loop's dispatch
@@ -30,8 +27,7 @@ type WakeConfig = Pick<MasterConfig, 'workers' | 'autoMerge'> & Partial<Pick<Mas
 
 /**
  * What the loop's next cycle acts on, read from one tick's snapshot and agent list: a claimable
- * item (its dispatch step), a launch profile free while one waits (the slot it fills), a scope
- * request open or refused on a live lease (its widening on grounds), and a routine decision the
+ * item (its dispatch step), a launch profile free while one waits (the slot it fills), and a routine decision the
  * item needs (a verdict's rework, a conflict, a recovery). An unreadable Herdr names no free slot.
  */
 export function loopWakeSubjects(work: readonly Work[], config: WakeConfig, now: number, agents: readonly HerdrAgent[] | null): LoopSubject[] {
@@ -44,11 +40,6 @@ export function loopWakeSubjects(work: readonly Work[], config: WakeConfig, now:
     const working = agents.some(agent => agent.name === profile.agentName && !finishedAgentStates.includes(agent.agent_status ?? ''));
     const leased = open.some(item => live(item) && item.lease!.owner === profile.principal);
     if (!working && !leased) subjects.push({ key: `slot:${profile.name}`, reason: `worker profile ${profile.name} is free while ${claimable[0].key} waits` });
-  }
-  for (const item of open) {
-    const request = item.scopeRequest;
-    if (!request || !live(item) || item.lease!.epoch !== request.epoch || request.decision?.state === 'approved') continue;
-    subjects.push({ key: `scope:${item.key}:${request.epoch}:${request.at}:${request.decision?.state ?? 'open'}`, reason: `${item.key}'s scope request is ${request.decision ? 'refused and waits on its grounds' : 'open'}` });
   }
   for (const item of work) {
     let decision: ReturnType<typeof neededDecision> = null;

@@ -80,7 +80,7 @@ function verdictItem(key: string, observedAt: string): Work {
   return {
     id: `work-${key}`, key, title: 'Rework through the registry', description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/loop.ts'], stage: 'review', revision: 5, policyRevision: 1, createdAt: iso(-4 * 60 * minute), updatedAt: iso(0),
+    stage: 'review', revision: 5, policyRevision: 1, createdAt: iso(-4 * 60 * minute), updatedAt: iso(0),
     stageEnteredAt: iso(-30 * minute), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 42 },
     candidate: { sha: reviewed, baseSha: base, pr: 42, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation, blocker: null, violations: [],

@@ -28,7 +28,7 @@ const regression = { id: 'AC-2', text: 'Each linked instance is reproduced again
 /** GY-1685 as delivered: merged at 03:11Z, its deployment observed on the release that is its own merge. */
 const delivered = (overrides: Partial<Work> = {}): Work => ({
   id: gy1685Id, key: 'GY-1685', title: 'Recurring escalation interventions at the build stage: 3 in 7 days', description: '', type: 'bug', priority: 1,
-  dependencies: [], criteria: [rate, regression], policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: [],
+  dependencies: [], criteria: [rate, regression], policy: { checks: ['test', 'typecheck'], review: true }, 
   stage: 'done', revision: 40, policyRevision: 1, createdAt: '2026-10-11T02:07:11.287Z', updatedAt: mergedAt, stageEnteredAt: mergedAt, ready: true, epoch: 1, lease: null,
   workspaces: [{ host: 'vishrog', path: '/w', branch: 'graphyard/gy-1685-1', epoch: 1, owner: 'graphyard-codex-2' }], candidate: null, submission: { epoch: 1, pr: 1110 }, reworkRequested: false,
   scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
@@ -224,7 +224,7 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   for (const at of [notBefore, '2026-10-18T09:00:00.000Z']) {
     const account = actionAccount(hand, handAll, new Date(at));
     assert.equal(account.action?.kind, 'dispatch', `dispatched at ${at}`);
-    assert.deepEqual(account.action!.inputs, { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1, plannedFiles: [] });
+    assert.deepEqual(account.action!.inputs, { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 1 });
     const queued = { ...hand, actionQueue: { actions: [], history: [] } } as Work;
     const transitions = reconcileActions(queued, [gy1685, queued], new Date(at));
     assert.deepEqual(transitions.map(entry => [entry.event, entry.action.kind, entry.action.requestedBy]), [['requested', 'dispatch', 'graphyard']]);

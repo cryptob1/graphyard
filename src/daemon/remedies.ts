@@ -1,8 +1,6 @@
 // Concern: the deterministic remedies (AC-3) — what the doctor would apply most often needs no judgement, so the loop applies it itself, every cycle, without an agent.
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
-import type { Work } from '../model.js';
-import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
 import { approverSessionName } from '../master/autonomy.js';
 import { containmentPhase, masterHarness } from '../master.js';
 import { HarnessCheckoutRefusal, harnessApplyCheckout, recordServingUnits } from '../master/harness.js';
@@ -57,54 +55,6 @@ export async function settleSubmittedContainment(cycle: Cycle) {
         performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'done', detail: `Settled the lapsed containment of ${item.key} epoch ${epoch}: the attempt submitted pull request #${item.submission!.pr} and its supervisor is verified gone on ${assessment.host ?? cycle.config.hostId}`, attempts, epoch, cycle: state.cycle }, now(), effects.persist));
       } catch (error) {
         performed.push(await record(state, key, { kind: 'settle', work: item.key, principal: null, state: 'failed', detail: `Could not settle the lapsed containment of ${item.key} epoch ${epoch} whose attempt submitted: ${message(error)}`, attempts, epoch, cycle: state.cycle }, now(), effects.persist));
-      }
-    });
-  }
-}
-
-/** A word of free text that names a file: it has a directory part, or a file extension (`README.md`). */
-const pathWord = /^(?:[\w.@-]+\/)+[\w.@-]*$|^[\w@-][\w.@-]*\.[A-Za-z][\w]*$/;
-
-/**
- * The paths a scope-refusal blocker is about, when plannedFiles already covers every one of them,
- * else null. Coverage is judged from the item's structured scope record — the open request's paths,
- * or the paths its last scope decision named — never from the blocker's prose alone, so an item with
- * no such record keeps its blocker. Any file the prose names besides must be planned as well: a
- * refusal that cites a root-level file the record does not carry is not covered.
- */
-export function coveredScopePaths(item: Pick<Work, 'blocker' | 'plannedFiles' | 'scopeRequest' | 'scopeDecision'>) {
-  const recorded = item.scopeRequest?.paths ?? item.scopeDecision?.paths ?? [];
-  if (!recorded.length) return null;
-  const words = (item.blocker ?? '').split(/[\s,;()'"`]+/).map(word => word.replace(/[.:,;!?]+$/, '')).filter(word => pathWord.test(word) && !/^https?:/.test(word));
-  const named = [...new Set([...recorded, ...words])];
-  return unplannedPaths(item.plannedFiles, named).length ? null : named;
-}
-
-/**
- * Remedy 2: clear a blocker whose named scope is already in plannedFiles. A scope refusal left the
- * item's blocker standing, and a widening since applied covers every path it names. Clearing it
- * weakens nothing, so the loop applies `unblock` itself as the master's operator-agent identity,
- * bound to the revision it read — the non-weakening intent that identity owns, never requested.
- */
-export async function clearCoveredBlockers(cycle: Cycle) {
-  const { state, effects, now, snapshot, performed, isolate } = cycle;
-  const unblock = effects.unblock;
-  if (!unblock) return;
-  for (const item of snapshot.work.filter(item => item.stage !== 'done' && item.blocker?.startsWith(scopeRefusalBlocker))) {
-    await isolate('decision', item, item.key, async () => {
-      // The remedy is only for a scope refusal whose every named path a later widening covered.
-      const named = coveredScopePaths(item);
-      if (!named) return;
-      // Keyed by the revision it read: a blocker set again later is a new situation.
-      const key = remedyKey('unblock', `${item.id}:${item.revision}`);
-      const previous = state.actions[key];
-      if (previous && (previous.state === 'done' || !readyToRetry(previous, state.cycle))) return;
-      const attempts = (previous?.attempts ?? 0) + 1;
-      try {
-        await unblock(item, `The loop cleared ${item.key}'s scope-refusal blocker: every path it names (${named.join(', ')}) is already in plannedFiles, so nothing is widened and nothing is weakened (GY-711).`);
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Cleared ${item.key}'s blocker as the operator-agent identity: its scope refusal names only paths plannedFiles already covers (${named.join(', ')})`.slice(0, 2000), attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
-      } catch (error) {
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not clear ${item.key}'s covered scope-refusal blocker: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
       }
     });
   }
@@ -254,7 +204,6 @@ export async function applyHarnessContract(cycle: Cycle) {
 /** The deterministic remedies, every cycle, before the doctor itself is scheduled. */
 export async function routineRemedies(cycle: Cycle) {
   await settleSubmittedContainment(cycle);
-  await clearCoveredBlockers(cycle);
   await requeueWorkspaceRefusals(cycle);
   await relaunchUnansweredApprovers(cycle);
   await applyHarnessContract(cycle);

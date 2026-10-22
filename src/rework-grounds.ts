@@ -14,7 +14,7 @@ import { baseRefreshConflict } from './model/base-refresh.js';
  * interventions at the build stage: 377 the loop requested under its own situated binding and 109
  * a master session requested on a ground the record already showed. Only a
  * rework whose grounds the record does not show is somebody's judgement: an ejection that left no
- * owed round, a restore of files outside plannedFiles, an answer to a refusal.
+ * owed round, a restore of shipped files, an answer to a refusal.
  */
 
 /** The work-document fields the grounds are read from: the projection the intervention ledger reads for a `rework` row. */

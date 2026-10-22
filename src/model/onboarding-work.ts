@@ -11,8 +11,6 @@
 export const onboardingBranch = 'graphyard/onboarding';
 /** The work item's title: what the Setup page and `up` find it by, with its branch. */
 export const onboardingWorkTitle = 'Add Graphyard onboarding';
-/** What the item plans to change: the files `init --scan --apply` writes, the workflows as a directory. */
-export const onboardingPlannedFiles = ['AGENTS.md', '.gitignore', 'graphyard.json'] as const;
 /** The proof the item's one criterion names, answered as a closed question about the changed files. */
 export const onboardingProof = 'unit:onboarding-files';
 const pullRequestUrl = /https:\/\/github\.com\/[\w.-]+\/[\w.-]+\/pull\/(\d+)/;
@@ -35,7 +33,6 @@ export function onboardingWorkRequest(url: string, checks: string[] | null) {
     description: `${url}\n\nThe pull request graphyard up opened with the files it wrote while onboarding this repository: coordination instructions (AGENTS.md), configuration (graphyard.json) and Graphyard's delivery workflows. It changes nothing else. Filed by graphyard up so the loop reviews and merges it under the normal gates (GY-1478).`,
     criteria: [{ id: 'AC-1', text: 'The pull request adds only Graphyard\'s onboarding files (AGENTS.md, .gitignore and graphyard.json); no .github/workflows file is written.', proofs: [onboardingProof] }],
     closedQuestions: [{ criterion: 'AC-1', proof: onboardingProof, question: 'Does this change touch only AGENTS.md, .gitignore and graphyard.json?', criteria: ['yes', 'no'], pass: 'yes', state: [{ kind: 'changed-files' as const }] }],
-    plannedFiles: [...onboardingPlannedFiles],
     policy: { checks: checks?.length ? checks : ['test', 'typecheck'], review: true },
   };
 }

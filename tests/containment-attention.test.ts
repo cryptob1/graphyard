@@ -20,7 +20,7 @@ const clean = { method: 'linux-proc-systemd' as const, platform: 'linux', uid: 1
 
 function item(overrides: Partial<Work> = {}): Work {
   return { id: 'id-GY-74', key: 'GY-74', title: 'Item', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/item.ts'], stage: 'build', revision: 3, policyRevision: 1, createdAt: observedAt, updatedAt: observedAt,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1, createdAt: observedAt, updatedAt: observedAt,
     stageEnteredAt: observedAt, ready: true, epoch: 1, lease: null, workspaces: [workspace], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: null, blocker: null, gates: [], violations: [], ...overrides } as Work;
 }

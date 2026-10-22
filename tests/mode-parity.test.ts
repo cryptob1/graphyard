@@ -10,7 +10,6 @@ import { Engine } from '../src/engine.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { regressionRefusals } from '../src/regression-guard.js';
 import { evaluateLandability } from '../src/model/landability.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { reworkGround } from '../src/model/rework-ground.js';
@@ -18,8 +17,8 @@ import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
 import { reworkWaitsForApprover } from '../src/server/lane-rework.js';
 import type { Observation, Work } from '../src/model/work.js';
 
-// GY-1528: mode parity. One fixture item runs through submit (the plannedFiles check the engine's
-// submit applies, and the engine's own submit operation below), evaluate (the landability verdict), dispatch (the auto-dispatch reconciliation)
+// GY-1528: mode parity. One fixture item runs through evaluate (the landability verdict, and the
+// engine's own submit operation below), dispatch (the auto-dispatch reconciliation)
 // and rework-ground (the ground and whether an approver is needed). Under the github merger its
 // outputs equal the snapshot recorded on this head, so the old gates stay exactly as they were
 // until their code is deleted; under the control-plane merger each switched behaviour is named.
@@ -40,7 +39,7 @@ function fixture(source: 'control-plane' | null): Work {
   return {
     id: 'parity', key: 'GY-1', title: 'parity fixture', type: 'feature', description: '', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works', 'integration:item-holds', 'manual:item-looks', 'e2e:item-ships'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/app.ts'], stage: 'build', revision: 3, policyRevision: 1, ready: true, epoch: 1, lease: null,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1, ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-1-1', epoch: 1, owner: 'worker' }], submission: { epoch: 1, pr: 7 }, candidate, reworkRequested: false,
     scenarioRequirements: [], blocker: null, gates: [], violations: [], createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(), stageEnteredAt: new Date(at).toISOString(),
     evidence: [{ id: 'e1', proof: 'unit:item-works', result: 'fail', trusted: true, executed: 3, skipped: 0, failed: 1, producer: 'producer-a', sha: head, baseSha: base, policyRevision: 1, at: new Date(at).toISOString() }],
@@ -52,23 +51,16 @@ function fixture(source: 'control-plane' | null): Work {
 /** The fixture through the four steps, as plain data. */
 function run(source: 'control-plane' | null) {
   const work = fixture(source), now = new Date(at);
-  const submit = regressionRefusals(work, work.observation!, [work]);
   const verdict = evaluateLandability(work, [work], now);
   const evaluate = verdict.verdict === 'refused' ? verdict.reasons : [];
   const dispatched = structuredClone(work);
   const dispatch = reconcileAutoDispatch(dispatched, [dispatched], now).map(entry => ({ event: entry.event, kind: entry.request.kind, resolution: entry.request.resolution ?? null }));
-  return { submit, evaluate, dispatch, producers: dispatched.autoDispatch!.producers.length, ground: reworkGround(work, [], now), approver: reworkWaitsForApprover(work) };
+  return { evaluate, dispatch, producers: dispatched.autoDispatch!.producers.length, ground: reworkGround(work, [], now), approver: reworkWaitsForApprover(work) };
 }
 
 /** The github-mode outputs, recorded on this head (GY-1528). */
 const recorded = {
-  submit: [
-    'Candidate changes 1 file outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-1, restore each file from origin/<base>, and push again',
-    `Out-of-scope regression: src/other.ts: differs from the base branch tip (+1 −1) (no delivered work item claims this path)`,
-  ],
   evaluate: [
-    { gate: 'build', reason: 'Candidate changes 1 file outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-1, restore each file from origin/<base>, and push again' },
-    { gate: 'build', reason: 'Out-of-scope regression: src/other.ts: differs from the base branch tip (+1 −1) (no delivered work item claims this path)' },
     { gate: 'build', reason: `AC-1: unit:item-works failed on ${head.slice(0, 12)} (trusted evidence from producer-a); the head returns to its worker before review` },
     { gate: 'acceptance', reason: 'AC-1: unit:item-works needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
     { gate: 'acceptance', reason: 'AC-1: integration:item-holds needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
@@ -83,11 +75,10 @@ const recorded = {
   approver: false,
 };
 
-test('unit:mode-parity-github-snapshot — under the github merger the fixture\'s submit, evaluate, dispatch and rework-ground outputs equal the snapshot recorded on this head; under the control-plane merger each switched behaviour is named', () => {
+test('unit:mode-parity-github-snapshot — under the github merger the fixture\'s evaluate, dispatch and rework-ground outputs equal the snapshot recorded on this head; under the control-plane merger each switched behaviour is named', () => {
   assert.deepEqual(run(null), recorded);
   const switched = run('control-plane');
   const named: Record<string, boolean> = {
-    'plannedFiles and scope refusals: the submit refuses nothing': switched.submit.length === 0 && !switched.evaluate.some(entry => /planned files/.test(entry.reason)),
     'producer evidence: the stray producer failure refuses no build': !switched.evaluate.some(entry => /trusted evidence from/.test(entry.reason)),
     'acceptance from the merge ledger trial: unit and integration proofs pass on its counts': !switched.evaluate.some(entry => /unit:|integration:/.test(entry.reason)),
     'manual attestations only for sensitive risk, e2e deferred': !switched.evaluate.some(entry => /manual:|e2e:/.test(entry.reason)),
@@ -124,7 +115,7 @@ async function checkoutWithHead(root: string, branch: string) {
   return { checkout, head: changed, baseTip: git(checkout, 'rev-parse', 'refs/remotes/origin/main') };
 }
 
-test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixture: under the github merger it refuses with exactly the recorded plannedFiles refusal, under the control-plane merger it accepts the head that changes a file outside plannedFiles', async () => {
+test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixture: under the control-plane merger it accepts the head the shared object store holds', async () => {
   fixtureRoot = await realpath(await temporaryDirectory('mode-parity'));
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1528;
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('mode-parity-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -133,29 +124,20 @@ test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixtu
   const engine = new Engine(store, 120, 'owner/project');
   engine.directMergeEnvironment = null; engine.baseBranch = 'main';
   const assigned = async (branch: string) => {
-    let w = await engine.execute(operator, 'create', null, { title: 'parity fixture', plannedFiles: ['src/app.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }] }, randomUUID());
+    let w = await engine.execute(operator, 'create', null, { title: 'parity fixture', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }] }, randomUUID());
     w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
     const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
     assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));
     return engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/w/${branch}`, branch }, randomUUID());
   };
 
-  // github: GitHub's observation of the pull request is the fixture's, so the submit is refused on plannedFiles, word for word.
-  const hub = await assigned('graphyard/gy-1-1');
-  engine.submissionObserver = async probe => ({ ...fixture(null).observation!, candidate: { ...fixture(null).candidate!, branch: probe.workspaces.find(w => w.epoch === 1)!.branch } });
-  await assert.rejects(engine.execute(worker, 'submit', hub.id, { epoch: 1, pr: 7 }, randomUUID()), (error: Error) => {
-    assert.equal(error.message, `Submission refused for ${hub.key}: ${recorded.submit.map(reason => reason.replace('GY-1', hub.key)).join('; ')}`);
-    return true;
-  });
-  assert.equal((await store.workDocument(hub.id))!.submission, null, 'github: nothing is submitted');
-
-  // control-plane: the same scope, observed from the shared object store, is accepted — plannedFiles refuses nothing (switched off).
+  // control-plane: the head, observed from the shared object store, is accepted.
   const branch = 'graphyard/gy-2-1';
   const repo = await checkoutWithHead(fixtureRoot, branch);
   engine.gitRunner = gitRunnerFor(repo.checkout);
   const plane = await assigned(branch);
   const submitted = await engine.execute(worker, 'submit', plane.id, { epoch: 1, head: repo.head }, randomUUID());
   assert.equal(submitted.observation?.source, 'control-plane');
-  assert.deepEqual(submitted.observation?.scopeFiles?.map(file => file.path).sort(), ['src/app.ts', 'src/other.ts'], 'the head changes a file outside plannedFiles');
+  assert.deepEqual(submitted.observation?.scopeFiles?.map(file => file.path).sort(), ['src/app.ts', 'src/other.ts'], 'the observation reads the files the head changes');
   assert.deepEqual([submitted.candidate?.sha, submitted.candidate?.baseSha, submitted.submission?.epoch], [repo.head, repo.baseTip, 1], 'control-plane: the head is submitted');
 });

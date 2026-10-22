@@ -7,7 +7,7 @@ import { Launcher, type Cycle } from '../src/daemon/cycle.js';
 import { Timings } from '../src/master/timings.js';
 import { approverSessionName } from '../src/master/autonomy.js';
 import { workerSubmissionBoundMs } from '../src/model/attempt-bound.js';
-import { clearDoctorRuns, clearCoveredBlockers, coveredScopePaths, decisionCheckMs, dedupDoctorFiles, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects, type DoctorFile } from '../src/daemon/doctor.js';
+import { clearDoctorRuns, decisionCheckMs, dedupDoctorFiles, doctorBounds, doctorDue, doctorIntervalMs, doctorPrompt, doctorReportPayloadSchema, doctorRunsSettled, doctorSanctionedCommands, doctorSessionArgs, doctorSessionTools, doctorStep, relaunchUnansweredApprovers, settleSubmittedContainment, stopDoctorRuns, unansweredDecisionMs, type DoctorEffects, type DoctorFile } from '../src/daemon/doctor.js';
 import { applyDoctorRun, doctorTool, filingDigest } from '../src/daemon/doctor.js';
 import { loopAttention, type LoopLiveness } from '../src/daemon/liveness.js';
 import { deliveredFaultClassCover, faultClassOf, faultClassPolicyDefaults, recurringClasses, type FaultInstance } from '../src/model/fault-classes.js';
@@ -35,7 +35,7 @@ function config(): MasterConfig {
 
 function item(overrides: Partial<Work> = {}): Work {
   return { id: 'id-GY-74', key: 'GY-74', title: 'Item', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/item.ts'], stage: 'build', revision: 3, policyRevision: 1, createdAt: observedAt, updatedAt: observedAt,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1, createdAt: observedAt, updatedAt: observedAt,
     stageEnteredAt: observedAt, ready: true, epoch: 1, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: null, blocker: null, gates: [], violations: [], ...overrides } as Work;
 }
@@ -280,8 +280,8 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
     ],
     actions: [{ subject: 'GY-75', command: 'graphyard master unblock GY-75 because scope is granted', outcome: 'applied' as const, detail: 'blocker cleared' }],
     filed: [
-      { faultClass: 'decision' as const, title: 'Decision faults recur', description: 'evidence', priority: 1, criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:x'] }], plannedFiles: ['src/x.ts'] },
-      { faultClass: 'containment' as const, title: 'Lapsed fences pile up', description: 'evidence', priority: 0, criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:y'] }], plannedFiles: ['src/y.ts'] },
+      { faultClass: 'decision' as const, title: 'Decision faults recur', description: 'evidence', priority: 1, criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:x'] }] },
+      { faultClass: 'containment' as const, title: 'Lapsed fences pile up', description: 'evidence', priority: 0, criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:y'] }] },
     ],
   };
   // 'decision' has an open item standing for it (filed through the same origin), so it is deduplicated.
@@ -421,7 +421,7 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
     return item({ id: 'id-GY-92', key: 'GY-92', title: input.title });
   } };
   const filingReport = { findings: [], actions: [], filed: [
-    { faultClass: 'merge' as const, title: 'Merge faults recur', description: 'evidence', priority: 1, criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:m'] }], plannedFiles: ['src/m.ts'] }] };
+    { faultClass: 'merge' as const, title: 'Merge faults recur', description: 'evidence', priority: 1, criteria: [{ id: 'AC-1', text: 'Fixed', proofs: ['unit:m'] }] }] };
   const filingDoctor: DoctorEffects = { ...filing, runner: () => Promise.resolve({ runtime: 'pi', model: 'test/model', release: async () => {}, runner: {
     name: 'pi', start: (_prompt: string, options: { tool: string }) => ({
       id: 'run', events: [], onEvent: () => () => {}, cancel: () => {},
@@ -495,7 +495,7 @@ test('unit:doctor-run-recorded — a doctor run records one event per item it fo
   assert.ok(!perItem.some(entry => entry.payload.subject === 'installation'), 'a status-level subject files no per-item event');
 });
 
-test('unit:loop-applies-routine-remedies — the loop settles a lapsed containment whose attempt submitted, clears a blocker whose named scope plannedFiles already covers, and relaunches an approver for a decision unanswered past ten minutes', async () => {
+test('unit:loop-applies-routine-remedies — the loop settles a lapsed containment whose attempt submitted and relaunches an approver for a decision unanswered past ten minutes', async () => {
   // Remedy 1: a lapsed fence on a submitted attempt is verified on this host with the settle-containment
   // probe and settled through autosettle with that verification, which the control plane re-checks.
   const settled: string[] = [], probed: string[] = [];
@@ -530,32 +530,7 @@ test('unit:loop-applies-routine-remedies — the loop settles a lapsed containme
   await settleSubmittedContainment(remedied);
   assert.deepEqual(settled, ['GY-74']);
 
-  // Remedy 2: a scope-refusal blocker whose paths a widening already planned is cleared by the loop
-  // itself as the operator-agent identity, bound to the revision it read — no decision, no approver.
-  const unblockedKeys: { key: string; revision: number }[] = [];
-  // Coverage is judged from the structured scope record, and any file the prose names besides —
-  // a root-level one included — must be planned too; an item with no record keeps its blocker.
-  const refusal = (paths: string[]) => ({ state: 'refused' as const, reason: 'outside', at: at(-60_000), decidedBy: 'graphyard', waitedMs: 0, paths, requestedBy: 'worker-a', requestedAt: at(-120_000), epoch: 1 });
-  const covered = item({ id: 'id-GY-77', key: 'GY-77', blocker: 'Scope request refused: GY-77 needs src/item.ts/extra and tests/extra outside plannedFiles', plannedFiles: ['src/item.ts', 'src/item.ts/extra', 'tests/extra'], scopeDecision: refusal(['src/item.ts/extra', 'tests/extra']) });
-  const stillUnplanned = item({ id: 'id-GY-78', key: 'GY-78', blocker: 'Scope request refused: GY-78 needs src/other.ts outside plannedFiles', plannedFiles: [], scopeDecision: refusal(['src/other.ts']) });
-  const rootUnplanned = item({ id: 'id-GY-81', key: 'GY-81', blocker: 'Scope request refused: GY-81 needs src/a.ts and package.json outside plannedFiles', plannedFiles: ['src/a.ts'], scopeDecision: refusal(['src/a.ts', 'package.json']) });
-  const proseRootUnplanned = item({ id: 'id-GY-82', key: 'GY-82', blocker: 'Scope request refused: GY-82 needs src/a.ts and AGENTS.md outside plannedFiles', plannedFiles: ['src/a.ts'], scopeDecision: refusal(['src/a.ts']) });
-  const unrecorded = item({ id: 'id-GY-83', key: 'GY-83', blocker: 'Scope request refused: GY-83 needs src/a.ts outside plannedFiles', plannedFiles: ['src/a.ts'] });
-  assert.deepEqual(coveredScopePaths(covered), ['src/item.ts/extra', 'tests/extra']);
-  assert.equal(coveredScopePaths(rootUnplanned), null, 'a root-level path the record names and plannedFiles lacks is not covered');
-  assert.equal(coveredScopePaths(proseRootUnplanned), null, 'a root-level file the refusal names besides the record is not covered');
-  assert.equal(coveredScopePaths(unrecorded), null, 'with no structured scope record the blocker is left alone');
-  const unblocked = cycle([covered, stillUnplanned, rootUnplanned, proseRootUnplanned, unrecorded], { effects: {
-    unblock: async target => { unblockedKeys.push({ key: target.key, revision: target.revision }); return { ...target, blocker: null }; },
-    decide: async () => { throw new Error('the remedy applies the unblock itself; it never requests a decision'); },
-  } });
-  await clearCoveredBlockers(unblocked);
-  assert.deepEqual(unblockedKeys, [{ key: 'GY-77', revision: 3 }], 'only the blocker whose every named path is planned is cleared, at the revision read');
-  assert.ok(Object.values(unblocked.state.actions).some(action => action.work === 'GY-77' && action.state === 'done' && /Cleared GY-77's blocker/.test(action.detail)));
-  await clearCoveredBlockers(unblocked);
-  assert.equal(unblockedKeys.length, 1, 'cleared once per revision');
-
-  // Remedy 3: a requested decision unanswered past ten minutes with no live approver gets one.
+  // Remedy 2: a requested decision unanswered past ten minutes with no live approver gets one.
   const launched: string[] = [];
   const asked = at(-unansweredDecisionMs - 60_000), fresh = at(-60_000);
   const waiting = item({ id: 'id-GY-79', key: 'GY-79', stage: 'review', candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 9, branch: 'x', author: 'w' } });
@@ -747,7 +722,7 @@ function filingDoctor(filed: unknown[], file: DoctorEffects['file']): DoctorEffe
         result: async () => ({ ok: true as const, tool: options.tool, payload: report, payloads: [report] }) }) } as unknown as Runner }) };
 }
 /** The filing instance 2 asked for: its title, with a proof ID written as prose. */
-const mainGuardFiling = (proofs: string[]) => ({ faultClass: 'merge' as const, priority: 1, plannedFiles: ['src/daemon/main-guard.ts'],
+const mainGuardFiling = (proofs: string[]) => ({ faultClass: 'merge' as const, priority: 1, 
   title: 'Main-guard revert PRs are refused by GitHub\'s approval rule and the guard abandons after one attempt, leaving a required check failing on main 38-90 minutes until an unrelated merge recovers it',
   description: 'evidence', criteria: [{ id: 'AC-1', text: 'A refused revert is retried until main is green', proofs }] });
 
@@ -918,7 +893,7 @@ test('manual:doctor-launch-fails-fast — a run a killed loop process left runni
 const gy1516 = { scenario: 'self-upgrade-loaded-revision-clears', title: 'Master loop cannot restart or self-upgrade: coordinator checkout HEAD moves under the running loop, so the dirty-checkout guard stands for hours (instances 2026-10-08T01:09Z and 04:11Z)' };
 /** The create route's refusal as the operator-agent post throws it: status and body kept on the error. */
 const scenarioRefusal = (scenario: string) => new RefusedResponse(`Graphyard refused work (409): Register E2E scenario ${scenario} before creating work that requires it`, 409, { error: `Register E2E scenario ${scenario} before creating work that requires it` });
-const selfUpgradeFiling = (proofs: string[]) => ({ faultClass: 'loop' as const, priority: 1, plannedFiles: ['src/daemon/self-upgrade.ts'], title: gy1516.title, description: 'evidence',
+const selfUpgradeFiling = (proofs: string[]) => ({ faultClass: 'loop' as const, priority: 1, title: gy1516.title, description: 'evidence',
   criteria: [{ id: 'AC-1', text: 'The loop restarts onto the checkout revision', proofs }] });
 const instanceKinds = (state: DaemonState) => state.faults.instances.map(entry => [entry.kind, entry.faultClass]);
 const escalationsOf = (state: DaemonState) => Object.values(state.actions).filter(action => action.kind === 'escalation');
@@ -1024,7 +999,7 @@ const gy1711Landing = Date.parse(observedAt) - 118 * 60_000;
 const gy1711CapacityFile = (): DoctorFile => ({
   faultClass: 'capacity', priority: 1,
   title: 'Approver, reviewer and worker sessions exhaust their model-account limit mid-attempt, losing judgements and attempts and breaching machine bounds',
-  description: 'doctor re-offer after GY-1708 landed', plannedFiles: ['src/model/capacity.ts'],
+  description: 'doctor re-offer after GY-1708 landed', 
   criteria: [{ id: 'AC-1', text: 'Mid-attempt exhaustion redispatches within machine bounds', proofs: ['unit:capacity-redispatch'] }],
 });
 const gy1708Delivered = (): Work => item({

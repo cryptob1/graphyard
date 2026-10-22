@@ -43,7 +43,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 let sequence = 0;
 /** A submitted item sent back for rework and claimed again: the claim a rework dispatch makes. */
 async function reworkClaim(): Promise<Work> {
-  let item = await engine.execute(operator, 'create', null, { title: `Rework ${++sequence}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title: `Rework ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/rework/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}` }, randomUUID());

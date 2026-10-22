@@ -53,9 +53,9 @@ async function call(principal: Principal, method: 'GET' | 'POST', path: string, 
 
 /** An item with a standing escalation, so its context read assembles the escalation's whole context. */
 async function escalated() {
-  let work = await engine.execute(operator, 'create', null, { title: 'heap', description: 'Why heap matters', plannedFiles: ['src/heap.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal' }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title: 'heap', description: 'Why heap matters', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal' }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, { reason: 'Priority one' }, randomUUID());
-  work = await engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
+  work = await engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: work.dependencies, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
   assert.deepEqual(standingEscalations(work).map(entry => entry.trigger), ['requirement-weakening']);
   return work;
 }

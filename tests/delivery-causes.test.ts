@@ -19,7 +19,7 @@ const minute = 60_000;
 
 // One delivered item per row of the population, in the Work shape the snapshot serves.
 const deliveredItem = (workId: string, key: string, over: Record<string, any> = {}): Work => ({
-  id: workId, key, title: `Fixture ${key}`, description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['scripts/delivery-causes.mjs'],
+  id: workId, key, title: `Fixture ${key}`, description: '', type: 'feature', priority: 1, dependencies: [], 
   stage: 'done', createdAt: '2026-09-26T04:00:00.000Z', updatedAt: '2026-09-26T10:00:00.000Z', stageEnteredAt: '2026-09-26T10:00:00.000Z',
   epoch: 3, gates: [], violations: [], workspaces: [], sessions: [], policy: { checks: ['test', 'typecheck'], review: true },
   submission: { epoch: 1, pr: 400 },
@@ -94,7 +94,7 @@ const fullGates = (unmetGate: string, gateReasons: string[]) => [
   gateRow('merge', unmetGate !== 'merge', unmetGate === 'merge' ? gateReasons : []),
 ];
 const snapshot = (workId: string, key: string, over: Record<string, any>) => ({
-  id: workId, key, title: `Fixture ${key}`, description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['scripts/delivery-causes.mjs'],
+  id: workId, key, title: `Fixture ${key}`, description: '', type: 'feature', priority: 1, dependencies: [], 
   stage: 'building', createdAt: '2026-09-26T04:00:00.000Z', updatedAt: over.at ?? '2026-09-26T04:00:00.000Z', stageEnteredAt: over.at ?? '2026-09-26T04:00:00.000Z',
   epoch: 1, gates: fullGates('build', ['Worker has not submitted implementation for this attempt']), violations: [], workspaces: [], sessions: [],
   policy: { checks: ['test'], review: true }, ready: true, reworkRequested: false, blocker: null, ...over,

@@ -9,7 +9,6 @@ import { pendingCaseChanges } from './master-status-case-changes.js';
 import { deployLine, leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { loopCodeRoot } from '../daemon/checkout-state.js';
 import { daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
-import { timeToMergeBySize } from '../decomposition.js';
 import { stalledReviewCapAttention } from '../daemon/cycle-review-cap.js';
 import { slowCycleAttention } from '../daemon/liveness.js';
 import { defaultAwaitReviewers, dispatchFailureAttention, dispatchSummary, loopMemoryAttention, readDispatchCursor } from '../auto-dispatch.js';
@@ -39,14 +38,13 @@ import { assembleReportedAttention, assembleStatusSections } from './master-stat
 export { actionReport, agentRequestAttention, agentRequestReport, sessionReport } from './loop-report.js';
 // Read from here as they always were.
 export { cycleBudget } from '../daemon/metrics.js';
-export { approveScopeRequest } from './master-scope.js';
 
 // The queue-head observation lag, lease health and stall composition live in `stall-attention.ts`;
 // the report and the tests read them from here.
 export { observationThroughputStatus } from './stall-attention.js';
 // The attention builders live in `status-attention.ts`; the report reads them from here.
 export { approverLaunchAttention, nameOrphanSupervisors, orphanSupervisorAttention, stalledItemAttention, supervisorReclaimCommand } from './status-attention.js';
-export { humanNeededAttention, needsHumanActions, scopeRequestAttention } from './owed-report.js';
+export { humanNeededAttention, needsHumanActions } from './owed-report.js';
 export { stalledActionAttention } from './stalled-actions.js';
 export { overlongSessionAttention } from './overlong-sessions.js';
 export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
@@ -103,7 +101,6 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const { probe, status: pipelined, delivery, lead } = await buildPipelineStatus(root, master, snapshot, coordinator, runtime, credentials, containment, reviews, producers, dispatch.failures, retries, daemonState, cycling, launches, masterApi, sections);
   // Failed check a fixed base explains (GY-793); a stalled review-cap replaces its review-gate row (GY-1810).
   const status = nameBaseBreaks(stalledReviewCapAttention(pipelined, snapshot.work, cursor, master.reviewRoundCap, Date.parse(snapshot.now)), snapshot.work);
-  const itemSize = timeToMergeBySize(snapshot.work, Date.parse(snapshot.now)); // GY-1858
   const sudo = administration.sudo; // operator confirming their GitHub credential on device
   // Unsatisfied settled request, or a review every session dismissed (GY-100), with the command that answers it.
   const unobtainable = unobtainableReviewAttention(status.work, reviews.completed as SettledReviewSession[]);
@@ -112,7 +109,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   const actionless = actionlessItems(snapshot.work, new Date(snapshot.now));
   const liveness = livenessStatus(snapshot); // GY-201: open items holding no obligation, with ages
   // Requests, conflicts, stalls, owed judgments: derivedAttention (the loop reads it too).
-  const { generatedFiles, overflow, interventions, decisions, throughput, resources, derived: { scopeRequests, stalledItems: derivedStalls, actorless, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
+  const { generatedFiles, overflow, interventions, decisions, throughput, resources, derived: { requests, stalledItems: derivedStalls, actorless, conflicted, stalled, owed, budget, overlong, triage, backlog } } = await reportedAttention(root, master, masterApi, coordinator, snapshot,
     { reviews: reviewRecords, producers: producerRecords, runtime, commit: cli.commit, approvals: cycling?.approvals ?? [], loop: cycling?.liveness ?? null, rows: status.work, trees,
       // GY-2015: the writer summary the cursor holds, so a held trial refusal reads as the loop reads it.
       mergeWriter: cycling?.mergeWriter ?? null,
@@ -127,7 +124,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const { observation, health, stalledItems } = stallAttention(snapshot, coordinator, derivedStalls, hs.attention);
   const { changes: caseChanges, items: caseChangeItems } = await pendingCaseChanges(sections, masterApi);
-  const attentionItems = [...diskAttention, ...scopeRequests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...caseChangeItems, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...diskAttention, ...requests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...stalled, ...overlong, ...budget, ...triage, ...owed.items, ...caseChangeItems, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [])];
   // First: loop health and stalls, dispatcher, release lag (GY-437).
   const ahead = [...loopItems, ...stallItems, ...dispatchItems, ...lag.attention];
@@ -167,7 +164,6 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     // GY-1982: the continuous deploy's release reading and a failed deploy's line.
     promotion: { lastPromotedSha: cursor?.promotion?.promotedSha ?? null, promotedAt: cursor?.promotion?.promotedAt ?? null, checkedAt: cursor?.promotion?.checkedAt ?? null, reason: cursor?.promotion?.reason ?? null, deploy: deployLine(cursor?.promotion?.deployFailed) },
     launches: { prepare: launches.prepare }, // GY-1836: the day's worktree preparation p50/p90
-    itemSize,
     // Every open item the control plane names no action for, with the account it names and how
     // long it has held its failing gate.
     actionless: { bound: stallBoundMs, items: actionless },

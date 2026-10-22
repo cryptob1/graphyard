@@ -90,9 +90,9 @@ export function candidateConflicts(work: Work[], probe: ConflictProbe, budget?: 
     for (let j = i + 1; j < candidates.length; j++) {
       const left = candidates[i], right = candidates[j];
 
-      // Pairs whose planned or changed files cannot intersect are never probed and never reported
-      const leftFiles = left.plannedFiles ?? [];
-      const rightFiles = right.plannedFiles ?? [];
+      // Pairs whose changed files cannot intersect are never probed and never reported
+      const leftFiles = left.observation?.files ?? [];
+      const rightFiles = right.observation?.files ?? [];
       if (leftFiles.length && rightFiles.length && !filesOverlap(leftFiles, rightFiles)) {
         continue;
       }
@@ -201,14 +201,14 @@ export async function probeCandidateConflictsWithBudget(root: string, work: Work
   };
 
   // Pre-populate the in-memory cache from disk for the pairs the probe can reach: the ones whose
-  // planned or changed files overlap. The reads are local and stop once the budget is spent; the
+  // changed files overlap. The reads are local and stop once the budget is spent; the
   // pairs this loop answers stay answerable however far the budget is spent afterwards, the fetch
   // included.
   const candidates = openCandidates(work);
   overlap: for (let i = 0; i < candidates.length; i++) {
     for (let j = i + 1; j < candidates.length; j++) {
       const left = candidates[i], right = candidates[j];
-      const leftFiles = left.plannedFiles ?? [], rightFiles = right.plannedFiles ?? [];
+      const leftFiles = left.observation?.files ?? [], rightFiles = right.observation?.files ?? [];
       if (leftFiles.length && rightFiles.length && !filesOverlap(leftFiles, rightFiles)) continue;
       if (spent()) break overlap;
       const cached = readCached(left.candidate!.sha, right.candidate!.sha);

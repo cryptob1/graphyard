@@ -59,7 +59,7 @@ const reload = async (workId: string) => (await store.list()).find(item => item.
 
 /** A ready item whose worker parked it on a human-only decision of KIND, with the request's own choices when given. */
 async function parked(title: string, kind: HumanDecisionKind, extra: Record<string, unknown> = {}): Promise<Work> {
-  let work: Work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, randomUUID());
+  let work: Work = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   await call(token(worker), 'POST', `work/${work.key}/park`, { epoch: work.epoch, kind, needed: 'Which of the two dashboards ships first this quarter', reason: 'The ordering of the two dashboards is a priority call',

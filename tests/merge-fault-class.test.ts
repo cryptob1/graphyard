@@ -43,7 +43,7 @@ function config(): MasterConfig {
 function item(key: string, at: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `work-${key}`, key, title: key, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 1, policyRevision: 2,
+    policy: { checks: ['test', 'typecheck'], review: true }, stage: 'build', revision: 1, policyRevision: 2,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [], ...overrides,

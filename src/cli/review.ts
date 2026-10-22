@@ -23,7 +23,7 @@ const selfGit = (...args: string[]) => {
 /**
  * `review self` (GY-1987): the worker judges its own diff by the standard the independent reviewer
  * will apply, before it submits. It reads the item through the worker's connection, as `status`
- * does (criteria, plannedFiles, documentation obligation, base branch), takes head as this
+ * does (criteria, documentation obligation, base branch), takes head as this
  * worktree's HEAD and base as the merge-base with origin/BASE, and prints reviewStandard for that
  * diff. It runs no model, posts nothing and records nothing: both reads are GETs, and the command
  * always exits 0.
@@ -35,7 +35,7 @@ async function reviewSelf({ api, args }: CliContext) {
   const head = selfGit('rev-parse', 'HEAD');
   const base = selfGit('merge-base', 'HEAD', `refs/remotes/origin/${baseBranch}`);
   const maps = await readVerificationMaps(process.cwd(), baseBranch, defaultChildRun).catch(() => []);
-  const standard = reviewStandard({ key: work.key, head, base }, work.criteria, work.documentation ? { obligation: work.documentation, files: null } : undefined, { maps, plannedFiles: work.plannedFiles ?? [] });
+  const standard = reviewStandard({ key: work.key, head, base }, work.criteria, work.documentation ? { obligation: work.documentation, files: null } : undefined, { maps, paths: selfGit('diff', '--name-only', base, head).split('\n').filter(Boolean) });
   console.log('Judge your own diff exactly as the independent reviewer will; fix every finding you would mark BLOCKING before you run complete.');
   console.log(standard);
 }

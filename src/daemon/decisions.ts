@@ -1,19 +1,16 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, RefusedResponse } from '../model.js';
-import { scopeDecisionBinding, scopeDecisionReason, scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
-import { askIdentity, routedScopeRequest, widenedPlannedFiles } from '../model/scope-collapse.js';
-import { itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths } from '../model/blocker-class.js';
 import { baseRefreshConflict, pendingBaseRefresh } from '../model/base-refresh.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { conflictReworkDue, decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
-import { guardBroadScope, type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
+import { type MasterConfig, type ContainmentAssessment, containmentPhase, type HerdrAgent } from '../master.js';
 import { containmentInMotion } from '../model/containment.js';
 import { researchRework } from '../research.js'; import { baseBreakHold } from '../master/base-break-refresh.js';
 import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js'; import { refusedAttestationRework, type RefusedAttestation } from '../model/rework-ground.js';
-import { actionDetailMax, approvalWatchSchema, type ApprovalWatch, message } from './state.js';
+import { actionDetailMax, approvalWatchSchema, type ApprovalWatch } from './state.js';
 // A decision's wording — its bounded reason and detail, and the refusals a retry
 // cites — lives in ./decision-text.ts; it is imported for use here and re-exported, so every
 // existing import keeps working.
@@ -168,13 +165,8 @@ export function observationWakeDue(work: Work, wokenAt: string | null | undefine
 export const routineDecisionActions = ['rework', 'recover', 'merge', 'resolve', 'requirements', 'close', 'attest'] as const;
 export type RoutineDecisionAction = typeof routineDecisionActions[number];
 /** `input` is what the decision names beyond what `decisionInput` derives from the item: a resolve's trigger, and the grounds binding a situated request judges (GY-407). */
-/** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. `scope` is the worker request a `requirements` decision answers; `input.answers` binds the decision to it. */
-export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string }; scope?: NonNullable<ApprovalWatch['scope']> }
-/**
- * Whether two decisions answer the same scope request. Compared field by field: the ledger keeps
- * the input as jsonb, which does not keep key order, so a serialised comparison never matches.
- */
-export const sameAnswers = (a: any, b: any) => !a || !b ? !a && !b : a.epoch === b.epoch && a.at === b.at;
+/** `escalation` is the one standing escalation a resolve settles: a standing request for any other is not this decision. */
+export interface RoutineDecision { action: RoutineDecisionAction; reason: string; binding: string; input?: Record<string, unknown>; escalation?: { trigger: string; at: string } }
 /**
  * The input a rework or recover request carries: the routine input plus the grounds binding, so
  * the server's refusal match sees what the watch key already keys (GY-407). A refusal judged on
@@ -185,55 +177,6 @@ export const situatedInput = (decision: Pick<RoutineDecision, 'action' | 'bindin
   decision.action === 'rework' || decision.action === 'recover'
     ? { ...(decision.input ?? {}), binding: decision.binding.slice(0, decisionBindingMax) }
     : decision.input;
-/**
- * The scope decision one item needs right now, or null (GY-176). A worker's additive request the
- * implication rule refused and no review finding grounds (`judged`: the loop has read the findings
- * for this request and policy revision and they named none of it) is put to the independent
- * approver as a `requirements` decision the master's operator-agent identity requests: the same
- * additive revision `master scope` applies, so an approved one keeps the worker's lease. A
- * widening that introduces a root-level directory is requested as the broad-scope exception, and
- * the approver grants it only with a stated reason. Unlike rework it attests nothing about a
- * stopped worker: the worker is live and waiting on the answer.
- */
-export function scopeRoutineDecision(work: Work, now: number, judged: boolean): RoutineDecision | null {
-  if (!judged || work.stage === 'done') return null;
-  // GY-1568: an ask carried past its attempt's end stays the approver's; its binding is unchanged, so the decision stands.
-  const routable = routedScopeRequest(work, now);
-  if (!routable) return null;
-  const { request, paths, plannedFiles, collapsed } = routable;
-  let broad: string | null = null;
-  try { guardBroadScope({ ...work, plannedFiles }, request.reason, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
-  catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
-  return { action: 'requirements', binding: scopeDecisionBinding(request), input: { plannedFiles, answers: askIdentity(request) }, reason: scopeDecisionReason(work.key, request, work.criteria, paths, broad, undefined, collapsed),
-    scope: { epoch: request.epoch, at: request.at, requestedBy: request.requestedBy, paths: paths.slice(0, 50).map(path => path.slice(0, 500)) } };
-}
-/**
- * GY-1008. A planned-file-scope blocker — a worker's blocker naming the files its change needs and
- * the commit it needs them for — as the same additive `requirements` decision a routed scope request
- * becomes, requested by the master's operator-agent identity and judged by the independent
- * approver, with no master session involved. The recorded blocker already ended its attempt, so
- * nothing about a worker is attested; the approver judges the widening alone. Null when the
- * blocker is anything else, when plannedFiles already cover every file it names (the blocker step
- * then clears it), or when no fold represents the widening under the plannedFiles cap.
- */
-export function blockerScopeDecision(work: Work): RoutineDecision | null {
-  if (work.stage === 'done' || !work.blocker || work.scopeRequest || work.blocker.startsWith(scopeRefusalBlocker)) return null;
-  const classification = itemBlockerClass(work);
-  if (classification?.class !== 'planned-file-scope' || (work.blockerProbe?.clears ?? 0) >= maxAutomaticClears) return null;
-  const paths = uncoveredBlockerPaths(work, classification);
-  if (!paths.length) return null;
-  const widened = widenedPlannedFiles(work, paths);
-  if (!widened.representable) return null;
-  let broad: string | null = null;
-  try { guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, work.blocker, { allow: false, command: 'the loop', existing: work.plannedFiles }); }
-  catch (error) { broad = `${guardBroadScope({ ...work, plannedFiles: widened.plannedFiles }, 'the approver grants it only with a stated reason', { allow: true, command: 'the loop', existing: work.plannedFiles })} (${message(error)})`; }
-  const asked = `${work.key}: its worker recorded a planned-file-scope blocker naming ${paths.join(', ')} for commit ${classification.commit}, which ended its attempt: "${work.blocker.slice(0, 500)}". `
-    + 'Approve the additive plannedFiles widening if the item\'s criteria justify those files, refuse with the reason otherwise; the loop clears the blocker once plannedFiles cover them. '
-    + (broad ? `${broad.slice(0, 300)} It needs the broad-scope flag: grant it only with a stated reason why narrower paths will not do. ` : '');
-  const named = `Criteria: ${work.criteria.map(criterion => `${criterion.id}: ${criterion.text}`).join(' | ')}`;
-  return { action: 'requirements', binding: `blocker-scope:${classification.commit}:${paths.join(',')}`.slice(0, decisionBindingMax), input: { plannedFiles: widened.plannedFiles },
-    reason: (asked + named).slice(0, 2000) };
-}
 /**
  * The decision one item needs right now, or null. Rework returns a head nothing can carry forward
  * — a standing verdict, or a base branch Graphyard could not merge in — to a fresh attempt.
@@ -523,21 +466,6 @@ export const approverJudgeBoundMs = 600_000, approverSettleMs = 60_000, maxAppro
  * product hands it over, and counts as a decision fault only once it outlasts it.
  */
 export const masterTurnWaitBoundMs = 30 * 60_000;
-/** What the control plane answers a widening whose scope request closed before it applied (engine `requirements`). */
-export const closedScopeAnswerFailure = /The scope request this widening answers is no longer open|which asked for this scope, no longer holds the lease/;
-/**
- * GY-1484. A requirements decision that settled failed only because the scope request it answered
- * closed — its wait window ran out or its attempt ended before the application — judged nothing
- * against the widening: the approver's judgement stood, the request around it did not. While the
- * paths it asked for are still outside plannedFiles, the planned-file blocker it answers still
- * stands, so the failure is not counted toward `maxDecisionRequests`: the loop keeps asking until an
- * approval lands or the operator resolves the scope, rather than stopping at three such races.
- */
-export function uncountedScopeFailure(watch: Pick<ApprovalWatch, 'action' | 'scope'>, judged: { state: string; outcome?: string | null } | null | undefined, work: Pick<Work, 'plannedFiles'>): boolean {
-  if (watch.action !== 'requirements' || judged?.state !== 'failed' || !closedScopeAnswerFailure.test(judged.outcome ?? '')) return false;
-  const asked = watch.scope?.paths ?? [];
-  return asked.length > 0 && unplannedPaths(work.plannedFiles, asked).length > 0;
-}
 /**
  * A headless approver run lost to something outside the loop (GY-453: killed, recording no exit)
  * judged nothing, so its launch is given back — but only this many times per decision. Past it, a
@@ -564,12 +492,8 @@ export function approvalStep(watch: ApprovalWatch, decision: { id?: string; acti
   if (decision === undefined) return { step: 'wait', detail: `The decision history of ${watch.work} could not be read; ${label} is looked at again next cycle` };
   if (decision === null) return { step: 'rerequest', detail: `The control plane no longer holds ${label}` };
   if (decision.state === 'applied') return { step: 'settled', detail: `The approver applied ${label}` };
-  // GY-1687: held is approved; the control plane applies it when the attempt ends. GY-1701: a covering adopt stays watched
-  // while held so status does not advertise `master scope` and the ask waits for that apply (not a settled foreign watch).
-  if (decision.state === 'held') {
-    if (watch.coveringAdopt) return { step: 'wait', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the covering ask waits until the control plane applies it` };
-    return { step: 'settled', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the control plane applies it when the attempt ends` };
-  }
+  // GY-1687: held is approved; the control plane applies it when the attempt ends.
+  if (decision.state === 'held') return { step: 'settled', detail: `${label} is approved and held (${decision.outcome ?? 'the item holds a live attempt'}); the control plane applies it when the attempt ends` };
   // A refusal is the approver's considered judgement (GY-141), not a session to replace or a request to repeat: the server refuses the same request unchanged, and answering it is the master's.
   if (decision.state === 'refused') return { step: 'refused', detail: `${label} was refused by ${decision.refusal?.approver ?? 'its approver'}: ${decision.refusal?.reason ?? decision.outcome ?? 'no reason recorded'}` };
   // An approved decision is already judged (GY-1300): no approver session is waited on, relaunched or spent for it. A session

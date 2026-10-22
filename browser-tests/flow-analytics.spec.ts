@@ -17,7 +17,7 @@ function snapshot(key: string, at: number, overrides: Partial<Work>): Work {
   return {
     id: `work-${key}`, key, title: `Fixture ${key}`, description: '', type: 'feature', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['integration:flow'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], scenarioRequirements: [],
+    policy: { checks: ['test'], review: true }, scenarioRequirements: [],
     stage: 'build', revision: 1, policyRevision: 1, createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(),
     stageEnteredAt: new Date(at).toISOString(), ready: true, epoch: 1, lease: null, workspaces: [], candidate: null,
     submission: null, reworkRequested: false, evidence: [], observation: null, blocker: null,

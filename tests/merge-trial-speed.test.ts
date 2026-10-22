@@ -286,7 +286,7 @@ test('unit:trial-phases-and-no-pending — every trial records its install, buil
 
 test('unit:trial-phases-and-no-pending — the merge writer\'s trial record carries the phases\' times and the attempts that reached no verdict, and a trial that reached none after its retry is recorded with its final outcome, phase and reason before the merge fails, in the shape the coordinator\'s merge-record route accepts', async () => {
   const files = ['tests/a.test.ts', 'tests/b.test.ts'], head = 'b'.repeat(40), tip = 'c'.repeat(40);
-  const work = { id: 'w1832', key: 'GY-1832', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:alpha-works'] }], plannedFiles: [], mergeLedger: null, submission: { epoch: 1, pr: 1 },
+  const work = { id: 'w1832', key: 'GY-1832', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:alpha-works'] }], mergeLedger: null, submission: { epoch: 1, pr: 1 },
     candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1832-1', author: 'worker' }, observation: { source: 'control-plane', candidate: { sha: head }, files: ['src/app.ts'] } } as unknown as Work;
   const merging = async (repo: ReturnType<typeof repository>, extra: Partial<MergeTrialInput> = {}) => {
     const events: MergeRecordEvent[] = [], base = await input(repo, { cores: 1, ...extra });

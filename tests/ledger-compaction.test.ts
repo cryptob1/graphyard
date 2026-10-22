@@ -45,7 +45,7 @@ const atRevision = async (id: string, revision: number) => (await store.pool.que
 async function seeded(): Promise<Work> {
   const id = randomUUID(); const n = ++serial;
   const work = { id, key: `GY-C${n}`, title: `Compaction ${n}`, type: 'feature', priority: 3, stage: 'build', ready: true, revision: 0, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(),
-    epoch: 1, lease: { epoch: 1, owner: 'implementer', expiresAt: new Date().toISOString() }, submission: null, workspaces: [], dependencies: [], evidence: [], plannedFiles: ['src/a.ts'],
+    epoch: 1, lease: { epoch: 1, owner: 'implementer', expiresAt: new Date().toISOString() }, submission: null, workspaces: [], dependencies: [], evidence: [], 
     criteria: [{ id: 'AC-1', text: randomBytes(1500).toString('hex'), proofs: ['integration:x'] }], actionQueue: { actions: [] as any[] }, gates: [] } as unknown as Work;
   await store.pool.query('INSERT INTO work_items(id, document) VALUES($1,$2)', [id, JSON.stringify(work)]);
   await write(work, 'create');
@@ -118,7 +118,7 @@ test('unit:routine-events-store-no-snapshot — a routine save stores only what 
   try { assert.deepEqual(await documentBefore(client, work.id, new Date(Date.now() + 60_000), () => true), written.at(-1)); } finally { client.release(); }
 
   // Through the engine: a worker's renewals past snapshotEvery are never whole.
-  let w = await engine.execute(operator, 'create', null, { title: 'Renewals', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title: 'Renewals', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   for (let beat = 0; beat < snapshotEvery + 5; beat++) w = await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID());
   const beats = (await raw(w.id)).filter(row => row.kind === 'heartbeat');

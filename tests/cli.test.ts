@@ -1013,7 +1013,7 @@ test('master run executes the durable loop as a supervised process and master st
   const snapshot = {
     now: now(),
     work: [
-      { id: 'blocked-1', key: 'GY-70', title: 'Needs an operator', stage: 'ready', ready: true, blocker: 'Waiting on an external contract', priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], workspaces: [], evidence: [], gates: [{ name: 'ready', passed: false, reasons: ['Waiting on an external contract'] }], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 1, policyRevision: 1 },
+      { id: 'blocked-1', key: 'GY-70', title: 'Needs an operator', stage: 'ready', ready: true, blocker: 'Waiting on an external contract', priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, workspaces: [], evidence: [], gates: [{ name: 'ready', passed: false, reasons: ['Waiting on an external contract'] }], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 1, policyRevision: 1 },
     ],
   };
   const http = createServer((req, res) => {
@@ -1071,7 +1071,7 @@ test('master run executes the durable loop as a supervised process and master st
 test('sync merges origin/BASE without rebasing and judges only the merge: in-scope, new and outside files all pass, and a real conflict stops the merge', async () => {
   const cwd = await temporaryDirectory('sync');
   const http = createServer((req, res) => { res.setHeader('Content-Type', 'application/json');
-    const task = { id: 'task', key: 'GY-1', plannedFiles: ['src/scoped/', 'tests/'], workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] };
+    const task = { id: 'task', key: 'GY-1', workspaces: [{ epoch: 1, host: 'machine-a', path: cwd, branch: 'graphyard/gy-1-1' }] };
     res.end(JSON.stringify(req.url === '/api/status' ? { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } }
       : req.url === '/api/work-snapshot' ? { now: new Date().toISOString(), work: [task] } : req.url === '/api/work/GY-1' ? task : [task])); });
   await new Promise<void>(r => http.listen(0, '127.0.0.1', r));

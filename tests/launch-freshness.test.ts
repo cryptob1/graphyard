@@ -35,7 +35,7 @@ function reviewRequest(overrides: Partial<DispatchRequest> = {}): DispatchReques
 function item(observedAt: string, overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-42', key: 'GY-42', title: 'Launch on the head', description: '', type: 'bug', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, plannedFiles: ['src/loop.ts'],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, 
     stage: 'review', revision: 5, policyRevision: 1, createdAt: iso(-4 * 60 * minute), updatedAt: iso(0), stageEnteredAt: iso(-30 * minute), ready: true, epoch: 1, lease: null, workspaces: [],
     submission: { epoch: 1, pr: 42 }, candidate: { sha: head, baseSha: base, pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: observation(head, observedAt), blocker: null, violations: [],

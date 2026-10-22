@@ -2,8 +2,8 @@ import type { Work } from './work.js';
 import { itemLane, laneRequiresProof, type BootstrapMode } from './policy.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { evidenceProves } from './mechanical-proofs.js';
-import { pathScopesOverlap } from './scope.js';
-export { pathScope, pathScopeContains, pathScopesOverlap } from './scope.js';
+import { pathScopesOverlap } from './documentation-glob.js';
+export { pathScope, pathScopeContains, pathScopesOverlap } from './documentation-glob.js';
 
 export interface BootstrapObligation extends BootstrapMode { key: string; workId: string; criterionId: string; proof: string }
 
@@ -28,19 +28,21 @@ export function bootstrapObligations(all: Work[]): BootstrapObligation[] {
 }
 
 /**
- * Obligations another change deferred that this item's planned files now touch. A criterion
- * of this item cannot defer an inherited proof a second time: its own bootstrap declaration is
- * deliberately not consulted here, so the deferral can never be renewed by the change that
+ * Obligations another change deferred on the contract this item touches: the files its candidate
+ * was observed to change, and the contract paths its own deferrals name. A criterion of this item
+ * cannot defer an inherited proof a second time: its own bootstrap declaration is deliberately not
+ * consulted for the proofs it requires, so the deferral can never be renewed by the change that
  * inherits it.
  */
 export function inheritedObligations(work: Work, all: Work[]): BootstrapObligation[] {
   if (work.stage === 'done') return [];
   const alreadyRequired = new Set(work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs));
+  const touched = [...(work.observation?.files ?? []), ...work.criteria.flatMap(ac => ac.bootstrap?.contractPaths ?? [])];
   const inherited: BootstrapObligation[] = [];
   for (const obligation of bootstrapObligations(all)) {
     if (obligation.workId === work.id || alreadyRequired.has(obligation.proof)) continue;
     if (inherited.some(seen => seen.proof === obligation.proof)) continue;
-    if (work.plannedFiles.some(path => obligation.contractPaths.some(contract => pathScopesOverlap(path, contract)))) inherited.push(obligation);
+    if (touched.some(path => obligation.contractPaths.some(contract => pathScopesOverlap(path, contract)))) inherited.push(obligation);
   }
   return inherited;
 }

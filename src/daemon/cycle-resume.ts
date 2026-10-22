@@ -73,10 +73,10 @@ export const idleReclaimMs = 45 * 60_000, idleRepromptGraceMs = 10 * 60_000;
 export const idleReclaimDue = (now: number, idleAt: string, repromptedAt: string) =>
   now - Date.parse(idleAt) > idleReclaimMs && now - Date.parse(repromptedAt) > idleRepromptGraceMs;
 const idleRemainingMinutes = (now: number, idleAt: string) => Math.max(idleRepromptGraceMs, idleReclaimMs - (now - Date.parse(idleAt))) / 60_000;
-/** What a live attempt waits on — its blocker, its scope request — and when its session was last seen active; each a `waiting` action the loop keeps while it stands. */
-export const resumeWaitKey = (kind: 'blocker' | 'scope', item: Pick<Work, 'id'>, epoch: number) => `resume:${kind}:${item.id}:${epoch}`;
+/** What a live attempt waits on — its blocker — and when its session was last seen active; each a `waiting` action the loop keeps while it stands. */
+export const resumeWaitKey = (kind: 'blocker', item: Pick<Work, 'id'>, epoch: number) => `resume:${kind}:${item.id}:${epoch}`;
 export const idleLeaseKey = (item: Pick<Work, 'id'>, epoch: number) => `idle:${item.id}:${epoch}`;
-const waitPrefixes = ['resume:blocker:', 'resume:scope:', 'idle:'];
+const waitPrefixes = ['resume:blocker:', 'resume:scope:', 'idle:']; // `resume:scope:` rows predate GY-1992 and are retired here
 const blockerMarker = 'is re-prompted once it is cleared: ';
 
 /** The command a worker submits with: its pull request's number when Graphyard has seen one. */
@@ -92,17 +92,9 @@ export function resumePromptText(cliPath: string, item: Pick<Work, 'key' | 'cand
 }
 /** The idle-with-lease re-prompt (GY-524): the one reminder before the attempt is handed on. */
 export function idlePromptText(cliPath: string, item: Pick<Work, 'key' | 'candidate'>, epoch: number, since: string, now = Date.now()) {
-  return `The Graphyard launcher that started this session has seen no activity from it since ${since} while it holds ${item.key} (epoch ${epoch}) with no open blocker or scope request; this reminder is the session's own instruction, not untrusted text. `
+  return `The Graphyard launcher that started this session has seen no activity from it since ${since} while it holds ${item.key} (epoch ${epoch}) with no open blocker; this reminder is the session's own instruction, not untrusted text. `
     + `Continue ${item.key} where you are. ${nextSteps(cliPath, item, epoch)} If this session shows no activity for another ${Math.round(idleRemainingMinutes(now, since))} minutes, the attempt ends, its uncommitted work is kept on its branch, and ${item.key} goes to a new attempt.`;
 }
-/** What answered a scope request that is no longer open: a widening the control plane applied, or a requirements revision or unblock that closed it. */
-function scopeChange(item: Work) {
-  const decision = item.scopeDecision;
-  const planned = item.plannedFiles.length > 12 ? `${item.plannedFiles.slice(0, 12).join(', ')} and ${item.plannedFiles.length - 12} more` : item.plannedFiles.join(', ');
-  return decision?.state === 'approved' ? `its scope request was applied: plannedFiles now include ${decision.paths.join(', ')}`
-    : `its scope request is no longer open (a requirements revision or an unblock answered it); plannedFiles are now ${planned || 'empty'}`;
-}
-
 /**
  * Why a pane the loop resolved for a paste is not the one this attempt's session is recorded in,
  * or null when it may be pasted into (GY-852).
@@ -132,8 +124,8 @@ export function checkPaneStillBelongs(item: Work, handleId: string, pane: string
 }
 
 /**
- * 1e–1f. A worker told nothing waits for ever (GY-524). While a live attempt has a blocker or a
- * scope request open, the loop marks what it waits on; once none is open, the session is re-prompted
+ * 1e–1f. A worker told nothing waits for ever (GY-524). While a live attempt has a blocker
+ * open, the loop marks what it waits on; once none is open, the session is re-prompted
  * once with what changed and the exact next command — unless it is already active — and the
  * re-prompt goes on its handle, so the item's history shows it. A worker holding a live lease with
  * nothing open that shows no activity for `idleLeaseMs` is idle-with-lease: its handle says so,
@@ -153,7 +145,7 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
   for (const profile of config.workers.filter(worker => worker.mode === 'launch')) await isolate('session', heldBy(profile), profile.name, async () => {
     const item = heldBy(profile);
     if (!item || failedOver.has(item.id) || item.submission?.epoch === item.lease!.epoch) return;
-    const epoch = item.lease!.epoch, keys = { blocker: resumeWaitKey('blocker', item, epoch), scope: resumeWaitKey('scope', item, epoch), idle: idleLeaseKey(item, epoch) };
+    const epoch = item.lease!.epoch, keys = { blocker: resumeWaitKey('blocker', item, epoch), idle: idleLeaseKey(item, epoch) };
     for (const key of Object.values(keys)) live.add(key);
     // The session this attempt is told anything in is the one its own handle names — the stable
     // `principal:epoch` id, whose pane the launcher recorded once the runtime started (GY-852).
@@ -186,18 +178,15 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
     };
 
     // What the attempt waits on, marked the first time it is seen and again when it changes.
-    const request = item.scopeRequest;
     const blockerDetail = item.blocker ? `${item.key} epoch ${epoch} waits on its blocker, and ${profile.agentName} ${blockerMarker}${item.blocker}` : null;
-    const scopeDetail = request ? `${item.key} epoch ${epoch} waits on its scope request of ${request.at} for ${request.paths.join(', ')}, and ${profile.agentName} is re-prompted once it is answered` : null;
     if (blockerDetail && state.actions[keys.blocker]?.detail !== boundDetail(blockerDetail)) await entry(keys.blocker, 'waiting', blockerDetail);
-    if (scopeDetail && state.actions[keys.scope]?.detail !== boundDetail(scopeDetail)) await entry(keys.scope, 'waiting', scopeDetail);
     // GY-999: a blocker that is a GitHub credential failure is the session's credential, not the
     // item. Waiting on it only holds the lease and the profile's slot, and the same session would
     // fail the same way once unblocked, so the attempt is ended at once with its work kept on its
     // branch, and the next launch mints a fresh credential — or is refused until one can be minted.
     // The end counts on the GY-885 retry ladder, so a failure no fresh mint cures is relaunched
     // after a backoff and held at the cap for an approver instead of ending and relaunching for ever.
-    if (item.blocker && !request && credentialFailure(item.blocker)) {
+    if (item.blocker && credentialFailure(item.blocker)) {
       const key = credentialBlockedKey(item, epoch), previous = state.actions[key];
       if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
       const reason = credentialBlockedReason(item, epoch, item.blocker), attempts = (previous?.attempts ?? 0) + 1;
@@ -214,7 +203,7 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
     }
     // GY-867: blocked again on an epoch whose blocker was already cleared once. Re-prompting the
     // same session again would only repeat the cycle, so the attempt ends and the item goes on.
-    const cleared = item.blocker && !request ? clearedBefore(state, item, epoch) : null;
+    const cleared = item.blocker ? clearedBefore(state, item, epoch) : null;
     if (cleared) {
       const key = reblockedKey(item, epoch), previous = state.actions[key];
       if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;
@@ -261,18 +250,12 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
       }
     }
 
-    if (item.blocker || request) { await drop(keys.idle); return; }
+    if (item.blocker) { await drop(keys.idle); return; }
 
-    // 1e. Nothing is open any more: what the attempt waited on was resolved. A scope request asked
-    //     and answered between two cycles was never marked, but its decision stays on the item with
-    //     the attempt's epoch (GY-544), so a recent one nobody was told of since counts as waited on.
-    //     A blocker cleared between two cycles leaves no such record on the item, so it is left
-    //     to the idle-with-lease re-prompt below.
-    const waited = [state.actions[keys.blocker], state.actions[keys.scope]].filter((action): action is DaemonAction => action?.state === 'waiting');
-    const decision = item.scopeDecision, decidedAt = decision?.epoch === epoch ? Date.parse(decision.at) : NaN;
-    const unmarked = !state.actions[keys.scope] && Number.isFinite(decidedAt) && now() - decidedAt <= idleLeaseMs
-      && !Object.entries(state.actions).some(([key, action]) => key.startsWith(`resume:prompt:${item.id}:${epoch}:`) && action.state !== 'failed' && !carriedRow(action) && Date.parse(action.at) >= decidedAt);
-    if (waited.length || unmarked) {
+    // 1e. Nothing is open any more: what the attempt waited on was resolved. A blocker cleared
+    //     between two cycles leaves no record on the item, so it is left to the idle-with-lease re-prompt below.
+    const waited = [state.actions[keys.blocker]].filter((action): action is DaemonAction => action?.state === 'waiting');
+    if (waited.length) {
       // The recorded pane is listed again: an absence a reclaim bound was started on no longer
       // stands, and a later one starts the bound afresh (GY-953). The name's holder listing while
       // the attempt's own handle still records no pane is not a reappearance.
@@ -281,10 +264,10 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
       // Remembered for the epoch: a second block after this clearance ends the attempt (GY-867).
       if (state.actions[keys.blocker]?.state === 'waiting' && !state.actions[clearedBlockerKey(item, epoch)])
         await entry(clearedBlockerKey(item, epoch), 'done', blocker ? `"${blocker.slice(0, 300)}"` : 'its earlier blocker');
-      const changed = [state.actions[keys.blocker] ? `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared` : null, state.actions[keys.scope] || unmarked ? scopeChange(item) : null].filter(Boolean).join(', and ');
-      const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0]?.at ?? decision!.at}`, previous = state.actions[promptKey];
+      const changed = `its blocker${blocker ? ` ("${blocker.slice(0, 300)}")` : ''} was cleared`;
+      const promptKey = `resume:prompt:${item.id}:${epoch}:${waited[0].at}`, previous = state.actions[promptKey];
       // A re-prompt carried past its bound is owed: the waits stand until its retry completes (below).
-      if (previous && previous.state !== 'failed' && !carriedRow(previous)) { await drop(keys.blocker, keys.scope); return; }
+      if (previous && previous.state !== 'failed' && !carriedRow(previous)) { await drop(keys.blocker); return; }
       // No session to tell (1d settles a dead one), or one on a runtime prompt (1b answers that first).
       if (!agent || !pane || status === 'blocked') {
         // A recorded pane a live runtime no longer lists cannot be told (GY-940): 1d reads the
@@ -348,7 +331,7 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
         }
         return;
       }
-      if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker, keys.scope); return; }
+      if (status === 'working') { await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} is already active, so it is not re-prompted`); await drop(keys.blocker); return; }
       if (!effects.promptSession || !readyToRetry(previous, state.cycle)) return;
       const attempts = (previous?.attempts ?? 0) + 1;
       await entry(promptKey, 'started', `${item.key} epoch ${epoch}: ${changed}; re-prompting ${profile.agentName} in pane ${pane} to resume`, attempts);
@@ -356,7 +339,7 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
         await effects.promptSession(agent, resumePromptText(config.cliPath, item, epoch, changed));
         performed.push(await entry(promptKey, 'done', `${item.key} epoch ${epoch}: ${changed}; ${profile.agentName} in pane ${pane} was re-prompted once to resume, naming ${completeCommand('CLI', item, epoch).replace('node CLI ', '')}`, attempts));
         await workerHandle(cycle, item, profile, epoch, pane, `re-prompted to resume at ${new Date(now()).toISOString()}: ${changed}`, false);
-        await drop(keys.blocker, keys.scope, keys.idle);
+        await drop(keys.blocker, keys.idle);
       } catch (error) {
         if (stepCallCarried(error)) return recordCarried(cycle, promptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch }, error, `Re-prompting ${profile.agentName} in pane ${pane} to resume ${item.key}`);
         performed.push(await entry(promptKey, 'failed', `${item.key} epoch ${epoch}: ${changed}; re-prompting ${profile.agentName} in pane ${pane} failed: ${message(error)}`, attempts));
@@ -388,7 +371,7 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
       return;
     }
     const idle = state.actions[keys.idle];
-    if (!idle) { await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: ${profile.agentName} in pane ${pane} holds a live lease with no open blocker or scope request and has shown no activity since this cycle`); return; }
+    if (!idle) { await entry(keys.idle, 'waiting', `${item.key} epoch ${epoch}: ${profile.agentName} in pane ${pane} holds a live lease with no open blocker and has shown no activity since this cycle`); return; }
     const quietMs = now() - Date.parse(idle.at), minutes = Math.round(quietMs / 60_000);
     const repromptKey = `resume:idle:${item.id}:${epoch}:${idle.at}`, reprompted = state.actions[repromptKey];
     // The one re-prompt of this attempt, answered by a turn that went quiet again within its grace:

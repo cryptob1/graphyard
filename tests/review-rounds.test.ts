@@ -10,11 +10,10 @@ import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-s
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewHistory, reviewPrompt, reviewRetryPrompt, reviewRoundCap, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { blockingFindings, defaultReviewRoundCap, followUpFindingsOf, observedReviewBody, reviewBodyMax, reviewRoundStatus, withReviewRounds } from '../src/review-cap.js';
+import { blockingFindings, defaultReviewRoundCap, followUpFindingsOf, observedReviewBody, reviewBodyMax, reviewRoundCapOf, reviewRoundStatus, withReviewRounds } from '../src/review-cap.js';
 import { cappedReview, cappedReworkBinding, neededDecision } from '../src/daemon/decisions.js';
 import { cappedRework } from '../src/server/lane-rework.js';
 import { cappedEscalation } from '../src/daemon/cycle-review-cap.js';
-import { routedScopeStatus } from '../src/cli/owed-report.js';
 import { coordinationWork } from '../src/server/work-view.js';
 // Time-bomb allowance (GY-1694): the 2026-09-24 instants stamp settled prior rounds and the reviewer binding, which the round logic orders by head rather than by clock; new Date() stamps the live item and the launch observedAt.
 
@@ -154,7 +153,7 @@ function work(): Work {
   const candidate = { sha: H, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
   const observation: Observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
     files: ['src/a.ts'], scopeFiles: [], at: new Date().toISOString(), prState: 'open', draft: false, baseTip: B, baseTree: B, baseTipContained: true } as unknown as Observation;
-  return { id: 'work-64', key: 'GY-64', title: 'Frobs', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-64', key: 'GY-64', title: 'Frobs', description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ ...criteria[0], proofs: ['unit:frob-count'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'review', revision: 7, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -191,7 +190,7 @@ test('unit:review-rounds-capped — a change request past the cap is read for BL
   assert.equal(defaultReviewRoundCap, 3);
   assert.deepEqual([0, 1, 2, 3].map(rounds => reviewRoundStatus({ pipeline: pipeline(rounds) }, 3)), [{ round: 1, cap: 3, capped: false }, { round: 2, cap: 3, capped: false }, { round: 3, cap: 3, capped: false }, { round: 4, cap: 3, capped: true }]);
   const row = { key: 'GY-64', attention: null, attentionOwner: null };
-  assert.deepEqual(routedScopeStatus({ work: [row], attentionItems: [] }, [{ ...work(), pipeline: pipeline(3) }], [], { reviewRoundCap: 5 }).work, [{ ...row, reviewRound: { round: 4, cap: 5, capped: false } }], 'master status rows carry the round against the configured cap');
+  assert.deepEqual(withReviewRounds([row], [{ ...work(), pipeline: pipeline(3) }], reviewRoundCapOf({ reviewRoundCap: 5 })), [{ ...row, reviewRound: { round: 4, cap: 5, capped: false } }], 'master status rows carry the round against the configured cap');
   assert.deepEqual(withReviewRounds([{ key: 'GY-64' }, { key: 'GY-65' }], [{ key: 'GY-64', pipeline: pipeline(3) }], 3), [{ key: 'GY-64', reviewRound: { round: 4, cap: 3, capped: true } }, { key: 'GY-65', reviewRound: null }], 'master status shows each item\'s round');
 
   const config = { autoMerge: true, reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2026-09-24T00:00:00Z' } };

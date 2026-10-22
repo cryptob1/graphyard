@@ -11,7 +11,6 @@ import { boundedPersist, progressAttention } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
 import { masterSessionStep } from './cycle-master.js';
-import { scopeStep, successorStep } from './cycle-scope.js';
 import { blockerStep } from './cycle-blockers.js';
 import { reclaimStep } from './cycle-reclaim.js';
 import { dispatchStep } from './cycle-dispatch.js';
@@ -218,9 +217,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   spent('close');
 
-  const { settled, budget } = await timings.step('scope', () => scopeStep(cycle));
-  // 2c. Open items planning a file the base split or renamed are re-planned onto its successors.
-  await timings.step('successors', () => successorStep(cycle, settled));
   // 2d. Every standing blocker is re-checked: its cause probed, cleared once the probe passes (GY-1008).
   await timings.step('blockers', () => blockerStep(cycle));
   spent('decisions');
@@ -239,7 +235,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   // 4b. Past the review-round cap (GY-1118) a change request is filed as follow-ups and withdrawn, or escalated; it is never reworked.
   await timings.step('review cap', () => reviewCapStep(cycle));
-  await timings.step('decisions', () => decisionStep(cycle, settled, assessments, capacity));
+  await timings.step('decisions', () => decisionStep(cycle, assessments, capacity));
   await settleLaunches();
   spent('decisions');
 
@@ -300,8 +296,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // GY-1344: time spent on requests the control plane never answered is the plane's outage, not the loop's work.
   const report = timings.report(), planeWaitMs = Math.min(durationMs - childWaitMs, report.planeWaitMs ?? 0);
   const metrics = cycleMetricsSchema.parse({ cycle: state.cycle, at: new Date(clock).toISOString(), durationMs, childWaitMs, workMs: durationMs - childWaitMs - planeWaitMs, ...(planeWaitMs ? { planeWaitMs } : {}), steps, timings: report, open: open.length, actions: performed.length,
-    actionable: actionable.length, stages, lead,
-    scope: { count: budget.count, p50Ms: budget.p50Ms, p90Ms: budget.p90Ms }, scopeOpenMs: budget.longestOpenMs });
+    actionable: actionable.length, stages, lead });
   state.metrics.push(metrics);
   state.cycle += 1;
   state.lastCycleAt = new Date(now()).toISOString();
@@ -318,7 +313,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   });
   pruneDaemonState(state);
   await effects.persist(state);
-  return { actions: performed, metrics, deployment: state.deployment, health, actionable, budget: latencyBudget(state.latency), scope: budget };
+  return { actions: performed, metrics, deployment: state.deployment, health, actionable, budget: latencyBudget(state.latency) };
 }
 
 /**

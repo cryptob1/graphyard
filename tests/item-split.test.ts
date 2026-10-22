@@ -35,7 +35,7 @@ const criteria = ['AC-1', 'AC-2', 'AC-3', 'AC-4', 'AC-5'].map((id, index) => ({ 
 function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: randomUUID(), key, title: `Item ${key}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: structuredClone(criteria),
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/', 'web/', 'tests/', 'docs/'], stage: 'ready', ready: true, revision: 2, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'ready', ready: true, revision: 2, policyRevision: 1,
     createdAt: new Date(NOW).toISOString(), updatedAt: new Date(NOW).toISOString(), stageEnteredAt: new Date(NOW).toISOString(),
     epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
@@ -46,9 +46,9 @@ function item(key: string, overrides: Partial<Work> = {}): Work {
 const proposal: DecompositionPayload = decompositionPayloadSchema.parse({
   reason: 'The model, the loop step and the status view merge separately.',
   children: [
-    { title: 'Model', criteria: ['AC-1', 'AC-2'], plannedFiles: ['src/decomposition.ts', 'tests/item-split.test.ts'] },
-    { title: 'Loop step', criteria: ['AC-3', 'AC-4'], plannedFiles: ['src/daemon/cycle-dispatch.ts'], after: [0] },
-    { title: 'Status and docs', criteria: ['AC-5'], plannedFiles: ['src/master/status.ts', 'docs/coordination.md'], after: [0] },
+    { title: 'Model', criteria: ['AC-1', 'AC-2'] },
+    { title: 'Loop step', criteria: ['AC-3', 'AC-4'], after: [0] },
+    { title: 'Status and docs', criteria: ['AC-5'], after: [0] },
   ],
 });
 
@@ -92,20 +92,20 @@ const step = (items: Work[], runner: Runner, record: (work: Work, event: Decompo
   decompositionStep({ items: [...items], clock: NOW, settings, config: { repository: 'owner/project' }, cwd: process.cwd(), runner, model: 'zai/glm-5.3-flash', record });
 const dispatchable = (work: Work, all: Work[]) => { try { assertDispatchable(work, all, new Date(NOW).toISOString()); return null; } catch (error) { return (error as Error).message; } };
 
-test('unit:broad-items-split-before-dispatch — an item over the size bounds is split before first dispatch into children covering its criteria exactly, with narrower plannedFiles and ordering dependencies; an item within the bounds or opted out is dispatched unchanged', async t => {
+test('unit:broad-items-split-before-dispatch — an item over the size bounds is split before first dispatch into children covering its criteria exactly, with ordering dependencies; an item within the bounds or opted out is dispatched unchanged', async t => {
   t.after(clearDecompositionRuns);
   // The bounds are master.json settings with defaults that leave an ordinary item whole.
   assert.equal(masterRunSchema.parse({}).decomposition, undefined);
   assert.deepEqual(decompositionSettings(masterRunSchema.parse({ decomposition: { maxCriteria: 6 } })).maxCriteria, 6);
-  assert.deepEqual(sizeBoundsExceeded(item('GY-9', { criteria: criteria.slice(0, 3), plannedFiles: ['src/decomposition.ts', 'tests/item-split.test.ts', 'docs/coordination.md'] }), settings), [], 'three criteria and three named files are within the bounds');
+  assert.deepEqual(sizeBoundsExceeded(item('GY-9', { criteria: criteria.slice(0, 3) }), settings), [], 'three criteria are within the bounds');
 
   const prerequisite = item('GY-1', { stage: 'done' });
   const broad = item('GY-2', { dependencies: [prerequisite.id], exclusiveResources: ['github-app'], documentation: { id: 'DOCS', text: 'Documentation reflects this change.', paths: ['docs/'] } as Work['documentation'] });
-  const small = item('GY-3', { criteria: criteria.slice(0, 2), plannedFiles: ['src/decomposition.ts', 'docs/coordination.md'] });
+  const small = item('GY-3', { criteria: criteria.slice(0, 2) });
   const optedOut = item('GY-4', { split: false });
   const dispatched = item('GY-5', { epoch: 1, implementers: ['graphyard-codex-1'] });
   const items = [prerequisite, broad, small, optedOut, dispatched];
-  assert.ok(decompositionWanted(broad, settings)!.some(reason => /5 criteria, over 4/.test(reason)) && decompositionWanted(broad, settings)!.some(reason => /4 root-level planned directories/.test(reason)));
+  assert.ok(decompositionWanted(broad, settings)!.some(reason => /5 criteria, over 4/.test(reason)));
 
   const { runner, starts } = fakeRunner(() => submitted(proposal));
   const { events, record } = plane(items);
@@ -130,7 +130,6 @@ test('unit:broad-items-split-before-dispatch — an item over the size bounds is
   assert.deepEqual(children.flatMap(child => child.criteria).sort((a, b) => a.id.localeCompare(b.id)), broad.criteria);
   for (const child of children) {
     assert.equal(child.parent, broad.key);
-    assert.ok(child.plannedFiles!.length && child.plannedFiles!.every(path => !path.endsWith('/')), `${child.key} plans named files, narrower than the parent's directories`);
     assert.ok(child.dependencies.includes(prerequisite.id), `${child.key} keeps the parent's dependency`);
     assert.deepEqual(child.exclusiveResources, ['github-app'], `${child.key} keeps the parent's exclusive resources`);
     assert.equal(child.documentation?.id, 'DOCS', `${child.key} carries the documentation obligation`);
@@ -163,7 +162,7 @@ test('unit:broad-items-split-before-dispatch — an item over the size bounds is
   await decompositionSettled();
 });
 
-test('unit:broad-items-split-before-dispatch — a split that drops, duplicates or invents a criterion, does not narrow the scope or orders a child after a later one is refused, and that run, a failed run or a kept-whole answer leaves the item to be dispatched unchanged', async t => {
+test('unit:broad-items-split-before-dispatch — a split that drops, duplicates or invents a criterion or orders a child after a later one is refused, and that run, a failed run or a kept-whole answer leaves the item to be dispatched unchanged', async t => {
   t.after(clearDecompositionRuns);
   const parent = item('GY-20');
   const refuse = (children: unknown[], pattern: RegExp) => {
@@ -176,8 +175,6 @@ test('unit:broad-items-split-before-dispatch — a split that drops, duplicates 
   refuse([base[0], base[1]], /drops AC-5/);
   refuse([base[0], { ...base[1], criteria: ['AC-2', 'AC-3', 'AC-4'] }, base[2]], /AC-2 of GY-20 is given to child 1 and child 2/);
   refuse([base[0], { ...base[1], criteria: ['AC-3', 'AC-4', 'AC-9'] }, base[2]], /names AC-9, which is not a criterion/);
-  refuse([base[0], { ...base[1], plannedFiles: ['lib/other.ts'] }, base[2]], /outside GY-20's planned files/);
-  refuse([base[0], { ...base[1], plannedFiles: ['src/', 'web/', 'tests/', 'docs/'] }, base[2]], /strictly narrower/);
   refuse([{ ...base[0], after: [1] }, base[1], base[2]], /must land after an earlier child only/);
   assert.throws(() => validateSplitCriteria(parent, []), /drops AC-1, AC-2, AC-3, AC-4, AC-5/);
 
@@ -246,17 +243,17 @@ async function deliver(key: string, mergedAt: string) {
 }
 
 test('unit:broad-items-split-before-dispatch — the control plane makes the split in one transaction with numbered children, owns the relation, takes the opt-out by requirements revision, and delivers the parent with a ledger event when its last child is delivered; master status shows the relation', async () => {
-  const created = await engine.execute(operator, 'create', null, { title: 'Broad item', criteria: criteria.slice(0, 3), plannedFiles: ['src/', 'tests/', 'docs/'] }, randomUUID());
+  const created = await engine.execute(operator, 'create', null, { title: 'Broad item', criteria: criteria.slice(0, 3) }, randomUUID());
   // The relation is the server's to set: an item cannot be created naming children or a parent.
   for (const field of [{ children: [created.key] }, { parent: created.key }]) assert.equal((await request(operator, 'work', { title: 'Forged', criteria: criteria.slice(0, 1), ...field })).status, 400);
   await engine.execute(operator, 'ready', created.id, {}, randomUUID());
   // Only the coordinator (or an admin) records a decomposition.
-  assert.equal((await request(worker, `work/${created.key}/decomposition`, { event: 'started', runtime: 'pi', model: 'm', timeoutMs: 60_000, bounds: ['3 root-level planned directories'] })).status, 403);
-  const started = await request(coordinator, `work/${created.key}/decomposition`, { event: 'started', runtime: 'pi', model: 'm', timeoutMs: 60_000, bounds: ['3 root-level planned directories'] });
+  assert.equal((await request(worker, `work/${created.key}/decomposition`, { event: 'started', runtime: 'pi', model: 'm', timeoutMs: 60_000, bounds: ['5 criteria, over 4'] })).status, 403);
+  const started = await request(coordinator, `work/${created.key}/decomposition`, { event: 'started', runtime: 'pi', model: 'm', timeoutMs: 60_000, bounds: ['5 criteria, over 4'] });
   assert.equal(started.status, 200, JSON.stringify(started.body));
   const payload = { reason: 'Two halves', children: [
-    { title: 'First half', criteria: ['AC-1', 'AC-2'], plannedFiles: ['src/decomposition.ts', 'tests/item-split.test.ts'] },
-    { title: 'Second half', criteria: ['AC-3'], plannedFiles: ['docs/coordination.md'], after: [0] },
+    { title: 'First half', criteria: ['AC-1', 'AC-2'] },
+    { title: 'Second half', criteria: ['AC-3'], after: [0] },
   ] };
   assert.equal((await request(coordinator, `work/${created.key}/decomposition`, { event: 'decided', payload: { ...payload, children: [payload.children[0]] } })).status, 400, 'a one-child split is refused');
   const split = await request(coordinator, `work/${created.key}/decomposition`, { event: 'decided', payload });
@@ -274,10 +271,10 @@ test('unit:broad-items-split-before-dispatch — the control plane makes the spl
   assert.equal((await ledger(first.id, 'decomposition.child-created')).length, 1);
   assert.equal((await request(coordinator, `work/${created.key}/decomposition`, { event: 'started', runtime: 'pi', model: 'm', timeoutMs: 60_000, bounds: ['again'] })).status, 409, 'one run per item');
   assert.equal((await request(worker, `work/${parent.key}/claim`, {})).status, 409, 'a split parent cannot be claimed directly');
-  assert.equal((await request(operator, `work/${parent.key}/requirements`, { expectedPolicyRevision: 1, reason: 'r', criteria: parent.criteria, dependencies: [], plannedFiles: ['src/'], exclusiveResources: [] })).status, 409, 'requirements revision on a split parent is refused');
+  assert.equal((await request(operator, `work/${parent.key}/requirements`, { expectedPolicyRevision: 1, reason: 'r', criteria: parent.criteria, dependencies: [], exclusiveResources: [] })).status, 409, 'requirements revision on a split parent is refused');
 
   // A child keeps the criteria it inherited unchanged, or the parent would never be delivered; it may add its own.
-  const childRevision = (childCriteria: typeof criteria) => request(operator, `work/${first.key}/requirements`, { expectedPolicyRevision: first.policyRevision, reason: 'r', criteria: childCriteria, dependencies: first.dependencies, plannedFiles: first.plannedFiles, exclusiveResources: [] });
+  const childRevision = (childCriteria: typeof criteria) => request(operator, `work/${first.key}/requirements`, { expectedPolicyRevision: first.policyRevision, reason: 'r', criteria: childCriteria, dependencies: first.dependencies, exclusiveResources: [] });
   const reworded = await childRevision([{ ...first.criteria[0], text: 'Reworded.' }, first.criteria[1]]);
   assert.equal(reworded.status, 409, 'rewriting an inherited criterion on a child is refused');
   assert.match(JSON.stringify(reworded.body), /AC-1 of its split parent/);
@@ -286,8 +283,8 @@ test('unit:broad-items-split-before-dispatch — the control plane makes the spl
   assert.equal(added.status, 200, JSON.stringify(added.body));
 
   // The operator's opt-out is a requirements field on an existing item.
-  const other = await engine.execute(operator, 'create', null, { title: 'Opt out later', criteria: criteria.slice(0, 2), plannedFiles: ['src/'] }, randomUUID());
-  const revised = await request(operator, `work/${other.key}/requirements`, { expectedPolicyRevision: 1, reason: 'Keep it whole', criteria: other.criteria, dependencies: [], plannedFiles: ['src/'], exclusiveResources: [], split: false });
+  const other = await engine.execute(operator, 'create', null, { title: 'Opt out later', criteria: criteria.slice(0, 2) }, randomUUID());
+  const revised = await request(operator, `work/${other.key}/requirements`, { expectedPolicyRevision: 1, reason: 'Keep it whole', criteria: other.criteria, dependencies: [], exclusiveResources: [], split: false });
   assert.equal(revised.status, 200, JSON.stringify(revised.body));
   assert.equal((await reload(other.key)).split, false);
 
@@ -323,7 +320,7 @@ test('unit:broad-items-split-before-dispatch — across loop cycles the broad it
   const profile = (name: string) => ({ name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch' as const, kind: 'codex' as const, credentialFile: credential, agentArgs: [], approvals: 'auto' as const, environment: {} });
   const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: credential, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), repository: 'owner/project',
     baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: ['one', 'two', 'three'].map(profile), run: { research: {} } });
-  const broad = item('GY-30', { stageEnteredAt: new Date(NOW - 60_000).toISOString() }), small = item('GY-31', { criteria: criteria.slice(0, 1), plannedFiles: ['src/coordination.ts'] });
+  const broad = item('GY-30', { stageEnteredAt: new Date(NOW - 60_000).toISOString() }), small = item('GY-31', { criteria: criteria.slice(0, 1) });
   const items = [broad, small];
   const { runner, starts } = fakeRunner(() => submitted(proposal));
   const { record } = plane(items);

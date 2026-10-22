@@ -1,6 +1,6 @@
 // Per-area verification maps (GY-1495): which tests guard an area, how to drive it, which
-// invariants bite. A map is checked in as verification/AREA.md; the sessions whose plannedFiles
-// touch its paths get a bounded, role-scoped digest of it beside the project-memory digest.
+// invariants bite. A map is checked in as verification/AREA.md; the sessions whose item names
+// paths it covers (in its criteria or description) get a bounded, role-scoped digest of it beside the project-memory digest.
 import { documentationGlobMatches } from './documentation-glob.js';
 import { docsWords } from './documentation.js';
 import type { SessionRole } from './project-memory.js';
@@ -52,17 +52,17 @@ export function parseVerificationMap(path: string, text: string): VerificationMa
 }
 
 /**
- * Whether a planned entry falls under a map's glob: a file the glob matches, or a directory scope
+ * Whether a named path falls under a map's glob: a file the glob matches, or a directory scope
  * (`src/store/`) that the glob covers or that holds the glob beneath it.
  */
-export function verificationGlobCovers(glob: string, planned: string) {
-  const entry = planned.replace(/^\.\//, ''), pattern = glob.replace(/^\.\//, '');
+export function verificationGlobCovers(glob: string, path: string) {
+  const entry = path.replace(/^\.\//, ''), pattern = glob.replace(/^\.\//, '');
   return documentationGlobMatches(pattern, entry) || entry.endsWith('/') && pattern.startsWith(entry);
 }
 
-/** The maps whose globs cover any planned entry, the most-touched first, then by path. */
-export function selectVerificationMaps(maps: readonly VerificationMap[], plannedFiles: readonly string[]) {
-  const touched = maps.map(map => ({ map, count: plannedFiles.filter(entry => map.paths.some(glob => verificationGlobCovers(glob, entry))).length }));
+/** The maps whose globs cover any named path, the most-touched first, then by path. */
+export function selectVerificationMaps(maps: readonly VerificationMap[], paths: readonly string[]) {
+  const touched = maps.map(map => ({ map, count: paths.filter(entry => map.paths.some(glob => verificationGlobCovers(glob, entry))).length }));
   return touched.filter(entry => entry.count > 0).sort((a, b) => b.count - a.count || a.map.path.localeCompare(b.map.path)).map(entry => entry.map);
 }
 
@@ -77,12 +77,12 @@ function render(included: readonly VerificationMap[], omitted: readonly Verifica
 }
 
 /**
- * The role's digest of the maps the plan touches: at most 3 maps whole within 600 words. A map
+ * The role's digest of the maps the item's named paths touch: at most 3 maps whole within 600 words. A map
  * that does not fit is named by path instead of being cut mid-section. No touched map, no text.
  */
-export function verificationMapDigest(maps: readonly VerificationMap[] | null | undefined, plannedFiles: readonly string[] | null | undefined, role: keyof typeof verificationRoleSections,
+export function verificationMapDigest(maps: readonly VerificationMap[] | null | undefined, paths: readonly string[] | null | undefined, role: keyof typeof verificationRoleSections,
   options: { wordBudget?: number; mapLimit?: number } = {}): string {
-  const selected = selectVerificationMaps(maps ?? [], plannedFiles ?? []);
+  const selected = selectVerificationMaps(maps ?? [], paths ?? []);
   if (!selected.length) return '';
   const budget = options.wordBudget ?? verificationDigestWordBudget, limit = options.mapLimit ?? verificationDigestMapLimit;
   const sections = verificationRoleSections[role];

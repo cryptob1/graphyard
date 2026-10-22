@@ -44,7 +44,7 @@ const gate = (name: string, passed: boolean, reasons: string[] | string = []) =>
 function item(key: string, since: string): Work {
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 1, policyRevision: 1,
     createdAt: iso(Date.parse(since) - 30 * minute), updatedAt: iso(Date.parse(since)), stageEnteredAt: iso(Date.parse(since) - 5 * minute),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null,

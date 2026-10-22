@@ -146,7 +146,6 @@ function makeWaitingWork(key: string, requestedAt: string, group: string): Work 
     dependencies: [],
     criteria: [],
     policy: { checks: [], review: true },
-    plannedFiles: ['src/'],
     stage: 'review',
     stageEnteredAt: requestedAt,
     createdAt: requestedAt,
@@ -198,7 +197,6 @@ function makeRunningWork(key: string, startedAt: string, group: string, reqId: s
     dependencies: [],
     criteria: [],
     policy: { checks: [], review: true },
-    plannedFiles: ['src/'],
     stage: 'review',
     stageEnteredAt: startedAt,
     createdAt: startedAt,
@@ -516,7 +514,7 @@ const capacityOrigin = (detectedAt: string) => ({
 const deliveredCapacity = (key: string, landedOffsetMs: number): Work => ({
   id: `id-${key}`, key, title: 'Capacity mid-attempt exhaustion', description: '', type: 'bug', priority: 1,
   dependencies: [], criteria: [{ id: 'AC-1', text: 'Redispatch preserves the attempt', proofs: ['unit:x'] }],
-  policy: { checks: ['test'], review: true }, plannedFiles: ['src/model/capacity.ts'], stage: 'done', revision: 1,
+  policy: { checks: ['test'], review: true }, stage: 'done', revision: 1,
   policyRevision: 1, createdAt: gy1711Iso(landedOffsetMs - hour), updatedAt: gy1711Iso(landedOffsetMs),
   stageEnteredAt: gy1711Iso(landedOffsetMs - hour), ready: true, epoch: 1, lease: null, workspaces: [],
   candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -530,7 +528,7 @@ const capacityInstance = (id: string, atOffsetMs: number, linkedTo: string | nul
 });
 const capacityFiling = (): DoctorFile => ({
   faultClass: 'capacity', priority: 1, title: 'Approver, reviewer and worker sessions exhaust their model-account limit mid-attempt',
-  description: 'GY-1710-shaped doctor re-offer', plannedFiles: ['src/model/capacity.ts'],
+  description: 'GY-1710-shaped doctor re-offer', 
   criteria: [{ id: 'AC-1', text: 'Mid-attempt exhaustion redispatches within bounds', proofs: ['unit:capacity'] }],
 });
 

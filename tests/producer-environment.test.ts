@@ -124,7 +124,7 @@ async function installation(pi = false) {
 function work(key: string, group: string, proofs: string[]): Work {
   const candidate = { sha: H, baseSha: B, pr: 73, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
   const request = { id: `request-${randomUUID().slice(0, 8)}`, kind: 'producer', sha: H, baseSha: B, policyRevision: 2, pr: 73, group, proofs, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' };
-  return { id: `id-${key}`, key, title: 'Live install', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: [],
+  return { id: `id-${key}`, key, title: 'Live install', description: '', type: 'feature', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Installs', proofs }], policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 2,
     createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 73 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     blocker: null, gates: [], violations: [], implementers: ['implementer'],

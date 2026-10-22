@@ -25,7 +25,7 @@ const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSche
  * the undeclared ones of `previous` survive under it; a null `next` clears the record as before.
  */
 export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
-export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3, retainedScopeDecisions = 200;
+export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
 export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
 /** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
 export const retainedDispatchFailureRuns = 500;
@@ -94,7 +94,6 @@ export function pruneDaemonState(state: DaemonState) {
   // stopped seeing (a removed item, a renamed repository) so the cursor cannot grow without end.
   const clocks = Object.keys(state.clocks);
   if (clocks.length > retainedClocks) for (const id of clocks.slice(0, clocks.length - retainedClocks)) delete state.clocks[id];
-  if (state.scope.length > retainedScopeDecisions) state.scope = state.scope.slice(-retainedScopeDecisions);
   // A watch is retired when its item moves on; this bound only catches items the loop stopped seeing.
   const watches = Object.entries(state.approvals).sort((a, b) => Date.parse(a[1].requestedAt) - Date.parse(b[1].requestedAt));
   if (watches.length > retainedClocks) for (const [key] of watches.slice(0, watches.length - retainedClocks)) delete state.approvals[key];
@@ -187,7 +186,6 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
   for (const clock of Object.values(state.clocks)) clock.key = cut(clock.key, 40);
   for (const sample of state.latency) sample.work = cut(sample.work, 40);
-  for (const entry of state.scope) entry.work = cut(entry.work, 200);
   for (const orphan of Object.values(state.orphans)) Object.assign(orphan, { owner: cut(orphan.owner, 200), unit: cut(orphan.unit, 200) });
   for (const watch of Object.values(state.approvals)) {
     Object.assign(watch, { work: cut(watch.work, 40), action: cut(watch.action, 40), decision: cut(watch.decision, 100), agentName: cut(watch.agentName, 200), pane: cut(watch.pane, 200) });

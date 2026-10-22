@@ -46,7 +46,7 @@ test('unit:soak-invariants-hold â€” over three simulated days a high-lane itemâ€
     const reasons = [...(produced.result === 'fail' ? [`AC-2: ${PRODUCED} needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy`] : []),
       ...(attested ? [] : [`AC-1: ${MANUAL} needs trusted passing evidence, with skipped = 0, for this candidate and policy`])];
     return {
-      id: 'work-GY-1500', key: 'GY-1500', title: 'High-lane change', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/server/auth.ts'],
+      id: 'work-GY-1500', key: 'GY-1500', title: 'High-lane change', description: '', type: 'feature', priority: 1, dependencies: [], 
       criteria: [{ id: 'AC-1', text: 'Safe', proofs: [MANUAL] }, { id: 'AC-2', text: 'Checked', proofs: [PRODUCED] }], policy: { checks: ['test'], review: true }, producerProofs: [PRODUCED],
       stage: delivered ? 'done' : reworkRequested ? 'build' : 'acceptance', ready: true, epoch: round + 1, revision: 10 + round, policyRevision: 1,
       createdAt: iso(start - hour), updatedAt: iso(now), stageEnteredAt: iso(pushedAt), lease: null, workspaces: [],

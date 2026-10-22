@@ -22,7 +22,7 @@ const unknown = () => new FleetUnreachableError('The agent registry at https://g
 function item(key: string): Work {
   return {
     id: `work-${key}`, key, title: 'Unknown registry session', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Ended', proofs: ['unit:unknown-session-404-clears-watch'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Ended', proofs: ['unit:unknown-session-404-clears-watch'] }], policy: { checks: ['test'], review: true }, 
     stage: 'ready', revision: 4, policyRevision: 1, createdAt: iso(-7_200_000), updatedAt: iso(), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 0,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [],

@@ -47,7 +47,7 @@ function item(evidenceEntries: Partial<Evidence>[] = [], extra: Partial<Work> = 
   const work = {
     id: '11111111-2222-4333-8444-555555555555', key: 'GY-895', title: 'Manual proof scoring', description: '', type: 'bug', priority: 2, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Review follow-ups are triaged', proofs: [MANUAL] }, { id: 'AC-2', text: 'The suite passes', proofs: [UNIT] }],
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], producerProofs: [MANUAL],
+    policy: { checks: ['test', 'typecheck'], review: true }, producerProofs: [MANUAL],
     stage: 'acceptance', revision: 5, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true,
     epoch: 1, lease: null, workspaces: [{ host: 'machine-a', path: '/tmp/gy-895', branch: 'graphyard/gy-895-1', epoch: 1, owner: 'agent-a' }],
     implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 }, candidate, submission: { epoch: 1, pr: 895 },

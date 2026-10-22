@@ -33,6 +33,7 @@ import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnap
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
+import { namedPaths } from '../model/documentation-glob.js';
 import { appliedReworkBrief, readReworkDecisions, reworkBriefSection, type AppliedRework, type ReworkDecisionRow } from './rework-brief.js';
 import { workerBeforePushSection, workerFastGatesPresent } from './worker-fast-gates.js';
 
@@ -154,8 +155,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let round: ReworkRound;
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
-  // GY-1772: which runtimes the worker is tried on first, judged from the change the item plans
-  // (`plannedFiles`), never from its path lane; recorded with the selection it ordered.
+  // GY-1772: which runtimes the worker is tried on first, never judged from its path lane; recorded with the selection it ordered.
   let prefer: 'fast' | 'strong' | null = null;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
   let dependencies: PreparedWorker['dependencies'] | null = null, reclaimed: string[] = [], prepareMs: number | null = null;
@@ -437,7 +437,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     const args = grantWorkerPaths(launch.kind, launch.args, writable, prepared.path);
     // The worker's own rules go into its worktree before the session starts, so pushing its
     // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
-    const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared, mergeWriter).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
+    const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
     const memory = await readProjectMemory(root).catch(() => null);
     // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes; any other
     // rework round, the reason of the decision that sent it back (GY-1569), read before the claim.
@@ -447,7 +447,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // GY-1797: whether this checkout carries the fast gates is read here, once, and handed to the prompt as an input.
     const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps, rework);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
-    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, key: work.key, epoch: prepared.epoch, mergeWriter, credentialFiles: [profile.credentialFile!] });
+    const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null, ran = false;
     try {
       // A sandbox that cannot write them is a launch failure naming the path, not a worker that
@@ -533,7 +533,7 @@ export const destructivePromptGuidance = 'Avoid any command that triggers your r
 export const branchRewriteGuidance = 'Never rewrite the assigned branch: fix a wrong commit forward with a new commit. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'plannedFiles' | 'submission' | 'pipeline'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'documentation' | 'description' | 'criteria' | 'researchBrief' | 'candidate' | 'submission' | 'pipeline'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -569,7 +569,8 @@ export function workerPrompt(
   return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, commit on the assigned branch, and submit the commit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action (nothing is pushed and no pull request is opened): complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
     + (memoryDigest || '')
-    + verificationMapDigest(verificationMaps, work.plannedFiles, 'worker')
+    // The maps for the areas the item's description and criteria name.
+    + verificationMapDigest(verificationMaps, [...new Set([work.description ?? '', ...(work.criteria ?? []).map(criterion => criterion.text)].flatMap(namedPaths))], 'worker')
     // The research brief recorded before build, with the product decisions it asked for (GY-259).
     + (work.researchBrief && work.criteria ? researchWorkerSection({ ...work, criteria: work.criteria, description: work.description ?? '' }, config.cliPath) : '')
     // The standard documentation criterion the control plane stamped at create time (GY-215).

@@ -14,7 +14,7 @@ import { dispatchHumanWait } from './human-request.js';
  * whether an executor may run it at all.
  */
 
-export const nextActionKinds = ['dispatch', 'request-review', 'request-rework', 'approve-scope', 'resync', 'reclaim', 'merge', 'escalate'] as const;
+export const nextActionKinds = ['dispatch', 'request-review', 'request-rework', 'resync', 'reclaim', 'merge', 'escalate'] as const;
 export type NextActionKind = typeof nextActionKinds[number];
 
 /**
@@ -29,7 +29,7 @@ export type NextActionKind = typeof nextActionKinds[number];
 export type LlmRole = 'implement' | 'review' | 'produce-evidence' | 'approve-decision' | 'resolve-escalation';
 export const nextActionLlmRoles: Record<NextActionKind, LlmRole | null> = {
   dispatch: 'implement', 'request-review': 'review', 'request-rework': 'approve-decision',
-  'approve-scope': null, resync: null, reclaim: null, merge: null,
+  resync: null, reclaim: null, merge: null,
   escalate: 'resolve-escalation',
 };
 export const llmRoles: readonly LlmRole[] = ['implement', 'review', 'produce-evidence', 'approve-decision', 'resolve-escalation'];
@@ -52,17 +52,16 @@ export const mechanicalActionKinds = nextActionKinds.filter(kind => nextActionLl
 export const actionJudgment: Record<NextActionKind, 'none' | 'in-session' | 'in-step'> = {
   dispatch: 'in-session', 'request-review': 'in-session',
   'request-rework': 'in-step', escalate: 'in-step',
-  'approve-scope': 'none', resync: 'none', reclaim: 'none', merge: 'none',
+  resync: 'none', reclaim: 'none', merge: 'none',
 };
 /** Every kind an executor may hold a handler for: everything but the judgments made in the step itself. */
 export const executorRunnableKinds = nextActionKinds.filter(kind => actionJudgment[kind] !== 'in-step');
 
 export type NextActionInputs =
-  | { kind: 'dispatch'; target: 'implementation'; epoch: number; priority: number; plannedFiles: string[] }
+  | { kind: 'dispatch'; target: 'implementation'; epoch: number; priority: number }
   | { kind: 'dispatch'; target: 'proof'; group: ProducerGroup; proofs: string[]; requestId: string | null; pr: number; sha: string; baseSha: string; policyRevision: number }
   | { kind: 'request-review'; provider: string; requestId: string | null; pr: number; sha: string; baseSha: string; policyRevision: number }
   | { kind: 'request-rework'; pr: number | null; sha: string | null; detail: string }
-  | { kind: 'approve-scope'; epoch: number; paths: string[]; requestedBy: string; detail: string }
   | { kind: 'resync'; pr: number | null; sha: string | null; baseSha: string | null; baseTip: string | null; observedAt: string | null }
   | { kind: 'reclaim'; epoch: number; owner: string | null; leaseExpiresAt: string | null }
   | { kind: 'merge'; pr: number; sha: string; baseSha: string; policyRevision: number }

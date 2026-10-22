@@ -32,7 +32,7 @@ function work(overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-1', key: 'GY-125', title: 'Never block the loop on a child', description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:child-wait-attributed'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 3, policyRevision: 1,
     createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 0,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null,

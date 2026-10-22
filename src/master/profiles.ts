@@ -4,7 +4,6 @@ import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
-import { pathScopeContains } from '../model/scope.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
@@ -310,9 +309,7 @@ export const masterRunSchema = z.object({
    * so `awaitReviewersMinutes` bounds the wait from the review request; 0 turns it off.
    * Unset: the Codex connector, for 8 minutes (`defaultAwaitReviewers`). The duration is the
    * master's to tune (`master config awaitReviewersMinutes=0`, an empty value restores the
-   * default). The login list stays the operator's, edited in .graphyard/master.json: it also
-   * decides whose review threads are trusted grounds for automatic scope widening, so the master
-   * cannot add a login whose findings would widen scope.
+   * default). The login list stays the operator's, edited in .graphyard/master.json.
    */
   awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
   awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
@@ -565,12 +562,12 @@ export function checkoutGuardApplies(root: string): boolean {
   const directory = resolve(root);
   return temporaryDirectories().some(temporary => directory === temporary || directory.startsWith(`${temporary}${sep}`));
 }
-/** The dirty paths, for the work snapshot's live leases whose planned files match them. */
+/** The dirty paths, for the work snapshot's live leases whose observed candidate changes them. */
 export interface DirtyCheckoutLease { key: string; epoch: number; owner: string; paths: string[] }
-export function dirtyCheckoutLeases(work: { key: string; lease?: { epoch: number; owner: string; expiresAt: string } | null; plannedFiles?: readonly string[] }[], paths: readonly string[], now: number = Date.now()): DirtyCheckoutLease[] {
+export function dirtyCheckoutLeases(work: { key: string; lease?: { epoch: number; owner: string; expiresAt: string } | null; observation?: { files?: readonly string[] } | null }[], paths: readonly string[], now: number = Date.now()): DirtyCheckoutLease[] {
   return work.flatMap(item => {
     if (!item.lease || Date.parse(item.lease.expiresAt) <= now) return [];
-    const matched = paths.filter(path => (item.plannedFiles ?? []).some(planned => pathScopeContains(planned, path)));
+    const matched = paths.filter(path => (item.observation?.files ?? []).includes(path));
     return matched.length ? [{ key: item.key, epoch: item.lease.epoch, owner: item.lease.owner, paths: matched }] : [];
   });
 }
@@ -582,9 +579,9 @@ export function coordinatorCheckoutRefusal(checkout: CoordinatorCheckout, subjec
   const paths = `dirty path(s): ${named}${dirty.length > 8 ? `; and ${dirty.length - 8} more` : ''}`;
   return `${subject} refuses to start, self-upgrade or restart from the coordinator checkout at ${checkout.root}: it holds uncommitted work at ${checkout.commit.slice(0, 12)} — ${checkout.modified.length} modified and ${checkout.untracked.length} untracked source ${paths}. It keeps running the last clean code; clean or stash these paths, then restart ${subject}`;
 }
-/** The refusal as `master status` raises it: the escalation also names which live leases' planned files the dirty paths match. */
+/** The refusal as `master status` raises it: the escalation also names which live leases' changed files the dirty paths match. */
 export const dirtyCheckoutEscalation = (refusal: string, leases: DirtyCheckoutLease[]) => leases.length
-  ? `${refusal}. The paths match the planned files of ${leases.length === 1 ? 'one live lease' : `${leases.length} live leases`}: ${leases.map(lease => `${lease.key} epoch ${lease.epoch} (${lease.owner}): ${lease.paths.join(', ')}`).join('; ')}`
+  ? `${refusal}. The paths match the changed files of ${leases.length === 1 ? 'one live lease' : `${leases.length} live leases`}: ${leases.map(lease => `${lease.key} epoch ${lease.epoch} (${lease.owner}): ${lease.paths.join(', ')}`).join('; ')}`
   : refusal;
 
 // The OS-level confinement of the coordinator checkout (GY-888) lives in ./confinement.ts;

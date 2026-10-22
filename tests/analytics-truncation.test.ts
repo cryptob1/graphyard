@@ -8,7 +8,7 @@ const to = Date.parse('2026-09-20T00:00:00.000Z');
 const from = to - 30 * day;
 const at = (ms: number) => new Date(ms).toISOString();
 
-const item = { id: '11111111-2222-4333-8444-555555555555', key: 'GY-1', title: 'Truncation fixture', type: 'feature', stage: 'build', plannedFiles: ['src/'], criteria: [], evidence: [], gates: [], violations: [], observation: null } as unknown as Work;
+const item = { id: '11111111-2222-4333-8444-555555555555', key: 'GY-1', title: 'Truncation fixture', type: 'feature', stage: 'build', criteria: [], evidence: [], gates: [], violations: [], observation: null } as unknown as Work;
 const fact = (kind: string, observedAt: number): FlowFact => ({
   id: observedAt, workId: item.id, workKey: item.key, kind: kind as FlowFact['kind'], observedAt: at(observedAt), recordedAt: at(observedAt),
   source: 'graphyard', sourceEvent: observedAt, stage: 'build', workType: 'feature', slices: ['src'], details: {}, dedupe: `${kind}:${observedAt}`,

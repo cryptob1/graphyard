@@ -7,7 +7,6 @@ import { z } from 'zod';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { distinctSessionName, sessionNameLimit, sessionName, nameForLaunch } from '../session-name.js';
 import { localDirectory } from '../onboarding.js';
-import { broadScopeRefusals } from '../coordination.js';
 import { writeHarnessPermissions } from '../harness.js';
 import { type Work, escalationTriggers } from '../model.js';
 import { type FleetLaunchAccount, type FleetProbe, readFleet, selectFleetSession } from '../fleet.js';
@@ -97,7 +96,7 @@ export async function agentToken(root: string, config: MasterConfig, which: 'ope
 export function decisionInput(action: string, work: Work, input: Record<string, unknown>) {
   // A triage closure (GY-402) binds its judgement, not the revision; a diagnostician's closure (GY-439) binds the revision.
   if (['release', 'unblock', 'resolve'].includes(action) || (action === 'close' && input.triageAt === undefined)) return { expectedRevision: work.revision, ...input };
-  if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, plannedFiles: work.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
+  if (action === 'requirements') return { expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [], ...input };
   if ((action === 'merge' || action === 'attest') && work.candidate) return { sha: work.candidate.sha, baseSha: work.candidate.baseSha, policyRevision: work.policyRevision, ...(action === 'attest' ? { result: 'pass', executed: 1, skipped: 0, ...attestationExercise(work, input.proof) } : {}), ...input };
   if (action === 'rework' || action === 'recover') return { previousWorkerStopped: true, ...input };
   return action === 'withdraw-park' && work.humanRequest ? { request: work.humanRequest.id, ...input } : input;
@@ -634,20 +633,6 @@ export async function launchEscalationHandler(root: string, config: MasterConfig
   catch (error) { throw await abandonLaunch(error, pane, tabId, selected, `escalation handler record for ${context.key} could not be written: ${failureText(error).slice(0, 300)}`, run); }
   return { agentName: name, work: context.key, trigger: context.escalation.trigger, fingerprint: context.fingerprint, context: file, identity: config.operatorAgent!.id, pane: pane!, delivery, focusChanged: false, account: selected?.account.name ?? null };
 }
-export const broadScopeFlag = '--allow-broad-scope';
-/**
- * Where planned files are set — `master create`, `master requirements`, `master scope` — a
- * root-level directory scope is refused with the narrower paths it should name (AC-2 of GY-112),
- * unless the command carries --allow-broad-scope: the exception is then written into the audited
- * reason, naming the scopes, so it is explicit and attributable to the identity that set it. A
- * revision is judged on the scopes it introduces; one the item already carries is not re-refused.
- */
-export function guardBroadScope(input: { plannedFiles?: string[]; title?: string; description?: string; criteria?: { text: string }[] }, reason: string, options: { allow: boolean; command: string; existing?: string[] }) {
-  const refusals = broadScopeRefusals(input.plannedFiles ?? [], [input.title ?? '', input.description ?? '', ...(input.criteria ?? []).map(criterion => criterion.text)]).filter(refusal => !options.existing?.includes(refusal.scope));
-  if (!refusals.length) return reason;
-  if (!options.allow) throw new Error(`${options.command} refused a high-conflict scope: ${refusals.map(refusal => refusal.reason).join('; ')}. Pass ${broadScopeFlag} to record the exception in the audited reason instead`);
-  return `Broad scope exception (${refusals.map(refusal => refusal.scope).join(', ')}) recorded with ${broadScopeFlag}: ${reason}`;
-}
 export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'defer', 'requirements', 'decide', 'decisions', 'approve', 'approver', 'principals', 'restart', 'environments', 'context', 'escalation'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
@@ -703,11 +688,10 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     if (apply && !args.includes('--admin-token-stdin')) throw new Error('Use master autonomy --admin-token-stdin --apply so the admin credential is not stored in shell history');
     return setupAutonomy(root, { apply, adminToken: apply ? await deps.readSecret() : undefined, ...(args.includes('--harness') ? { harness } : {}) }, fetcher);
   }
-  const allowBroad = args.includes(broadScopeFlag); args = args.filter(argument => argument !== broadScopeFlag);
   if (id === 'create') {
-    if (!args[0]) throw new Error(`Use master create FILE [${broadScopeFlag}] REASON`);
+    if (!args[0]) throw new Error('Use master create FILE REASON');
     const input = await jsonArgument(`@${args[0]}`);
-    return call(await operator(), 'work', { ...input, reason: guardBroadScope(input, reason(args.slice(1)), { allow: allowBroad, command: 'master create' }) });
+    return call(await operator(), 'work', { ...input, reason: reason(args.slice(1)) });
   }
   if (id === 'release' || id === 'unblock') {
     const work = await item(args[0]), text = reason(args.slice(1)), write = async (work: Work, attempt = 1) => call(await operator(), `work/${work.id}/${id === 'release' ? 'ready' : 'unblock'}`, { expectedRevision: work.revision, reason: text }, attemptKey(attempt));
@@ -719,9 +703,9 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     return call(await operator(), `work/${work.id}/window`, { notBefore: args[1], reason: reason(args.slice(2)), expectedRevision: work.revision });
   }
   if (id === 'requirements') {
-    const work = await item(args[0]); if (!args[1]) throw new Error(`Use master requirements GY-N FILE [${broadScopeFlag}] REASON`);
-    const input = decisionInput('requirements', work, await jsonArgument(`@${args[1]}`)) as { plannedFiles?: string[]; criteria?: { text: string }[] };
-    return call(await operator(), `work/${work.id}/requirements`, { ...input, reason: guardBroadScope({ ...input, title: work.title, description: work.description }, reason(args.slice(2)), { allow: allowBroad, command: 'master requirements', existing: work.plannedFiles }) });
+    const work = await item(args[0]); if (!args[1]) throw new Error('Use master requirements GY-N FILE REASON');
+    const input = decisionInput('requirements', work, await jsonArgument(`@${args[1]}`));
+    return call(await operator(), `work/${work.id}/requirements`, { ...input, reason: reason(args.slice(2)) });
   }
   if (id === 'decide') {
     const { work, now } = await snapshotItem(args[0]); const action = args[1];

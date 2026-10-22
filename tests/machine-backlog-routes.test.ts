@@ -36,7 +36,7 @@ async function followUp(parent: Work, reviewId: number, findings: string[]) {
   const entries = findings.map(text => ({ path: text.split(' ')[0]!, text }));
   return ok(operator, 'work', {
     title: `Follow-ups from the approved review of ${parent.key} (PR #7)`, description: `Review ${reviewId}.\n\n${entries.map((entry, index) => `${index + 1}. Finding with no thread: ${entry.text}`).join('\n')}`,
-    type: 'chore', priority: 2, dependencies: [], plannedFiles: entries.map(entry => entry.path),
+    type: 'chore', priority: 2, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Each follow-up listed in the description is addressed in code, or declined with a recorded reason.', proofs: ['manual:review-followups-triaged'] }],
     origin: { reviewFollowUps: { parent: parent.key, findings: entries } }, policy: { checks: ['test'], review: true },
   }) as Promise<Work>;
@@ -55,8 +55,8 @@ before(async () => {
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
 test('unit:machine-backlog-triaged — a triage release applies at once with its priority; a triage closure waits for an independent approver and a refusal returns the item to triage', async () => {
-  const parent = await ok(operator, 'work', { title: 'Parent C', plannedFiles: ['src/e.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:c'] }] }) as Work;
-  const shipped = await ok(operator, 'work', { title: 'Shipped fix', plannedFiles: ['src/f.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:c'] }] }) as Work;
+  const parent = await ok(operator, 'work', { title: 'Parent C', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:c'] }] }) as Work;
+  const shipped = await ok(operator, 'work', { title: 'Shipped fix', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:c'] }] }) as Work;
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [shipped.id, JSON.stringify({ ...(await reload(shipped.key)), stage: 'done', closure: null })]);
   const released = await followUp(parent, 31, ['src/e.ts — worth doing']);
   const closing = await followUp(parent, 32, ['src/f.ts — already fixed']);
@@ -95,7 +95,7 @@ test('unit:machine-backlog-triaged — a triage release applies at once with its
 });
 
 test('unit:machine-backlog-triaged — a triage merge appends the merged item\'s findings to the open follow-up item it names, deduplicated, and creates no item', async () => {
-  const parent = await ok(operator, 'work', { title: 'Parent D', plannedFiles: ['src/g.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:d'] }] }) as Work;
+  const parent = await ok(operator, 'work', { title: 'Parent D', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:d'] }] }) as Work;
   const into = await followUp(parent, 41, ['src/g.ts — the bound is unchecked']);
   const merging = await followUp(parent, 42, ['src/g.ts — the bound is unchecked', 'src/h.ts — the cache never expires']);
   const before = (await store.list()).length;
@@ -112,8 +112,8 @@ test('unit:machine-backlog-triaged — a triage merge appends the merged item\'s
 });
 
 test('unit:machine-backlog-triaged — the loop withdraws a triage closure a later recurrence overtook: the item returns to triage and an approval of its close decision closes nothing', async () => {
-  const parent = await ok(operator, 'work', { title: 'Parent E', plannedFiles: ['src/i.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:e'] }] }) as Work;
-  const shipped = await ok(operator, 'work', { title: 'Shipped fix E', plannedFiles: ['src/i.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:e'] }] }) as Work;
+  const parent = await ok(operator, 'work', { title: 'Parent E', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:e'] }] }) as Work;
+  const shipped = await ok(operator, 'work', { title: 'Shipped fix E', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:e'] }] }) as Work;
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [shipped.id, JSON.stringify({ ...(await reload(shipped.key)), stage: 'done', closure: null })]);
   const closing = await followUp(parent, 51, ['src/i.ts — covered by the shipped fix']);
   const proposed = await ok(coordinator, `work/${closing.key}/triage`, { judgement: { outcome: 'close', ref: shipped.key, reason: 'covered' } }) as Work;

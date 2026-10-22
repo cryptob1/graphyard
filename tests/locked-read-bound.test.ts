@@ -89,10 +89,10 @@ after(async () => { if (store) await store.close(); if (database) await database
 
 let template: Work;
 async function ensureTemplate() {
-  template ??= await engine.execute(operator, 'create', null, { title: 'Template', plannedFiles: ['src/template/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  template ??= await engine.execute(operator, 'create', null, { title: 'Template', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
 }
 function open(n: number): Work {
-  return { ...structuredClone(template), id: randomUUID(), key: `OPEN-${n}`, title: `Open change ${n}`, description: `What open change ${n} must do. `.repeat(8), plannedFiles: [`src/area-${n % 7}/module-${n}.ts`], ready: n % 2 === 0, stage: 'backlog' } as Work;
+  return { ...structuredClone(template), id: randomUUID(), key: `OPEN-${n}`, title: `Open change ${n}`, description: `What open change ${n} must do. `.repeat(8), ready: n % 2 === 0, stage: 'backlog' } as Work;
 }
 async function insert(documents: Work[]) {
   for (let from = 0; from < documents.length; from += 50) {

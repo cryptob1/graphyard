@@ -139,8 +139,7 @@ export function wholeFindings(rest: string, read: readonly string[], cut = 2000)
 
 /**
  * The follow-up item one BLOCKING finding of a post-merge review files (AC-4): a bug at priority 1,
- * its origin naming the delivered item and its merge commit, planned on every file the finding
- * names, reviewed like any item. The delivered item itself is never reopened.
+ * its origin naming the delivered item and its merge commit, reviewed like any item. The delivered item itself is never reopened.
  */
 export function postMergeFollowUp(delivered: Pick<Work, 'key' | 'title' | 'policy'>, mergeSha: string, finding: PostMergeFinding, index: number) {
   const others = finding.paths.filter(path => path !== finding.path);
@@ -151,7 +150,6 @@ export function postMergeFollowUp(delivered: Pick<Work, 'key' | 'title' | 'polic
     type: 'bug' as const, priority: 1,
     criteria: [{ id: 'AC-1', text: `The finding is fixed: ${finding.text.slice(0, 1500)}`, proofs: [`unit:post-merge-follow-up-${index + 1}`] }],
     policy: { checks: delivered.policy?.checks ?? ['test', 'typecheck'], review: true },
-    plannedFiles: finding.paths,
     origin: { reviewFollowUps: { parent: delivered.key, findings: [{ path: finding.path, text: finding.text.slice(0, 2000), ref: mergeSha }] } },
   };
 }

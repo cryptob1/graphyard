@@ -117,7 +117,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 test('integration:rework-grounds-ledger — a rework of a head GitHub reports conflicting is read with its grounds and is no intervention; a rework of a clean head still is', async () => {
   const head = (seed: string) => seed.repeat(40).slice(0, 40), base = 'b'.repeat(40);
   const submitted = async (name: string, conflicting: boolean) => {
-    let work = await engine.execute(operator, 'create', null, { title: name, plannedFiles: [`src/${name}.ts`], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID());
+    let work = await engine.execute(operator, 'create', null, { title: name, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'grounds-host', path: `/tmp/grounds/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}-1` }, randomUUID());

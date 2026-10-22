@@ -13,7 +13,6 @@ import { containmentGraceMs } from '../src/quarantine.js';
 import { containmentSettleWaitBoundMs } from '../src/model/containment.js';
 import type { Work } from '../src/model.js';
 import { maxInFlight } from '../src/model/dispatch.js';
-import { decideScopeRequest } from '../src/model/scope.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import { cappedEscalationKey, cappedFilingKey } from '../src/daemon/cycle-review-cap.js';
@@ -55,7 +54,7 @@ const profile = (name: string, overrides: Partial<WorkerProfile> = {}): WorkerPr
 
 /** What the outside world does with one attempt: the session dies, the head is judged, or both. */
 type Round = 'die' | 'changes' | 'conflict' | 'pass';
-interface Script { key: string; rounds: Round[]; scopeOn?: number }
+interface Script { key: string; rounds: Round[] }
 
 interface PlaneDecision { id: string; action: string; state: string; input: any; approvedBy: string | null; approvedAt?: string | null; reason: string; outcome: string | null }
 
@@ -148,7 +147,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
   const work: Work[] = scripts.map((script, index) => ({
     id: `id-${script.key}`, key: script.key, title: `Deliver ${script.key}`, description: '', type: 'feature', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven end to end', proofs: ['integration:loop'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [`src/${script.key.toLowerCase()}.ts`],
+    policy: { checks: ['test'], review: true }, 
     stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(now - 30 * minute), updatedAt: iso(), stageEnteredAt: iso(now - minute),
     ready: index < admit, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [],
@@ -161,7 +160,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
   for (let index = 0; index < (options.delivered ?? 0); index++) {
     const key = `GY-${index + 1}`, sha = hex(`${key}-1`), baseSha = hex(`base-${key}`), mergedAt = iso(now - (index + 1) * 60 * minute);
     const candidate = { sha, baseSha, pr: index + 1, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker', createdAt: mergedAt };
-    work.push({ ...work[0], id: `id-${key}`, key, title: `Deliver ${key}`, plannedFiles: [`src/${key.toLowerCase()}.ts`], stage: 'done', stageEnteredAt: mergedAt, epoch: 1,
+    work.push({ ...work[0], id: `id-${key}`, key, title: `Deliver ${key}`, stage: 'done', stageEnteredAt: mergedAt, epoch: 1,
       candidate, submission: { epoch: 1, pr: index + 1 }, lastAssignment: { owner: 'graphyard-claude-0', epoch: 1, claimedAt: mergedAt },
       observation: { candidate, checks: [], reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha, state: 'APPROVED', submittedAt: mergedAt }], merged: true, mergeSha: hex(`merge-${key}`), mergedAt,
         mergeable: true, protected: true, files: [], at: mergedAt, baseTip: baseSha, baseTipContained: true, prState: 'closed', draft: false },
@@ -216,7 +215,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     item.submission = { epoch: item.epoch, pr };
     item.reworkRequested = false;
     item.observation = { candidate: item.candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
-      files: item.plannedFiles, at: iso(), baseTip: baseSha, baseTipContained: true, prState: 'open', draft: false } as Work['observation'];
+      files: [`src/${item.key.toLowerCase()}.ts`], at: iso(), baseTip: baseSha, baseTipContained: true, prState: 'open', draft: false } as Work['observation'];
     item.baseRefresh = null;
     // `complete` reports the implementation and ends the lease in the same transaction.
     item.lease = null;
@@ -279,8 +278,6 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       if (item.stage === 'done') continue;
       const live = !!item.lease && Date.parse(item.lease.expiresAt) > now;
       const submitted = !!item.submission && !item.reworkRequested && item.submission.epoch === item.epoch;
-      // A worker waiting for its scope request keeps its lease and pushes nothing until it lands.
-      if (live && item.scopeRequest) continue;
       if (live && round(item) !== 'die' && !submitted) { push(item); continue; }
       if (!submitted || !item.candidate) continue;
       judge(item);
@@ -316,7 +313,6 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       target.implementers = [...new Set([...(target.implementers ?? []), worker.principal])];
       // A claim leaves `reworkRequested` standing, as the engine does: only the round's own
       // submission clears it, so a round whose worker dies before pushing is still a requested round.
-      if (script(target).scopeOn === target.epoch) target.scopeRequest = { epoch: target.epoch, paths: ['docs/loop.md'], reason: 'The criteria ask for the loop guide to be updated', requestedBy: worker.principal, at: iso() };
       if (round(target) === 'die') {
         // A supervised launch fences its session in a scope unit; this one dies with the fence up.
         target.lease = { ...target.lease, expiresAt: iso(now + minute) };
@@ -353,21 +349,6 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       const entry = (decisions.get(find(item.id).id) ?? []).find(candidate => candidate.id === decision)!;
       assert.equal(entry.state, 'requested', 'only a requested decision can be withdrawn');
       Object.assign(entry, { state: 'withdrawn', outcome: reason });
-    },
-    // The control plane's side of `autoscope`: the verdict is recomputed from the item itself, and
-    // an approved request is applied and cleared without ending the attempt.
-    decideScope: async item => {
-      const target = find(item.id);
-      const request = target.scopeRequest!;
-      const verdict = decideScopeRequest(target, request);
-      target.scopeDecision = { state: verdict.state, reason: verdict.reason, at: iso(), decidedBy: 'graphyard', waitedMs: Math.max(0, now - Date.parse(request.at)),
-        paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at };
-      if (verdict.state === 'approved') {
-        target.plannedFiles = [...new Set([...target.plannedFiles, ...verdict.paths])];
-        target.policyRevision += 1; target.scopeRequest = null;
-      } else target.scopeRequest = { ...request, decision: target.scopeDecision };
-      recompute(target);
-      return target;
     },
     containment: items => Object.fromEntries(items.filter(item => item.containmentQuarantine).map(item => [item.id, {
       key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch, owner: item.containmentQuarantine!.owner, at: item.containmentQuarantine!.at,
@@ -426,10 +407,9 @@ test('integration:unattended-stranded-approval — an approval left unapplied is
   assert.deepEqual(state.approvals, {}, 'the watch is retired with its decision');
 });
 
-test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, reclaims a dead session, has an additive scope request decided, requests and dispatches rework after a verdict and after a base conflict through approver sessions that die and decline, and leaves the candidate whose gates are green to GitHub to merge', async t => {
+test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, reclaims a dead session, requests and dispatches rework after a verdict and after a base conflict through approver sessions that die and decline, and leaves the candidate whose gates are green to GitHub to merge', async t => {
   // Attempt 1's session dies under its fence; attempt 2 is told to change the work; attempt 3
-  // hits a base branch Graphyard cannot merge in; attempt 4 asks for one more planned file and
-  // then delivers. Every step between them is the loop's to take.
+  // hits a base branch Graphyard cannot merge in; attempt 4 delivers. Every step between them is the loop's to take.
   //
   // The approver sessions are the real launch contract, and they are not all well behaved: the
   // first rework's approver dies without judging, and the second rework's approver declines and
@@ -437,7 +417,7 @@ test('integration:unattended-full-cycle — with no master session and no human 
   const host = await approverHost({ workers: [profile('claude-a'), profile('claude-b')] });
   t.after(host.cleanup);
   const master = host.master;
-  const simulation = plane([{ key: 'GY-84', rounds: ['die', 'changes', 'conflict', 'pass'], scopeOn: 4 }], { host, judgements: ['die', 'approve', 'decline', 'approve'] });
+  const simulation = plane([{ key: 'GY-84', rounds: ['die', 'changes', 'conflict', 'pass'] }], { host, judgements: ['die', 'approve', 'decline', 'approve'] });
   const state = emptyDaemonState(master);
   const effects = simulation.effects();
   const performed: DaemonAction[] = [];
@@ -451,9 +431,7 @@ test('integration:unattended-full-cycle — with no master session and no human 
 
   assert.equal(item.stage, 'done', 'the item reached delivery with no master session and no human input');
   assert.equal(item.epoch, 4, 'four attempts: the dead session, the rework round, the base conflict, and the delivered one');
-  assert.deepEqual(item.plannedFiles, ['src/gy-84.ts', 'docs/loop.md'], 'the additive scope request was applied without ending the attempt');
   assert.equal(item.containmentQuarantine, null, 'the dead session\'s fence was settled by the loop');
-  assert.equal(item.scopeRequest, null);
 
   // Exactly the routine decisions the criteria name, each requested by the loop and applied by the
   // independent approver session the loop launched for it — never by the requester.
@@ -489,7 +467,6 @@ test('integration:unattended-full-cycle — with no master session and no human 
   assert.ok(order('settle:GY-84:done') >= 0, `the dead session was reclaimed: ${kinds.join(', ')}`);
   assert.equal(kinds.filter(entry => entry === 'dispatch:GY-84:done').length, 4, 'every attempt was dispatched by the loop');
   assert.equal(performed.filter(action => action.kind === 'decision' && /^Requested decision /.test(action.detail)).length, 2, 'one request per round, however many sessions it took to judge it');
-  assert.equal(kinds.filter(entry => entry === 'scope:GY-84:done').length, 1);
   assert.deepEqual(kinds.filter(entry => entry.startsWith('merge:')), [], 'GitHub merged the green candidate; the loop merges nothing (GY-1235)');
   assert.equal(item.delivery?.mergeSha, hex('merge-GY-84-4'), 'the delivery is the fourth attempt\'s, after the rework rounds it needed');
   assert.ok(order('settle:GY-84:done') < order('decision:GY-84:done'), 'the reclaim came before the rework rounds');

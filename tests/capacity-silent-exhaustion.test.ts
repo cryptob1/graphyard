@@ -170,7 +170,7 @@ test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAcco
 
 type Herdr = { agents: { name: string; pane_id: string; agent_status: string }[]; output: Record<string, string> };
 const loginsOnly = (now: () => number) => ({ quota: false, now, cacheMs: 0 });
-const definition = (title: string) => ({ title, plannedFiles: [`src/${title.replace(/\W+/g, '-')}.ts`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
+const definition = (title: string) => ({ title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
   origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: 'src/a.ts — a finding' }] } } });
 
 async function silentApproverLoop(label: string) {

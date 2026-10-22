@@ -53,7 +53,7 @@ function held(overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-885', key: 'GY-885', title: 'Disposable attempts', description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-6 * 3_600_000), updatedAt: iso(0), stageEnteredAt: iso(-6 * 3_600_000), ready: true, epoch,
     lease: leased ? { owner: 'alpha-principal', epoch, expiresAt: iso(3_600_000) } : null,
     lastAssignment: { owner: 'alpha-principal', epoch, claimedAt: iso(-5 * 3_600_000) },

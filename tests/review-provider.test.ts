@@ -19,7 +19,7 @@ function work(overrides: Partial<Work> = {}): Work {
   const now = new Date().toISOString();
   return {
     id: 'work-id', key: 'GY-42', title: 'Pluggable review', description: '', type: 'feature', priority: 2, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Reviewed', proofs: ['integration:claim-safety'] }], plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Reviewed', proofs: ['integration:claim-safety'] }], 
     policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: profiles },
     stage: 'review', revision: 5, policyRevision: 3, createdAt: now, updatedAt: now, stageEnteredAt: now, ready: true,
     epoch: 1, lease: null, workspaces: [{ host: 'h', path: '/p', branch: 'graphyard/gy-42-1', epoch: 1, owner: 'agent-a' }],

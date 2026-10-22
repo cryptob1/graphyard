@@ -1,7 +1,6 @@
 // Concern: the decision histories the decisions step reads, kept across cycles (GY-1142).
 import type { Work } from '../model.js';
 import { approvalApplyGraceMs, situationLabel, stalledApproval, supersededSituation, type DecisionSituation } from '../model/approval.js';
-import { routedScopeRequest } from '../model/scope-collapse.js';
 import type { ApprovalWatch, DaemonAction, DaemonState } from './state.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import { planeUnavailableText } from '../model/refusal.js';
@@ -93,11 +92,8 @@ export const decisionRefreshMs = 30 * 60_000;
  * `decisionRefreshMs`. A kept history is handed out as a copy: no caller can change what later
  * cycles read.
  *
- * GY-1293. The read-ahead takes first the items whose refused scope request the step may put to
- * an approver this cycle, then the open watches. A worker waits on that request, inside the scope
- * budget: read only when the step reached it, its history missed the deadline behind every slower
- * read ahead of it, cycle after cycle (GY-1287 on 5 October 2026, twice, until the budget passed).
- * The unreleased backlog items the stale-release step reads come last (GY-1315).
+ * GY-1293. The read-ahead takes the open watches first; the unreleased backlog items the
+ * stale-release step reads come last (GY-1315).
  */
 export async function decisionReads(effects: DaemonEffects, held: HeldDecisions, open: readonly Work[], watched: readonly ApprovalWatch[], clock = Date.now(), deadlineMs = decisionReadDeadlineMs) {
   const until = performance.now() + deadlineMs;
@@ -142,13 +138,12 @@ export async function decisionReads(effects: DaemonEffects, held: HeldDecisions,
     if (property === 'resume') return writes(target.resume);
     return Reflect.get(target, property, receiver);
   } });
-  // The waiting scope requests' and open watches' histories are read ahead, a bounded few at a time, while the step works.
+  // The open watches' histories are read ahead, a bounded few at a time, while the step works.
   const keys = new Set(watched.filter(watch => !watch.settledAt).map(watch => watch.work));
-  const scoped = open.filter(item => item.stage !== 'done' && !!routedScopeRequest(item, clock));
-  const watching = open.filter(item => keys.has(item.key) && !scoped.includes(item));
+  const watching = open.filter(item => keys.has(item.key));
   // Last, the unreleased backlog the stale-release step reads (GY-1315), so a cold backlog is read while the step works, not when it reaches them.
-  const backlog = staleReleaseCandidates(open).filter(item => !scoped.includes(item) && !watching.includes(item));
-  const ahead = effects.decisions ? [...scoped, ...watching, ...backlog].filter(item => !held.histories.has(item.id)) : [];
+  const backlog = staleReleaseCandidates(open).filter(item => !watching.includes(item));
+  const ahead = effects.decisions ? [...watching, ...backlog].filter(item => !held.histories.has(item.id)) : [];
   const next = async (): Promise<void> => { const item = ahead.shift(); if (item) { if (!held.histories.has(item.id)) await start(item).catch(() => undefined); return next(); } };
   void Promise.all(Array.from({ length: decisionReadConcurrency }, next));
   return reads;

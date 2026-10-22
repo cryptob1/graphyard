@@ -46,7 +46,7 @@ function closedItem(index: number, now: Date): Work {
   const at = new Date(now.getTime() - (CLOSED - index) * 3_600_000).toISOString();
   return {
     id: randomUUID(), key: `GY-${index + 1}`, title: `Closed ${index}`, description: 'A delivered item. '.repeat(200), type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'done', revision: 300, policyRevision: 1,
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test', 'typecheck'], review: true }, stage: 'done', revision: 300, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 2, lease: null, implementers: ['worker-a'], submission: { epoch: 2, pr: index + 1 },
     candidate: { sha: sha(12), baseSha: 'b'.repeat(40), pr: index + 1, branch: `graphyard/gy-${index + 1}-2`, author: 'worker-a' }, reworkRequested: false, scenarioRequirements: [], blocker: null, violations: [],
     evidence: Array.from({ length: 24 }, (_, n) => ({ id: randomUUID(), proof: 'unit:works', sha: sha(n), baseSha: 'b'.repeat(40), policyRevision: 1, producer: 'proof-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at, environment: 'node', url: 'https://ci.example/run', scopeFiles: Array.from({ length: 30 }, (_, f) => `src/m${f}.ts`) })),
@@ -104,7 +104,7 @@ async function spyOnReports<T>(run: () => Promise<T>) {
 test('unit:plane-hot-calls-bounded-under-load — decide, requirements and status each answer under 3 s on 850 closed and 20 open items while the server scans the intervention ledger, and a concurrent lease renewal under 1 s', async () => {
   const open: Work[] = [];
   for (let n = 0; n < OPEN; n++) {
-    const made = await call(master.token, 'POST', 'work', { title: `open-${n}`, plannedFiles: [`src/open-${n}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'seed' });
+    const made = await call(master.token, 'POST', 'work', { title: `open-${n}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'seed' });
     assert.equal(made.status, 200, JSON.stringify(made.body));
     open.push(made.body);
   }
@@ -113,7 +113,7 @@ test('unit:plane-hot-calls-bounded-under-load — decide, requirements and statu
   assert.equal(claimed.status, 200, JSON.stringify(claimed.body));
   const epoch = claimed.body.epoch as number;
   const target = open[1];
-  const rewrite = { expectedPolicyRevision: target.policyRevision, criteria: target.criteria, dependencies: [], plannedFiles: [...target.plannedFiles, 'src/more.ts'], exclusiveResources: [], producerProofs: [], reason: 'widen' };
+  const rewrite = { expectedPolicyRevision: target.policyRevision, criteria: target.criteria, dependencies: [], exclusiveResources: [], producerProofs: [], reason: 'widen' };
   // What the server does every minute (main.ts), run back to back for as long as the calls are timed.
   const cache = new LedgerRowCache();
   let scanning = true, scans = 0;
@@ -131,13 +131,13 @@ test('unit:plane-hot-calls-bounded-under-load — decide, requirements and statu
     for (let round = 0; round < 3 || (scans < 3 && round < 120); round++) {
       if (round >= 3) await new Promise(resolve => setTimeout(resolve, 250));
       // A fresh draft each round, so every timed release is a first request and succeeds.
-      const fresh = await call(master.token, 'POST', 'work', { title: `decide-${round}`, plannedFiles: [`src/decide-${round}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'seed' });
+      const fresh = await call(master.token, 'POST', 'work', { title: `decide-${round}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'seed' });
       assert.equal(fresh.status, 200, JSON.stringify(fresh.body));
       let renewing = true;
       const renewal = (async () => { while (renewing) { const renewed = await call(token(worker), 'POST', `work/${open[0].key}/heartbeat`, { epoch }); assert.equal(renewed.status, 200, JSON.stringify(renewed.body)); renewals.push(renewed.ms); } })();
       const [decided, revised, read] = await Promise.all([
         call(master.token, 'POST', `work/${fresh.body.key}/decide`, { action: 'release', input: { expectedRevision: fresh.body.revision }, reason: `round ${round}` }),
-        call(token(operator), 'POST', `work/${target.key}/requirements`, { ...rewrite, plannedFiles: [...rewrite.plannedFiles, `src/more-${round}.ts`] }),
+        call(token(operator), 'POST', `work/${target.key}/requirements`, { ...rewrite }),
         call(token(operator), 'GET', 'status'),
       ]);
       renewing = false; await renewal;

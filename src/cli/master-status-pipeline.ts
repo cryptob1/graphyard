@@ -3,7 +3,6 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { probeCandidateConflictsWithBudget } from '../conflicts.js';
 import { agentOwner, buildMasterStatus, type MasterConfig } from '../master.js';
 import { nameOrphanSupervisors } from './status-attention.js';
-import { routedScopeStatus } from './owed-report.js';
 import { leadTimeReport, speedSections } from '../flow-analytics.js';
 import { timedStep } from '../master/timings.js';
 import { withPipelineTimelines } from '../pipeline-speed.js';
@@ -46,8 +45,8 @@ export async function buildPipelineStatus(
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
   const sessions = await timedStep('build status', async () => nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState, { mode: master.supervision, operatorLogin: master.operatorLogin }),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now), daemonState && 'orphans' in daemonState ? daemonState : null));
-  // A routed scope request names its approver. No check-run annotation is read back (GY-2010).
-  const status = routedScopeStatus(sessions, snapshot.work, cycling?.approvals, master);
+  // Each item's review round against the configured cap (GY-1118). No check-run annotation is read back (GY-2010).
+  const status = { ...sessions, work: withReviewRounds(sessions.work, snapshot.work, reviewRoundCapOf(master)) };
   for (const worker of status.workers) Object.assign(worker, launches.rows[worker.profile] ?? {});
   // Rework rounds by cause (GY-643, GY-725) onto `speed`, delivery speed on the GitHub path with its
   // breach attention (GY-1232) and the stage holding each item's time (GY-1382); a failed read marks its section.

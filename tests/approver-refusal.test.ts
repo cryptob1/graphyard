@@ -37,7 +37,7 @@ const call = async (credential: string, method: 'GET' | 'POST', path: string, bo
   return { status: response.status, body: await response.json() as any };
 };
 const created = async (title: string) => {
-  const result = await call(master.token, 'POST', 'work', { title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: refusals are recorded' });
+  const result = await call(master.token, 'POST', 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: refusals are recorded' });
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return result.body as Work;
 };
@@ -69,7 +69,7 @@ async function stubbedMaster(item: { id: string; key: string }, decisions: () =>
   const credentialDirectory = await temporaryDirectory('refusal-credentials');
   const files = { coordinator: join(credentialDirectory, 'coordinator.token'), operator: join(credentialDirectory, 'operator.token'), approver: join(credentialDirectory, 'approver.token') };
   const now = () => new Date().toISOString();
-  const work = { id: item.id, key: item.key, title: 'Refused', stage: 'ready', ready: true, blocker: null, priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], workspaces: [], evidence: [], gates: [], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 3, policyRevision: 1 };
+  const work = { id: item.id, key: item.key, title: 'Refused', stage: 'ready', ready: true, blocker: null, priority: 1, epoch: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop'] }], policy: { checks: ['test'], review: true }, workspaces: [], evidence: [], gates: [], violations: [], createdAt: now(), updatedAt: now(), stageEnteredAt: now(), lease: null, candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null, revision: 3, policyRevision: 1 };
   const mutations: { path: string; authorization: string; body: any }[] = [];
   const stub = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');

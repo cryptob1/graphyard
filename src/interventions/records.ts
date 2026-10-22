@@ -46,10 +46,10 @@ export async function recordJudgement(store: Store, actor: Principal, input: Jud
 /**
  * Turn a recorded judgement into a work item: the same standing as a failed gate, as an item
  * the loop dispatches. The judgement's own words become the description; the caller may name
- * the criteria and planned files, and otherwise the item asks for the judgement to be addressed
+ * the criteria, and otherwise the item asks for the judgement to be addressed
  * and reviewed by hand. One item per judgement: a second call returns the first.
  */
-export async function judgementToWork(engine: Engine, actor: Principal, judgementId: string, input: { title?: string; criteria?: { id: string; text: string; proofs: string[] }[]; plannedFiles?: string[]; priority?: number }, key: string) {
+export async function judgementToWork(engine: Engine, actor: Principal, judgementId: string, input: { title?: string; criteria?: { id: string; text: string; proofs: string[] }[]; priority?: number }, key: string) {
   demand(actor.role === 'admin' || actor.role === 'operator-agent', 'Operator permission required', 403);
   const row = (await engine.store.pool.query("SELECT seq, actor, payload FROM events WHERE kind='judgement.recorded' AND payload->>'id'=$1", [judgementId])).rows[0];
   demand(row, 'Judgement not found', 404);
@@ -62,7 +62,7 @@ export async function judgementToWork(engine: Engine, actor: Principal, judgemen
   return engine.execute(actor, 'create', null, {
     title: (input.title ?? `${subject} is ${verdict}: ${judgement.text}`).slice(0, 200),
     description: `Operator judgement recorded by ${judgement.by} at ${judgement.at} about ${subject}: ${verdict}.\n\n${judgement.text}\n\nThis item carries the judgement into the backlog with the same standing as a failed gate; it was not typed into a chat.`,
-    type: 'bug', priority: input.priority ?? 1, plannedFiles: input.plannedFiles ?? [],
+    type: 'bug', priority: input.priority ?? 1,
     criteria: input.criteria ?? [{ id: 'AC-1', text: `The judgement about ${judgement.work?.key ?? judgement.page} (${verdict}) is addressed: ${judgement.text}`, proofs: [`manual:judgement-${judgementId.slice(0, 8)}-review`] }],
     origin: { judgement: { id: judgement.id, verdict: judgement.verdict, work: judgement.work?.key ?? null, page: judgement.page ?? null, by: judgement.by, at: judgement.at } },
     reason: `Operator judgement ${judgementId}: ${subject} is ${verdict}`,

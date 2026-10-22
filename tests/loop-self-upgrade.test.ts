@@ -312,7 +312,7 @@ test('unit:self-upgrade-restarts-loop-only — a loaded-code move restarts the l
 
 const delivered = (key: string, mergeSha: string, mergedAt: string) => ({
   id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [],
-  policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'done', revision: 1, policyRevision: 1,
+  policy: { checks: ['test'], review: true }, stage: 'done', revision: 1, policyRevision: 1,
   createdAt: iso(-4 * hour), updatedAt: iso(0), stageEnteredAt: iso(-hour), ready: false, epoch: 0, lease: null, workspaces: [],
   candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
   gates: [], violations: [], delivery: { mergedAt, mergeSha, authorizationRevision: 1 },

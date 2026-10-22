@@ -117,9 +117,6 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
   const reasons: [string, string][] = [
     ['ready', 'Not released from backlog'], ['ready', 'Dependency GY-3 is unfinished'], ['ready', 'needs a second Postgres instance'],
     ['build', 'Worker has not submitted implementation for this attempt'], ['build', 'Pull request has not been independently observed'], ['build', 'No workspace registered'],
-    ['build', 'Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required'],
-    ['build', 'Candidate changes 2 files outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-9, restore each file from origin/<base>, and push again'],
-    ['build', 'Out-of-scope regression: src/engine.ts: reverted (shipped by GY-3)'],
     ['review', 'Verified clean Codex review of the current commit is required'],
     ['review', 'Every configured reviewer profile is exhausted for this candidate (claude); add reviewer capacity or select another review provider'],
     ['review', 'Verified approval from reviewer profile claude is required for the current commit'],

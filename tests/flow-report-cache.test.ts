@@ -40,7 +40,7 @@ after(async () => {
 
 async function item(index: number, claimed: boolean) {
   let work = await engine.execute(operator, 'create', null, {
-    title: `Cached flow item ${index}`, plannedFiles: [`slice-${index % 3}/`],
+    title: `Cached flow item ${index}`, 
     criteria: [{ id: 'AC-1', text: 'Observable delivery behavior', proofs: ['integration:flow'] }],
   }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());

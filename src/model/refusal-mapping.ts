@@ -32,15 +32,12 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'build', match: /^Worker has not submitted implementation for this attempt$/, kind: 'dispatch' },
   { gate: 'build', match: /^No workspace registered$/, kind: 'dispatch' },
   { gate: 'build', match: /^Pull request has not been independently observed$/, kind: 'resync' },
-  { gate: 'build', match: /has not been compared against the base branch tip/, kind: 'resync' },
-  { gate: 'build', match: /^(Candidate changes|Out-of-scope regression)/, kind: 'request-rework' },
   // A mechanical proof that failed on the head returns it to its worker before review (GY-115).
   { gate: 'build', match: /the head returns to its worker before review$/, kind: 'request-rework' },
   // The same judgment passed on the commit the candidate would actually land on: the base has
   // gained work this head would revert. Only a new head answers it, exactly as for the diff
   // against the bound base — without this rule the refusal fell through to the catch-all and
   // said "no executor step answers it" about the one thing rework is for.
-  { gate: 'build', match: /^Landing (the candidate on|regression:)/, kind: 'request-rework' },
   // A base the control plane cannot merge in cleanly is the worker's to resolve, on a fresh head:
   // the refusal itself says to run `graphyard sync`, resolve it and push, and that approval and
   // proofs do not survive the resolution. Re-reading the pull request cannot produce that head, so

@@ -33,7 +33,7 @@ function item(sha: string, reworkRequested: boolean): Work {
   return {
     id: '00000000-0000-4000-8000-000000001522', key: 'GY-1522', title: 'Held rework', description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/loop.ts'], stage: 'review', revision: 5, policyRevision: 1, createdAt: new Date(clock - 3_600_000).toISOString(), updatedAt: new Date(clock).toISOString(),
+    stage: 'review', revision: 5, policyRevision: 1, createdAt: new Date(clock - 3_600_000).toISOString(), updatedAt: new Date(clock).toISOString(),
     stageEnteredAt: new Date(clock - 600_000).toISOString(), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 42 },
     candidate, reworkRequested, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [],
   } as unknown as Work;
@@ -153,7 +153,7 @@ test('integration:held-rework-request-refused-mechanically — a rework request 
 
   // A submitted high-lane item, observed with a change request on its head.
   const paths = ['src/server/routes/held-rework.ts'];
-  const created = await send(master.token, 'work', { title: 'Held rework', plannedFiles: paths, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Held rework fixture' });
+  const created = await send(master.token, 'work', { title: 'Held rework', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Held rework fixture' });
   assert.equal(created.status, 200, JSON.stringify(created.body));
   let work = await engine.execute(admin, 'ready', created.body.id, {}, randomUUID());
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());

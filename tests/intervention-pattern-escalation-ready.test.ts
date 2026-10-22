@@ -30,7 +30,7 @@ const after5 = (at: string) => Date.parse(at) + leaseLossSettleMs;
 function item(key: string, escalation: Escalation, overrides: Partial<Work>): Work {
   return {
     id: `work-${key}`, key, title: key, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'build', revision: 9, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 9, policyRevision: 1,
     createdAt: escalation.at, updatedAt: escalation.at, stageEnteredAt: escalation.at, ready: true, epoch: 1, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [], containmentQuarantine: null, escalation, escalations: [escalation], ...overrides,
@@ -116,7 +116,7 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
 async function lapsed(title: string) {
-  let work = await engine.execute(operator, 'create', null, { title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
+  let work = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   work = await expiring.execute(worker, 'claim', work.id, {}, id());
   await engine.reconcile();

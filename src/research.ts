@@ -217,11 +217,10 @@ export function researchRework(work: Pick<Work, 'key' | 'submission' | 'candidat
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 
-export function researchPrompt(config: { repository: string }, work: Pick<Work, 'key' | 'title' | 'type' | 'description' | 'criteria' | 'plannedFiles'>, settings: Pick<ResearchSettings, 'timeoutMinutes' | 'tokenBudget'>) {
+export function researchPrompt(config: { repository: string }, work: Pick<Work, 'key' | 'title' | 'type' | 'description' | 'criteria'>, settings: Pick<ResearchSettings, 'timeoutMinutes' | 'tokenBudget'>) {
   return `You are the Graphyard research agent for ${config.repository}. An implementation worker on a more expensive model will build ${work.key} (${work.type}): ${work.title}. Before it starts, research the item so it begins from what already exists instead of rediscovering it. `
     + (work.description ? `The item's description: ${clip(work.description, 6000)} ` : '')
     + `Its acceptance criteria: ${work.criteria.map(criterion => `${criterion.id}: ${clip(criterion.text, 1500)}`).join(' ')} `
-    + (work.plannedFiles?.length ? `Its planned files: ${work.plannedFiles.join(', ')}. ` : '')
     + 'Read this checkout (it is the base branch) and, where it helps, the outside world, and find: the existing code and conventions to reuse, as paths with what each offers; relevant external patterns and prior art, each with its source (a URL, a library, a standard, or a path); the risks and edge cases; and the approach you recommend. '
     + 'List as product questions only questions about the product experience whose answer is the operator\'s to choose (goals and priorities), each with why it matters and a concrete recommended answer: the build proceeds on your recommendation until the operator answers, so recommend what you would ship. Settle every engineering question yourself in the approach. '
     + `This session is read-only and nobody reads it: do not edit, commit, push, claim work, run the build or tests, or ask anyone anything. Keep within about ${settings.tokenBudget} tokens and ${settings.timeoutMinutes} minutes. `

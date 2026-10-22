@@ -28,7 +28,7 @@ function requested(key: string, sha: string): Work {
   const candidate = { sha, baseSha: B, pr: 64, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
   const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [{ path: 'src/a.ts', status: 'modified' as const, sha: sha40('s'), additions: 1, deletions: 1, binary: false }],
     at, prState: 'open', draft: false, baseTip: B, baseTree: sha40('7b'), baseTipContained: true } as Observation;
-  const item = { id: `work-${key}`, key, title: key, description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  const item = { id: `work-${key}`, key, title: key, description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 1, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [] } as unknown as Work;

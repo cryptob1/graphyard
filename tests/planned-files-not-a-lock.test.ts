@@ -5,8 +5,6 @@ import { writeFile } from 'node:fs/promises';
 import { realpath } from 'node:fs/promises';
 import { join } from 'node:path';
 import { syncWork } from '../src/cli/workspace.js';
-import { scopeRequestCommand, scopeRequestPlanLine } from '../src/cli/session-commands.js';
-import { main } from '../src/cli/index.js';
 import { workerPrompt } from '../src/master/dispatch.js';
 import { workerBeforePushSection } from '../src/master/worker-fast-gates.js';
 import { reworkBriefSection } from '../src/master/rework-brief.js';
@@ -17,12 +15,11 @@ import { criteriaRuleSection } from '../src/reviewer.js';
 import type { CliContext } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-1991: an item's file list is a plan, not a lock. `sync` merges the shared base branch and
-// judges only the merge: a commit that changes a file outside plannedFiles that the base holds is
-// this branch's change to submit, never a refusal, and `--restore` is no longer offered. A real
-// merge conflict is still reported. `scope-request` prints that line and posts nothing. No
-// worker-facing text carries the old scope rule any more, and the reviewer's criteria rule says a
-// file outside plannedFiles is not a finding by itself.
+// GY-1991: an item's file list is a plan, not a lock, and since GY-1992 there is no list. `sync`
+// merges the shared base branch and judges only the merge: any file the base holds is this branch's
+// change to submit, never a refusal, and `--restore` is no longer offered. A real merge conflict is
+// still reported. No worker-facing text carries the old scope rule, and the reviewer's criteria rule
+// names no planned files.
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
@@ -43,7 +40,7 @@ async function repo(label: string) {
   execFileSync('git', ['clone', '-q', origin, branch], { stdio: 'ignore' });
   git(branch, 'config', 'user.email', 't@example.com'); git(branch, 'config', 'user.name', 'T');
   git(branch, 'checkout', '-q', '-b', 'graphyard/gy-9-1');
-  const work = { id: 'w9', key: 'GY-9', plannedFiles: ['planned.ts', 'tests/'], workspaces: [{ epoch: 1, host: 'h', path: branch, branch: 'graphyard/gy-9-1' }] };
+  const work = { id: 'w9', key: 'GY-9', workspaces: [{ epoch: 1, host: 'h', path: branch, branch: 'graphyard/gy-9-1' }] };
   const runSync = async () => {
     const printed: any[] = [];
     const context = { command: 'sync', id: work.key, args: [], rest: [work.key], base: 'http://127.0.0.1:1', connection: null,
@@ -62,9 +59,9 @@ async function repo(label: string) {
   return { root, main, branch, work, runSync };
 }
 
-test('unit:sync-ignores-planned-files — a commit changing a file outside plannedFiles that the base holds merges the base, lists no out-of-scope finding, reports ok, and offers no --restore', async () => {
+test('unit:sync-ignores-planned-files — a commit changing a file the base holds merges the base, lists no out-of-scope finding, reports ok, and offers no --restore', async () => {
   const { main, branch, runSync } = await repo('planned-not-lock');
-  // The branch changes README.md, a file outside plannedFiles that the base branch holds.
+  // The branch changes README.md, a file the base branch holds.
   await writeFile(join(branch, 'README.md'), '# Changed outside the plan\n'); git(branch, 'add', '.'); git(branch, 'commit', '-q', '-m', 'outside the plan');
   // The base branch moves on; the loop fetches the shared store, sync itself fetches nothing.
   await writeFile(join(main, 'base-note.md'), 'from main\n'); git(main, 'add', '.'); git(main, 'commit', '-q', '-m', 'base moves'); git(main, 'push', '-q', 'origin', 'main');
@@ -97,30 +94,7 @@ test('unit:sync-ignores-planned-files — a real merge conflict is still reporte
   assert.deepEqual(printed[0].conflicts.map((entry: any) => entry.path), ['README.md']);
 });
 
-test('unit:scope-request-is-a-no-op — scope-request prints that plannedFiles is a plan and posts nothing, with or without --wait', async () => {
-  const work = { id: 'w9', key: 'GY-9', epoch: 4 } as any;
-  for (const args of [['4'], ['4', 'src/b.ts', '--', 'the reason'], ['4', '--wait'], ['4', 'src/b.ts', '--wait', '--', 'the reason'], ['4', '-']]) {
-    const calls: unknown[] = [], printed: unknown[] = [];
-    const context = { args, api: async (path: string, data?: unknown) => { calls.push({ path, data }); return {}; }, print: (value: unknown) => printed.push(value) } as unknown as CliContext;
-    await scopeRequestCommand.run(context, work);
-    assert.deepEqual(calls, [], `${args.join(' ')} posts nothing to the control plane`);
-    assert.deepEqual(printed, [scopeRequestPlanLine], `${args.join(' ')} prints the one line`);
-  }
-  // The real CLI dispatch looks nothing up either: no request reaches the control plane.
-  const fetched: unknown[] = [], logged: unknown[] = [];
-  const { fetch, log } = { fetch: globalThis.fetch, log: console.log };
-  globalThis.fetch = (async (input: unknown) => { fetched.push(input); throw new Error('no control plane'); }) as typeof fetch;
-  console.log = (value: unknown) => { logged.push(value); };
-  try {
-    for (const args of [['GY-9', '4', 'src/b.ts', '--', 'the reason'], ['GY-9', '4', 'src/b.ts', '--wait', '--', 'the reason']]) await main(['scope-request', ...args]);
-  } finally { globalThis.fetch = fetch; console.log = log; }
-  assert.deepEqual(fetched, [], 'the CLI makes no request to the control plane');
-  assert.equal(logged.length, 2);
-  for (const line of logged) assert.match(String(line), /plannedFiles is a plan, not a lock/);
-  assert.equal(scopeRequestPlanLine, 'plannedFiles is a plan, not a lock: edit the file you need and submit; nothing needs requesting.');
-});
-
-test('unit:worker-text-has-no-scope-rules — the worker launch request, before-push text, rework brief, force-push remedy, complete help and the managed AGENTS.md block carry no scope rule, and the reviewer criteria rule says an outside file is not a finding by itself', () => {
+test('unit:worker-text-has-no-scope-rules — the worker launch request, before-push text, rework brief, force-push remedy, complete help and the managed AGENTS.md block carry no scope rule, and the reviewer criteria rule names no planned files', () => {
   const cli = '/bin/graphyard.mjs';
   const rework = { id: 'd1', reason: 'Fix the flake the review named', approvedAt: new Date(0).toISOString() };
   const texts: [string, string][] = [
@@ -133,9 +107,8 @@ test('unit:worker-text-has-no-scope-rules — the worker launch request, before-
     ['the complete help', completeCommand.help.join(' ')],
     ['the managed AGENTS.md block', managedInstructions('')],
   ];
-  for (const [name, text] of texts) for (const phrase of ['scope-request', '--restore', 'outside plannedFiles']) {
+  for (const [name, text] of texts) for (const phrase of ['scope-request', '--restore', 'plannedFiles']) {
     assert.ok(!text.includes(phrase), `${name} names ${phrase}`);
   }
-  // The reviewer's criteria rule carries the one clause this item adds: judge the change.
-  assert.match(criteriaRuleSection('GY-1', 'a'.repeat(40), []), /A change to a file outside plannedFiles is not a finding by itself; judge the change\./);
+  assert.doesNotMatch(criteriaRuleSection('GY-1', 'a'.repeat(40), []), /plannedFiles|planned files/);
 });

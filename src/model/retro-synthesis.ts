@@ -116,9 +116,9 @@ export const retroPatternSchema = z.object({
 }).strict();
 
 /**
- * What a registered check evaluates on a submission's observed candidate: that it changes only
- * planned or documentation files, that it merges onto the base without conflict, or that no check
- * reported on its head failed.
+ * What a registered check evaluates on a submission's observed candidate: that it merges onto the
+ * base without conflict, or that no check reported on its head failed. `planned-files` is retired
+ * with plannedFiles (GY-1992): a check registered with it still loads and never refuses.
  */
 export const retroCheckRules = ['planned-files', 'merges-onto-base', 'checks-passed'] as const;
 export type RetroCheckRule = typeof retroCheckRules[number];

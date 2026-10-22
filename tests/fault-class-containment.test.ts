@@ -143,7 +143,6 @@ function standing(entry: Instance): Work {
     dependencies: [],
     criteria: [{ id: 'AC-1', text: 'The behaviour changes as described', proofs: ['unit:behaviour-changes'] }],
     policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/'],
     stage: 'implementation',
     revision: 1,
     policyRevision: 1,
@@ -347,7 +346,7 @@ function fencedItem(outcome: 'loop' | 'observed', deadlines: { lease: number; la
   return {
     id: 'work-2151', key: 'GY-2151', title: 'Fence', description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Settles', proofs: ['unit:fence-settles'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'review', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 1,
     createdAt: fenceIso(-60 * 60_000), updatedAt: fenceIso(0), stageEnteredAt: fenceIso(-30 * 60_000), ready: true, epoch,
     lease: { owner, epoch, expiresAt: fenceIso(deadlines.lease) },
     lastAssignment: { owner, epoch, claimedAt: fenceIso(-30 * 60_000) },

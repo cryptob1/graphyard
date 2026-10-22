@@ -55,7 +55,7 @@ const fixedNow = 1_893_456_000_000, fixedAt = new Date(fixedNow).toISOString();
 const tip = sha('tip'), head = sha('head'), mergeSha = sha('merge');
 const work = (files: string[] = ['src/game.ts']) => ({
   id: 'w1', key: 'GY-1', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-  policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, stage: 'build', ready: true, epoch: 1, lease: null, workspaces: [],
+  policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, stage: 'build', ready: true, epoch: 1, lease: null, workspaces: [],
   submission: { epoch: 1, pr: 1 }, candidate: { sha: head, baseSha: tip, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' }, reworkRequested: false, scenarioRequirements: [], evidence: [],
   observation: { source: 'control-plane', candidate: { sha: head, baseSha: tip, pr: 1 }, files, checks: [], reviews: [], merged: false }, blocker: null, violations: [], gates: [], mergeLedger: null,
 }) as unknown as Work;

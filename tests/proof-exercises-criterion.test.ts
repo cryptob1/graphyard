@@ -111,7 +111,7 @@ test('integration:non-discriminating-proof-refused the producer is told to recor
 });
 
 test('unit:refusal-names-criterion-and-behaviour the refusal names the proof, the criterion and the removed behaviour', () => {
-  const work = { key: 'GY-1', id: 'w', stage: 'build', plannedFiles: [], criteria: [{ id: 'AC-1', text: 'x', proofs: [PROOF] }, { id: 'AC-2', text: 'y', proofs: [OTHER] }] } as unknown as Work;
+  const work = { key: 'GY-1', id: 'w', stage: 'build', criteria: [{ id: 'AC-1', text: 'x', proofs: [PROOF] }, { id: 'AC-2', text: 'y', proofs: [OTHER] }] } as unknown as Work;
   const reason = exerciseRefusal(work, [work], { proof: PROOF, result: 'pass', exercise: { criterion: 'AC-1', behaviour: BEHAVIOUR, result: 'pass', executed: 3 } })!;
   for (const named of [PROOF, 'AC-1', BEHAVIOUR]) assert.ok(reason.includes(named), `${named} appears in: ${reason}`);
   assert.ok(!reason.includes('AC-2'), 'only the criterion the proof is attached to is named');
@@ -152,7 +152,7 @@ function unexercisedItem(options: { finding?: boolean } = {}): Work {
     checks: [{ name: 'test', result: 'success', appId: CI_APP }, { name: 'typecheck', result: 'success', appId: CI_APP }], reviews: [], protected: true, mergeable: true, merged: false, mergeSha: null,
     files: ['src/tmp.ts'], scopeFiles: [], at: ago(1), prState: 'open', draft: false, baseTip: base, baseTipContained: true } as Observation;
   const work = { id: '22222222-3333-4444-8555-666666666666', key: 'GY-421', title: 'Unexercised fixture', description: '', type: 'bug', priority: 2, dependencies: [],
-    criteria: [{ id: 'AC-3', text: 'An old tsx directory is reclaimed', proofs: [UNIT] }], policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], producerProofs: [],
+    criteria: [{ id: 'AC-3', text: 'An old tsx directory is reclaimed', proofs: [UNIT] }], policy: { checks: ['test', 'typecheck'], review: true }, producerProofs: [],
     stage: 'build', revision: 5, policyRevision: 1, createdAt: ago(120), updatedAt: ago(5), stageEnteredAt: ago(60), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'machine-a', path: '/tmp/gy-421', branch: 'graphyard/gy-421-1', epoch: 1, owner: 'agent-a' }], implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 },
     candidate: observation.candidate, submission: { epoch: 1, pr: 421 }, evidence: options.finding === false ? [] : [record], observation,

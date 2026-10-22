@@ -259,7 +259,7 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
       : { goal: goalAtHand.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
         items: [{ ref: 'greeting', title: 'Greet the customer', plain: 'Customers see a greeting.', description: 'Add the greeting module', type: 'feature', priority: 2,
           outcomes: ['greeting'], cases: ['greeting'],
-          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], plannedFiles: ['src/greeting.ts', 'public/greeting.json'], dependsOn: [] }] }, runs) }),
+          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], dependsOn: [] }] }, runs) }),
     plan: (goalAtHand, plan) => request(operatorAgent, `goals/${goalAtHand.key}/plan`, plan, `planner:${goalAtHand.id}:${goalAtHand.revision}`),
     invalid: (goalAtHand, reason) => request(operatorAgent, `goals/${goalAtHand.key}/plan-invalid`, { reason }, `planner:${goalAtHand.id}:${goalAtHand.revision}:invalid`),
     judge: (goalAtHand, judgement) => request(approver, `goals/${goalAtHand.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goalAtHand.id}:${goalAtHand.revision}:judged`),

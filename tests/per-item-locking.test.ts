@@ -47,7 +47,7 @@ after(async () => {
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 let created = 0;
 async function claimed(worker: Principal) {
-  const item = await engine.execute(operator, 'create', null, { title: `Locking item ${++created}`, plannedFiles: [`src/locking-${created}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+  const item = await engine.execute(operator, 'create', null, { title: `Locking item ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
   await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   return engine.execute(worker, 'claim', item.id, {}, randomUUID());
 }
@@ -66,7 +66,7 @@ const within = async <T>(promise: Promise<T>, ms: number) => Promise.race([promi
 test('unit:per-item-locking heartbeats on different items run while a dispatch holds the fleet lock, and neither waits for the other', { timeout: 60_000 }, async () => {
   const [one, two] = [await claimed(workers[0]), await claimed(workers[1])];
   // A real claim command on a third item holding the fleet lock: a claim of a fourth item queues behind it.
-  const threeItem = await engine.execute(operator, 'create', null, { title: `Locking item ${++created}`, plannedFiles: [`src/locking-${created}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+  const threeItem = await engine.execute(operator, 'create', null, { title: `Locking item ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
   await engine.execute(operator, 'ready', threeItem.id, {}, randomUUID());
 
   let releaseDispatch!: () => void;
@@ -149,7 +149,7 @@ test('unit:per-item-locking a heartbeat committing between renewClaimedAction re
 test('unit:per-item-locking commands that read fleet state still serialise on the fleet lock', { timeout: 60_000 }, async () => {
   const holder = hold({ fleetLock: true });
   await holder.taken;
-  const ready = engine.execute(operator, 'create', null, { title: 'Serialised', plannedFiles: ['src/serialised.ts'], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+  const ready = engine.execute(operator, 'create', null, { title: 'Serialised', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
   assert.equal(await within(ready, 300), 'pending', 'a create reads the fleet and waits for the fleet lock');
   const reconcile = engine.reconcile();
   assert.equal(await within(reconcile, 300), 'pending', 'reconciliation opens under the fleet lock too');
@@ -197,7 +197,7 @@ test('unit:per-item-locking mixed fleet and item locks under concurrent load nev
     items.forEach((work, i) => operations.push(heartbeat(workers[5 + i], work)));
     // Fleet commands (fleet lock, then the item's) and item-only transactions on the same items.
     items.forEach((work, i) => operations.push(store.transaction(async db => { await db.query('SELECT 1 FROM work_items WHERE id=$1 FOR UPDATE', [work.id]); await sleep(2); }, { fleetLock: i % 2 === 0, itemLock: work.id })));
-    operations.push(engine.execute(operator, 'create', null, { title: `Mixed ${round}`, plannedFiles: [`src/mixed-${round}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID()));
+    operations.push(engine.execute(operator, 'create', null, { title: `Mixed ${round}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID()));
     operations.push(engine.reconcile());
   }
   assert.equal(await within(Promise.all(operations), 30_000), 'settled', 'every operation committed');
@@ -377,7 +377,7 @@ test('unit:per-item-locking 100 items and 20 concurrent writers keep p95 request
   engine.principals = [operator, ...workers, ...writers];
   const items: Work[] = [];
   for (let n = 0; n < 100; n++) {
-    const item = await engine.execute(operator, 'create', null, { title: `Load ${n}`, plannedFiles: [`src/load-${n}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
+    const item = await engine.execute(operator, 'create', null, { title: `Load ${n}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:per-item-locking'] }] }, randomUUID());
     items.push(await engine.execute(operator, 'ready', item.id, {}, randomUUID()));
   }
   const latencies: number[] = [];

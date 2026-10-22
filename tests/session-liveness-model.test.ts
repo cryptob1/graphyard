@@ -65,7 +65,7 @@ function dispatcher(items: () => Promise<Work[]>, runtime: () => RuntimeSession[
 }
 
 test('unit:session-liveness-model — the loop reports every session it sees on each dispatch tick and the control plane stores it with the observation time: a working session, an agent exited to a shell (ended), a vanished pane (lost after two consecutive reports) and a report gap', async () => {
-  let item = await engine.execute(operator, 'create', null, { title: 'Session state', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title: 'Session state', criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   // Four sessions a launcher registered on this host, each with the pane it holds and its name.
   const register = (id: string, pane: string) => engine.execute(coordinator, 'session', item.id, { id, kind: 'coordination', role: 'approver', runtime: 'claude', host: 'host-1', workspace: 'wF',
@@ -202,7 +202,7 @@ test('unit:session-liveness-model — a missed report keeps the last sighting, a
 });
 
 test('unit:session-liveness-model — only the observer writes the observation, a delivered item keeps it fresh, and a reopened record carries none of the previous runtime session', async () => {
-  let item = await engine.execute(operator, 'create', null, { title: 'Observation writes', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title: 'Observation writes', criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   const handle = { id: 'owned', kind: 'coordination', role: 'approver', runtime: 'claude', host: 'host-1', principal: producer.id, agentName: 'agent-owned', pane: 'wF:p7',
     attach: 'herdr pane attach wF:p7 --workspace wF', transcript: '/logs/owned-1.jsonl', subject: `${item.key}: owned`, state: 'running' } as const;
@@ -385,7 +385,7 @@ test('unit:session-liveness-model — GY-1532: a launch registered over a held r
 
   // Through the control plane: the held record, observed working and missed twice under another
   // launch's token, is closed and reopened; the new session carries none of that observation.
-  let item = await engine.execute(operator, 'create', null, { title: 'Relaunch over a held record', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Fresh', proofs: ['unit:fresh'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title: 'Relaunch over a held record', criteria: [{ id: 'AC-1', text: 'Fresh', proofs: ['unit:fresh'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   const earlier = { id: 'req-1', kind: 'review', role: 'review', runtime: 'claude', host: 'host-1', pane: 'wF:p8', agentName: 'review-claude', subject: `${item.key}: review`, state: 'running', launch: 'a'.repeat(32) } as const;
   await engine.execute(coordinator, 'session', item.id, earlier, randomUUID());
@@ -408,7 +408,7 @@ test('unit:session-liveness-model — GY-1532: after a hand-launched review of a
     prState: 'open', draft: false, baseTip: baseSha, baseTree: '7b'.padEnd(40, '0'), baseTipContained: true };
   const hand = { id: `review:${sha}`, kind: 'review', principal: 'reviewer-a', epoch: null, runtime: 'codex', host: 'host-1', workspace: 'wF', tab: null, pane: 'wF:p2', agentName: 'review-codex', role: 'review', head: sha,
     attach: null, transcript: null, subject: 'GY-1532: review', startedAt: ago(40 * 60_000), updatedAt: ago(20 * 60_000), endedAt: null, state: 'running', outcome: null, observed: 'working', observedAt: ago(20 * 60_000), missedReports: 1 } as unknown as SessionHandle;
-  const work = { id: 'w', key: 'GY-1532', title: 'Item', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }],
+  const work = { id: 'w', key: 'GY-1532', title: 'Item', description: '', type: 'bug', priority: 0, dependencies: [], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }],
     policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 4, createdAt: ago(3_600_000), updatedAt: ago(60_000), stageEnteredAt: ago(60_000), ready: true, epoch: 1, lease: null,
     workspaces: [], candidate, submission: { epoch: 1, pr: 995 }, reworkRequested: false, scenarioRequirements: [], observation, blocker: null, violations: [], sessions: [hand], autoDispatch: null,
     evidence: [{ id: 'e1', proof: 'unit:x', sha, baseSha, policyRevision: 4, producer: 'ci-runner', trusted: true, result: 'pass', executed: 3, skipped: 0, at: ago(120_000) }],

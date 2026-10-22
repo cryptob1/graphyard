@@ -21,7 +21,7 @@ const hotFile = 'src/daemon/cycle-sessions.ts';
 function work(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0),
+    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
   } as Work;
@@ -37,15 +37,15 @@ function reopenReverted(work: Work, now: Date) {
 }
 /** A returned rework: the earlier attempt's submission stands, sent back for a new claim. */
 const rework = (key: string, plannedFiles: string[], overrides: Partial<Work> = {}) =>
-  work(key, { stage: 'build', plannedFiles, submission: { epoch: 1, pr: 7 }, reworkRequested: true, ...overrides });
+  work(key, { stage: 'build', submission: { epoch: 1, pr: 7 }, reworkRequested: true, ...overrides });
 /** A retry: an earlier attempt ended without submitting, so the pipeline records only the ended attempt. */
 const retried = (key: string, plannedFiles: string[], overrides: Partial<Work> = {}) =>
-  work(key, { plannedFiles, pipeline: { attempts: [{ epoch: 1, owner: `${key}-worker`, claimedAt: iso(-7_200_000), endedAt: iso(-3_600_000), end: 'expired' }], submittedAt: null, resubmittedAt: null, reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } }, ...overrides });
+  work(key, { pipeline: { attempts: [{ epoch: 1, owner: `${key}-worker`, claimedAt: iso(-7_200_000), endedAt: iso(-3_600_000), end: 'expired' }], submittedAt: null, resubmittedAt: null, reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } }, ...overrides });
 /** Submitted once: the pipeline still records the submission though no standing submission object remains. */
 const submittedOnce = (key: string, plannedFiles: string[], overrides: Partial<Work> = {}) =>
-  work(key, { plannedFiles, pipeline: { attempts: [{ epoch: 1, owner: `${key}-worker`, claimedAt: iso(-7_200_000), endedAt: iso(-3_600_000), end: 'submitted' }], submittedAt: iso(-3_600_000), resubmittedAt: iso(-3_600_000), reworkRounds: 1, interventions: { blocked: 0, requirements: 0 } }, ...overrides });
+  work(key, { pipeline: { attempts: [{ epoch: 1, owner: `${key}-worker`, claimedAt: iso(-7_200_000), endedAt: iso(-3_600_000), end: 'submitted' }], submittedAt: iso(-3_600_000), resubmittedAt: iso(-3_600_000), reworkRounds: 1, interventions: { blocked: 0, requirements: 0 } }, ...overrides });
 const claimed = (key: string, plannedFiles: string[]) =>
-  work(key, { stage: 'build', plannedFiles, epoch: 1, lease: { owner: `${key}-worker`, epoch: 1, expiresAt: iso(600_000) } });
+  work(key, { stage: 'build', epoch: 1, lease: { owner: `${key}-worker`, epoch: 1, expiresAt: iso(600_000) } });
 
 test('unit:dispatch-reworks-before-fresh-items — dispatchSort offers every same-priority item with a submitted attempt before every item without one, whatever their scope, heat or wait; within each group the existing order stands', () => {
   const heat = new Set([hotFile]);
@@ -57,10 +57,10 @@ test('unit:dispatch-reworks-before-fresh-items — dispatchSort offers every sam
   // The fresh four in the old keys' order: one starving and narrow, then a narrow retry whose
   // earlier attempt ended without submitting (a lapsed lease is a retry, not a rework), then a
   // cold item, then one just created — a never-submitted attempt keeps this existing-order place.
-  const starvingFresh = work('GY-starvingFresh', { plannedFiles: ['docs/one.md'], createdAt: iso(-2 * dispatchStarvationMs), stageEnteredAt: iso(-2 * dispatchStarvationMs) });
+  const starvingFresh = work('GY-starvingFresh', { createdAt: iso(-2 * dispatchStarvationMs), stageEnteredAt: iso(-2 * dispatchStarvationMs) });
   const expiredRetry = retried('GY-retryExpired', ['docs/one.md'], { createdAt: iso(-30 * 60_000), stageEnteredAt: iso(-30 * 60_000) });
-  const coldFresh = work('GY-coldFresh', { plannedFiles: ['docs/two.md'], createdAt: iso(-25 * 60_000), stageEnteredAt: iso(-25 * 60_000) });
-  const newFresh = work('GY-newFresh', { plannedFiles: ['docs/three.md'], createdAt: iso(-60_000), stageEnteredAt: iso(-60_000) });
+  const coldFresh = work('GY-coldFresh', { createdAt: iso(-25 * 60_000), stageEnteredAt: iso(-25 * 60_000) });
+  const newFresh = work('GY-newFresh', { createdAt: iso(-60_000), stageEnteredAt: iso(-60_000) });
   const mixed = [newFresh, broadHotRework, starvingFresh, expiredRetry, coldFresh, narrowSubmittedOnce];
   assert.deepEqual(dispatchSort(mixed, heat, clock).map(item => item.key),
     ['GY-submittedOnce', 'GY-reworkBroad', 'GY-starvingFresh', 'GY-retryExpired', 'GY-coldFresh', 'GY-newFresh'],
@@ -70,7 +70,7 @@ test('unit:dispatch-reworks-before-fresh-items — dispatchSort offers every sam
   assert.ok(dispatchSort([newFresh, narrowSubmittedOnce], new Set())[0] === narrowSubmittedOnce, 'the key holds without a clock or heat, as the empty defaults give the cold order');
   // The loop sorts the coordination view, which strips `pipeline`: a delivery a candidate
   // revert reopened has no standing submission there, yet still ranks as submitted.
-  const reverted = work('GY-reverted', { plannedFiles: ['src/', 'tests/', hotFile], createdAt: iso(-60_000), stageEnteredAt: iso(-60_000), stage: 'done', submission: { epoch: 1, pr: 9 }, delivery: { mergeSha: 'abc123' } as Work['delivery'] });
+  const reverted = work('GY-reverted', { createdAt: iso(-60_000), stageEnteredAt: iso(-60_000), stage: 'done', submission: { epoch: 1, pr: 9 }, delivery: { mergeSha: 'abc123' } as Work['delivery'] });
   recordSubmission(reverted, 1, new Date(clock - 120_000));
   reopenReverted(reverted, new Date(clock - 60_000));
   const view = [reverted, starvingFresh, expiredRetry].map(item => coordinationWork(structuredClone(item), { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 }));
@@ -87,12 +87,12 @@ test('unit:dispatch-reworks-before-fresh-items — dispatchSort offers every sam
 
 test('unit:dispatch-rework-first-keeps-priority — a higher-priority fresh item still ranks before a lower-priority rework, and a starving fresh item still ranks before a non-starving fresh one', () => {
   // The fresh item is the broader scope, so only priority can decide the pair.
-  const broadFresh = work('GY-freshP0', { priority: 0, plannedFiles: ['src/', 'tests/'], createdAt: iso(-60_000), stageEnteredAt: iso(-60_000) });
+  const broadFresh = work('GY-freshP0', { priority: 0, createdAt: iso(-60_000), stageEnteredAt: iso(-60_000) });
   const narrowRework = rework('GY-reworkP1', ['docs/one.md'], { priority: 1 });
   assert.deepEqual(dispatchSort([narrowRework, broadFresh], new Set(), clock).map(item => item.key), ['GY-freshP0', 'GY-reworkP1'],
     'priority still decides first: a P0 fresh item outranks a P1 rework even across a broader scope');
-  const starvingFresh = work('GY-starvingFresh', { plannedFiles: ['docs/one.md'], createdAt: iso(-2 * dispatchStarvationMs), stageEnteredAt: iso(-2 * dispatchStarvationMs) });
-  const newFresh = work('GY-newFresh', { plannedFiles: ['docs/two.md'], createdAt: iso(-60_000), stageEnteredAt: iso(-60_000) });
+  const starvingFresh = work('GY-starvingFresh', { createdAt: iso(-2 * dispatchStarvationMs), stageEnteredAt: iso(-2 * dispatchStarvationMs) });
+  const newFresh = work('GY-newFresh', { createdAt: iso(-60_000), stageEnteredAt: iso(-60_000) });
   assert.deepEqual(dispatchSort([newFresh, starvingFresh], new Set(), clock).map(item => item.key), ['GY-starvingFresh', 'GY-newFresh'],
     `among never-attempted items the starvation rule stands: past dispatchStarvationMs (${dispatchStarvationMs}ms) still offers first`);
 });

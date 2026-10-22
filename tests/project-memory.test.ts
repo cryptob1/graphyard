@@ -257,6 +257,8 @@ test('unit:session-request-carries-project-memory — memory updates from settle
       key: 'GY-500',
       title: 'Human decision item',
       stage: 'done',
+      // The files its delivered candidate was observed to change are the change memory records.
+      observation: { files: ['src/deploy.ts'] },
       // An answered request is cleared from humanRequest and kept in humanRequests.
       humanRequest: null,
       humanRequests: [{
@@ -288,7 +290,6 @@ test('unit:session-request-carries-project-memory — memory updates from settle
         sha: '1234567890123456789012345678901234567890',
         baseSha: '0987654321098765432109876543210987654321',
       },
-      plannedFiles: ['src/deploy.ts'],
     } as any,
   ];
 
@@ -343,7 +344,7 @@ test('unit:session-request-carries-project-memory — memory updates from settle
 
   assert.ok(!memory.decisions.some(d => d.key === 'GY-602'));
   assert.equal(memory.pitfalls.some(p => p.faultClass === 'scope' && p.count >= 2), true);
-  assert.ok(memory.pitfalls.find(p => p.faultClass === 'scope')?.remedy.includes('Request scope widening'));
+  assert.ok(memory.pitfalls.find(p => p.faultClass === 'scope')?.remedy.includes('Change only what the criteria need'));
 });
 
 test('unit:session-request-carries-project-memory — unreviewed agent claims and unapproved decisions are rejected', () => {

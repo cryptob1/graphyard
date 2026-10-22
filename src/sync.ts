@@ -1,14 +1,10 @@
-import { z } from 'zod';
-import { activeLease, demand, type Principal, type ScopeFile, type Work } from './model.js';
-import type { Store } from './store.js';
-import { classifyScope, inPlannedScope, shippedBy, type ScopeFinding } from './regression-guard.js';
-import { judgeTimingCompanion } from './model/timing-companion.js';
+import type { ScopeFile, Work } from './model.js';
+import { shippedBy } from './regression-guard.js';
 
 /**
  * Local half of the regression guard, for `graphyard sync`. Parses `git diff --raw -M -z
  * --no-abbrev BASE HEAD` and `git diff --numstat -M -z BASE HEAD`, both taken directly against
  * the fetched base tip, into the same file records the control plane derives from the provider.
- * Every record here already differs from the base tip; the classifier decides which are allowed.
  */
 const statuses: Record<string, ScopeFile['status']> = { A: 'added', D: 'removed', M: 'modified', R: 'renamed', C: 'copied', T: 'changed' };
 const zero = /^0+$/;
@@ -41,13 +37,6 @@ export function parseLocalScopeDiff(raw: string, numstat: string): ScopeFile[] {
     files.push(file);
   }
   return files;
-}
-
-/** `read` gives a blob's text by sha (`git cat-file blob`), so the timing baseline is judged by its lines as the control plane judges it (GY-1023). */
-export async function localScopeFindings(plannedFiles: string[], raw: string, numstat: string, generated: readonly string[] = [], read: (sha: string) => Promise<string | null> = async () => null): Promise<ScopeFinding[]> {
-  const files = parseLocalScopeDiff(raw, numstat);
-  await judgeTimingCompanion(files, read, path => inPlannedScope(plannedFiles, path));
-  return classifyScope(plannedFiles, files, generated);
 }
 
 /**
@@ -83,13 +72,13 @@ export function regenerateManagedBlocks(conflicted: string, render: (text: strin
 
 /**
  * Which shipped work each remaining conflict comes from: the delivered items whose merge commit
- * the sync brings in and whose planned scope or observed diff covers the path. When none of the
+ * the sync brings in and whose observed diff covers the path. When none of the
  * newly landed items covers it, every delivered item that ever shipped the path is named instead.
  */
 export function attributeConflicts(paths: string[], all: Work[], landed: (sha: string) => boolean, generated: readonly string[] = []) {
   const arrived = all.filter(item => item.stage === 'done' && [item.delivery?.mergeSha, item.observation?.mergeSha].some(sha => !!sha && landed(sha)));
   return paths.map(path => {
-    const covers = (item: Work) => inPlannedScope(item.plannedFiles ?? [], path) || (item.observation?.files ?? []).includes(path);
+    const covers = (item: Work) => (item.observation?.files ?? []).includes(path);
     const causes = arrived.filter(covers).map(item => item.key);
     return { path, generated: generated.includes(path), shippedBy: causes.length ? causes : shippedBy(path, all), landedSince: causes.length > 0 };
   });

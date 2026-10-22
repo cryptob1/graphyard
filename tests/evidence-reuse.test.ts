@@ -213,7 +213,7 @@ test('D6-2 requirement, scenario, proof policy, bundle, environment, freshness a
   // Requirement revision: the pass at policy v1 cannot stand for v2 even with no file changed.
   const f = await fixture(); await pass(f);
   let w = await current(f.w.id);
-  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, criteria: [{ id: 'AC-1', text: 'Behavior is proven, revised', proofs: [f.proof] }], dependencies: [], plannedFiles: [], exclusiveResources: [], reason: 'Wording revised' }, id());
+  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, criteria: [{ id: 'AC-1', text: 'Behavior is proven, revised', proofs: [f.proof] }], dependencies: [], exclusiveResources: [], reason: 'Wording revised' }, id());
   assert.equal(w.policyRevision, 2);
   const revised = await decide(f, heads.two, [file('src/app.ts', 'a'), file('docs/guide.md', 'h')]);
   assert.equal(revised.outcome, 'refused'); assert.match(revised.reasons.join('\n'), /Requirement or proof policy revision changed \(attempt at v1, work at v2\)/);

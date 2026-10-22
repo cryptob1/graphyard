@@ -82,13 +82,12 @@ function* ledger(now: number) {
       continue;
     }
     const stage = stageAt(j, item), epoch = 1 + Math.floor(j / 30);
-    const plannedFiles = kind === 'requirements' ? [...(previous?.plannedFiles ?? [`src/item-${item}.ts`]), `src/widened-${t}.ts`] : previous?.plannedFiles ?? [`src/item-${item}.ts`];
     const escalations = t % 29 >= 14 && t % 29 < 20 ? [{ trigger: 'lease-loss', at: iso(now - span + Math.floor(((seq - (t % 29 - 14) * ITEMS) / EVENTS) * span)), reason: 'the lease lapsed', actor: 'graphyard' }] : [];
     const blocker = kind === 'blocked' ? `waiting on vendor ${item % 7}` : kind === 'unblock' || kind === 'rework' ? null : previous?.blocker ?? null;
     const candidate = stage === 'build' ? null : { sha: sha(`${item}-${epoch}`), baseSha: 'b'.repeat(40), pr: 10_000 + item };
     const work = {
       id, key, title: `Item ${key} of the seeded ledger`, description: `What ${key} is for. `.repeat(30), type: 'feature', priority: 2, dependencies: [],
-      criteria: [{ id: 'AC-1', text: `The behaviour ${key} asks for holds`, proofs: ['unit:proof-1'] }], policy: { checks: ['test'], review: true }, plannedFiles,
+      criteria: [{ id: 'AC-1', text: `The behaviour ${key} asks for holds`, proofs: ['unit:proof-1'] }], policy: { checks: ['test'], review: true }, 
       revision: j + 1, policyRevision: 1, createdAt: iso(now - span), updatedAt: at, stageEnteredAt: at, ready: true, epoch, stage,
       lease: { owner: worker.id, epoch, expiresAt: iso(Date.parse(at) + 120_000) }, blocker, escalations, candidate, submission: candidate ? { epoch, pr: candidate.pr } : null,
       containmentQuarantine: t % 31 === 15 ? { epoch, at } : null, workspaces: [{ host: 'machine-a', path: `/srv/${key}-${epoch}`, epoch, owner: worker.id, branch: `graphyard/${key.toLowerCase()}-${epoch}` }],
@@ -96,7 +95,7 @@ function* ledger(now: number) {
     } as unknown as Work;
     docs.set(item, work);
     const details = kind === 'blocked' ? { reason: blocker, epoch } : kind === 'unblock' ? { reason: 'the vendor answered' } : kind === 'scope' ? { epoch, paths: [`src/asked-${t}.ts`], reason: 'the table lives elsewhere' }
-      : kind === 'requirements' ? { reason: 'widened for the ask', plannedFiles } : kind === 'rework' ? { reason: 'rework authorized' } : { pass: seq };
+      : kind === 'requirements' ? { reason: 'widened for the ask' } : kind === 'rework' ? { reason: 'rework authorized' } : { pass: seq };
     const base = bases.get(item);
     // appendSave's rule: a delta on the newest whole row when it is recent and the stage is unchanged.
     if (base?.work && base.since < 50 && base.work.stage === work.stage) {
@@ -151,7 +150,7 @@ after(async () => {
 const perRowColumns = `seq, work_id, actor, kind, created_at, doc->>'updatedAt' AS updated_at, payload->'details' AS details,
   CASE WHEN kind LIKE 'decision.%' OR kind IN ('intervention.recorded','judgement.recorded') THEN payload ELSE NULL END AS top,
   CASE WHEN doc IS NOT NULL THEN jsonb_build_object('key', doc->'key', 'stage', doc->'stage', 'title', doc->'title', 'epoch', doc->'epoch', 'blocker', doc->'blocker',
-    'plannedFiles', doc->'plannedFiles', 'quarantine', doc->'containmentQuarantine', 'escalations', doc->'escalations', 'candidate', doc->'candidate', 'submission', doc->'submission') ELSE NULL END AS work,
+    'quarantine', doc->'containmentQuarantine', 'escalations', doc->'escalations', 'candidate', doc->'candidate', 'submission', doc->'submission') ELSE NULL END AS work,
   CASE WHEN kind = 'rework' AND doc IS NOT NULL THEN ${reworkGroundsSql('doc')} END AS grounds,
   CASE WHEN work_id IS NULL THEN NULL ELSE (SELECT graphyard_event_work(earlier.work_id, earlier.payload)->>'stage' FROM events earlier WHERE earlier.work_id=ledger.work_id AND earlier.seq<ledger.seq AND (earlier.payload ? 'work' OR earlier.payload ? 'delta') ORDER BY earlier.seq DESC LIMIT 1) END AS stage_before`;
 async function perRowLedger(since: string, limit = interventionLedgerLimit): Promise<{ rows: InterventionLedgerRow[]; truncated: boolean }> {
@@ -266,7 +265,7 @@ test('unit:report-pool-isolated — the report routes run on their own small poo
   // A claimed item to renew, and a submitted one to observe.
   const key = () => randomUUID();
   const claimed = async (title: string) => {
-    let work = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/isolated.ts'], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:holds'] }] }, key());
+    let work = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:holds'] }] }, key());
     work = await engine.execute(operator, 'ready', work.id, {}, key());
     work = await engine.execute(worker, 'claim', work.id, {}, key());
     return engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/srv/${work.key}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, key());
@@ -329,7 +328,7 @@ test('integration:intervention-scan-bounded — the pattern scan reads only the 
   const settled = Array.from({ length: TOTAL_ITEMS - existingItems }, (_, index) => {
     const item = ITEMS + 1 + index, at = iso(seededAt - 60 * day + index * 1_000);
     return { id: uuid(item), key: `GY-${item}`, title: `Delivered item GY-${item}`, description: 'Shipped. '.repeat(20), type: 'feature', priority: 2, dependencies: [],
-      criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:holds'] }], policy: { checks: ['test'], review: true }, plannedFiles: [`src/done-${item}.ts`], revision: 9, policyRevision: 1,
+      criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:holds'] }], policy: { checks: ['test'], review: true }, revision: 9, policyRevision: 1,
       createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, stage: 'done', lease: null, blocker: null, escalations: [], candidate: null, submission: null,
       delivery: { mergedAt: at }, evidence: [], sessions: [], gates: [], violations: [], observation: null, workspaces: [], pipeline: { attempts: [], submittedAt: null, reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } } };
   });
@@ -360,7 +359,7 @@ test('integration:intervention-scan-bounded — the pattern scan reads only the 
 
   // A claimable item, and a leased one to renew.
   const key = () => randomUUID();
-  const ready = async (title: string) => engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/scan.ts'], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:holds'] }] }, key())).id, {}, key());
+  const ready = async (title: string) => engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:holds'] }] }, key())).id, {}, key());
   const claimable = await ready('Pattern scan beside the tick: claim');
   const leased = await engine.execute(worker, 'claim', (await ready('Pattern scan beside the tick: heartbeat')).id, {}, key());
 

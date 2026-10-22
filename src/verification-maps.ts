@@ -7,7 +7,7 @@ const mapPath = /^verification\/[^/]+\.md$/;
 
 /**
  * The verification maps (GY-1495) on origin/BASE in the coordinator checkout, read with git
- * ls-tree and git show as plannedFiles resolution reads the base tree. A launcher calls it before
+ * ls-tree and git show. A launcher calls it before
  * any coordination request, never inside one. An unreadable base reads as no maps, and a malformed
  * map is left out: a session launches without the section rather than not at all.
  */

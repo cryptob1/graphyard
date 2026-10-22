@@ -82,7 +82,7 @@ class World {
       const reviewed = !sensitive(n) || now >= entry.submittedAt + 20 * minute;
       return {
         id: `w${n}`, key: `GY-${n}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
-        policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(entry.submittedAt),
+        policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(entry.submittedAt),
         ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: n }, candidate: { sha: entry.head, baseSha: sha('base'), pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' },
         reworkRequested: !!reworked && entry.head === sha(`head${n}-1`), scenarioRequirements: [], evidence: [], blocker: null, violations: [], mergeLedger: ledger,
         observation: { source: 'control-plane', candidate: { sha: entry.head, baseSha: sha('base'), pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' }, files, checks: [], reviews: [], merged: delivered, mergeSha: delivered ? ledger!.mergeSha : null, mergeable: true, protected: false, baseTip: this.tip(), baseTipContained: true, at: iso(now) },

@@ -39,7 +39,7 @@ test('unit:soak-invariants-hold — over three days a standing worktree refusal 
     });
     const idle = new Date(start - 8 * hour);
     for (const tree of trees) for (const name of ['.gitignore', 'source.ts', '.git', '.']) await utimes(name === '.' ? tree.path : join(tree.path, name), idle, idle).catch(() => {});
-    const items = trees.map((tree, index) => ({ id: `id-${tree.key}`, key: tree.key, title: tree.key, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    const items = trees.map((tree, index) => ({ id: `id-${tree.key}`, key: tree.key, title: tree.key, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
       stage: 'done', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: new Date(start - (10 - index) * hour).toISOString(), ready: false, epoch: 1, lease: null,
       workspaces: [{ host: 'vishrog', path: tree.path, branch: tree.branch, epoch: 1, owner: 'worker' }], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [] }) as unknown as Work);
 

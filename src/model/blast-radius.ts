@@ -1,11 +1,10 @@
 import type { Gate, ScopeFile, Work } from './work.js';
-import { pathScopeContains } from './scope.js';
 
 /**
  * A candidate's merge danger and blast radius in plain sentences (GY-972): what the change
  * touches, whether it is a one-way or a two-way door, what reverting it restores, and what the
- * merge guard checks before it lands. Everything is derived from the item's own scope (its
- * plannedFiles and the files the latest observation read from the provider) and its landability
+ * merge guard checks before it lands. Everything is derived from the files the latest observation
+ * read of the candidate and its landability
  * verdict (the gates, the conflict reading and the unlanded work the head carries), so the
  * summary never says anything those do not. Gate reasons are never quoted: each gate is named by
  * what it checks, in words a newcomer can read without the docs.
@@ -56,12 +55,12 @@ function guardClauses(work: Pick<Work, 'policy' | 'criteria'>, base: string): { 
     ...(checks.length ? [{ gate: 'test', text: `the automated ${checks.length === 1 ? 'check' : 'checks'} ${list(checks)} ${checks.length === 1 ? 'passes' : 'pass'} on this exact code` }] : []),
     ...(work.policy?.review ? [{ gate: 'review', text: 'someone other than the builder approves this exact code' }] : []),
     ...(proofs ? [{ gate: 'acceptance', text: `${proofs === 1 ? 'the proof its requirements name passes' : `all ${proofs} proofs its requirements name pass`} on it` }] : []),
-    { gate: 'merge', text: `it merges cleanly onto ${base} and puts back no file outside its plan` },
+    { gate: 'merge', text: `it merges cleanly onto ${base}` },
   ];
 }
 const gateWords: Record<string, string> = { build: 'hand-in', test: 'automated checks', review: 'approval', acceptance: 'proof', merge: 'clean merge' };
 
-type Subject = Pick<Work, 'candidate' | 'observation' | 'plannedFiles' | 'policy' | 'criteria' | 'gates'>;
+type Subject = Pick<Work, 'candidate' | 'observation' | 'policy' | 'criteria' | 'gates'>;
 
 export function blastRadius(work: Subject): BlastRadius {
   const observation = work.observation;
@@ -84,12 +83,9 @@ export function blastRadius(work: Subject): BlastRadius {
   const removed = files.filter(file => file.status === 'removed').length;
   const counts = new Map<Area, number>();
   for (const file of files) { const area = areaOf(file.path); counts.set(area, (counts.get(area) ?? 0) + 1); }
-  const planned = work.plannedFiles ?? [];
-  const outside = planned.length ? files.filter(file => !planned.some(scope => pathScopeContains(scope, file.path))).length : 0;
   const touches = !files.length ? 'It changes no files.'
     : `It changes ${plural(files.length, 'file')}${lines ? ` (${plural(lines, 'line')})` : ''} in ${list([...counts].sort((a, b) => b[1] - a[1]).map(([area, count]) => `${area.name} (${count})`))}`
-      + `${removed ? `, deleting ${plural(removed, 'file')}` : ''}.`
-      + (outside ? ` ${outside === 1 ? 'One of them is' : `${outside} of them are`} outside its plan.` : '');
+      + `${removed ? `, deleting ${plural(removed, 'file')}` : ''}.`;
   const lasting = [...counts.keys()].filter(area => area.oneWay);
   const door = lasting.length ? 'one-way' : 'two-way';
   const doorway = lasting.length
@@ -100,7 +96,7 @@ export function blastRadius(work: Subject): BlastRadius {
   const reverts = `${restores}${lasting.length ? `, but not ${list(lasting.map(area => area.oneWay!))}` : ''}.`
     + (foreign.length ? ` Its branch also carries unfinished work from ${list(foreign)}, which a revert would take out too.` : '');
   const conflicting = !!observation!.conflicting;
-  const danger: Danger = lasting.length || foreign.length || outside || conflicting ? 'high'
+  const danger: Danger = lasting.length || foreign.length || conflicting ? 'high'
     : files.length > 10 || lines > 400 || removed ? 'medium' : 'low';
   const headline = `Merge danger: ${danger} · ${door} door${conflicting ? ' · conflicts with the base branch' : ''}`;
   return { danger, door, headline, touches, doorway, reverts, guard, sentences: [touches, doorway, reverts, guard] };

@@ -31,7 +31,7 @@ function escalationContext(overrides: {
       revision: overrides.revision ?? 5, policyRevision: 1, epoch: overrides.epoch ?? 1, createdAt: at,
       criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
       retiredCriterionIds: ['AC-2'],
-      plannedFiles: [], producerProofs: [], exclusiveResources: [], dependencies: [],
+      producerProofs: [], exclusiveResources: [], dependencies: [],
       refusal: { escalation, standing: [escalation], gates: [], blocker: null, violations: [] },
       candidate: null, submission: null, lease: null, implementers: [],
       history: { total: 10, kinds: [], recent: [], omitted: 0 },
@@ -110,11 +110,11 @@ test('AC-1: the requirements history is read as the ledger records it — before
   const decisionId = '3f2a1b0c-1111-4222-8333-444444444444';
   const rows: LedgerRow[] = [
     // A decision-applied revision: after-criteria on the event, the decision id quoted in its reason.
-    { seq: '12', at, actor: 'graphyard-master', kind: 'requirements', details: { before: { plannedFiles: [] }, criteria: [{ id: 'AC-1', text: 'Narrowed', proofs: ['unit:narrow'] }], reason: `Narrow the criterion [decision ${decisionId}, requested by m, approved by a: ok]` } },
+    { seq: '12', at, actor: 'graphyard-master', kind: 'requirements', details: { before: {  }, criteria: [{ id: 'AC-1', text: 'Narrowed', proofs: ['unit:narrow'] }], reason: `Narrow the criterion [decision ${decisionId}, requested by m, approved by a: ok]` } },
     // A loop-applied revision: the prior document as `before`, the new intent as `after`.
     { seq: '8', at, actor: 'graphyard-master', kind: 'requirements', details: { before: { criteria: [{ id: 'AC-1', text: 'Full', proofs: ['unit:full', 'e2e:full'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }] }, intent: { criteria: [{ id: 'AC-1', text: 'Full', proofs: ['unit:full'] }] }, reason: 'retire AC-2 and narrow AC-1 proofs' } },
     // A directly applied revision: after-criteria only, no decision named.
-    { seq: '4', at, actor: 'operator', kind: 'requirements', details: { before: { plannedFiles: [] }, criteria: [{ id: 'AC-1', text: 'Full', proofs: ['unit:full', 'e2e:full'] }], reason: 'initial narrowing' } },
+    { seq: '4', at, actor: 'operator', kind: 'requirements', details: { before: {  }, criteria: [{ id: 'AC-1', text: 'Full', proofs: ['unit:full', 'e2e:full'] }], reason: 'initial narrowing' } },
     // Routine rows never appear as revisions.
     { seq: '2', at, actor: 'worker', kind: 'heartbeat', details: { epoch: 1 } },
   ];

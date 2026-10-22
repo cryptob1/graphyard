@@ -66,10 +66,10 @@ function standing(entry: Instance, requestedAt: string): Work {
   return {
     id, key: entry.subject, title: entry.subject, description: '', type: 'bug', priority: 2, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'The behaviour changes as described', proofs: ['unit:behaviour-changes'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'test', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'test', revision: 1, policyRevision: 1,
     createdAt: requestedAt, updatedAt: requestedAt, stageEnteredAt: requestedAt, ready: true, epoch: 1, lease: null, workspaces: [],
     candidate: { sha: '9a299cadd661'.padEnd(40, '0'), baseSha: '1'.repeat(40), pr: 700, branch: `graphyard/${entry.subject.toLowerCase()}-1`, author: 'implementer' },
-    submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], scopeRequest: null,
+    submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
     nextAction: { ...action, needsHuman: humanNeeded(action)! },
     actionQueue: { actions: [{ id: `row-${entry.subject}`, key: entry.subject, work: id, kind: 'request-rework', gate: 'test', binding, inputs: action.inputs, reason: action.reason,
       refusal: entry.detail, state: 'requested', claim: null, result: null, resolution: null, resolvedAt: null, attempts: 0, history: [], requestedAt, requestedBy: 'graphyard' }], history: [] },
@@ -502,35 +502,6 @@ test('manual:fault-class-decision — a partial observation settles no held esca
   assert.deepEqual(state.faults.instances.map(entry => entry.kind), ['action:escalation']);
 });
 
-// GY-1764 names this file for GY-1763's two instances (decision class, subjects GY-1696 and GY-1761): decision formation had no
-// evidence gate. Each is replayed as the item stood; the candidate forms no decision the evidence refutes.
-test('integration:fault-class-decision-gy-1763-replay — GY-1696\'s two ask shapes produce no approver decision and no decision-refused fault', async () => {
-  const { nonRepositoryPaths } = await import('../src/model/scope-repository.js');
-  const { decideScopeRequest } = await import('../src/model/scope.js');
-  const tree = new Set(['src/model/scope.ts', 'src/daemon/cycle-scope.ts', 'README.md']);
-  const at = '2026-10-13T05:26:00.000Z', now = Date.parse('2026-10-13T05:26:30.000Z');
-  const criteria = [{ id: 'AC-1', text: 'The live observation is recorded by a master session', proofs: ['manual:checkout-restore'] }];
-  for (const paths of [['daemon.relea', 'upgrade.align'], ['.graphyard/master.json']]) {
-    const request = { epoch: 1, paths, reason: 'AC-1 needs the live fields', requestedBy: 'graphyard-opencode-1', at };
-    const standing = (decision: ReturnType<typeof decideScopeRequest> & { decidedBy?: string }) => ({
-      key: 'GY-1696', stage: 'build', plannedFiles: [] as string[], criteria, lease: { epoch: 1, expiresAt: '2026-10-13T06:26:00.000Z' },
-      scopeRequest: { ...request, decision: { state: decision.state, reason: decision.reason, paths, at, decidedBy: 'graphyard', waitedMs: 0, requestedBy: request.requestedBy, requestedAt: at, epoch: 1, ...(decision.nonRepository ? { nonRepository: true } : {}), treeRead: true } },
-    } as unknown as Work);
-    // Base: the rule judges implication alone, refuses the ask, and the loop routes it to the approver, who refuses it (decision-refused).
-    const base = standing(decideScopeRequest({ plannedFiles: [], criteria }, request));
-    assert.ok(decisions.scopeRoutineDecision(base, now, true), `${paths.join(', ')}: the base routes the ask to the approver`);
-    // A refusal the tree was never read for (a failed read, a typed ask) is never routed: it waits for the evidence.
-    const unread = standing(decideScopeRequest({ plannedFiles: [], criteria }, request));
-    delete (unread.scopeRequest!.decision as { treeRead?: boolean }).treeRead;
-    assert.equal(decisions.scopeRoutineDecision(unread, now, true), null, `${paths.join(', ')}: an unevidenced refusal is not routed`);
-    // Candidate: the evidence gate refuses it in-process, with the offending path named, and nothing is routed.
-    const gated = decideScopeRequest({ plannedFiles: [], criteria }, request, { nonRepository: nonRepositoryPaths(paths, tree) });
-    assert.equal(gated.state, 'refused');
-    assert.ok(paths.some(path => gated.reason.includes(path)), gated.reason);
-    assert.equal(decisions.scopeRoutineDecision(standing(gated), now, true), null, `${paths.join(', ')}: no approver decision is formed`);
-  }
-});
-
 test('integration:owed-decision-gy-1761-replay — approval 5499583025 of 632185dd with no ledger plan holds nothing and owes no decision past reworkDecisionWaitBoundMs', async () => {
   const { mechanicalReviewHold } = await import('../src/mechanical-findings.js');
   const head = '632185dd17dd'.padEnd(40, '0'), submittedAt = '2026-10-13T06:25:00.000Z';
@@ -582,10 +553,10 @@ test('integration:mechanical-plan-report-surfaced — a refused plan report is a
   let confirmedAt = iso(start - 11 * minute);
   const attempts: ({ reviewId: number; head: string } | null)[] = [];
   const work = (): Work => ({
-    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
     createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
-    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: true, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: true, scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [],
     observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
     mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
   } as unknown as Work);
@@ -634,10 +605,10 @@ test('integration:mechanical-plan-report-blocks-decision — an item whose plann
   let confirmedAt = iso(start - 11 * minute);
   const attempts: ({ reviewId: number; head: string } | null)[] = [];
   const work = (): Work => ({
-    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
     createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
-    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [],
     observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
     mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
   } as unknown as Work);
@@ -680,10 +651,10 @@ test('integration:mechanical-plan-report-clear-blocks-decision — a held plan t
   let confirmedAt = iso(start - 11 * minute);
   const attempts: ({ reviewId: number; head: string } | null)[] = [];
   const work = (): Work => ({
-    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    id: 'work-1761', key: 'GY-1761', title: 'GY-1761', description: '', type: 'bug', priority: 2, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
     createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
-    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [],
     observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
     mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
   } as unknown as Work);
@@ -711,122 +682,7 @@ test('integration:mechanical-plan-report-clear-blocks-decision — a held plan t
   assert.deepEqual(Object.values(state.approvals).map(watch => watch.work), [], 'no approval is requested for it');
   assert.ok(attempts.every(plan => plan === null), 'only the plan\'s absence is reported');
 });
-test('integration:scope-evidence-gate-failed-read — a failed tree read decides nothing and routes nothing; the ask waits for a read', async () => {
-  const minute = 60_000, start = Date.parse('2026-10-13T08:20:00.000Z');
-  const iso = (at: number) => new Date(at).toISOString();
-  const work = {
-    id: 'work-GY-1696', key: 'GY-1696', title: 'GY-1696', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/widget.ts'],
-    criteria: [{ id: 'AC-1', text: 'The live observation is recorded by a master session', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, stage: 'build', ready: true,
-    epoch: 1, revision: 10, policyRevision: 2, createdAt: iso(start - 2 * hour(1)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)),
-    lease: { owner: 'worker', epoch: 1, expiresAt: iso(start + 30 * minute) }, workspaces: [], submission: null, candidate: null,
-    scenarioRequirements: [], blocker: null, violations: [], evidence: [], observation: null, gates: [],
-    scopeRequest: { epoch: 1, at: iso(start - 5 * minute), paths: ['daemon.relea'], reason: 'the round needs these', requestedBy: 'worker' },
-  } as unknown as Work;
-  let reads = 0; const decided: boolean[] = [];
-  const effects = {
-    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    snapshot: async () => ({ work: [work], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
-    persist: async () => {}, reviewFindings: async () => [], basePaths: async (paths: string[]) => new Set(paths),
-    repositoryFiles: async () => { reads++; throw new Error('git is unavailable'); },
-    decideScope: async (item: Work) => { decided.push(true); return item; },
-  } as unknown as Parameters<typeof daemon.runCycle>[2];
-  let now = start;
-  const state = emptyDaemonState(config());
-  for (let step = 0; step < 3; step++, now += 2 * minute) await daemon.runCycle(config(), state, effects, () => now);
-  assert.equal(reads, 3, 'each cycle retries the read');
-  assert.deepEqual(decided, [], 'the rules alone never decide an ask whose tree could not be read');
-  assert.deepEqual(Object.values(state.approvals).map(watch => watch.work), [], 'and no approver is asked');
-});
 function hour(count: number) { return count * 60 * 60_000; }
-
-// GY-1764 rework, AC-1/AC-3: the replay above injects the classifier's verdict; this one runs the real
-// loop's scope step over repeated cycles, heads and items — the loop reads the tree once per cycle, the
-// plane decides from what the loop posted, and no approver decision is ever formed for what the tree refutes.
-test('integration:scope-evidence-gate-repeated-cycles — the loop reads the tree once per cycle, refuses non-repository asks in-process, approves decidable new files, and routes nothing', async () => {
-  const { decideScopeRequest } = await import('../src/model/scope.js');
-  const minute = 60_000, start = Date.parse('2026-10-13T08:20:00.000Z');
-  const iso = (at: number) => new Date(at).toISOString();
-  const tree = ['src/widget.ts', 'docs/guide.md', 'README.md', 'package.json'];
-  const asked = iso(start - 5 * minute);
-  const item = (key: string, paths: string[], criterion: string): Work => ({
-    id: `work-${key}`, key, title: key, description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/widget.ts'],
-    criteria: [{ id: 'AC-1', text: criterion, proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, stage: 'build', ready: true,
-    epoch: 1, revision: 10, policyRevision: 2, createdAt: iso(start - 2 * hour(1)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)),
-    lease: { owner: 'worker', epoch: 1, expiresAt: iso(start + 30 * minute) }, workspaces: [], submission: null, candidate: null,
-    scenarioRequirements: [], blocker: null, violations: [], evidence: [], observation: null, gates: [],
-    scopeRequest: { epoch: 1, at: asked, paths, reason: 'the round needs these', requestedBy: 'worker' },
-  } as unknown as Work);
-  // The plane as the loop's `autoscope` leaves it: the verdict recomputed here from the item and the evidence posted.
-  const plane = new Map<string, Work>([
-    ['GY-1696', item('GY-1696', ['daemon.relea', 'upgrade.align'], 'The live observation is recorded by a master session')],
-    ['GY-1697', item('GY-1697', ['.graphyard/master.json'], 'The credential the master reads exists')],
-    ['GY-1698', item('GY-1698', ['src/soak/new-check.ts'], 'src/soak/new-check.ts behaves for the item')],
-  ]);
-  const posted: [string, string[]][] = [];
-  let treeReads = 0;
-  const widened: string[] = [];
-  const effects = {
-    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    snapshot: async () => ({ work: [...plane.values()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
-    persist: async () => {}, basePaths: async (paths: string[]) => new Set(paths),
-    // A finding naming each offender would ground an automatic widening; a terminal non-repository refusal must never reach it.
-    reviewFindings: async () => [{ ground: 'review finding', text: 'daemon.relea upgrade.align and .graphyard/master.json need changes' }],
-    widenScope: async (work: Work) => { widened.push(work.key); return work; },
-    repositoryFiles: async () => { treeReads++; return new Set(tree); },
-    decideScope: async (work: Work, nonRepository?: readonly { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[], treeRead?: boolean) => {
-      posted.push([work.key, (nonRepository ?? []).map(entry => entry.path)]);
-      const request = work.scopeRequest!;
-      const verdict = decideScopeRequest(work, request, { nonRepository });
-      const decision = { state: verdict.state, reason: verdict.reason, at: iso(now), decidedBy: 'graphyard', waitedMs: 0, paths: verdict.paths, requestedBy: request.requestedBy, requestedAt: request.at, epoch: request.epoch, ...(verdict.nonRepository ? { nonRepository: true } : {}), ...(treeRead ? { treeRead: true } : {}) };
-      const decided: Work = { ...work, scopeDecision: decision, ...(verdict.state === 'approved'
-        ? { scopeRequest: null, plannedFiles: [...(work.plannedFiles ?? []), ...verdict.paths] }
-        : { scopeRequest: { ...request, decision } }) };
-      plane.set(work.key, decided);
-      return decided;
-    },
-  } as unknown as Parameters<typeof daemon.runCycle>[2];
-  let now = start;
-  const state = emptyDaemonState(config());
-  const violations: string[] = [];
-  for (let step = 0; step < 5; step++, now += 2 * minute) {
-    await daemon.runCycle(config(), state, effects, () => now);
-    for (const check of state.invariants.report as { holds: boolean; line: string }[]) if (!check.holds) violations.push(`cycle ${step}: ${check.line}`);
-  }
-  assert.equal(treeReads, 1, 'the tree is read once for the cycle with open asks, not once per item');
-  assert.deepEqual(posted.map(([key, paths]) => [key, paths]), [
-    ['GY-1696', ['daemon.relea', 'upgrade.align']],
-    ['GY-1697', ['.graphyard/master.json']],
-    ['GY-1698', []],
-  ], 'the loop posts the offenders it read, and nothing for the decidable new file');
-  const a = plane.get('GY-1696')!, b = plane.get('GY-1697')!, c = plane.get('GY-1698')!;
-  assert.equal(a.scopeRequest!.decision!.nonRepository, true, 'A: refused as its own verdict');
-  assert.match(a.scopeRequest!.decision!.reason, /daemon\.release is a master-status field, not a file/);
-  assert.equal(b.scopeRequest!.decision!.nonRepository, true, 'B: the install-local credential is refused as its own verdict');
-  assert.match(b.scopeRequest!.decision!.reason, /install-local \.graphyard\/ directory/);
-  assert.equal(c.scopeRequest, null, 'C: a new file inside a tracked directory is approved across the same read');
-  assert.ok(c.plannedFiles!.includes('src/soak/new-check.ts'));
-  assert.deepEqual(Object.values(state.approvals).filter(watch => watch.action === 'requirements').map(watch => watch.work), [], 'no requirements decision is requested for what the tree refutes');
-  assert.ok(!widened.includes('GY-1696') && !widened.includes('GY-1697'), 'a standing non-repository refusal is never widened on a finding');
-  assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
-  // The decision class this item removes is silent here: no requirements decision is requested, so no
-  // approver session, no escalation and no decision fault forms — the standing scope-request faults are
-  // the refused asks themselves, which the worker re-asks or finishes without, as the refusal says.
-  assert.deepEqual(state.faults.instances.map(entry => entry.kind).filter(kind => /decision|escalation/.test(kind)), [], 'no decision fault opens for any of them');
-});
-
-// GY-1764: a refusal the repository tree supplied the evidence for is no pending widening; a later attempt asks afresh.
-test('unit:non-repository-refusal-not-carried', async () => {
-  const { carriedScopeRequest } = await import('../src/engine.js');
-  const decision = { state: 'refused', reason: 'daemon.release is a master-status field, not a file', at: '2026-10-13T08:00:00.000Z', decidedBy: 'graphyard', waitedMs: 0, paths: ['daemon.release'], requestedBy: 'w', requestedAt: '2026-10-13T07:59:00.000Z', epoch: 1 };
-  const ask = { epoch: 1, at: decision.requestedAt, paths: ['daemon.release'], reason: 'r', requestedBy: 'w', decision: { ...decision, treeRead: true } };
-  assert.equal(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, { ...ask, decision: { ...decision, nonRepository: true } } as any), null, 'an evidence-gated refusal ends with its attempt');
-  assert.deepEqual(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, ask as any)?.paths, ['daemon.release'], 'an ordinary graphyard refusal the tree was read for still carries');
-  assert.equal(carriedScopeRequest({ plannedFiles: ['src/a.ts'] }, { ...ask, decision } as any), null, 'a refusal the tree was never read for is not carried to the approver');
-});
 
 // GY-1764 rework, AC-2: a ledger read that fails reads as no plan, so a held projection is cleared on that very cycle, retried
 // until the clear lands; the failure of the clear is a visible failed action, never a quiet hold.
@@ -879,10 +735,10 @@ async function timedOutClearReplay(state: ReturnType<typeof emptyDaemonState>, c
   const attempts: ({ reviewId: number; head: string } | null)[] = [];
   let now = start;
   const work = (): Work => ({
-    id: 'work-1459', key: 'GY-1459', title: 'GY-1459', description: '', type: 'bug', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    id: 'work-1459', key: 'GY-1459', title: 'GY-1459', description: '', type: 'bug', priority: 2, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 3, policyRevision: 1,
     createdAt: iso(start - hour(2)), updatedAt: iso(start), stageEnteredAt: iso(start - hour(1)), ready: true, epoch: 1, lease: null, workspaces: [],
-    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], scopeRequest: null, gates: [],
+    candidate, submission: { epoch: 1, pr: 1169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates: [],
     observation: { candidate, reviews: [review], checks: [], merged: false, prState: 'open', draft: false, at: iso(start - 30 * minute) },
     mechanicalPlan: { reviewId: 5499583025, head, at: confirmedAt },
   } as unknown as Work);
@@ -1007,7 +863,7 @@ function instanceItem(key: string, reworkRequested: boolean, verdict: boolean): 
   return {
     id: `00000000-0000-4000-8000-${key.replace(/\D/g, '').padStart(12, '0')}`, key, title: key, description: '', type: 'bug', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/loop.ts'], stage: 'review', revision: 5, policyRevision: 1, createdAt: instanceIso(-3_600_000), updatedAt: instanceIso(0),
+    stage: 'review', revision: 5, policyRevision: 1, createdAt: instanceIso(-3_600_000), updatedAt: instanceIso(0),
     stageEnteredAt: instanceIso(-1_800_000), ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 1884 },
     candidate, reworkRequested, scenarioRequirements: [], evidence: [], observation, blocker: null, violations: [],
     gates: [{ name: 'build', passed: true, reasons: [] }, { name: 'review', passed: !verdict, reasons: verdict ? ['Outstanding change requests must be resolved through a new review'] : [] }],
@@ -1687,7 +1543,7 @@ const gy2166Bypasses = [
 
 const gy2166FoldRows = () => gy2166Bypasses.map(entry => ({ seq: entry.seq, workId: entry.workId, actor: 'cryptob1-graphyard-master', kind: 'merge.reconciled', at: entry.at,
   details: null, payload: { mergeSha: entry.mergeSha, observedTip: gy2166Base }, stageBefore: 'test', work: { key: entry.key, stage: 'test', title: entry.key, epoch: 7, blocker: null } }));
-const gy2166Delivered = () => gy2166Bypasses.map(entry => ({ id: entry.workId, key: entry.key, title: entry.key, stage: 'done', epoch: 7, plannedFiles: ['docs/'], blocker: null,
+const gy2166Delivered = () => gy2166Bypasses.map(entry => ({ id: entry.workId, key: entry.key, title: entry.key, stage: 'done', epoch: 7, blocker: null,
   delivery: { mergedAt: entry.at, mergeSha: entry.mergeSha, authorizationRevision: 1 }, observation: { merged: true, mergedAt: entry.at, mergeSha: entry.mergeSha, source: 'control-plane', conversations: { unresolved: [] } } } as unknown as Work));
 
 test('manual:fault-class-decision — intervention-pattern|interventions|2026-10-19T05:41:28.284Z: the writer\'s own reconciled deliveries are no bypass, so the test-stage pattern cannot fire', () => {

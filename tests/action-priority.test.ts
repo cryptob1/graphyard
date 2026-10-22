@@ -9,7 +9,7 @@ import { server } from '../src/server.js';
 import { leaseLossReason, standingEscalations, type Escalation, type Principal, type Work } from '../src/model.js';
 import { actionIdleMs, idleActionable, queueSnapshot, reconcileActions } from '../src/model/actions.js';
 import { actionJudgment, carriedAction, executorRunnableKinds, humanNeeded, humanNeededActions, nextAction, openAction } from '../src/model/next-action.js';
-import { humanNeededAttention, needsHumanActions, scopeRequestAttention } from '../src/cli/master-status.js';
+import { humanNeededAttention, needsHumanActions } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2000-01-01 lease expiry forces a lapse that stays lapsed, 2026-09-22 resetsAt is a past record the note quotes, and 2026-09-21 `at` is the fixed now handed to nextAction.
 
@@ -18,15 +18,12 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *
  * A standing escalation used to be answered before anything else was considered, so a concern
  * that blocked nothing still froze work anybody could have done; an escalation whose cause the
- * ledger already explained still waited for a person; and a scope widening an item's own criteria
- * imply waited for a master session to run a command. Each test here is named for the proof it
+ * ledger already explained still waited for a person. Each test here is named for the proof it
  * produces: integration:escalation-does-not-freeze-workable-item,
- * integration:explained-escalations-settle-unattended,
- * integration:scope-request-answered-by-executor and unit:human-needed-actions-visible.
+ * integration:explained-escalations-settle-unattended and unit:human-needed-actions-visible.
  *
  * No test here runs a master session. Where an action has to be carried out, it is carried out the
- * way the loop's own steps carry it out: a launched worker claims under its own identity, and the
- * scope step asks the control plane's widening rule (`autoscope`) as the coordinator.
+ * way the loop's own steps carry it out: a launched worker claims under its own identity.
  */
 
 const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -64,14 +61,10 @@ before(async () => {
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
 
-/**
- * Every item this file creates owns a planned scope of its own, so what it overlaps is never part
- * of the case under test (overlap holds no dispatch; an exclusive resource does).
- */
 let sequence = 0;
 async function created(overrides: Record<string, unknown> = {}) {
-  const scope = `src/priority-${++sequence}/`;
-  return engine.execute(human, 'create', null, { title: `Priority ${sequence}`, plannedFiles: [scope], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, id());
+  ++sequence;
+  return engine.execute(human, 'create', null, { title: `Priority ${sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, id());
 }
 const release = (work: Work) => engine.execute(human, 'ready', work.id, {}, id());
 const ready = async (overrides: Record<string, unknown> = {}) => release(await created(overrides));
@@ -99,8 +92,6 @@ async function launchWorker(item: Work) {
   const claimed = await engine.execute(other, 'claim', item.id, {}, id());
   return engine.execute(other, 'workspace', claimed.id, { epoch: claimed.epoch, host: 'host-1', path: `/tmp/priority/${claimed.id}-${claimed.epoch}`, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` }, id());
 }
-/** The loop's scope step: the control plane's widening rule decides the request for its epoch, on a base tree the loop read. */
-const autoscope = (item: Work, epoch: number) => engine.execute(coordinator, 'autoscope', item.id, { epoch, treeRead: true }, id());
 
 // ---- AC-1: an escalation stops only the work it blocks -----------------------------------------
 
@@ -234,71 +225,12 @@ test('integration:explained-escalations-settle-unattended — a lease-loss the l
     /requires a declared human session/);
 });
 
-// ---- AC-3: a scope request the criteria imply is answered by the loop's scope step ------------------------
-
-test('integration:scope-request-answered-by-executor — a request for a file an acceptance criterion names is granted by the loop\'s approve-scope step, with no master session, and only a widening the criteria do not support reaches a person', async () => {
-  const target = 'src/priority-palette/tokens.ts';
-  let item = await release(await created({ criteria: [
-    { id: 'AC-1', text: 'The widget renders its palette', proofs: [PROOF] },
-    { id: 'AC-2', text: `${target} holds the palette tokens the widget reads`, proofs: [PROOF] },
-  ] }));
-  item = await engine.execute(worker, 'claim', item.id, {}, id());
-  const epoch = item.epoch;
-  item = await engine.execute(worker, 'workspace', item.id, { epoch, host: 'host-1', path: `/tmp/priority/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${epoch}` }, id());
-  const planned = [...item.plannedFiles];
-
-  // The worker keeps its lease and records what it needs; the control plane names the step.
-  item = await engine.execute(worker, 'scope', item.id, { epoch, paths: [target], reason: 'AC-2 puts the tokens there' }, id());
-  assert.equal(action(item).kind, 'approve-scope');
-  assert.deepEqual(action(item).inputs, { kind: 'approve-scope', epoch, paths: [target], requestedBy: worker.id, detail: 'AC-2 puts the tokens there' });
-  assert.equal(action(item).llmRole, null, 'applying the item\'s own scope is mechanical');
-  assert.equal(action(item).needsHuman, undefined);
-  assert.ok(executorRunnableKinds.includes('approve-scope'), 'and it is a mechanical kind, not a judgment');
-  // Nobody is asked to decide it: the attention list is for widenings the item does not carry.
-  assert.deepEqual(scopeRequestAttention({ work: [item], now: new Date().toISOString() }), []);
-
-  const decided = await autoscope(item, epoch);
-  assert.equal(decided.scopeDecision?.state, 'approved', JSON.stringify(decided.scopeDecision));
-  item = await reload(item);
-  assert.deepEqual(item.plannedFiles, [...planned, target], 'the widening is applied');
-  assert.equal(item.scopeRequest, null, 'the request is answered and cleared');
-  assert.equal(item.scopeDecision!.decidedBy, 'graphyard');
-  assert.match(item.scopeDecision!.reason, new RegExp(`${target.replace(/\./g, '\\.')} \\(AC-2 names ${target.replace(/\./g, '\\.')}\\)`));
-  assert.equal(item.lease!.epoch, epoch, 'and the attempt keeps its lease');
-  assert.equal(action(item), null, 'and the item needs nothing from anybody: the worker holding it is doing the work');
-
-  // A widening no criterion implies is the one that is somebody's decision: the loop refuses it,
-  // the item is blocked on the refusal, and it is named for a person with the command.
-  const outside = 'src/priority-unclaimed/other.ts';
-  item = await engine.execute(worker, 'scope', item.id, { epoch, paths: [outside], reason: 'It looked related' }, id());
-  await autoscope(item, epoch);
-  item = await reload(item);
-  assert.equal(item.scopeRequest?.decision?.state, 'refused');
-  assert.deepEqual(item.plannedFiles, [...planned, target], 'nothing was widened');
-  assert.match(item.blocker!, /^Scope request refused/);
-  // Inside the bound the loop routes it to the approver and the engine refuses `master scope`
-  // (GY-1388), so status names it only once that bound has passed with no routed decision.
-  assert.deepEqual(scopeRequestAttention({ work: [item], now: new Date().toISOString() }), []);
-  const aged = (iso: string) => new Date(Date.parse(iso) - 16 * 60_000).toISOString(), request = item.scopeRequest!;
-  const attention = scopeRequestAttention({ work: [{ ...item, scopeRequest: { ...request, at: aged(request.at), decision: { ...request.decision!, at: aged(request.decision!.at) } } }], now: new Date().toISOString() });
-  assert.equal(attention.length, 1);
-  assert.match(attention[0].text, /The widening rule refuses it:/);
-  assert.equal(attention[0].next, `graphyard master scope ${item.key}`);
-  assert.equal(action(item).kind, 'escalate', 'and the item itself says a judgment is owed');
-  assert.ok(humanNeededActions([item], new Date()).some(entry => entry.key === item.key && entry.source === 'action'));
-
-  // The worker withdraws the ask; the refusal it earned goes with it and the item works on.
-  item = await engine.execute(worker, 'scope', item.id, { epoch, paths: [], reason: 'Withdrawn' }, id());
-  assert.equal(item.blocker, null);
-  assert.deepEqual(scopeRequestAttention({ work: [item], now: new Date().toISOString() }), []);
-});
-
 // ---- AC-4: an action no executor may run is owed by somebody, and counted apart -----------------
 
 const at = '2026-09-21T12:00:00.000Z';
 const probe = (overrides: Partial<Work> = {}): Work => ({
   id: `id-${overrides.key ?? 'GY-1'}`, key: 'GY-1', title: 'Owed', type: 'feature', description: '',
-  priority: 2, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [],
+  priority: 2, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
   ready: true, stage: 'merge', epoch: 1, revision: 1, policyRevision: 1,
   gates: [], violations: [], evidence: [], workspaces: [], agentRequests: [], sessions: [],
   lease: null, submission: null, candidate: null, observation: null, blocker: null,

@@ -44,7 +44,7 @@ function work(clock: number): Work {
   const at = new Date(clock).toISOString();
   return {
     id: 'work-1850', key: 'GY-1850', title: 'Reviewer profiles before the first review', description: '', type: 'bug', priority: 0, dependencies: [],
-    plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }],
+    criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }],
     policy: { checks: [], review: false }, stage: 'review', revision: 1, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
     workspaces: [], candidate, submission: { epoch: 1, pr: 1850 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

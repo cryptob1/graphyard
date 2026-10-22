@@ -28,7 +28,7 @@ function releasingRunner() {
 test('unit:triage-skips-unshipped-parent — triage never judges a follow-up whose parent has not shipped, nor raises it as overdue; once the parent ships it is judged', async t => {
   t.after(clearTriageRuns);
   const day = 30 * 3_600_000, now = Date.parse('2026-09-30T12:00:00Z'), old = new Date(now - day).toISOString();
-  const base = { type: 'chore', priority: 2, plannedFiles: [], criteria: [], policy: { checks: ['test'], review: true }, ready: false, revision: 1, policyRevision: 1, createdAt: old, updatedAt: old, stageEnteredAt: old, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: '' };
+  const base = { type: 'chore', priority: 2, criteria: [], policy: { checks: ['test'], review: true }, ready: false, revision: 1, policyRevision: 1, createdAt: old, updatedAt: old, stageEnteredAt: old, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], description: '' };
   const item = (key: string, title: string, overrides: Partial<Work> = {}) => ({ ...base, id: `id-${key}`, key, title, stage: 'backlog', dependencies: [], ...overrides }) as unknown as Work;
   const review = item('GY-900', 'Still in review', { stage: 'review' });
   const landed = item('GY-901', 'Landed', { stage: 'done', closure: null });

@@ -10,7 +10,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-1898: a fleet face any writer moved — a routine session record, an observation save, a command —
 // makes the next reconciliation pass evaluate the moved item and the items whose evaluation reads it
 // (`readsFace`: by reference, as a split sibling, through a shared exclusive resource or an
-// overlapping path scope), not every live item. Only an empty kept view, a merge-configuration
+// overlapping observed file), not every live item. Only an empty kept view, a merge-configuration
 // change or the full-evaluation interval makes a pass full, and over a scripted sequence of
 // external face moves the decisions and writes equal those of evaluating every item each pass.
 
@@ -38,7 +38,7 @@ after(async () => {
 });
 
 let created = 0;
-const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Face readers ${++created}`, plannedFiles: [`src/face-readers-${created}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:face-move-evaluates-readers-only'] }], ...extra }, randomUUID());
+const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Face readers ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:face-move-evaluates-readers-only'] }], ...extra }, randomUUID());
 /** A session-record write: the routine API write whose face moves the production report names. */
 const sessionWrite = (id: string, n: number, state: 'running' | 'finished' = 'running') =>
   engine.execute(operator, 'session', id, { id: `face-readers-session-${n}`, kind: 'coordination', runtime: 'test-runtime', host: 'test-host', subject: 'GY-1898 face-move driver', state }, randomUUID());
@@ -82,15 +82,13 @@ test('unit:face-move-evaluates-readers-only — with 30 live items an API write 
     recorder.evaluated.length = 0;
     await settle();
 
-    // Readers of X's face, one per way an evaluation reads another item: by reference (a
-    // dependency), as a split sibling (a shared parent), through a shared exclusive resource, and
-    // through an overlapping path scope. Each is evaluated with X; every item that reads nothing
-    // of X is not.
+    // Readers of X's face, one per way an evaluation of an item with no candidate reads another: by
+    // reference (a dependency), as a split sibling (a shared parent) and through a shared exclusive
+    // resource. Each is evaluated with X; every item that reads nothing of X is not.
     const parent = await create();
     const byReference = await create({ dependencies: [x.id] });
     const sibling = await create();
     const sharer = await create({ exclusiveResources: ['res:face-readers'] });
-    const overlayer = await create({ plannedFiles: [...x.plannedFiles] });
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{exclusiveResources}', to_jsonb($2::jsonb)) WHERE id = $1`, [x.id, JSON.stringify(['res:face-readers'])]);
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{parent}', to_jsonb($2::text)) WHERE id = $1`, [x.id, parent.id]);
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{parent}', to_jsonb($2::text)) WHERE id = $1`, [sibling.id, parent.id]);
@@ -102,8 +100,8 @@ test('unit:face-move-evaluates-readers-only — with 30 live items an API write 
     const withReaders = engine.reconcileTicks.at(-1)!;
     assert.ok(!withReaders.full, 'the moved face still makes no full pass');
     assert.deepEqual(withReaders.faces.map(move => move.key), [x.key]);
-    assert.equal(withReaders.readers, 5, `the tick counts the moved item and its four readers: ${withReaders.readers}`);
-    assert.deepEqual([...new Set(recorder.evaluated)], [x.id, byReference.id, sibling.id, sharer.id, overlayer.id],
+    assert.equal(withReaders.readers, 4, `the tick counts the moved item and its three readers: ${withReaders.readers}`);
+    assert.deepEqual([...new Set(recorder.evaluated)], [x.id, byReference.id, sibling.id, sharer.id],
       `the pass evaluated X and the items that read its face, and nothing else: ${recorder.evaluated.join(', ')}`);
     const readers = new Set(recorder.evaluated);
     for (const other of fleet) if (other.id !== x.id) assert.ok(!readers.has(other.id), `${other.key} reads nothing of X's face and is not evaluated`);
@@ -167,12 +165,12 @@ test('unit:face-move-readers-match-full-evaluation — the view, the configurati
   await settle();
 
   // The scripted sequence: between passes an external writer moves faces — retitles, the release
-  // and session writes the API serves, a re-dependency, an overlapping scope, a dropped resource,
+  // and session writes the API serves, a re-dependency, a dropped resource,
   // a parent's retitle and a deletion. The readers run decides each on the moved item and the
   // items its face feeds, the full evaluation held open the whole time; the reference run
   // evaluates every live item each pass. The outcomes must come out equal.
   const item = async (title: string, extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null,
-    { title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:face-move-readers-match-full-evaluation'] }], ...extra }, randomUUID());
+    { title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:face-move-readers-match-full-evaluation'] }], ...extra }, randomUUID());
   const script = (x: Work, byReference: Work, sibling: Work, parent: Work, drafter: Work): [string, () => Promise<unknown>][] => [
     // A retitle: the moved item alone; nothing reads a description.
     ['retitle the face item', () => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{description}', to_jsonb($2::text)) WHERE id = $1`, [x.id, 'moved by an external writer'])],
@@ -183,9 +181,6 @@ test('unit:face-move-readers-match-full-evaluation — the view, the configurati
     ['end the session', () => engine.execute(operator, 'session', x.id, { id: 'face-readers-session-3', kind: 'coordination', runtime: 'test-runtime', host: 'test-host', subject: 'scripted face moves', state: 'finished' }, randomUUID())],
     // The by-reference reader gains a dependency on the draft: its own face moves, and nothing reads it.
     ['re-depend the reader', () => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{dependencies}', to_jsonb($2::jsonb)) WHERE id = $1`, [byReference.id, JSON.stringify([x.id, drafter.id])])],
-    // The sibling takes the face item's planned file: its move reaches that item through the
-    // overlapping scope and the shared parent.
-    ['overlap the sibling', () => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{plannedFiles}', to_jsonb($2::jsonb)) WHERE id = $1`, [sibling.id, JSON.stringify(x.plannedFiles)])],
     // The face item drops its exclusive resource: the sharer, a reader of the face as it stood
     // before the move, is reached through the before document.
     ['drop the resource', () => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{exclusiveResources}', '[]'::jsonb) WHERE id = $1`, [x.id])],
@@ -223,7 +218,6 @@ test('unit:face-move-readers-match-full-evaluation — the view, the configurati
     const byReference = await item('Script reader', { dependencies: [x.id] });
     const sibling = await item('Script sibling');
     const sharer = await item('Script sharer', { exclusiveResources: ['res:script'] });
-    const overlayer = await item('Script overlayer', { plannedFiles: [...x.plannedFiles] });
     const drafter = await item('Script draft');
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{parent}', to_jsonb($2::text)) WHERE id = $1`, [x.id, parent.id]);
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{parent}', to_jsonb($2::text)) WHERE id = $1`, [sibling.id, parent.id]);

@@ -111,7 +111,7 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   const clock = () => now;
 
   const filed = await ok(operator, 'POST', 'work', {
-    title: 'silent soak death', plannedFiles: ['src/soak-silent.ts'],
+    title: 'silent soak death', 
     criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
     origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: 'src/a.ts — a finding' }] } },
   }) as Work;
@@ -120,7 +120,7 @@ test('unit:soak-invariants-hold — over a simulated hour silent ended failover 
   const at = soakStart - 3 * 3_600_000;
   const coveringWork = {
     id: 'work-GY-99', key: 'GY-99', title: 'Covering scope fix', description: '', type: 'bug', priority: 1,
-    dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'backlog', revision: 1, policyRevision: 1,
+    dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, stage: 'backlog', revision: 1, policyRevision: 1,
     createdAt: new Date(at).toISOString(), updatedAt: new Date(at).toISOString(), stageEnteredAt: new Date(at).toISOString(),
     ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [],
     evidence: [], observation: null, blocker: null, gates: [], violations: [],

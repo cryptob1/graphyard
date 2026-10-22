@@ -46,7 +46,7 @@ const stored = async (root: string) => JSON.parse(await readFile(join(root, '.gr
 const reresolvingOn = (workspaces: string[]) => (root: string, config: MasterConfig) => reresolveHerdrWorkspace(root, config, current => liveHerdrWorkspace(current, herdr(workspaces)));
 
 function item(overrides: Partial<Work>): Work {
-  return { id: 'id-GY-2517', key: 'GY-2517', title: 'Item', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [],
+  return { id: 'id-GY-2517', key: 'GY-2517', title: 'Item', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
     stage: 'build', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 4, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides } as Work;
 }

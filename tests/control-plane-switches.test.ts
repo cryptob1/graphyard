@@ -4,10 +4,6 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { regressionRefusals, landingRegressions } from '../src/regression-guard.js';
-import { restoreAndReport, restoreOffLine } from '../src/cli/sync-restore.js';
-import { sessionHarnessPlan, workerHarnessPlan } from '../src/master/harness.js';
-import { controlPlaneMerger, scopeStep } from '../src/daemon/cycle-scope.js';
 import { evaluateLandability, landabilityRefusals } from '../src/model/landability.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
@@ -20,9 +16,9 @@ import { advisoryTests, listTestFiles } from '../scripts/ci-tests.mjs';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { Observation, Work } from '../src/model/work.js';
 
-// GY-1528: the control-plane merger switches off the gates the decided model retired — plannedFiles
-// and scope refusals, sync-restore, the scope hook, producer sessions, budget blockers and the
-// normal-risk rework approver — while github mode keeps each exactly as before.
+// GY-1528: the control-plane merger switches off the gates the decided model retired — producer
+// sessions, budget blockers and the normal-risk rework approver — while github mode keeps each
+// exactly as before.
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const start = Date.parse('2030-05-01T00:00:00Z');
@@ -41,7 +37,7 @@ const observation = (source: 'control-plane' | null, paths: string[]): Observati
 const item = (source: 'control-plane' | null, paths: string[], fields: Record<string, unknown> = {}): Work => ({
   id: 'w1', key: 'GY-1', title: 'switch fixture', type: 'feature', description: '', priority: 1, dependencies: [],
   criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works', 'integration:item-holds', 'manual:item-looks', 'e2e:item-ships'] }],
-  policy: { checks: ['test'], review: true }, plannedFiles: ['src/app.ts'], stage: 'build', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
+  policy: { checks: ['test'], review: true }, stage: 'build', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
   workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-1-1', epoch: 1, owner: 'worker' }], submission: { epoch: 1, pr: 7 },
   candidate: { sha: head, baseSha: base, pr: 7, branch: 'graphyard/gy-1-1', author: 'worker' }, reworkRequested: false, scenarioRequirements: [], evidence: [],
   observation: observation(source, paths), blocker: null, gates: [], violations: [], createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start), ...fields,
@@ -51,65 +47,6 @@ const trialLedger = (proofs: Record<string, { executed: number; failed: number }
     { kind: 'merge.intent', payload: { key: 'GY-1', head: tried, baseTip: base, mergeSha: sha('merge'), risk: 'normal', at: iso(start) } },
     { kind: mergeTrialKind, payload: { head: tried, baseTip: base, mergeSha: sha('merge'), build: 'pass', tests: { passed: 1, failed: [], files: 1 }, files: [], proofs, durationMs: 1 } },
   ])['GY-1'];
-
-test('unit:scope-switches-control-plane — under the control-plane merger regressionRefusals refuses nothing on plannedFiles (landing regressions still computed), restore says it is off and commits nothing, the worker harness carries no scope-guard hook, and the loop decides no scope request', async () => {
-  // plannedFiles: a file outside them refuses nothing for a control-plane observation.
-  const outside = item('control-plane', ['src/app.ts', 'src/other.ts']);
-  assert.deepEqual(regressionRefusals(outside, outside.observation!, []), []);
-  const landing = { ...outside.observation!, landing: { base, files: [scoped('src/landed.ts')] } } as Observation;
-  assert.equal(landingRegressions(outside, landing, []).length, 1, 'what landing would revert is still computed for status');
-  assert.deepEqual(regressionRefusals(outside, landing, []), []);
-  // sync --restore: one rev-parse for the report, no restore and no commit; the exit code stays 0.
-  const calls: string[][] = [], printed: any[] = [];
-  const git = (...args: string[]) => { calls.push(args); if (args[0] !== 'rev-parse') throw new Error(`restore ran git ${args.join(' ')}`); return head; };
-  process.exitCode = 0;
-  await restoreAndReport(git, value => printed.push(value), { work: { key: 'GY-1', plannedFiles: ['src/app.ts'] }, baseBranch: 'main', baseTip: base, regenerated: [], generated: [], refused: ['src/other.ts'], controlPlane: true });
-  assert.deepEqual(calls, [['rev-parse', 'HEAD']]);
-  assert.equal(process.exitCode, 0);
-  assert.equal(printed.length, 1);
-  assert.deepEqual([printed[0].ok, printed[0].restore, printed[0].restored], [true, 'off', []]);
-  assert.ok(printed[0].next.startsWith(restoreOffLine), printed[0].next);
-  // The worker harness: no scope-guard hook in either plan the launch writes.
-  const workerInput = { cliPath: '/bin/graphyard', branch: 'graphyard/gy-1-1', baseBranch: 'main', credentialHome: '/creds', key: 'GY-1', epoch: 1, mergeWriter: 'control-plane' as const };
-  assert.equal(workerHarnessPlan(workerInput).hooks, undefined);
-  assert.equal(sessionHarnessPlan({ ...workerInput, role: 'worker', kind: 'claude', repository: 'owner/project', credentialDirectories: ['/creds/a'] }).hooks, undefined);
-  // The loop's scope step: the merger is read, and no request is decided, widened or re-planned.
-  const decided: string[] = [];
-  const effects = { mergeWriter: { merger: async () => 'control-plane' }, decideScope: async (work: Work) => { decided.push(work.key); return work; }, persist: async () => {} } as unknown as DaemonEffects;
-  const asking = item('control-plane', ['src/app.ts'], { lease: { epoch: 1, owner: 'worker', expiresAt: iso(start + 600_000) }, scopeRequest: { epoch: 1, at: iso(start), paths: ['src/other.ts'], requestedBy: 'worker', reason: 'needs it' } });
-  const cycle = { state: emptyDaemonState(config), effects, now: () => start, clock: start, performed: [], open: [asking], isolate: async (_k: unknown, _i: unknown, _n: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle;
-  assert.equal(await controlPlaneMerger(cycle), true);
-  const { settled, budget } = await scopeStep(cycle);
-  assert.deepEqual([decided, settled.size, budget.breaches, cycle.performed], [[], 0, [], []]);
-});
-
-test('unit:scope-switches-github-snapshot — a candidate GitHub observed keeps the plannedFiles refusal, and a loop wired without merge writer reads keeps its scope step', async () => {
-  const outside = item(null, ['src/app.ts', 'src/other.ts']);
-  const refusals = regressionRefusals(outside, outside.observation!, []);
-  assert.equal(refusals.length, 2);
-  assert.equal(refusals[0], 'Candidate changes 1 file outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-1, restore each file from origin/<base>, and push again');
-  assert.match(refusals[1], /^Out-of-scope regression: src\/other\.ts: /);
-  // No merge writer reads keep the scope step running.
-  assert.equal(await controlPlaneMerger({ state: emptyDaemonState(config), effects: { mergeWriter: null } } as unknown as Cycle), false);
-});
-
-test('unit:scope-switches-control-plane — a failed merger read never re-enables the scope actions: it reads as the control plane', async () => {
-  let read: () => Promise<string> = async () => 'control-plane';
-  const reads = { merger: () => read() };
-  const known = { state: emptyDaemonState(config), effects: { mergeWriter: reads } } as unknown as Cycle;
-  assert.equal(await controlPlaneMerger(known), true);
-  read = async () => { throw new Error('status unreadable'); };
-  assert.equal(await controlPlaneMerger(known), true, 'a failed read is the control plane');
-  const fresh = { state: emptyDaemonState(config), effects: { mergeWriter: reads } } as unknown as Cycle;
-  assert.equal(await controlPlaneMerger(fresh), true, 'nothing read yet: the scope actions are off');
-  // The scope step itself: a failed read decides nothing and records nothing.
-  const decided: string[] = [];
-  const effects = { mergeWriter: reads, decideScope: async (work: Work) => { decided.push(work.key); return work; }, persist: async () => {} } as unknown as DaemonEffects;
-  const asking = item('control-plane', ['src/app.ts'], { lease: { epoch: 1, owner: 'worker', expiresAt: iso(start + 600_000) }, scopeRequest: { epoch: 1, at: iso(start), paths: ['src/other.ts'], requestedBy: 'worker', reason: 'needs it' } });
-  const cycle = { state: emptyDaemonState(config), effects, now: () => start, clock: start, performed: [], open: [asking], isolate: async (_k: unknown, _i: unknown, _n: unknown, body: () => Promise<unknown>) => body() } as unknown as Cycle;
-  const { settled } = await scopeStep(cycle);
-  assert.deepEqual([decided, settled.size, cycle.performed], [[], 0, []]);
-});
 
 test('unit:landability-control-plane-ledger-proofs — a control-plane candidate\'s acceptance reads unit:/integration: counts from work.mergeLedger.trial for the current head, asks manual: only of a sensitive change, defers e2e:, and ignores producer evidence', () => {
   const acceptance = (work: Work) => landabilityRefusals(evaluateLandability(work, [work], new Date(start)), 'acceptance');

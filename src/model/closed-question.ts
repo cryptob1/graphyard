@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { proofSchema } from './proof.js';
-import { decideScopeRequest } from './scope.js';
 import type { Work } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -109,12 +108,6 @@ export function closedQuestionRefusal(work: Work, proof: string): string | null 
     return `${proof} is established only by an approved attest decision — a two-party decision an answer never satisfies; request it with graphyard master decide ${work.key} attest`;
   if (work.humanRequest && !work.humanRequest.answer)
     return `${work.key} waits on a human-only decision (${work.humanRequest.kind}); an answer never stands in for one, and only the human's answer resumes the item`;
-  const scope = work.scopeRequest;
-  if (scope) {
-    const verdict = decideScopeRequest(work, scope);
-    if (verdict.state === 'refused')
-      return `${work.key} has an open scope request its criteria do not name (${verdict.reason}); an answer never approves a scope widening — an operator decides it`;
-  }
   return null;
 }
 

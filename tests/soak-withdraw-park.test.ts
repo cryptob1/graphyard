@@ -105,7 +105,7 @@ test('unit:soak-invariants-hold — across the real loop\'s cycles a withdrawn p
     }
   };
 
-  let work = await ok(master.token, 'POST', 'work', { title: 'Dashboard ordering', plannedFiles: ['src/dashboards.ts'], criteria: [{ id: 'AC-1', text: 'Ships the dashboard asked for first', proofs: ['unit:dashboards'] }], reason: 'Operator goal: dashboards' }) as Work;
+  let work = await ok(master.token, 'POST', 'work', { title: 'Dashboard ordering', criteria: [{ id: 'AC-1', text: 'Ships the dashboard asked for first', proofs: ['unit:dashboards'] }], reason: 'Operator goal: dashboards' }) as Work;
   work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for an attempt' }) as Work;
 
   // The loop dispatches it; the worker parks on the ordering, and the loop never dispatches it again while it waits.

@@ -294,7 +294,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
 
 /** A claimed item with its workspace, and the observation of a candidate changing `files` on its branch. */
 async function claimed(plannedFiles: string[]) {
-  let work: Work = await engine.execute(operator, 'create', null, { title: `implements ${randomUUID().slice(0, 6)}`, plannedFiles, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID());
+  let work: Work = await engine.execute(operator, 'create', null, { title: `implements ${randomUUID().slice(0, 6)}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   const branch = `graphyard/${work.key.toLowerCase()}-1`;

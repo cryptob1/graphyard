@@ -38,7 +38,7 @@ function refused(instance: typeof instances[number]): Work {
   const candidate = { sha: instance.sha, baseSha: instance.baseSha, pr: instance.pr, branch: `graphyard/${instance.key.toLowerCase()}-1`, author: 'worker' };
   return {
     id: `work-${instance.key}`, key: instance.key, title: instance.key, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], stage: 'merge', revision: 9, policyRevision: 2,
+    policy: { checks: ['test', 'typecheck'], review: true }, stage: 'merge', revision: 9, policyRevision: 2,
     createdAt: instance.since, updatedAt: instance.at, stageEnteredAt: instance.since, ready: true, epoch: 1, lease: null, workspaces: [], candidate,
     submission: { epoch: 1, pr: instance.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [],
     gates: ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: true, reasons: [] })),

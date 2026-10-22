@@ -26,7 +26,7 @@ const decision = '5e1d2c3b-4cb5-4f21-9b0e-0f2a6c8d4e15';
 function item(): Work {
   return {
     id: 'work-1612', key: 'GY-1612', title: 'First seen', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Dated from first sight', proofs: ['unit:approver-stall-first-seen'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Dated from first sight', proofs: ['unit:approver-stall-first-seen'] }], policy: { checks: ['test'], review: true }, 
     stage: 'ready', revision: 4, policyRevision: 1, createdAt: iso(clock - 7_200_000), updatedAt: iso(clock), stageEnteredAt: iso(clock - 3_600_000), ready: true, epoch: 0,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [],

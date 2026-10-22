@@ -31,7 +31,7 @@ const clock = Date.parse(at);
 function delivered(key: string, fields: Record<string, unknown> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author: 'graphyard-claude-1' };
   return { id: randomUUID(), key, title: `Item ${key}`, description: '', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/feature.ts'],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, 
     stage: 'done', revision: 9, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-7-1', epoch: 1, owner: 'graphyard-claude-1' }], candidate, submission: { epoch: 1, pr: 7 }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['graphyard-claude-1'], postMergeReview: 'owed',
@@ -90,18 +90,17 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   // An extensionless file, or a file named after the criterion, is still the finding's file; prose is not.
   assert.deepEqual(parseFinding('Dockerfile:12 — the base image is unpinned'), { text: 'Dockerfile:12 — the base image is unpinned', path: 'Dockerfile', line: 12, paths: ['Dockerfile'] });
   assert.equal(parseFinding('Makefile — the test target skips the build').path, 'Makefile');
-  assert.equal(postMergeFollowUp(owed, M, parseFinding('deploy/Containerfile has no healthcheck'), 0).plannedFiles[0], 'deploy/Containerfile');
+  assert.equal(parseFinding('deploy/Containerfile has no healthcheck').path, 'deploy/Containerfile');
   assert.deepEqual(parseFinding('AC-4, src/model/post-merge-review.ts:80-84 and :100 — the path is lost'), { text: 'AC-4, src/model/post-merge-review.ts:80-84 and :100 — the path is lost', path: 'src/model/post-merge-review.ts', line: 80, paths: ['src/model/post-merge-review.ts'] });
   assert.equal(parseFinding('.gitignore misses dist').path, '.gitignore');
-  // A finding naming several files plans its follow-up on every one of them, so the fix may edit each.
+  // A finding naming several files names every one of them in its follow-up.
   const twoFiles = parseFinding('src/a.ts:12 and src/b.ts:20 — the two files disagree; see `src/a.ts` and Makefile, not work.postMergeReview');
   assert.deepEqual([twoFiles.path, twoFiles.line, twoFiles.paths], ['src/a.ts', 12, ['src/a.ts', 'src/b.ts', 'Makefile']]);
   const both = postMergeFollowUp(owed, M, twoFiles, 0);
-  assert.deepEqual(both.plannedFiles, ['src/a.ts', 'src/b.ts', 'Makefile']);
   assert.match(both.description, /BLOCKING in src\/a\.ts:12 \(also src\/b\.ts, Makefile\)/);
   for (const prose of ['AC-4 — i.e. version 1.2 regressed', 'read/write races', 'see https://example.com/a.html']) assert.equal(parseFinding(prose).path, null, prose);
   const followUp = postMergeFollowUp(owed, M, parseFinding('src/feature.ts:12 — the flag is never read'), 0);
-  assert.deepEqual([followUp.type, followUp.priority, followUp.plannedFiles, followUp.policy, followUp.origin], ['bug', 1, ['src/feature.ts'], { checks: ['test'], review: true }, { reviewFollowUps: { parent: 'GY-10', findings: [{ path: 'src/feature.ts', text: 'src/feature.ts:12 — the flag is never read', ref: M }] } }]);
+  assert.deepEqual([followUp.type, followUp.priority, followUp.policy, followUp.origin], ['bug', 1, { checks: ['test'], review: true }, { reviewFollowUps: { parent: 'GY-10', findings: [{ path: 'src/feature.ts', text: 'src/feature.ts:12 — the flag is never read', ref: M }] } }]);
   assert.match(followUp.title, /^Post-merge review of GY-10 \(cccccccccccc\): src\/feature\.ts:12 — the flag is never read$/);
   assert.match(followUp.description, new RegExp(`delivered as merge commit ${M}`));
   // The ledger side: a post-merge record is stale only when its item is not delivered as that commit; its verdict and refusal are read from the launch.
@@ -148,7 +147,7 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   reviews[0] = record(launched, { id: reviews[0].id, state: 'completed', verdict: { state: 'CHANGES_REQUESTED', reviewer: 'review-claude-1', reviewId: 77, submittedAt: at } });
   items = [launched];
   const third = await runDispatchTick(config, cursor, effects, () => clock + 40_000);
-  assert.deepEqual(filed.map(entry => [(entry as { body: { plannedFiles: string[] } }).body.plannedFiles, (entry as { requestId: string }).requestId]), [[['src/feature.ts'], `post-merge-follow-up:GY-10:${M}:0`], [['src/other.ts'], `post-merge-follow-up:GY-10:${M}:1`]]);
+  assert.deepEqual(filed.map(entry => [(entry as { body: { origin: { reviewFollowUps: { findings: { path: string }[] } } } }).body.origin.reviewFollowUps.findings.map(finding => finding.path), (entry as { requestId: string }).requestId]), [[['src/feature.ts'], `post-merge-follow-up:GY-10:${M}:0`], [['src/other.ts'], `post-merge-follow-up:GY-10:${M}:1`]]);
   assert.deepEqual(memory, [['AC-1 unmet after merge.', '- Nit: naming of `x` is terse']], 'everything but the BLOCKING lines goes to memory');
   assert.deepEqual(settled, [{ at: new Date(clock + 40_000).toISOString(), filed: [{ key: 'GY-101', finding: 'src/feature.ts:12 — the flag is never read', index: 0 }, { key: 'GY-102', finding: 'src/other.ts — the retry loop never ends', index: 1 }], memory: 2, through: 2 }]);
   assert.deepEqual(third.followUps, [{ work: 'GY-10', sha: M, filed: ['GY-101', 'GY-102'], memory: 2 }]);
@@ -271,7 +270,7 @@ async function request(credential: string, path: string, body?: unknown, key: st
 }
 const stored = async (id: string) => (await store.pool.query('SELECT document FROM work_items WHERE id=$1', [id])).rows[0].document as Work;
 
-test('integration:post-merge-review-files-follow-ups — a delivered normal-risk item takes one post-merge launch on its merge commit; the verdict marks it reviewed without reopening it, and each BLOCKING finding becomes one priority-1 bug item whose origin names the delivered item and merge commit, planned on the finding\'s file', async () => {
+test('integration:post-merge-review-files-follow-ups — a delivered normal-risk item takes one post-merge launch on its merge commit; the verdict marks it reviewed without reopening it, and each BLOCKING finding becomes one priority-1 bug item whose origin names the delivered item, merge commit and the finding\'s file', async () => {
   const work = delivered('GY-9101');
   await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1,$2)', [work.id, JSON.stringify(work)]);
   const token = randomBytes(32).toString('hex');
@@ -299,7 +298,7 @@ test('integration:post-merge-review-files-follow-ups — a delivered normal-risk
   for (const [index, entry] of outcome!.filed.entries()) {
     const followUp = (await store.pool.query('SELECT document FROM work_items WHERE document->>\'key\'=$1', [entry.key])).rows[0].document as Work;
     const finding = index === 0 ? { path: 'src/feature.ts', text: 'src/feature.ts:12 — the flag is never read' } : { path: 'src/other.ts', text: 'src/other.ts — the retry loop never ends' };
-    assert.deepEqual([followUp.type, followUp.priority, followUp.plannedFiles, followUp.policy.review, followUp.stage, followUp.ready], ['bug', 1, [finding.path], true, 'ready', true], 'filed and released, so a worker takes it without a triage pass');
+    assert.deepEqual([followUp.type, followUp.priority, followUp.policy.review, followUp.stage, followUp.ready], ['bug', 1, true, 'ready', true], 'filed and released, so a worker takes it without a triage pass');
     assert.deepEqual(followUp.origin, { reviewFollowUps: { parent: 'GY-9101', findings: [{ ...finding, ref: M }] } });
     assert.match(followUp.title, /^Post-merge review of GY-9101 \(cccccccccccc\): /);
     assert.match(followUp.description, new RegExp(`delivered as merge commit ${M}`));

@@ -88,7 +88,7 @@ function planeHead(key: string, request: { id: string; sha: string; requestedAt:
   const raised = Date.parse(request.requestedAt);
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/feature.ts'], stage: 'review', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 1,
     createdAt: new Date(raised - 24 * hour).toISOString(), updatedAt: new Date(raised - hour).toISOString(), stageEnteredAt: new Date(raised - 2 * hour).toISOString(),
     ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 7 }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
@@ -226,7 +226,7 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
 test('manual:fault-class-session-liveness — the deploy the tick records explains a lapse inside its window through the real engine: no lease-loss stands, the attempt ends as history', async () => {
-  let work = await engine().execute(human, 'create', null, { title: 'deploy-window-lapse', plannedFiles: ['src/deploy-window-lapse.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+  let work = await engine().execute(human, 'create', null, { title: 'deploy-window-lapse', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
   work = await engine().execute(human, 'ready', work.id, {}, randomUUID());
   work = await engine().execute(worker, 'claim', work.id, {}, randomUUID());
   assert.ok(work.lease, 'the attempt holds its lease');

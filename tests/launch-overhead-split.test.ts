@@ -33,7 +33,7 @@ test('unit:assignment-started-at — the first lease renewal of an epoch stamps 
   const run = (actor: Principal, command: string, id: string | null, input: unknown) => engine.execute(actor, command as any, id, input, randomUUID()) as Promise<Work>;
   const current = async (id: string) => (await store.list()).find(item => item.id === id)!;
 
-  let work = await run(operator, 'create', null, { title: 'Split', plannedFiles: ['src/split.ts'], criteria: [{ id: 'AC-1', text: 'Splits', proofs: ['unit:splits'] }], reason: 'GY-1499 fixture' });
+  let work = await run(operator, 'create', null, { title: 'Split', criteria: [{ id: 'AC-1', text: 'Splits', proofs: ['unit:splits'] }], reason: 'GY-1499 fixture' });
   await run(operator, 'ready', work.id, {});
   work = await run(worker, 'claim', work.id, {});
   const claimed = await current(work.id);
@@ -79,7 +79,7 @@ const clocks = () => ({ clocks: {} }) as unknown as DaemonState;
 /** An item on its way through one attempt, as the coordination snapshot shows it to the loop. */
 function item(overrides: Partial<Work>): Work {
   return { id: 'w-1499', key: 'GY-1499', stage: 'build', epoch: 1, ready: true, blocker: null, lease: null, submission: null, reworkRequested: false, candidate: null,
-    gates: [], dependencies: [], plannedFiles: ['src/split.ts'], criteria: [], stageEnteredAt: iso(0), ...overrides } as unknown as Work;
+    gates: [], dependencies: [], criteria: [], stageEnteredAt: iso(0), ...overrides } as unknown as Work;
 }
 
 test('unit:latency-sample-split — the schemas live in src/daemon/latency-clock.ts, the item clock captures the epoch\'s session start, and a delivery records claim→start and start→first push beside ready→first push, each null when an endpoint is unknown', async () => {

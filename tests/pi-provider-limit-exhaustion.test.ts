@@ -164,7 +164,7 @@ test('integration:pi-provider-limit-exhaustion — an idle pi session on the 131
   }) as MasterConfig;
   const herdr: Herdr = { agents: [], output: {} };
   const { calls, cycle } = loop(config, herdr);
-  let work = await ok(operator, 'POST', 'work', { title: 'pi limit exhaustion', plannedFiles: ['src/pi.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
+  let work = await ok(operator, 'POST', 'work', { title: 'pi limit exhaustion', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
   work = await ok(operator, 'POST', `work/${work.id}/ready`, {}) as Work;
 
   // The attempt runs on the first account.

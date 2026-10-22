@@ -46,7 +46,7 @@ const credential = async (name: string) => {
 /** One claimable item: the standing subject a deaf master is woken for. */
 const wakeItem = (key: string, at: number): Work => ({
   id: `work-${key}`, key, title: `A claimable ${key}`, description: '', type: 'bug', priority: 0, dependencies: [],
-  criteria: [{ id: 'AC-1', text: 'Delivered', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+  criteria: [{ id: 'AC-1', text: 'Delivered', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, 
   stage: 'ready', revision: 1, policyRevision: 1, createdAt: new Date(start - 2 * 3_600_000).toISOString(), updatedAt: new Date(at).toISOString(),
   stageEnteredAt: new Date(start - 3_600_000).toISOString(), ready: true, epoch: 0,
   lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
@@ -59,7 +59,7 @@ const worker = (name: string, principal: string, agentName: string): WorkerProfi
 /** An assignment whose agent session is finished against its live lease, as GY-1860's was. */
 const finishedAssignment = (key: string, profile: WorkerProfile, epoch: number, at: number, quarantine: Work['containmentQuarantine']): Work => ({
   id: key, key, title: `A finished session on ${key}`, description: '', type: 'bug', priority: 0, dependencies: [],
-  criteria: [{ id: 'AC-1', text: 'Delivered', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/attempt.ts'],
+  criteria: [{ id: 'AC-1', text: 'Delivered', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, 
   stage: 'build', revision: 1, policyRevision: 1, createdAt: new Date(start - 6 * 3_600_000).toISOString(), updatedAt: new Date(at).toISOString(),
   stageEnteredAt: new Date(at - 30 * minute).toISOString(), ready: true, epoch,
   lease: { owner: profile.principal, epoch, expiresAt: new Date(start + 4 * minute).toISOString() },

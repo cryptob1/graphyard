@@ -23,7 +23,7 @@ let fixtureIds = 0;
 /** One delivered item, released at `releasedMs` and merged at `mergedMs`; its creation is an hour before its release. */
 const merged = (releasedMs: number, mergedMs: number): Work => ({
   id: `00000000-0000-4000-8000-${String(++fixtureIds).padStart(12, '0')}`, key: `GY-${1000 + fixtureIds}`, title: `Fixture GY-${1000 + fixtureIds}`,
-  description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: [], criteria: [], policy: { checks: ['test'], review: true },
+  description: '', type: 'feature', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true },
   stage: 'done', revision: 1, policyRevision: 1, createdAt: iso(releasedMs - hour), updatedAt: iso(mergedMs), stageEnteredAt: iso(mergedMs),
   ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: { epoch: 1, pr: 400 + fixtureIds }, reworkRequested: false,
   scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],

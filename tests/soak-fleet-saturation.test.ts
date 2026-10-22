@@ -43,7 +43,7 @@ function item(n: number, released: number): Work {
   const key = `GY-${3000 + n}`;
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: [`src/item-${n}.ts`], stage: 'build', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 1, policyRevision: 1,
     createdAt: iso(released - 30 * minute), updatedAt: iso(released), stageEnteredAt: iso(released),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null,

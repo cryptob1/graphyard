@@ -85,7 +85,7 @@ async function configure(root: string, change: (config: any) => void) {
 function work(overrides: Partial<Work> = {}) {
   const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 68, branch: 'graphyard/gy-68-1', author: 'worker' };
   return { id: 'work-68', key: 'GY-68', title: 'Agent environments', description: '', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:agent-env-discovery'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:agent-env-discovery'] }], policy: { checks: ['test'], review: true }, 
     stage: 'review', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [],
     candidate, submission: { epoch: 1, pr: 68 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false },

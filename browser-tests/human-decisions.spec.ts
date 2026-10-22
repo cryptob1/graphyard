@@ -8,7 +8,7 @@ import { openHumanOnly } from '../src/model/human-request';
 const request = { id: '5b0c8f4e-7d8a-4f6e-9a55-0c1d2e3f4a5b', kind: 'money-or-accounts', needed: 'A Hetzner Cloud project for the live-install proofs', reason: 'The proofs provision real servers',
   requestedBy: 'worker', epoch: 1, at: '2026-01-01T00:00:00Z',
   choices: [{ id: 'choice-1', label: 'Approve up to €50/month', outcome: 'provided', input: 'none' }, { id: 'choice-2', label: 'Approve with a different cap…', outcome: 'provided', input: 'text' }] };
-const parked = { dependencies: [], plannedFiles: [], scenarioRequirements: [], id: 'parked-work', key: 'GY-7', title: 'Live-install proofs', description: 'Needs an account', type: 'feature', priority: 1,
+const parked = { dependencies: [], scenarioRequirements: [], id: 'parked-work', key: 'GY-7', title: 'Live-install proofs', description: 'Needs an account', type: 'feature', priority: 1,
   stage: 'ready', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, checks: ['test'] }, policyRevision: 1, revision: 1, epoch: 1, violations: [], workspaces: [],
   criteria: [{ id: 'AC-1', text: 'Proven live', proofs: ['unit:live'] }], evidence: [], gates: [], lease: null, blocker: `Waiting on a human-only decision (spending money or opening third-party accounts): ${request.needed}`, humanRequest: request, humanRequests: [] };
 const now = '2026-01-01T02:00:00Z';

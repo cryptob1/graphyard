@@ -55,7 +55,7 @@ after(async () => {
 });
 
 let created = 0;
-const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Incremental ${++created}`, plannedFiles: [`src/incremental-${created}.ts`], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:incremental-reconcile'] }], ...extra }, randomUUID());
+const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Incremental ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:incremental-reconcile'] }], ...extra }, randomUUID());
 async function pass() {
   documentsRead = 0; projected = 0;
   await engine.reconcile();
