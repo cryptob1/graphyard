@@ -92,8 +92,8 @@ test('unit:release-normal-backlog-applies — an ordinary backlog item still rel
   assert.equal(after.ready, true); assert.equal(after.stage, 'ready');
 });
 
-test('unit:release-loop-owned-refused — a loop-owned measure item is still refused as loop-owned', async () => {
-  const work = await created({ title: 'Measure throughput on the serving release', criteria: [{ id: 'AC-1', text: 'Claim verified', proofs: ['manual:throughput-claim-verified'] }], reason: 'Measure' });
+test('unit:release-loop-owned-refused — a loop-owned observation item is still refused as loop-owned', async () => {
+  const work = await created({ title: 'Observe the master checkout on the serving release', criteria: [{ id: 'AC-1', text: 'Checkout restored', proofs: ['manual:checkout-restore-on-serving-release'] }], reason: 'Observe' });
   const refused = await release(master.token, work);
   assert.equal(refused.status, 409); assert.match(refused.body.error, /is loop-owned/); assert.doesNotMatch(refused.body.error, /owner hold/);
   const after = await reload(work.id);

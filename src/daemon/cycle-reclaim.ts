@@ -266,7 +266,7 @@ export function endedAttemptWorktrees(work: Work[], hostId: string, now: number)
 }
 
 /** Step 3: end unbounded attempts, reconcile lapsed leases, remove ended attempts' worktrees and sweep leftover panes. */
-export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaimLease', 'preserveWork', 'reportCapacity'], reclaimStepWithin);
+export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaimLease', 'removeWorktree', 'preserveWork', 'reportCapacity'], reclaimStepWithin);
 async function reclaimStepWithin(cycle: Cycle) {
   const { config, state, effects, now, clock, performed, isolate, open, snapshot } = cycle;
   // 3a'. Stop renewing an attempt past its no-submission bound (GY-1460).
@@ -291,6 +291,8 @@ async function reclaimStepWithin(cycle: Cycle) {
     try {
       if (await effects.removeWorktree(space.path)) performed.push(await record(state, key, { kind: 'reclaim', work: item.key, principal: null, epoch: space.epoch, state: 'done', detail: `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
+      // A removal carried past the step's bound is asked again next cycle, joining it.
+      if (stepCallCarried(error)) continue;
       performed.push(await record(state, key, { kind: 'reclaim', work: item.key, principal: null, epoch: space.epoch, state: 'failed', detail: `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`.slice(0, actionDetailMax), attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }
   }

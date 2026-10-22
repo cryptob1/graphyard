@@ -37,8 +37,6 @@ const routine = new Set<string>(routineSaveKinds);
 type Row = { seq: string; work_id: string | null; kind: string; payload: any };
 const raw = async (id?: string) => (await store.pool.query('SELECT seq, work_id, kind, payload FROM events WHERE ($1::uuid IS NULL OR work_id=$1) ORDER BY seq', [id ?? null])).rows as Row[];
 const resolvedBySeq = async () => new Map((await store.pool.query(`SELECT seq, ${resolvedPayloadSql()} AS payload FROM events WHERE work_id IS NOT NULL ORDER BY seq`)).rows.map(row => [String(row.seq), row.payload.work as Work | null]));
-/** Mark the ledger read by the flow projection up to its newest row, as its tick does (flow-analytics.ts). */
-const projectFlow = async () => { await store.pool.query('UPDATE flow_projection SET last_event=(SELECT max(seq) FROM events) WHERE id=1'); };
 const atRevision = async (id: string, revision: number) => (await store.pool.query('SELECT graphyard_work_at_revision($1,$2) AS work', [id, String(revision)])).rows[0].work as Work | null;
 
 /** A work item inserted directly, whose saves go through the store's own `save`. */
@@ -154,7 +152,6 @@ test('unit:ledger-compaction-preserves-reconstruction — compaction removes onl
   await sleep(50); const cutoff = Date.now(); await sleep(50);
   // Inside the window.
   for (let n = 0; n < 3; n++) { open.lease.expiresAt = new Date(Date.now() + n).toISOString(); await write(open, 'heartbeat'); }
-  await projectFlow();
 
   const before = await raw();
   const documents = await resolvedBySeq();
@@ -224,13 +221,11 @@ test('unit:ledger-compaction-preserves-reconstruction — compaction removes onl
   assert.deepEqual(tally, expected);
   assert.deepEqual(result.removed, expected);
 
-  // Rows the flow projection has not read are kept whatever their age; the item's newest save always is.
+  // The item's newest save is always kept.
   for (let n = 0; n < 3; n++) { open.lease.expiresAt = new Date(Date.now() + n).toISOString(); await write(open, 'heartbeat'); }
-  const unprojected = (await raw(open.id)).slice(-3).map(row => row.seq);
+  const newest = (await raw(open.id)).at(-1)!.seq;
   await compactLedger(store.pool, { retentionMs: 0, batch, batches: 100 });
-  const remaining = new Set((await raw()).map(row => row.seq));
-  assert.ok(unprojected.every(seq => remaining.has(seq)), 'unprojected rows are kept');
-  await projectFlow();
+  assert.ok((await raw()).some(row => row.seq === newest), 'the newest save is kept');
   await compactLedger(store.pool, { retentionMs: 0, batch, batches: 100 });
   const settled = await compactLedger(store.pool, { retentionMs: 0, batch, batches: 100 });
   assert.equal(settled.total, 0, 'a settled ledger compacts nothing further');

@@ -665,8 +665,8 @@ export interface DispatchWait { kind: 'review' | 'producer'; work: string; reque
 export type PostMergeOutcome = NonNullable<ReviewRecord['postMergeFollowUps']>;
 /** The wait a normal-risk control-plane head's pre-merge review request reports (GY-1525): it merges on its trial and is reviewed after. */
 export const postMergeWaitReason = 'normal-risk delta in control-plane mode: it merges on its trial and is reviewed after the merge, so no pre-merge reviewer session is launched';
-/** Whether the item's pre-merge review request is answered by a post-merge review instead: an observed head whose merge delta reads normal (the one merge rule, model/gates.ts). */
-export const reviewedAfterMerge = (work: Work) => !!work.observation && !!work.policy.review && !reviewedBeforeMerge(riskOf(work).risk);
+/** Whether the item's pre-merge review request is answered by a post-merge review instead: a control-plane head whose merge delta reads normal (the one merge rule, model/gates.ts). */
+export const reviewedAfterMerge = (work: Work) => work.observation?.source === 'control-plane' && !!work.policy.review && !reviewedBeforeMerge(riskOf(work).risk);
 /**
  * The dispatch request a post-merge review is launched under: one per delivered merge commit, bound
  * to nothing else. Its base is the merge commit's first parent, the tip the merge writer's ledger

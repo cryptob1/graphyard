@@ -109,7 +109,7 @@ test('unit:waked-observation-survives-loop-bookkeeping — the loop\'s own bookk
   assert.ok((await reload(item.id)).sessions?.some(entry => entry.id === handle.id), 'the session the loop wrote meanwhile is kept');
 
   // Next action and gates are bookkeeping too; the submitted work is not.
-  const bookkeeping = { ...moved, revision: moved.revision + 1, nextAction: null, gates: [], lane: 'high' } as unknown as Work;
+  const bookkeeping = { ...moved, revision: moved.revision + 1, nextAction: null, gates: [] } as unknown as Work;
   assert.ok(sameBesideBookkeeping(moved, bookkeeping), 'next action, gates and attention are the loop\'s bookkeeping');
   assert.ok(!sameBesideBookkeeping(moved, { ...moved, submission: { epoch: moved.submission!.epoch, pr: moved.submission!.pr + 1 } }), 'a moved submission is not');
   assert.ok(!sameBesideBookkeeping(moved, { ...moved, candidate: { ...moved.candidate!, sha: 'f'.repeat(40) } } as Work), 'a moved candidate is not');

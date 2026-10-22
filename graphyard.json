@@ -30,10 +30,6 @@
         "glob": "src/operator-agent.ts"
       },
       {
-        "rule": "proof authority",
-        "glob": "src/model/proof.ts"
-      },
-      {
         "rule": "installation",
         "glob": "src/install/"
       },

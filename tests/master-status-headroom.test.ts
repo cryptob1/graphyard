@@ -18,7 +18,6 @@ const MAX_LINES = 260;
 
 const splitModules = [
   'src/cli/master-status.ts',
-  'src/cli/master-status-pipeline.ts',
   'src/cli/master-status-sections.ts',
 ];
 

@@ -148,7 +148,7 @@ test('unit:overdue-threshold-applied — twenty-nine minutes is not red, thirty-
   }
   assert.deepEqual(definitions, ['src/model/duration.ts'], 'the threshold has one home');
   // Every view reaches the verdict through the one call.
-  for (const path of ['web/components/work-card.tsx', 'web/pages/work-details.tsx']) assert.match(await read(path), /stepHeld\(item, now, stepMoves(, release)?\)/);
+  for (const path of ['web/components/work-card.tsx', 'web/pages/work-details.tsx']) assert.match(await read(path), /stepHeld\(item, now, null, release\)/);
   assert.match(await read('web/components/status-age.tsx'), /held\.overdue/);
 });
 

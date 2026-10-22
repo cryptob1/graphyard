@@ -114,6 +114,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:7de34c0370b76022eb3a031341cf39d6530a12c4985302dad97da7f5479ab8a9',
   // GY-2874: the settled-delivery SQL no longer reads the deleted containment quarantine.
   'sha256:e07c6de88732eb753880f822b11c8f41543f7f2817001cd65fec79b954f71281',
+  // GY-2876: the flow analytics and proof grant tables left the registry, and the migration drops them.
+  'sha256:74c1eb046c1959bdbd71f79b8f536fb3f3af2b042547aa13c5cb5ff26924ceb9',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

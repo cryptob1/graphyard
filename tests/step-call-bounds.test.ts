@@ -223,10 +223,10 @@ test('unit:step-calls-bounded — rework: a rework write that does not answer re
 test('unit:step-calls-bounded — every named step runs under the shared bound with the calls the item names', async () => {
   const sb = await helper();
   const steps: Record<string, { file: string; calls: string[] }> = {
-    dispatch: { file: 'cycle-dispatch.ts', calls: ['agents', 'roleHealth', 'reportCapacity', 'planeHealth', 'hostMemory'] },
+    dispatch: { file: 'cycle-dispatch.ts', calls: ['agents', 'roleHealth', 'reportCapacity', 'planeHealth'] },
     sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'recordSession', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork'] },
     resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'recordSession', 'preserveWork', 'reportCapacity'] },
-    reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'preserveWork', 'reportCapacity'] },
+    reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaimLease', 'removeWorktree', 'preserveWork', 'reportCapacity'] },
     master: { file: 'cycle-master.ts', calls: ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'] },
     rework: { file: 'rework.ts', calls: ['rework', 'recordMechanicalPlan'] },
   };

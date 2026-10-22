@@ -102,7 +102,7 @@ test('unit:optimistic-dispatch — two items overlapping on the same files both 
   assert.equal(row.attention, null, 'an overlap raises no attention');
   assert.equal(status.effectiveConcurrency.effective, 5); assert.equal(status.effectiveConcurrency.inFlight, 3); assert.equal(status.effectiveConcurrency.dispatchable, 2);
   assert.equal(status.counts.effectiveConcurrency, 5);
-  assert.match(status.effectiveConcurrency.statement, /^5 items could be in flight at once \(3 in flight, 2 dispatchable; file overlap holds nothing\); 3 of 3 launch profiles idle; the dispatcher starts new work while fewer than 4 items are in flight$/);
+  assert.match(status.effectiveConcurrency.statement, /^5 items could be in flight at once \(3 in flight, 2 dispatchable; file overlap holds nothing\); 3 of 3 launch profiles idle; the dispatcher starts every dispatchable item while a worker profile is free$/);
   assert.ok(!('held' in status.counts) && !('holdsOverdue' in status.counts));
 
   // The launcher dispatches over the overlap without any override, and records it.

@@ -61,6 +61,7 @@ const recorded = {
     { gate: 'build', reason: `AC-1: unit:item-works failed on ${head.slice(0, 12)} (trusted evidence from producer-a); the head returns to its worker before review` },
     { gate: 'acceptance', reason: 'AC-1: unit:item-works needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
     { gate: 'acceptance', reason: 'AC-1: integration:item-holds needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
+    { gate: 'acceptance', reason: 'AC-1: manual:item-looks needs trusted passing evidence, with skipped = 0, for this candidate and policy' },
     { gate: 'acceptance', reason: 'AC-1: e2e:item-ships needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy' },
   ],
   dispatch: [

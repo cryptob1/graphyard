@@ -86,16 +86,16 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
     : work.formalReviewResetRequired ? 'A new independent approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
   // An approval naming mechanical nits waits for its worker-bot round before the merge writer may merge (GY-971).
   const mechanicalHold = reviewPassed ? mechanicalReviewHold(work, now.getTime()) : null;
-  // The one merge rule (GY-1525): a head is judged by the class of its merge delta
-  // (model/risk-class.ts). A sensitive delta needs the exact-head approval before it merges; any
-  // other passes here and owes one post-merge review (model/post-merge-review.ts), which the
-  // evaluation marks on the item.
-  const byRisk = current && work.policy.review ? riskOf(work) : null;
+  // The one merge rule (GY-1525): a head the merge writer observed is judged by the class of its
+  // merge delta (model/risk-class.ts). A sensitive delta needs the exact-head approval before it
+  // merges; any other passes here and owes one post-merge review (model/post-merge-review.ts), which
+  // the evaluation marks on the item. A pull-request-era observation still needs its approval.
+  const byRisk = current && obs!.source === 'control-plane' && work.policy.review ? riskOf(work) : null;
   const beforeMerge = byRisk ? reviewedBeforeMerge(byRisk.risk) : true;
   const riskRefusal = reviewPassed || !beforeMerge ? [] : byRisk?.risk === 'sensitive' ? [sensitiveReviewRefusal(byRisk.reasons)] : [reviewRefusal];
   const postMerge = byRisk ? postMergeReviewMark(work, beforeMerge ? 'sensitive' : byRisk.risk, reviewPassed) : {};
-  // A change request holds only a sensitive delta (or a candidate not yet observed). A normal-risk
-  // change request is attention for the post-merge pass, never a merge gate (GY-1525).
+  // A change request holds only where the approval is needed before merge. A normal-risk change
+  // request is attention for the post-merge pass, never a merge gate (GY-1525).
   const changeRequestHold = changesRequested && beforeMerge
     ? ['Outstanding change requests must be resolved through a new review'] : [];
   add('review', work.policy.review ? [

@@ -33,7 +33,6 @@ const sensitiveSamples: [string, string][] = [
   ['src/server/main.ts', 'server auth, principals, API assembler, bootstrap or routes'],
   ['src/server/routes/status.ts', 'server auth, principals, API assembler, bootstrap or routes'],
   ['src/operator-agent.ts', 'operator agent'],
-  ['src/proof-grants.ts', 'proof grants'],
   ['src/install/local-runtime.ts', 'installation'],
   ['deploy/railway.json', 'deployment'],
   ['Dockerfile', 'Dockerfile'],
@@ -66,7 +65,7 @@ test('unit:risk-class-paths — every sensitive rule of the criterion classifies
   assert.equal(mixed.risk, 'sensitive');
   assert.deepEqual(mixed.reasons, ['src/store/tables/work.ts: persistence layer']);
   // The rule table is the criterion's list, one rule per surface.
-  assert.equal(sensitiveRules.length, 13);
+  assert.equal(sensitiveRules.length, 12);
   assert.ok(sensitiveRules.every(({ pattern }) => pattern.source.startsWith('^')), 'every rule is anchored at the start of the path');
   // Node-free: the module imports nothing from node: and nothing but the work type.
 });
@@ -148,32 +147,30 @@ function dashboard(work: Work[], role = 'admin'): Dashboard {
   return { ...d, board: boardFromStatus(d.work, d.observedAt, d.status) };
 }
 
-test('unit:risk-class-shown — graphyard status GY-N prints risk, its reasons and its source right after lane, and the item page shows Risk with its reasons beside Lane, both computed on read', async () => {
+test('unit:risk-class-shown — graphyard status GY-N prints risk, its reasons and its source right after the key, and the item page shows Risk with its reasons, both computed on read', async () => {
   const status = workCommands.find(command => command.name === 'status')!;
   const printed: any[] = [];
   const context = { api: async (path: string) => { if (path === 'retro/standing') throw Object.assign(new Error('not found'), { status: 404 }); throw new Error(`unexpected ${path}`); }, print: (value: unknown) => { printed.push(value); } } as unknown as CliContext;
-  const item = { key: 'GY-1', stage: 'build', ...base(), gates: [], lane: 'medium', speedTarget: 1 } as unknown as Work;
+  const item = { key: 'GY-1', stage: 'build', ...base(), gates: [] } as unknown as Work;
   await status.run(context, item);
   assert.equal(printed.length, 1);
   const keys = Object.keys(printed[0]);
-  assert.deepEqual(keys.slice(keys.indexOf('lane'), keys.indexOf('lane') + 4), ['lane', 'risk', 'riskReasons', 'riskSource'], 'risk reads right after lane');
-  assert.deepEqual([printed[0].lane, printed[0].risk, printed[0].riskReasons, printed[0].riskSource], ['medium', 'normal', [], 'landing']);
+  assert.deepEqual(keys.slice(keys.indexOf('key'), keys.indexOf('key') + 4), ['key', 'risk', 'riskReasons', 'riskSource'], 'risk reads right after the key');
+  assert.deepEqual([printed[0].risk, printed[0].riskReasons, printed[0].riskSource], ['normal', [], 'landing']);
   assert.equal('risk' in item, false, 'the record itself is never stamped: the class is computed on the read');
   const sensitive = withRisk({ ...item, observation: { ...item.observation!, landing: undefined } });
   assert.deepEqual([sensitive.risk, sensitive.riskReasons], ['sensitive', ['src/install/host.ts: installation']]);
-  // An item whose record holds no lane still prints the class, after the record's keys.
+  // An item whose record holds no key still prints the class, after the record's keys.
   const laneless = withRisk({ candidate: null, observation: null });
   assert.deepEqual(Object.keys(laneless), ['candidate', 'observation', 'risk', 'riskReasons', 'riskSource']);
   assert.equal(laneless.risk, 'sensitive');
 
-  // The item page: the Pull request facts carry Lane and Risk side by side, with the reasons.
+  // The item page: the Pull request facts carry Risk with the reasons.
   const work = fixture();
   const page = work.find(entry => entry.candidate && entry.observation)!;
-  const shown = { ...page, lane: 'high', observation: { ...page.observation!, landing: undefined, scopeFiles: [{ path: 'src/store/tables/work.ts', status: 'modified', sha: 'a', additions: 1, deletions: 0, binary: false }] } } as Work;
+  const shown = { ...page, observation: { ...page.observation!, landing: undefined, scopeFiles: [{ path: 'src/store/tables/work.ts', status: 'modified', sha: 'a', additions: 1, deletions: 0, binary: false }] } } as Work;
   const html = renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(work), item: shown }));
-  assert.match(html, /<dt>Lane<\/dt><dd class="lane-details">high<\/dd>/);
   assert.match(html, /<dt>Risk<\/dt><dd class="risk-details">sensitive<small> · src\/store\/tables\/work\.ts: persistence layer<\/small><\/dd>/);
-  assert.ok(html.indexOf('<dt>Lane</dt>') < html.indexOf('<dt>Risk</dt>') && html.indexOf('<dt>Risk</dt>') - html.indexOf('<dt>Lane</dt>') < 200, 'Risk sits right beside Lane');
   const normal = { ...shown, observation: { ...shown.observation!, scopeFiles: [{ path: 'docs/dashboard.md', status: 'modified', sha: 'a', additions: 1, deletions: 0, binary: false }] } } as Work;
   assert.match(renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(work), item: normal })), /<dt>Risk<\/dt><dd class="risk-details">normal<small> · no sensitive path in the merge delta<\/small><\/dd>/);
 });

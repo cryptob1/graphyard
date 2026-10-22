@@ -229,7 +229,7 @@ test('unit:status-degrades-per-section — master status returns every section f
     assert.ok(Date.now() - started < 20_000, `master status returned in ${Date.now() - started}ms`);
     assert.deepEqual(report.unavailable, [], 'no section is unavailable');
     // Every section is there, built from the bounded snapshot.
-    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'throughput', 'runtime', 'timings'])
+    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'runtime', 'timings'])
       assert.ok(section in report && report[section] !== undefined, `master status returned its ${section} section`);
     assert.ok(report.work.length >= OPEN, 'the open items are reported');
 
@@ -244,7 +244,7 @@ test('unit:status-degrades-per-section — master status returns every section f
   const logged: string[] = [], original = console.error;
   console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
   try {
-    const response = await fetch(`http://127.0.0.1:${(slowServer.address() as AddressInfo).port}/api/shipping-pulse`, { headers: { Authorization: `Bearer ${tokens.coordinator}` } });
+    const response = await fetch(`http://127.0.0.1:${(slowServer.address() as AddressInfo).port}/api/analytics/attribution`, { headers: { Authorization: `Bearer ${tokens.coordinator}` } });
     assert.equal(response.status, 500);
   } finally {
     console.error = original;
@@ -253,5 +253,5 @@ test('unit:status-degrades-per-section — master status returns every section f
   }
   const line = logged.find(entry => entry.startsWith('request failed'));
   assert.ok(line, logged.join('\n'));
-  assert.match(line, /^request failed GET \/api\/shipping-pulse: canceling statement due to statement timeout \(statement: /);
+  assert.match(line, /^request failed GET \/api\/analytics\/attribution: canceling statement due to statement timeout \(statement: /);
 });

@@ -13,7 +13,7 @@ import { DELIVERY_EVENT_PREDICATE } from './tables/production.js';
  * 19 GB volume in production. A row is removed only when every one of these holds:
  * - its kind is routine — the events trigger itself refuses any other kind, and any delete not
  *   made under this module's transaction setting (`graphyard.ledger_compaction`);
- * - it is older than the retention window, the flow projection has already read it, and it is not
+ * - it is older than the retention window, and it is not
  *   its item's newest save (the ledger's copy of the current document);
  * - it is no delta's base: a delta row is never one, and a whole row goes only when a newer whole
  *   row of its item exists (so no save can still take it as a base) and no delta names it;
@@ -55,7 +55,7 @@ DROP TRIGGER IF EXISTS immutable_events ON events;
 CREATE TRIGGER immutable_events BEFORE UPDATE OR DELETE ON events FOR EACH ROW EXECUTE FUNCTION graphyard_events_immutable();`;
 
 // $1 routine kinds, $2 cutoff, $3 batch. `revision` is the revision the candidate row stands for.
-const scope = (revision: string) => `e.kind = ANY($1::text[]) AND e.created_at < $2 AND e.seq <= (SELECT last_event FROM flow_projection WHERE id=1)
+const scope = (revision: string) => `e.kind = ANY($1::text[]) AND e.created_at < $2
     AND NOT COALESCE(i.pr_state = 'merged' AND i.stage IS DISTINCT FROM 'done', false)
     AND cited.revision IS DISTINCT FROM ${revision}`;
 // The revision the item's delivery cites, from its first delivery event (a delivery is never rewritten).

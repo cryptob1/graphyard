@@ -246,7 +246,7 @@ test('unit:conflict-probe-budgeted: master status still returns every other sect
   assert.deepEqual(unprobedReasons, { [pairKey('GY-left', 'GY-right')]: BUDGET_EXHAUSTED_REASON });
 
   const status = buildMasterStatus({ work, now: '2030-01-01T00:00:00Z' }, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
-  for (const section of ['work', 'counts', 'schedule', 'conflicts', 'speed', 'attentionItems']) {
+  for (const section of ['work', 'counts', 'schedule', 'conflicts', 'attentionItems']) {
     assert.ok(section in status, `master status still returns the ${section} section when the conflict budget is spent`);
   }
   const row = (key: string) => status.work.find(entry => entry.key === key)!;

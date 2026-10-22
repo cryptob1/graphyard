@@ -540,7 +540,7 @@ test('integration:shadow-trial-bounded-test-groups — the selection runs in gro
   // The bound itself: this repository's pre-merge suite, as scripts/ci-tests.mjs selects it, never runs in one process.
   const suiteFiles = listTestFiles();
   const groups = groupTestFiles(suiteFiles);
-  assert.ok(suiteFiles.length > 400 && groups.length >= Math.ceil(suiteFiles.length / trialTestGroupSize) && groups.length > 1, `${suiteFiles.length} files run in ${groups.length} groups`);
+  assert.ok(suiteFiles.length > 300 && groups.length >= Math.ceil(suiteFiles.length / trialTestGroupSize) && groups.length > 1, `${suiteFiles.length} files run in ${groups.length} groups`);
   assert.ok(groups.every(group => group.length <= trialTestGroupSize && group.length > 0));
   assert.deepEqual(groups.flat(), suiteFiles, 'every selected file, once, in order');
   assert.deepEqual([groupTestFiles([]), groupTestFiles(['a'], 0)], [[], [['a']]], 'an empty selection has no group; a bound under one is one');

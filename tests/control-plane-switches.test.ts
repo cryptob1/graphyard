@@ -81,10 +81,8 @@ test('unit:no-producer-requests-control-plane — reconcileAutoDispatch opens no
 });
 
 test('unit:landability-github-snapshot — a github-observed candidate keeps the producer-evidence acceptance rule word for word', () => {
-  // A low-lane change asks only its e2e proof; a high-lane one every proof, the manual attestation included.
-  const low = item(null, ['src/app.ts']);
-  assert.deepEqual(landabilityRefusals(evaluateLandability(low, [low], new Date(start)), 'acceptance'), ['AC-1: e2e:item-ships needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy']);
-  const work = item(null, ['src/store/schema.ts']);
+  // Every change asks every declared proof, the manual attestation included (GY-2876: no lane waives one).
+  const work = item(null, ['src/app.ts']);
   const reasons = landabilityRefusals(evaluateLandability(work, [work], new Date(start)), 'acceptance');
   assert.deepEqual(reasons, [
     'AC-1: unit:item-works needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy',
