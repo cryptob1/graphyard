@@ -56,6 +56,13 @@ const retired = ['scopeRequest', 'carriedScopeRequest', 'heldGroundings', 'scope
 const events = async (id: string) => (await store.pool.query('SELECT kind FROM events WHERE work_id=$1', [id])).rows.map(row => row.kind as string);
 const judged = /^(scope|decomposition|research|triage|decision|blocker)\./;
 
+test('unit:planned-files-only-a-hint — the scope, split, research and triage modules are gone', async () => {
+  for (const module of ['decomposition', 'decomposition-step', 'research', 'triage', 'daemon/cycle-triage', 'daemon/cycle-blockers', 'model/blocker-class']) {
+    const path = `../src/${module}.js`;
+    await assert.rejects(import(path), `src/${module}.ts is deleted`);
+  }
+});
+
 test('unit:planned-files-only-a-hint — a head outside the item\'s plannedFiles is accepted with no scope request, hold, blocker or decision', async () => {
   let w = await engine.execute(operator, 'create', null, { title: 'Hinted', plannedFiles: ['src/planned.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:planned-files-only-a-hint'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
@@ -82,10 +89,14 @@ test('unit:planned-files-only-a-hint — an item with twelve planned source file
   const credential = join(directory, 'token');
   await writeFile(credential, 'token-'.padEnd(40, 'x'), { mode: 0o600 });
   const profile: WorkerProfile = { name: 'codex-a', principal: 'codex-a', agentName: 'agent-codex-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: credential, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
+  // An installation that still names research and split settings, with a run that never answers: nothing reads them.
+  const base = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: credential, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile] });
-  const dispatched: Work[] = [];
-  const effects: DaemonEffects = {
+  const config = masterConfigSchema.parse({ ...base, run: { ...base.run, research: { command: 'pi' }, decomposition: { maxCriteria: 4 } } });
+  const dispatched: Work[] = [], writes: string[] = [];
+  const silent = { name: 'silent', start: () => ({ id: randomUUID(), events: [], onEvent: () => () => {}, cancel() {}, result: () => new Promise(() => {}) }) };
+  const stale = { research: { cwd: directory, runner: silent }, recordResearch: async () => { writes.push('research'); }, recordDecomposition: async () => { writes.push('decomposition'); }, recordTriage: async () => { writes.push('triage'); } };
+  const effects: DaemonEffects = { ...stale as object,
     agents: () => [], credentials: async items => Object.fromEntries(items.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: (await store.list()).filter(item => item.id === w.id), now: new Date().toISOString() }),
     closeSession: () => {}, dispatch: async item => { dispatched.push(item); },
@@ -96,6 +107,7 @@ test('unit:planned-files-only-a-hint — an item with twelve planned source file
   try {
     await runCycle(config, state, effects, Date.now, undefined, () => {});
     assert.deepEqual(dispatched.map(item => item.key), [w.key], 'the item itself is offered to a worker on the next cycle');
+    assert.deepEqual(writes, [], 'no split, research or triage record was written');
     const after = (await store.list()).find(item => item.id === w.id)!;
     assert.equal(after.criteria.length, 6, 'whole: every criterion stays on the one item');
     for (const field of retired) assert.equal(field in after, false, `no ${field}`);
