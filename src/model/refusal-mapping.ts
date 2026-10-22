@@ -24,7 +24,7 @@ import { mechanicalHoldPattern } from './refusal-catalogue.js';
  */
 export const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }[] = [
   // ready
-  { gate: 'ready', match: /^Not released from backlog$/, kind: 'escalate' },
+  { gate: 'ready', match: /^Not released from backlog$/, kind: 'attention' },
   // An unfinished dependency is answered by dispatching that dependency, not by anything on this item.
   { gate: 'ready', match: /^Dependency .+ is unfinished$/, kind: 'dispatch' },
   // build
@@ -55,7 +55,7 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   // merge
   // Nothing gates the merge on the observation's age (GY-1235): only a reading of the current head.
   { gate: 'merge', match: /^The merge writer has not observed the current candidate$/, kind: 'resync' },
-  { gate: null, match: /.*/, kind: 'escalate' },
+  { gate: null, match: /.*/, kind: 'attention' },
 ];
 
 /**
@@ -100,7 +100,7 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
     // observation job is both how the request is posted and how the verdict arrives.
     case 'provider-dispatched': return { kind: 'resync', reason: need.reason };
     // Nobody is left to ask. An executor cannot add reviewer capacity or change the provider.
-    case 'provider-exhausted': return { kind: 'escalate', reason: need.reason };
+    case 'provider-exhausted': return { kind: 'attention', reason: need.reason };
     // `required` is the one state a launched reviewer answers, and the three remaining states
     // raise no review refusal at all: without a review the policy requires, an approval or a
     // carried approval, the gate passes (or refuses only its outstanding change requests).
@@ -119,7 +119,7 @@ export function refusalAction(work: Work, gate: string, refusal: string, all: Wo
     if (standstill) return standstill.kind;
   }
   if (gate === 'merge') {
-    if (leadHoldRefusal(work) === refusal) return 'escalate';
+    if (leadHoldRefusal(work) === refusal) return 'attention';
   }
   const rule = refusalRules.find(candidate => (candidate.gate === null || candidate.gate === gate) && candidate.match.test(refusal));
   return rule!.kind;

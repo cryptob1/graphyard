@@ -14,25 +14,25 @@ import { dispatchHumanWait } from './human-request.js';
  * whether an executor may run it at all.
  */
 
-export const nextActionKinds = ['dispatch', 'request-review', 'request-rework', 'resync', 'reclaim', 'merge', 'escalate'] as const;
+export const nextActionKinds = ['dispatch', 'request-review', 'request-rework', 'resync', 'reclaim', 'merge', 'attention'] as const;
 export type NextActionKind = typeof nextActionKinds[number];
 
 /**
  * Where a language model is required, per action kind. The executor step itself never needs one:
  * an executor launches a session, calls the provider, or records a fact. `llmRole` names the
  * judgment that happens *inside* what the action starts, which is the only place a model belongs
- * (see AGENTS.md: agents implement, review, approve, produce evidence and resolve escalations).
+ * (see AGENTS.md: agents implement, review and produce evidence).
  * A kind whose role is `null` is mechanical end to end. `dispatch` carries the one distinction the
  * kind alone cannot make: dispatching a worker starts an implementation, dispatching a producer
  * starts evidence production, and the computed action names which (`llmRole` on the action).
  */
-export type LlmRole = 'implement' | 'review' | 'produce-evidence' | 'approve-decision' | 'resolve-escalation';
+export type LlmRole = 'implement' | 'review' | 'produce-evidence' | 'judge-rework' | 'attend';
 export const nextActionLlmRoles: Record<NextActionKind, LlmRole | null> = {
-  dispatch: 'implement', 'request-review': 'review', 'request-rework': 'approve-decision',
+  dispatch: 'implement', 'request-review': 'review', 'request-rework': 'judge-rework',
   resync: null, reclaim: null, merge: null,
-  escalate: 'resolve-escalation',
+  attention: 'attend',
 };
-export const llmRoles: readonly LlmRole[] = ['implement', 'review', 'produce-evidence', 'approve-decision', 'resolve-escalation'];
+export const llmRoles: readonly LlmRole[] = ['implement', 'review', 'produce-evidence', 'judge-rework', 'attend'];
 /** The action kinds an executor can drive to completion with no language model anywhere in the loop. */
 export const mechanicalActionKinds = nextActionKinds.filter(kind => nextActionLlmRoles[kind] === null);
 
@@ -51,7 +51,7 @@ export const mechanicalActionKinds = nextActionKinds.filter(kind => nextActionLl
  */
 export const actionJudgment: Record<NextActionKind, 'none' | 'in-session' | 'in-step'> = {
   dispatch: 'in-session', 'request-review': 'in-session',
-  'request-rework': 'in-step', escalate: 'in-step',
+  'request-rework': 'in-step', attention: 'in-step',
   resync: 'none', reclaim: 'none', merge: 'none',
 };
 /** Every kind an executor may hold a handler for: everything but the judgments made in the step itself. */
@@ -65,7 +65,7 @@ export type NextActionInputs =
   | { kind: 'resync'; pr: number | null; sha: string | null; baseSha: string | null; baseTip: string | null; observedAt: string | null }
   | { kind: 'reclaim'; epoch: number; owner: string | null; leaseExpiresAt: string | null }
   | { kind: 'merge'; pr: number; sha: string; baseSha: string; policyRevision: number }
-  | { kind: 'escalate'; trigger: string; detail: string };
+  | { kind: 'attention'; trigger: string; detail: string };
 
 export interface NextAction {
   kind: NextActionKind;

@@ -169,7 +169,7 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
     // fail the same way once unblocked, so the attempt is ended at once with its work kept on its
     // branch, and the next launch mints a fresh credential — or is refused until one can be minted.
     // The end counts on the GY-885 retry ladder, so a failure no fresh mint cures is relaunched
-    // after a backoff and held at the cap for an approver instead of ending and relaunching for ever.
+    // after a backoff and held at the cap for the master instead of ending and relaunching for ever.
     if (item.blocker && credentialFailure(item.blocker)) {
       const key = credentialBlockedKey(item, epoch), previous = state.actions[key];
       if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;

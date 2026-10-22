@@ -74,9 +74,7 @@ export async function directMergeStatus(db: Queryable, environment: DirectMergeW
 
 /** The operator-authorized record a merge inside a direct-merge window is delivered with. */
 export function directMergeAuthorization(window: DirectMergeWindow, merge: { sha: string; at: string }, snapshotRevision: number, cutoff: string, unmet: string[]): OperatorAuthorizedDelivery & { directMerge: DirectMergeWindow } {
-  const decision = window.event ? `direct-merge:${window.event}` : 'direct-merge:environment';
-  return { decision, requestedBy: window.setBy, requestedAt: window.enabledAt, approvedBy: window.setBy, approvedAt: window.enabledAt, reason: window.reason, approvalReason: '',
-    operator: window.setBy, refusedDecision: '', unmet, cutoff, snapshotRevision, execution: null, violation: unauthorizedMergeViolation, directMerge: window,
+  return { operator: window.setBy, reason: window.reason, unmet, cutoff, snapshotRevision, execution: null, violation: unauthorizedMergeViolation, directMerge: window,
     judgement: `No merge execution authorized merge ${merge.sha.slice(0, 12)}; it landed at ${merge.at}, inside the direct-merge window from ${window.since}${window.until ? ` to ${window.until}` : ''} that ${window.setBy} set (${window.reason}), so gated merging was bypassed and it is delivered as operator-authorized` };
 }
 
@@ -106,7 +104,7 @@ export async function sweepDirectMerges(db: pg.PoolClient, all: Work[], windows:
       JSON.stringify({ details: { ...record, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision: work.revision, evidenceAsOf: null, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
     // What the delivery still owes, in the same transaction: nothing retries against it (GY-185).
     settleDelivered(work, all, now);
-    await save(db, work, 'graphyard', 'direct-merge.delivered', now, { window: record.decision });
+    await save(db, work, 'graphyard', 'direct-merge.delivered', now, { window: window.event ?? 'environment' });
     await deliverSplitParent(db, work, all, now);
     // The job row after the item row (GY-1115), the order every transaction takes them in.
     await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);

@@ -18,15 +18,15 @@ import { runRecord, runRecordSchema, type Run, type RunOptions, type RunRecord, 
  * detached from the process that started it, so a restart leaves it running; the restarted process
  * adopts every run still live there (`adoptRuns`), keeps waiting on it, and applies its result once.
  */
-export type RunRole = 'approver' | 'producer' | 'research';
+export type RunRole = 'producer' | 'research';
 export interface RegisteredRun {
   name: string;
   role: RunRole;
   work: string;
-  /** The producer ledger record id, or the decision id, the run answers. */
+  /** The producer ledger record id, or the research revision, the run answers. */
   subject: string;
   run: Run<unknown>;
-  /** The managed directory the run works in, when it was given one (the approver's, GY-391): a reclaim pass leaves it while the run lives. */
+  /** The managed directory the run works in, when it was given one (GY-391): a reclaim pass leaves it while the run lives. */
   checkout?: string;
   /** Filled in when the run ends and its payload was applied. */
   record: RunRecord | null;
@@ -92,7 +92,7 @@ export function detachRuns() {
 
 export const runsDirectory = (root: string) => resolve(root, '.graphyard', 'runs');
 export const runOwnerSchema = z.object({
-  version: z.literal(1), name: z.string().min(1).max(200), role: z.enum(['approver', 'producer', 'research']), work: z.string().min(1).max(200), subject: z.string().min(1).max(200),
+  version: z.literal(1), name: z.string().min(1).max(200), role: z.enum(['producer', 'research']), work: z.string().min(1).max(200), subject: z.string().min(1).max(200),
   /** What the role needs to apply the run's result after a restart: never a credential, only where to read one. */
   context: z.record(z.string(), z.unknown()).default({}),
   startedAt: z.string().max(40),

@@ -3,7 +3,7 @@ import { actionJudgment, type NextAction, type NextActionKind } from './action-k
 import type { Work } from './work.js';
 
 /**
- * What an action nobody may run is waiting for (GY-104). `escalate` and `request-rework` are
+ * What an action nobody may run is waiting for (GY-104). `attention` and `request-rework` are
  * judgments made in the step itself (`actionJudgment`), so the executor holds no handler for
  * either: such a row is never claimed and never fails. It is recorded with the computed action,
  * so every reader — the dashboard, `master status`, the loop, the API — sees who owes it.
@@ -30,7 +30,7 @@ export function humanNeeded(action: NextAction): HumanNeeded | null {
   if (action.kind === 'request-rework') return { decision: `a new head for ${action.key}`, resolve: `graphyard master rework ${action.key} REASON` };
   // A gate refusing something no executor step answers — an exhausted reviewer roster, an
   // unverified branch protection — names what has to be decided in the refusal itself.
-  const detail = action.inputs.kind === 'escalate' ? action.inputs.detail : action.reason;
+  const detail = action.inputs.kind === 'attention' ? action.inputs.detail : action.reason;
   return { decision: `resolving ${action.key}'s refusal`, resolve: `graphyard diagnose ${action.key} — ${detail}` };
 }
 
@@ -95,7 +95,7 @@ export function humanNeededActions(all: readonly Work[], now: Date): HumanNeeded
       return { since: new Date(instant).toISOString(), waitedMs: Math.max(0, now.getTime() - instant) };
     };
     if (action.needsHuman) rows.push({ key: work.key, work: work.id, source: 'action', kind: action.kind,
-      trigger: action.inputs.kind === 'escalate' ? action.inputs.trigger : null, reason: action.reason,
+      trigger: action.inputs.kind === 'attention' ? action.inputs.trigger : null, reason: action.reason,
       ...action.needsHuman, action: row?.id ?? null, ...since(row?.requestedAt ?? null) });
   }
   return rows.sort((a, b) => b.waitedMs - a.waitedMs || a.key.localeCompare(b.key));

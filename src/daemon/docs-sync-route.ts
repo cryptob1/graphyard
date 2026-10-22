@@ -93,7 +93,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     // The earlier of its own bound and the loop-owned rework's cutoff (GY-1434).
     const deadline = new Date(Math.min(docsSyncHoldDeadline(watch), cutoff ?? Infinity)).toISOString(), session = watch.agentName ?? 'unnamed';
     // Past half its bound without moving the head: raised once, naming the session, before the silence budget could (GY-1436).
-    const stallKey = `escalation:docs-sync-stall:${key}`;
+    const stallKey = `attention:docs-sync-stall:${key}`;
     if (clock - Date.parse(watch.launchedAt) >= docsSyncStallMs && !state.actions[stallKey])
       await note(stallKey, item, 'attention', 'done', `${item.key}: docs-sync session ${session} has held the conflict of ${watch.head.slice(0, 12)} with base ${watch.base.slice(0, 12)} past half its ${docsSyncHoldMs / 60_000}-minute bound without moving the head; at ${deadline} the conflict returns to a worker (close the session to return it now)`);
     return { held: true, watch, deadline, wait: `${item.key}: rework decision held by docs-sync session ${session} on head ${watch.head.slice(0, 12)} against base ${watch.base.slice(0, 12)} until ${deadline}, the end of its ${docsSyncHoldMs / 60_000}-minute bound` };

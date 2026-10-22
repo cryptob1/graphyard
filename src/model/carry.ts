@@ -103,8 +103,6 @@ export function describeGround(ground: CarryGround | null | undefined): string |
   if (ground.rule === 'diff changed') return `diff changed (patch-id ${ground.patchId!.slice(0, 12)} became ${ground.tipPatchId!.slice(0, 12)}); files rule`;
   return 'files rule (the diff could not be compared)';
 }
-/** How a carry reason names the attest decision behind a record, or nothing for a producer's. */
-const attested = (evidence: Pick<Evidence, 'attestation'>) => evidence.attestation ? ` (attest decision ${evidence.attestation.decision}, approved by ${evidence.attestation.approvedBy})` : '';
 const list = (paths: string[]) => paths.length > 6 ? `${paths.slice(0, 6).join(', ')} and ${paths.length - 6} more` : paths.join(', ');
 
 /** The one reason that refuses every binding at once, or null when the tip qualifies for per-binding decisions. */
@@ -140,7 +138,7 @@ export function decideCarry(input: CarryInput): QueueCarry {
     const approval: CarriedApproval | RequiredApproval = !input.approval ? { carried: false, reason: `no approval was bound to the replaced head ${short(from.sha)}` }
       : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `${approvedBy(input.approval)} carried to Graphyard-authored tip ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` };
     const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => !evidence ? { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` }
-      : { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer}${attested(evidence)} carried to ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` });
+      : { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: diff unchanged (patch-id ${id}) across ${who}'s changes` });
     return { ...base, approval, evidence, ground };
   }
   const ground: CarryGround = diff?.reviewed && diff.tip ? { rule: 'diff changed', patchId: diff.reviewed, tipPatchId: diff.tip } : { rule: 'files', patchId: diff?.reviewed ?? null, tipPatchId: diff?.tip ?? null };
@@ -151,9 +149,6 @@ export function decideCarry(input: CarryInput): QueueCarry {
     : { ...input.approval, carried: true, originalSha: input.approval.sha, reason: `${approvedBy(input.approval)} carried to Graphyard-authored tip ${short(to.sha)}: ${who} changed none of the ${input.reviewedFiles.length} reviewed files` };
   const evidence = input.proofs.map(({ proof, evidence }): CarriedProof => {
     if (!evidence) return { proof, carried: false, reason: `no trusted evidence was bound to the replaced head ${short(from.sha)}` };
-    // An attestation judged the patch its decision named, not a declared scope: it carries only
-    // across an unchanged patch-id, whatever the base changed (GY-615).
-    if (evidence.attestation) return { proof, carried: false, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id}${attested(evidence)} carries only across an unchanged patch-id of the item's own diff, which ${ground.rule === 'diff changed' ? 'changed' : 'could not be compared'}; a fresh attestation for ${short(to.sha)} is required` };
     // A predicted base that changed nothing relative to the bound base leaves the tested tree
     // untouched, so no declared scope is needed to show the proof still applies.
     if (!changed.length) return { proof, carried: true, evidenceId: evidence.id, producer: evidence.producer, reason: `evidence ${evidence.id} from ${evidence.producer} carried to ${short(to.sha)}: ${who} changed no file relative to ${short(from.baseSha)}` };

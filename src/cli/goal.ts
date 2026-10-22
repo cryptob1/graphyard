@@ -9,8 +9,8 @@ import type { CliContext } from './context.js';
  * goal or move it on, each a call to /api/goals that the server authorizes and records in the
  * goal's history. A reason is everything after `--`.
  */
-const usage = `Use goal FILE | goal list [--all] | goal show GOAL-N | goal draft GOAL-N DRAFT.json | goal approve|refuse GOAL-N -- REASON
-  | goal land GOAL-N | goal closed GOAL-N PR|change -- REASON | goal plan GOAL-N PLAN.json | goal plan-approve|plan-refuse GOAL-N -- REASON | goal release GOAL-N | goal deliver GOAL-N GY-N... -- REASON | goal case-change GOAL-N GY-N CASE... -- REASON | goal case-change-approve|case-change-refuse GOAL-N CHANGE_ID -- REASON | goal amend GOAL-N --apply-decision REQUEST_ID`;
+const usage = `Use goal FILE | goal list [--all] | goal show GOAL-N | goal draft GOAL-N DRAFT.json
+  | goal land GOAL-N | goal closed GOAL-N PR|change -- REASON | goal plan GOAL-N PLAN.json | goal release GOAL-N | goal deliver GOAL-N GY-N... -- REASON | goal case-change GOAL-N GY-N CASE... -- REASON | goal amend GOAL-N --apply-decision REQUEST_ID`;
 /** The words before `--`, and the reason after it. */
 function split(args: string[]) {
   const at = args.indexOf('--');
@@ -31,18 +31,15 @@ async function goal(context: CliContext) {
   if (!sub || sub === 'help') throw new Error(usage);
   if (sub === 'list') return print((await api(`goals?view=summary${args.includes('--all') ? '' : '&open=1'}`)).goals);
   if (sub === 'show') return print(await api(`goals/${encodeURIComponent(ref ?? '')}`));
-  if (['draft', 'approve', 'refuse', 'deliver', 'land', 'closed', 'plan', 'plan-approve', 'plan-refuse', 'release', 'case-change', 'case-change-approve', 'case-change-refuse', 'amend'].includes(sub) && !ref) throw new Error(usage);
+  if (['draft', 'deliver', 'land', 'closed', 'plan', 'release', 'case-change', 'amend'].includes(sub) && !ref) throw new Error(usage);
   if (sub === 'draft') return print(await post('draft', await json(rest[0])));
-  if (sub === 'approve' || sub === 'refuse') return print(await post(sub, { reason: needReason(reason) }));
   if (sub === 'deliver') return print(await post('deliver', { items: rest, reason: needReason(reason) }));
   if (sub === 'land') return print(await post('land', {}));
   if (sub === 'plan') return print(await post('plan', await json(rest[0])));
-  if (sub === 'plan-approve' || sub === 'plan-refuse') return print(await post(sub, { reason: needReason(reason) }));
   if (sub === 'release') return print(await post('release', {}));
   // GY-1535: a merge-writer acceptance change has no pull request; `change` names it.
   if (sub === 'closed') return print(await post('closed', { pr: rest[0] === 'change' ? null : Number(rest[0]), reason: needReason(reason) }));
   if (sub === 'case-change') return print(await post('case-change', { work: rest[0], cases: rest.slice(1), reason: needReason(reason) }));
-  if (sub === 'case-change-approve' || sub === 'case-change-refuse') return print(await post(sub, { change: rest[0], reason: needReason(reason) }));
   if (sub === 'amend') {
     const decision = rest[rest.indexOf('--apply-decision') + 1];
     if (!rest.includes('--apply-decision') || !decision) throw new Error(usage);
@@ -60,26 +57,20 @@ export const goalCommands = defineCommands([{
     '                                outcomes and one required uat E2E case per outcome',
     '  goal list [--all] | goal show GOAL-N',
     '                                Open goals with stage and next actor; one goal with history',
-    '  goal approve|refuse GOAL-N -- REASON',
-    '                                Judge an acceptance draft (never its author)',
-    '  goal land GOAL-N              Land the approved acceptance PR at its approved head;',
+    '  goal land GOAL-N              Land the acceptance PR at its drafted head;',
     '                                merged there, its cases are protected',
     '  goal closed GOAL-N PR|change -- REASON',
     '                                Record the acceptance PR (or, under the control-plane merger,',
     '                                the merge-writer change) closed unmerged (drafted again)',
     '  goal plan GOAL-N PLAN.json    Record a plan {note, items} for a goal whose acceptance',
     '                                merged (the planner role writes it)',
-    '  goal plan-approve|plan-refuse GOAL-N -- REASON',
-    '                                Judge a plan (never its author)',
-    '  goal release GOAL-N           Create and release the approved plan\'s items in',
+    '  goal release GOAL-N           Create and release the plan\'s items in',
     '                                dependency order',
     '  goal deliver GOAL-N GY-N... -- REASON',
     '                                Record the goal delivered once those items are done and',
     '                                served by production',
     '  goal case-change GOAL-N GY-N CASE... -- REASON',
-    '                                Ask to change protected cases for one item; judged by',
-    '                                goal case-change-approve|case-change-refuse GOAL-N ID --',
-    '                                REASON, never by the requester or an implementer',
+    '                                Grant one item a change to protected cases (master only)',
     '  goal amend GOAL-N --apply-decision REQUEST_ID',
     '                                Retire the protected outcomes (and their cases) that the',
     '                                operator\'s "Go ahead as asked" request says to retire',

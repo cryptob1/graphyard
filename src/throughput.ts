@@ -564,7 +564,7 @@ export const openThroughputOwner = <W extends Pick<Work, 'title' | 'stage'> & { 
 
 /**
  * Whether the owner's needs-decision was answered: the loop raised it (`raisedAt`, the owner's
- * requirements revision when the loop recorded `escalation:throughput:GY-N:REVISION`) and a
+ * requirements revision when the loop recorded `attention:throughput:GY-N:REVISION`) and a
  * requirements revision was applied to the owner after that (`master decide GY-N requirements`,
  * then its approver). A revision with no needs-decision raised, or one applied before it, answers
  * nothing: a scope or criteria edit alone never closes the owner.

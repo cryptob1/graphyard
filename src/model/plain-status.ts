@@ -32,11 +32,6 @@ export interface PlainStatus { sentence: string; tone: Tone; phase: Phase; who: 
    */
   outcome: string | null }
 
-const trigger: Record<string, string> = {
-  'lease-loss': 'the builder lost contact', 'evidence-policy-conflict': 'a proof breaks the rules',
-  'security-concern': 'a security concern', 'requirement-weakening': 'a request to weaken the requirements',
-};
-
 /**
  * One gate reason in plain words. `stuck` marks reasons that will not clear on their own:
  * somebody has to decide or fix something. A reason nobody anticipated falls back to a
@@ -65,7 +60,6 @@ export function plainReason(reason: string, gate: string, now = Date.now(), work
     [mergeWriterPushPattern, () => 'Waiting for Graphyard to merge it'],
     [/^Required Graphyard check and merge-queue branch protection/, () => 'GitHub merge protection is not confirmed yet', true],
     [/^Pull request is not mergeable against the current base$/, () => 'The pull request conflicts with the main branch', true],
-    [/^Unresolved (\S+) escalation requires operator resolution: (.*)$/s, m => `Needs a decision about ${trigger[m[1]] ?? 'a problem'}: ${m[2]}`, true],
     [/^Slice lead (\S+) ruled \S+ under rule \S+; delivery is blocked until the authorized recovery: (.*)$/s, m => `Held by team lead ${m[1]}: ${m[2]}`, true],
   ];
   for (const [pattern, text, stuck] of rules) { const m = reason.match(pattern); if (m) return { text: text(m), stuck: !!stuck, known: true }; }
@@ -146,7 +140,7 @@ const stepWords: Record<string, string> = {
   dispatch: 'handing it to a builder', 'request-review': 'asking for a review',
   'request-rework': 'sending it back for changes',
   resync: 're-reading it from GitHub', reclaim: 'freeing it from its last builder', merge: 'merging it',
-  escalate: 'getting somebody to decide it',
+  attention: 'getting somebody to decide it',
 };
 
 /**

@@ -174,14 +174,14 @@ export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 
  * needs-decision a measurement shows is the throughput attention line alone. The key stays so
  * `throughputEscalatedAt` still reads what an earlier loop raised, which the attention line names.
  */
-export const throughputEscalationKey = (owner: string, policyRevision: number) => `escalation:throughput:${owner}:${policyRevision}`;
+export const throughputEscalationKey = (owner: string, policyRevision: number) => `attention:throughput:${owner}:${policyRevision}`;
 /**
  * The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none.
  * Read by the throughput attention (master-status-sections.ts) to word what an applied revision answered. The old
  * `waiting` raises settle through settleThroughputEscalations, and a settled row still answers here.
  */
 export function throughputEscalatedAt(actions: Record<string, DaemonAction>, owner: Pick<Work, 'key'>): number | null {
-  const prefix = `escalation:throughput:${owner.key}:`;
+  const prefix = `attention:throughput:${owner.key}:`;
   const raised = Object.entries(actions).filter(([key, action]) => key.startsWith(prefix) && (action.state === 'waiting' || action.state === 'done') && action.work === owner.key)
     .map(([key]) => Number(key.slice(prefix.length))).filter(Number.isInteger);
   return raised.length ? Math.min(...raised) : null;
@@ -195,7 +195,7 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  */
 function settleThroughputEscalations(state: DaemonState) {
   for (const [key, action] of Object.entries(state.actions)) {
-    if (key.startsWith('escalation:throughput:') && action.state === 'waiting') storeAction(state, key, { ...action, state: 'done' });
+    if (key.startsWith('attention:throughput:') && action.state === 'waiting') storeAction(state, key, { ...action, state: 'done' });
   }
 }
 

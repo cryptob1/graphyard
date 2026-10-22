@@ -12,13 +12,13 @@ import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../p
  * registry document; src/agent-registry.ts runs it inside the coordination transaction.
  */
 export const sessionHistoryLimit = 100, refusalHistoryLimit = 20;
-export const launchGraceMs = 5 * 60_000, reviewSessionMs = 2 * 3_600_000, producerSessionMs = 24 * 3_600_000, decisionSessionMs = 30 * 60_000, sessionCapMs = 48 * 3_600_000;
+export const launchGraceMs = 5 * 60_000, reviewSessionMs = 2 * 3_600_000, producerSessionMs = 24 * 3_600_000, sessionCapMs = 48 * 3_600_000;
 type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'>;
 /**
  * Whether a recorded session still occupies its account, and why not when it does not. Nothing
  * reports a session's end: the control plane already knows what each one was launched for, so a
  * worker session lives as long as its item's lease, a reviewer or producer session as long as the
- * request it answers stands, and a decision session for a bounded time. Every session is live
+ * request it answers stands. Every session is live
  * through a launch grace, because the claim or the request follows the choice.
  */
 export function sessionEnded(session: FleetSession, work: SessionWork | undefined, now: number): string | null {
@@ -26,7 +26,6 @@ export function sessionEnded(session: FleetSession, work: SessionWork | undefine
   const age = now - Date.parse(session.selectedAt);
   if (age < launchGraceMs) return null;
   if (age > sessionCapMs) return 'older than any session runs';
-  if (session.role === 'approver' || session.role === 'escalation-handler') return age > decisionSessionMs ? 'the decision window passed' : null;
   // The master session (GY-898) names no work item by design: it holds its slot until the loop
   // that supervises it ends it (rotation), bounded only by the outer cap above — its own budget is
   // at most 12 hours — so a second host never reads the role as free while the pane still runs.

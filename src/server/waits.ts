@@ -152,7 +152,8 @@ export async function listHumanRequests(services: Services, actor: Principal) {
   return { now: snapshot.now, requests: openHumanOnly(await humanOnlySubjects(services, visible), Date.parse(snapshot.now)) };
 }
 
-const capacityOf = (work: Work): CapacityState => work.capacity ?? { exhaustions: [], escalations: [] };
+// A document recorded before GY-2874 named its spent roles `escalations`: they are dropped, and the loop records them spent again.
+const capacityOf = (work: Work): CapacityState => ({ exhaustions: work.capacity?.exhaustions ?? [], spent: work.capacity?.spent ?? [] });
 
 /**
  * What the master loop observed about provider capacity, recorded by its coordinator identity.
@@ -198,15 +199,15 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
       const interrupted = report.cause === 'interrupted';
       return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, ...(endedBlocker ? { endedBlocker } : {}), requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable again' : 'the attempt ended as released; the item is claimable on another account') : 'the request is launched again on another account' }, key, fingerprint);
     }
-    const standing = capacity.escalations.find(entry => entry.role === data.role);
-    if (data.event === 'escalated') {
+    const standing = capacity.spent.find(entry => entry.role === data.role);
+    if (data.event === 'spent') {
       if (standing && capacitySignature(standing.role, standing.accounts) === capacitySignature(data.role, data.accounts)) return work!;
-      const escalation = { role: data.role, at: now.toISOString(), accounts: data.accounts, retryAt: capacityRetryAt(data.accounts) };
-      work!.capacity = { ...capacity, escalations: [...capacity.escalations.filter(entry => entry.role !== data.role), escalation] };
-      return commit(services, db, now, work!, all, actor, 'capacity.escalated', { escalation }, key, fingerprint);
+      const spent = { role: data.role, at: now.toISOString(), accounts: data.accounts, retryAt: capacityRetryAt(data.accounts) };
+      work!.capacity = { ...capacity, spent: [...capacity.spent.filter(entry => entry.role !== data.role), spent] };
+      return commit(services, db, now, work!, all, actor, 'capacity.spent', { spent }, key, fingerprint);
     }
     if (!standing) return work!;
-    work!.capacity = { ...capacity, escalations: capacity.escalations.filter(entry => entry.role !== data.role) };
-    return commit(services, db, now, work!, all, actor, 'capacity.restored', { role: data.role, reason: data.reason, escalation: standing }, key, fingerprint);
+    work!.capacity = { ...capacity, spent: capacity.spent.filter(entry => entry.role !== data.role) };
+    return commit(services, db, now, work!, all, actor, 'capacity.restored', { role: data.role, reason: data.reason, spent: standing }, key, fingerprint);
   });
 }

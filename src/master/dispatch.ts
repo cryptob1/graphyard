@@ -573,7 +573,7 @@ function resumedAttempt(work: Partial<Pick<Work, 'capacity' | 'humanRequests'>>)
   const last = work.humanRequests?.at(-1);
   const answered = last?.answer?.outcome === 'provided' ? `An earlier attempt asked the human for ${last.needed} (${humanDecisionLabel[last.kind]}); the human answered: ${last.answer.text}. Continue from that answer. ` : '';
   // GY-1815: every park withdrawn on observation carries what was observed, even after a later park was answered, so no resumed attempt parks on it again.
-  const superseded = (work.humanRequests ?? []).filter(request => request.answer?.outcome === supersededByObservation).map(request => `An earlier attempt asked the human for ${request.needed} (${humanDecisionLabel[request.kind]}); the request was closed as superseded by observation, because the asked state already holds: ${request.answer!.text.replace(/^superseded-by-observation: /, '')} (requested by ${request.answer!.by}${request.answer!.approvedBy ? `, approved by ${request.answer!.approvedBy}` : ''}). Continue from that observed state; do not park on the same question again. `).join('');
+  const superseded = (work.humanRequests ?? []).filter(request => request.answer?.outcome === supersededByObservation).map(request => `An earlier attempt asked the human for ${request.needed} (${humanDecisionLabel[request.kind]}); the request was closed as superseded by observation, because the asked state already holds: ${request.answer!.text.replace(/^superseded-by-observation: /, '')} (recorded by ${request.answer!.by}). Continue from that observed state; do not park on the same question again. `).join('');
   return kept + answered + superseded;
 }
 

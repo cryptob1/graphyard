@@ -216,8 +216,8 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
         for (const item of waiting) {
           const standing = standingCapacity(item, capacity.role)[0];
           if (standing && capacitySignature(standing.role, standing.accounts) === signature) continue;
-          try { await effects.reportCapacity(item, { event: 'escalated', role: capacity.role, accounts: capacity.accounts }); }
-          catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, `${key}:${item.id}`, { kind: 'capacity', work: item.key }, error, `Recording the ${capacity.role} capacity escalation on ${item.key}`); continue; } performed.push(await record(state, `${key}:${item.id}`, { kind: 'capacity', work: item.key, principal: null, state: 'failed', detail: `Could not record the ${capacity.role} capacity escalation on ${item.key}: ${message(error)}`, attempts: (state.actions[`${key}:${item.id}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); }
+          try { await effects.reportCapacity(item, { event: 'spent', role: capacity.role, accounts: capacity.accounts }); }
+          catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, `${key}:${item.id}`, { kind: 'capacity', work: item.key }, error, `Recording the ${capacity.role} capacity as spent on ${item.key}`); continue; } performed.push(await record(state, `${key}:${item.id}`, { kind: 'capacity', work: item.key, principal: null, state: 'failed', detail: `Could not record the ${capacity.role} capacity as spent on ${item.key}: ${message(error)}`, attempts: (state.actions[`${key}:${item.id}`]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)); }
         }
         const detail = `${describeCapacity(capacity.role, capacity.accounts)}${waiting.length ? `; waiting: ${waiting.map(item => item.key).join(', ')}` : ''}`;
         if (detailChanged(previous, detail)) performed.push(await record(state, key, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
@@ -244,7 +244,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
       attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
 
-  // 4b-owed. An action no executor may claim is a judgment the loop cannot make: `escalate` and
+  // 4b-owed. An action no executor may claim is a judgment the loop cannot make: `attention` and
   //     `request-rework` are decided in the step itself (`actionJudgment`), so the executor holds
   //     no handler for either and the row is never claimed, never fails, and never shows up as a
   //     refused launch. The loop names each one once — what is waiting, what decides it, and the
@@ -266,8 +266,8 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   // could not claim, and its work would be recorded nowhere. One escalation names the cause.
   // GY-1774: a health read carried past the step's bound holds dispatch this cycle, as an unanswered plane cannot record a launch; the next cycle reads again, joining it.
   const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await carriedCall(cycle, 'dispatch', 'dispatch', 'planeHealth', () => effects.planeHealth!(), error => `the control plane's health read was carried to the next cycle, which reads it again: ${message(error)}`) : null;
-  if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
-    performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'attention', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+  if (unrecordable && detailChanged(state.actions['attention:dispatch:plane'], `Dispatch held: ${unrecordable}`))
+    performed.push(await record(state, 'attention:dispatch:plane', { kind: 'attention', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['attention:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   // A host below its memory floor launches no worker (GY-612): the crossing is recorded once each
   // way — deferred with its reason and top consumers, resumed once memory recovers — and master
   // status raises one `resources` attention item while it stands. Running sessions are left alone.
@@ -317,7 +317,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
       const launchable = health.filter(entry => entry.profile.mode === 'launch');
       if (!saturatedFleet(health, held)) {
         const detail = `No worker profile can take ${item.key}: ${launchable.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`;
-        const escalationKey = `escalation:dispatch:${item.id}`;
+        const escalationKey = `attention:dispatch:${item.id}`;
         if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'attention', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       } else {
         // GY-1890: the fleet is saturated — every profile is held by a live attempt or otherwise
@@ -470,7 +470,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
 }
 
 /** The key of the loop's host-memory record: one deferral and one resumption per crossing. */
-export const memoryActionKey = 'escalation:dispatch:memory';
+export const memoryActionKey = 'attention:dispatch:memory';
 /** Read the host's memory, keep it on the loop's state, and record a crossing of its floor. Whether launches are deferred. */
 export async function hostMemoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'config' | 'performed'>) {
   const { state, effects, now, config, performed } = cycle;

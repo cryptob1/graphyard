@@ -31,7 +31,7 @@ export const credentialBlockedKey = (item: Pick<Work, 'id'>, epoch: number) => `
  * The marker a credential-blocked attempt's end carries in its capacity record. The retry ladder
  * (GY-885) reads it back: such an end counts as a failed attempt, so a failure a fresh mint does
  * not cure — an App permission the push needs and lacks, say — is relaunched after a backoff and
- * held at the cap for an approver's decision instead of ending and relaunching for ever.
+ * held at the cap for the master instead of ending and relaunching for ever.
  */
 export const credentialBlockedMarker = 'credential-blocked attempt';
 /** Why the attempt is ended: the blocker it reported, and that the next attempt gets a freshly minted credential. */

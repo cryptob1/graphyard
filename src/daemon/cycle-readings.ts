@@ -29,7 +29,7 @@ export interface ReadingEffects {
 
 /** The loop's one record of taking the item's reading, whatever release it read: the backoff is the item's, so a plane that deploys every few minutes costs no read per cycle. */
 export const readingKey = (item: Pick<Work, 'id'>) => `reading:${item.id}`;
-export const readingEscalationKey = (item: Pick<Work, 'id'>) => `escalation:reading:${item.id}`;
+export const readingEscalationKey = (item: Pick<Work, 'id'>) => `attention:reading:${item.id}`;
 /** The idempotency key of the close a passing reading on `release` ends in: a close that failed is retried under it, never applied twice. */
 export const readingCloseKey = (item: Pick<Work, 'id'>, release: string) => `reading:close:${item.id}:${release}`;
 /** The reason a passing reading's close names, from the readings it stands on: byte-identical however many times the close is retried under its key. */

@@ -270,7 +270,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // The two waits that stall only this item (GY-89): the open human-only request, and the
       // sessions that ran out of quota with any role that has no account left.
       humanRequest: parked ? { id: parked.id, kind: parked.kind, decision: humanDecisionLabel[parked.kind], needed: parked.needed, reason: parked.reason, requestedBy: parked.requestedBy, at: parked.at, waitedMs: Math.max(0, now - Date.parse(parked.at)), answer: answerCommand(work.key, parked) } : null,
-      capacity: work.capacity ? { exhaustions: work.capacity.exhaustions.slice(-5), escalations: work.capacity.escalations } : null,
+      capacity: work.capacity ? { exhaustions: work.capacity.exhaustions.slice(-5), spent: work.capacity.spent ?? [] } : null,
       // What the control plane is doing, or last did, about a base branch that moved under this
       // candidate: nobody is asked for a round while `pending` is set.
       base: baseRefresh || baseConflict || refreshCarry ? { pending: baseRefresh, conflict: baseConflict,
@@ -372,22 +372,15 @@ export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[
 const atCapClause = (inFlight: number) => inFlight >= maxInFlight ? ` — ${inFlight} in flight is the cap, so ready work waits until one merges (Hotfix items excepted)` : '';
 
 /**
- * The deliveries that did not come through an authorized merge execution, each with the decision
- * it rests on. A reconciled delivery cites the pre-merge snapshot that satisfied every gate; an
- * operator-authorized one states that no execution authorized the merge, names the operator and
- * both reasons, and lists what the record lacked. The item's own `delivery` carries the same
+ * The deliveries that did not come through an authorized merge execution: a reconciled delivery
+ * cites the pre-merge snapshot that satisfied every gate; an operator-authorized one names the
+ * direct-merge window it fell inside and lists what the record lacked. The item's own `delivery` carries the same
  * record under `reconciliation` or `operatorAuthorization`; the ledger keeps `merge.reconciled` or
  * `merge.operator-authorized`.
  */
 export function recoveredDeliveries(work: Work[]) {
-  const done = work.filter(item => item.stage === 'done' && item.delivery) as (Work & { delivery: NonNullable<Work['delivery']> & { reconciliation?: any; operatorAuthorization?: any } })[];
-  const cite = (item: typeof done[number], record: any) => ({ key: item.key, title: item.title, mergeSha: item.delivery.mergeSha, mergedAt: item.delivery.mergedAt, decision: record.decision as string,
-    requestedBy: record.requestedBy as string, approvedBy: record.approvedBy as string, reason: record.reason as string, approvalReason: record.approvalReason as string, cutoff: record.cutoff as string, snapshotRevision: record.snapshotRevision as number });
-  return {
-    reconciled: done.filter(item => item.delivery.reconciliation).map(item => ({ ...cite(item, item.delivery.reconciliation), authorization: 'reconciled' as const, judgement: item.delivery.reconciliation.judgement as string })),
-    operatorAuthorized: done.filter(item => item.delivery.operatorAuthorization).map(item => ({ ...cite(item, item.delivery.operatorAuthorization), authorization: 'operator' as const, execution: null,
-      operator: item.delivery.operatorAuthorization.operator as string, refusedDecision: item.delivery.operatorAuthorization.refusedDecision as string, unmet: item.delivery.operatorAuthorization.unmet as string[], judgement: item.delivery.operatorAuthorization.judgement as string })),
-  };
+  const done = work.filter(item => item.stage === 'done' && item.delivery) as (Work & { delivery: NonNullable<Work['delivery']> & { reconciliation?: unknown; operatorAuthorization?: unknown } })[];
+  return { reconciled: done.filter(item => item.delivery.reconciliation), operatorAuthorized: done.filter(item => item.delivery.operatorAuthorization) };
 }
 /** Time from the accepted merge to the observed deployment covering it: merge-to-production latency. */
 export function mergeToProductionMs(work: Work): number | null {

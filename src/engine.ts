@@ -10,7 +10,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
@@ -276,9 +276,8 @@ export function historicalAuthorizationRefusals(past: Work, _all: Work[], observ
 }
 /** How a merge inside a direct-merge window (direct-merge.ts) was recorded as operator-authorized: `unmet` is what the record lacked. */
 export interface OperatorAuthorizedDelivery {
-  decision: string; requestedBy: string; requestedAt: string; approvedBy: string; approvedAt: string; reason: string; approvalReason: string;
-  /** The admin credential that authorized the merge, and the refused reconciliation its decision cites. */
-  operator: string; refusedDecision: string; unmet: string[];
+  /** Who set the direct-merge window the merge fell inside, and why. */
+  operator: string; reason: string; unmet: string[];
   cutoff: string; snapshotRevision: number; judgement: string; violation: string;
   /** Always null: the statement that no merge execution authorized this merge. */
   execution: null;
@@ -778,7 +777,7 @@ export class Engine {
    * a programming error included, is refused without a grace, so bugs surface instead of
    * extending the lease they broke (GY-671).
    */
-  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; attestation?: EvidenceAttestation } = {}) {
+  async execute(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation } = {}) {
     if (command !== 'heartbeat') return this.executeCommand(actor, command, id, input, key, context);
     const started = new Date();
     this.renewing++;
@@ -897,7 +896,7 @@ export class Engine {
     lease.expiresAt = new Date(Math.max(expires, Date.parse(stall.to) + stallRenewalWindowMs)).toISOString();
     return true;
   }
-  private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation; attestation?: EvidenceAttestation } = {}) {
+  private async executeCommand(actor: Principal, command: Command, id: string | null, input: unknown, key: string, context: { observation?: Observation } = {}) {
     demand(Object.hasOwn(commands, command), 'Unknown command', 404);
     // Leads coordinate through rulings; no lifecycle command is lead-permitted.
     demand(actor.role !== 'slice-lead' || leadMay(command), 'Slice leads cannot perform lifecycle mutations', 403);
@@ -1132,10 +1131,10 @@ export class Engine {
           const record: ExhaustionRecord = { role: 'worker', cause: 'interrupted', epoch: data.epoch, profile: actor.id.slice(0, 80), account: null, runtime: actor.runtime?.slice(0, 40) ?? null,
             // A GitHub credential failure's end carries GY-999's marker, so it counts on the retry
             // ladder: a failure no freshly minted credential cures is relaunched after a backoff
-            // and held at the cap for an approver, never ended and relaunched for ever.
+            // and held at the cap for the master, never ended and relaunched for ever.
             reason: (credentialFailure(data.reason) ? credentialBlockedReason(work, data.epoch, data.reason) : `${blockedAttemptMarker}${data.epoch}: ${data.reason}`).slice(0, 500),
             resetsAt: null, partialWork, at: now.toISOString(), owner: actor.id, recordedBy: actor.id };
-          const capacity = work.capacity ?? { exhaustions: [], escalations: [] };
+          const capacity = work.capacity ?? { exhaustions: [], spent: [] };
           work.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
           endAttempt(work, data.epoch, 'released', now);
           work.lease = null;
@@ -1348,9 +1347,7 @@ export class Engine {
         // GY-135: a pass is trusted only beside a recorded run that fails with the criterion's
         // behaviour removed; otherwise it is kept, untrusted, as not exercising its criterion.
         const unexercised = trusted && data.proof !== deploySmokeProof ? exerciseRefusal(work, all, data) : null;
-        // A master attestation names itself on the record it applies (GY-615), which is what
-        // lets a Graphyard-authored refresh of the same patch carry it; see model/carry.ts.
-        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(unexercised ? { unexercised } : {}), ...(context.attestation ? { attestation: context.attestation } : {}) };
+        const evidence: Evidence = { ...data, id: randomUUID(), producer: actor.id, trusted: trusted && !unexercised, at: now.toISOString(), ...(unexercised ? { unexercised } : {}) };
         if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'evidence.exercise.refused',
           JSON.stringify({ details: { proof: data.proof, criteria: attachedCriteria(work, all, data.proof), behaviour: data.exercise?.behaviour ?? null, sha: data.sha, reason: unexercised } })]);
         work.evidence.push(evidence);

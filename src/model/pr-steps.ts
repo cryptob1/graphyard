@@ -78,9 +78,9 @@ const reviewersExhausted = /^Every configured reviewer profile is exhausted/;
  * Merge refusals only the master agent clears — unverified branch protection, a standing
  * escalation, a slice lead's hold — and those a new head from the builder clears: a conflict with
  * the base, unresolved review threads, an ejection from the queue. The same refusals
- * src/model/refusal-mapping.ts maps to `escalate` and `request-rework`.
+ * src/model/refusal-mapping.ts maps to `attention` and `request-rework`.
  */
-const mergeMasterClears = /branch protection have not been verified$|^Unresolved \S+ escalation requires operator resolution|^Slice lead \S+ ruled /;
+const mergeMasterClears = /branch protection have not been verified$|^Slice lead \S+ ruled /;
 const mergeBuilderClears = /^Pull request is not mergeable against the current base$|^Branch protection requires conversation resolution and \d+ review threads? (is|are) unresolved|^Ejected from the merge queue:/;
 
 /** What the checked work waits on, and who acts next, in plain words, per recorded step. */
@@ -122,7 +122,7 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
       switch (work.nextAction?.gate === 'review' ? work.nextAction.kind : null) {
         case 'dispatch': return { detail: 'the proofs run before the review', who: 'Prover agent' };
         case 'resync': return { detail: 'waiting for a fresh reading of the pull request before the review', who: 'Graphyard (automatic)' };
-        case 'escalate': return { detail: 'no reviewer can be asked about this head', who: 'Master agent' };
+        case 'attention': return { detail: 'no reviewer can be asked about this head', who: 'Master agent' };
         case 'request-rework': return { detail: 'this head needs a new commit before the review', who: 'Builder agent' };
       }
       return { detail: 'waiting for the reviewer', who: 'Reviewer agent' };

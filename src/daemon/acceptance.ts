@@ -1,12 +1,11 @@
 // Concern: the acceptance role (GY-1417) — each open goal is drafted headless into customer outcomes and
-// required cases on one pull request, judged headless in a separate session, landed by the control
-// plane at its approved head and recorded merged (or closed unmerged, or conflicting, and drafted again).
+// required cases on one pull request, landed by the control plane at its drafted head and recorded merged (or closed unmerged, or conflicting, and drafted again).
 // Under the control-plane merger (GY-1535) the draft is one commit the merge writer lands instead: no pull request.
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { z } from 'zod';
 import { caseDirectory, contractFile, parseContract } from '../e2e/case.js';
-import { acceptanceChangeRisk, acceptanceDraftSchema, acceptanceName, acceptanceStuckMs, draftFiles, maxDraftRounds, type AcceptanceDraft, type CaseChange, type Goal, type Landing } from '../model/goal.js';
+import { acceptanceChangeRisk, acceptanceDraftSchema, acceptanceName, acceptanceStuckMs, draftFiles, maxDraftRounds, type AcceptanceDraft, type Goal, type Landing } from '../model/goal.js';
 import type { MergerMode } from '../merger-mode.js';
 import { baseMovedReason } from '../merge-writer/executor.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
@@ -25,14 +24,10 @@ import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
 import { detailChanged } from './text.js';
 import type { Cycle } from './cycle.js';
-import { caseChangeStep, clearCaseChangeJudgements } from './case-change-judge.js';
 import { carriedIsolate, stepCallCarried } from './step-budget.js';
 
 export const acceptanceRole = 'acceptance';
 export const acceptanceTool = 'graphyard_acceptance';
-/** The judgement run's Pi role and tool: a separate judge session's verdict on one draft. */
-export const acceptanceJudgeRole = 'acceptance-judge';
-export const acceptanceJudgementTool = 'graphyard_acceptance_judgement';
 /** A run that returned nothing is tried again after this long: each try is a paid model run. */
 export const acceptanceRetryMs = 60 * 60_000;
 /** A step that only talks to GitHub or the control plane (open, post, close) is retried after this long, reusing the draft. */
@@ -41,13 +36,11 @@ export const acceptanceStepRetryMs = 10 * 60_000;
 export const acceptancePollMs = 5 * 60_000;
 export const acceptancePayloadSchema = z.object({ goal: z.string().min(1).max(40), outcomes: z.unknown() }).strict()
   .transform(({ goal, outcomes }) => ({ goal, ...acceptanceDraftSchema.parse({ outcomes }) }));
-export const judgementPayloadSchema = z.object({ goal: z.string().min(1).max(40), verdict: z.enum(['approve', 'refuse']), reason: z.string().trim().min(1).max(2000) }).strict();
-export type Judgement = z.infer<typeof judgementPayloadSchema>;
 
 export interface AcceptanceRun { runner: Runner; runtime: string; model: string; release?: (reason: string) => Promise<unknown> }
 export interface PullRequestState { state: 'open' | 'closed' | 'merged'; mergeSha: string | null; head: string | null }
 /**
- * The merge writer's steps an approved acceptance change lands through under the control-plane
+ * The merge writer's steps an accepted acceptance change lands through under the control-plane
  * merger (GY-1535; cycle-merge-writer.ts builds them): the fetched base tip, the exact merge commit
  * of the head onto it, the leased deploy-key push, and the merge commit the base's first-parent
  * history already holds for a head (so a retry after a lost record never pushes twice).
@@ -59,24 +52,19 @@ export interface AcceptanceEffects {
   settings: Pick<DiagnosticianSettings, 'enabled' | 'model' | 'fallbackModel' | 'timeoutMinutes'>;
   cwd: string;
   goals: () => Promise<Goal[]>;
-  /** The draft runs on the acceptance role's accounts; the judgement on the approver role's. */
-  runner: (role: 'draft' | 'judge', attempt: 'primary' | 'fallback', goal: Goal) => Promise<AcceptanceRun>;
+  /** The draft runs on the acceptance role's accounts. */
+  runner: (attempt: 'primary' | 'fallback', goal: Goal) => Promise<AcceptanceRun>;
   /** Push the draft to the goal's branch for this revision and open its pull request, or reuse the one already open there. */
   open: (goal: Goal, draft: AcceptanceDraft) => Promise<{ pr: number; branch: string; head: string }>;
   /** Post the draft as the master's operator-agent identity: its author. */
   draft: (goal: Goal, input: AcceptanceDraft & { pr: number | null; branch: string; head: string }) => Promise<Goal>;
-  /** Post the verdict as the master's identity. */
-  judge: (goal: Goal, judgement: Judgement) => Promise<Goal>;
-  /** GY-1806: post the approver's verdict on a requested case change (goal case-change-approve|refuse) as the master's identity. */
-  judgeCaseChange?: (goal: Goal, change: CaseChange, judgement: Judgement) => Promise<Goal>;
-  pullRequest: (pr: number) => Promise<PullRequestState>;
   /**
-   * Ask the control plane to land the approved pull request (POST /api/goals/:key/land): it publishes
-   * the App-bound gate verdicts on the approved head and merges it there once GitHub's own checks pass,
+   * Ask the control plane to land the accepted pull request (POST /api/goals/:key/land): it publishes
+   * the App-bound gate verdicts on the drafted head and merges it there once GitHub's own checks pass,
    * recording it merged; a pull request closed, moved off that head or conflicting is closed and recorded closed.
    */
   land: (goal: Goal) => Promise<{ goal: Goal; landing: Landing }>;
-  /** Close a refused or abandoned acceptance pull request with a comment and delete its branch; nothing when it is no longer open. */
+  /** Close an abandoned acceptance pull request with a comment and delete its branch; nothing when it is no longer open. */
   close: (pr: number, comment: string) => Promise<void>;
   /** Record the draft closed unmerged; `pr` is null for a merge-writer change. */
   closed: (goal: Goal, pr: number | null, reason: string) => Promise<Goal>;
@@ -84,14 +72,14 @@ export interface AcceptanceEffects {
   merger?: () => Promise<MergerMode>;
   /** Under the control-plane merger: commit the draft on its own branch in the coordinator checkout from the base tip, with no push and no pull request. */
   commit?: (goal: Goal, draft: AcceptanceDraft) => Promise<{ branch: string; head: string }>;
-  /** Under the control-plane merger: the merge writer's steps the approved change lands through. */
+  /** Under the control-plane merger: the merge writer's steps the accepted change lands through. */
   writer?: AcceptanceWriterPorts;
   /** Record a merge-writer change merged at the merge commit the writer pushed (POST /api/goals/:key/land with `mergeSha`); the control plane checks the base holds it. */
   landed?: (goal: Goal, mergeSha: string) => Promise<{ goal: Goal; landing: Landing }>;
 }
 
-/** A finished run, kept until it is posted: the draft (and the pull request it was opened as) or the verdict; `deferred` names the full role no run started on. */
-interface Pending { revision: number; draft?: AcceptanceDraft | null; opened?: { pr: number | null; branch: string; head: string }; judgement?: Judgement | null; runs: string[]; deferred?: string }
+/** A finished run, kept until it is posted: the draft and the pull request it was opened as; `deferred` names the full role no run started on. */
+interface Pending { revision: number; draft?: AcceptanceDraft | null; opened?: { pr: number | null; branch: string; head: string }; runs: string[]; deferred?: string }
 /**
  * A draft the current base can never take (an outcome, case or file it names already exists), or one
  * refused outright (401, 403, 409 or 422): it is dropped and drafted again, never reopened.
@@ -129,11 +117,10 @@ const live = new Map<string, Promise<void>>();
 const pending = new Map<string, Pending>();
 /** When each goal's next try of a step may run: `${goal.id}:${step}`. */
 const retryAt = new Map<string, number>();
-const polledAt = new Map<string, number>();
 /** Pull requests closed by this loop or the control plane. */
 const closedPulls = new Set<number>();
 export async function draftsSettled() { await Promise.all([...live.values()]); }
-export function clearDrafts() { for (const store of [live, pending, retryAt, polledAt]) store.clear(); closedPulls.clear(); clearCaseChangeJudgements(); }
+export function clearDrafts() { for (const store of [live, pending, retryAt]) store.clear(); closedPulls.clear(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 /** `caught` is the error a failed step met. */
@@ -153,18 +140,8 @@ export function acceptancePrompt(config: { repository: string }, goal: Goal, exi
     + `Read ${caseDirectory}/ and ${contractFile} in this checkout for the case format and the outcomes already declared. `
     + `Then call the ${acceptanceTool} tool exactly once with goal "${goal.key}" and outcomes: each outcome a new id (lower-case letters, digits, ., _ and -), a plain-language title a customer would say, `
     + 'the criteria they would check it by, and exactly one case proving it — a case in the e2e/cases format whose id is new, with required true, target "uat", and http or browser steps that check what the customer sees, not how it is built. '
-    + 'Answer any refusal of the last draft. Stop after the call.\n\n'
+    + 'Answer why the last draft was closed. Stop after the call.\n\n'
     + `The goal, as JSON:\n${clip(JSON.stringify(input), 50_000)}`;
-}
-
-export function judgementPrompt(config: { repository: string }, goal: Goal) {
-  const input = { goal: goal.key, statement: goal.statement, users: goal.users, constraints: goal.constraints, deployTarget: goal.deployTarget,
-    pullRequest: goal.acceptance!.pr, author: goal.acceptance!.author, outcomes: goal.acceptance!.outcomes };
-  return `You are the independent approver of an acceptance draft for ${config.repository}. You did not write it. Judge whether it states what the goal's users asked for, before any code is written. `
-    + 'This session is read-only: never edit, commit, push, claim or decide anything, and never ask anyone anything. '
-    + 'Approve only when every outcome is in plain language a customer would recognise, together they cover the goal within its constraints, and each one\'s single required uat case checks what the customer sees rather than how it is built. Otherwise refuse, naming what the next draft must change. '
-    + `Call the ${acceptanceJudgementTool} tool exactly once with goal "${goal.key}", verdict "approve" or "refuse", and your reason. Stop after the call.\n\n`
-    + `The goal and its draft, as JSON:\n${clip(JSON.stringify(input), 80_000)}`;
 }
 
 /**
@@ -172,19 +149,18 @@ export function judgementPrompt(config: { repository: string }, goal: Goal) {
  * its concurrency (or paused) defers the goal instead: no fallback starts, so the operator's limit
  * holds however many goals are open.
  */
-export async function runHeadless<T>(acceptance: AcceptanceEffects, role: 'draft' | 'judge', goal: Goal, prompt: string, validate: (payload: unknown) => T): Promise<{ payload: T | null; runs: string[]; deferred?: string }> {
+export async function runHeadless<T>(acceptance: AcceptanceEffects, goal: Goal, prompt: string, validate: (payload: unknown) => T): Promise<{ payload: T | null; runs: string[]; deferred?: string }> {
   const runs: string[] = [];
-  const [env, tool] = role === 'draft' ? [acceptanceRole, acceptanceTool] : [acceptanceJudgeRole, acceptanceJudgementTool];
   for (const attempt of ['primary', 'fallback'] as const) {
     let chosen: AcceptanceRun;
-    try { chosen = await acceptance.runner(role, attempt, goal); } catch (error) {
+    try { chosen = await acceptance.runner(attempt, goal); } catch (error) {
       const full = capacityRefusal(error);
       if (full) return { payload: null, runs, deferred: `${full}: ${clip(message(error), 300)}` };
       runs.push(`no ${attempt} runner: ${message(error)}`); continue;
     }
-    const run = chosen.runner.start(prompt, { cwd: acceptance.cwd, env: { GRAPHYARD_PI_ROLE: env }, tool, timeoutMs: acceptance.settings.timeoutMinutes * 60_000, validate });
+    const run = chosen.runner.start(prompt, { cwd: acceptance.cwd, env: { GRAPHYARD_PI_ROLE: acceptanceRole }, tool: acceptanceTool, timeoutMs: acceptance.settings.timeoutMinutes * 60_000, validate });
     const result = await run.result();
-    await Promise.resolve(chosen.release?.(`the ${attempt} acceptance ${role} of ${goal.key} ended`)).catch(() => {});
+    await Promise.resolve(chosen.release?.(`the ${attempt} acceptance draft of ${goal.key} ended`)).catch(() => {});
     if (result.ok) return { payload: result.payload, runs };
     runs.push(`${chosen.model} ${result.failure.reason}: ${clip(result.failure.detail, 300)}`);
     if (result.failure.reason === 'cancelled') break;
@@ -192,22 +168,19 @@ export async function runHeadless<T>(acceptance: AcceptanceEffects, role: 'draft
   return { payload: null, runs };
 }
 const ofGoal = (goal: Goal) => (parsed: { goal: string }) => { if (parsed.goal !== goal.key) throw new Error(`the answer names ${parsed.goal}, not ${goal.key}`); };
-function launch(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, role: 'draft' | 'judge') {
-  const run = role === 'draft'
-    ? declared(acceptance.cwd).then(existing => runHeadless(acceptance, role, goal, acceptancePrompt(cycle.config, goal, existing), payload => {
-      const parsed = acceptancePayloadSchema.parse(payload); ofGoal(goal)(parsed); return { outcomes: parsed.outcomes };
-    })).then(result => ({ revision: goal.revision, draft: result.payload, runs: result.runs, deferred: result.deferred }))
-    : runHeadless(acceptance, role, goal, judgementPrompt(cycle.config, goal), payload => { const parsed = judgementPayloadSchema.parse(payload); ofGoal(goal)(parsed); return parsed; })
-      .then(result => ({ revision: goal.revision, judgement: result.payload, runs: result.runs, deferred: result.deferred }));
-  live.set(goal.id, run.catch(error => ({ revision: goal.revision, [role === 'draft' ? 'draft' : 'judgement']: null, runs: [message(error)] }))
+function launch(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal) {
+  const run = declared(acceptance.cwd).then(existing => runHeadless(acceptance, goal, acceptancePrompt(cycle.config, goal, existing), payload => {
+    const parsed = acceptancePayloadSchema.parse(payload); ofGoal(goal)(parsed); return { outcomes: parsed.outcomes };
+  })).then(result => ({ revision: goal.revision, draft: result.payload, runs: result.runs, deferred: result.deferred }));
+  live.set(goal.id, run.catch(error => ({ revision: goal.revision, draft: null, runs: [message(error)] }))
     .then(result => { pending.set(goal.id, result); }).finally(() => live.delete(goal.id)));
 }
 const due = (cycle: Cycle, goal: Goal, step: string) => cycle.clock >= (retryAt.get(`${goal.id}:${step}`) ?? -Infinity);
 const later = (cycle: Cycle, goal: Goal, step: string, ms: number) => { retryAt.set(`${goal.id}:${step}`, cycle.clock + ms); };
 /** A run the full role deferred: dropped, and launched again after one poll interval. */
-function deferred(cycle: Cycle, goal: Goal, result: Pending, step: 'draft' | 'judge', note: Note) {
-  pending.delete(goal.id); later(cycle, goal, step, acceptancePollMs);
-  return note(goal, 'waiting', `The acceptance role is at its registry capacity (${result.deferred}); ${goal.key}'s ${step === 'draft' ? 'draft' : 'judgement'} starts no fallback and is launched again in five minutes`);
+function deferred(cycle: Cycle, goal: Goal, result: Pending, note: Note) {
+  pending.delete(goal.id); later(cycle, goal, 'draft', acceptancePollMs);
+  return note(goal, 'waiting', `The acceptance role is at its registry capacity (${result.deferred}); ${goal.key}'s draft starts no fallback and is launched again in five minutes`);
 }
 
 /**
@@ -232,32 +205,29 @@ export async function acceptanceStep(cycle: Cycle) {
       const result = pending.get(goal.id);
       if (result && result.revision !== goal.revision) pending.delete(goal.id);
       if (goal.stage === 'acceptance-drafting') return drafting(cycle, acceptance, goal, note);
-      if (goal.stage === 'awaiting-approval') return awaiting(cycle, acceptance, goal, note);
       if (goal.stage === 'accepted') return accepted(cycle, acceptance, goal, note);
     });
-    // GY-1806: a requested case change is judged whatever the goal's stage (a delivered goal included), so no implementer blocks on it.
-    if (goal.caseChanges?.some(change => change.state === 'requested')) await isolate('judgement', null, `the case changes of ${goal.key}`, () => caseChangeStep(cycle, acceptance, goal, note));
   }
 }
 
 async function drafting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
-  // A refused or closed draft's pull request is closed (and its branch deleted) before the next draft, so none accumulates.
+  // A closed draft's pull request is closed (and its branch deleted) before the next draft, so none accumulates.
   // A merge-writer change has no pull request to close: its branch is the coordinator checkout's alone.
   const refused = goal.refusal?.pr != null ? goal.refusal as NonNullable<Goal['refusal']> & { pr: number } : null;
   if (refused && !closedPulls.has(refused.pr) && due(cycle, goal, 'close')) {
     try {
-      await acceptance.close(refused.pr, `Closed by the Graphyard loop: ${goal.key}'s acceptance draft was not taken (${clip(refused.reason, 500)}, by ${refused.by}). The next draft opens on a new pull request.`);
+      await acceptance.close(refused.pr, `Closed by the Graphyard loop: ${goal.key}'s acceptance draft was not landed (${clip(refused.reason, 500)}, by ${refused.by}). The next draft opens on a new pull request.`);
       closedPulls.add(refused.pr);
-      await note(goal, 'done', `Closed ${goal.key}'s refused acceptance pull request #${refused.pr} and deleted its branch`);
-    } catch (error) { if (stepCallCarried(error)) throw error; later(cycle, goal, 'close', acceptanceStepRetryMs); return note(goal, 'failed', `Could not close ${goal.key}'s refused acceptance pull request #${refused.pr}: ${message(error)}; it is tried again in ten minutes, and the next draft waits for it`); }
+      await note(goal, 'done', `Closed ${goal.key}'s abandoned acceptance pull request #${refused.pr} and deleted its branch`);
+    } catch (error) { if (stepCallCarried(error)) throw error; later(cycle, goal, 'close', acceptanceStepRetryMs); return note(goal, 'failed', `Could not close ${goal.key}'s abandoned acceptance pull request #${refused.pr}: ${message(error)}; it is tried again in ten minutes, and the next draft waits for it`); }
   }
   // Closed before the next draft: until then nothing else moves.
   if (refused && !closedPulls.has(refused.pr)) return;
   if ((goal.drafts ?? 0) >= maxDraftRounds)
-    return note(goal, 'done', `${goal.key} has had ${goal.drafts} acceptance drafts refused or closed (last: ${clip(goal.refusal?.reason ?? 'none recorded', 300)}); the loop drafts no more and leaves it to the master`);
+    return note(goal, 'done', `${goal.key} has had ${goal.drafts} acceptance drafts closed (last: ${clip(goal.refusal?.reason ?? 'none recorded', 300)}); the loop drafts no more and leaves it to the master`);
   const result = pending.get(goal.id);
   if (result && 'draft' in result) {
-    if (!result.draft && result.deferred) return deferred(cycle, goal, result, 'draft', note);
+    if (!result.draft && result.deferred) return deferred(cycle, goal, result, note);
     if (!result.draft) {
       pending.delete(goal.id); later(cycle, goal, 'draft', acceptanceRetryMs);
       return note(goal, 'failed', `The acceptance role returned no draft for ${goal.key}: ${result.runs.join('; ')}; it is drafted again in an hour`);
@@ -274,10 +244,10 @@ async function drafting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
       later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `Opened ${named} for ${goal.key}, but its draft could not be recorded: ${message(error)}; it is posted again in ten minutes`, error);
     }
     pending.delete(goal.id);
-    return note(goal, 'done', `Opened ${named} for ${goal.key}${opened.pr === null ? ' for the merge writer, with no pull request' : ''}: ${result.draft.outcomes.map(entry => `${entry.id} (case ${entry.case.id})`).join(', ')}; it awaits approval`);
+    return note(goal, 'done', `Opened ${named} for ${goal.key}${opened.pr === null ? ' for the merge writer, with no pull request' : ''}: ${result.draft.outcomes.map(entry => `${entry.id} (case ${entry.case.id})`).join(', ')}; it is landed next`);
   }
   if (live.has(goal.id) || !due(cycle, goal, 'draft')) return;
-  launch(cycle, acceptance, goal, 'draft');
+  launch(cycle, acceptance, goal);
   await note(goal, 'done', `Launched the acceptance role for ${goal.key} (draft ${(goal.drafts ?? 0) + 1} of at most ${maxDraftRounds}) on ${acceptance.settings.model}, falling back to ${acceptance.settings.fallbackModel}`);
 }
 
@@ -291,44 +261,11 @@ async function openDraft(acceptance: AcceptanceEffects, goal: Goal, draft: Accep
   return acceptance.open(goal, draft);
 }
 
-/** The draft's pull request read at most once per poll interval; a pull request closed unmerged sends the goal back to drafting. A merge-writer change has none: it stays open until it is judged. */
-async function polled(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
-  if (goal.acceptance!.pr === null) return true;
-  if (cycle.clock - (polledAt.get(goal.id) ?? -Infinity) < acceptancePollMs) return null;
-  polledAt.set(goal.id, cycle.clock);
-  const pr = await acceptance.pullRequest(goal.acceptance!.pr!);
-  if (pr.state !== 'closed') return pr;
-  const reason = `acceptance pull request #${goal.acceptance!.pr} was closed without merging`;
-  await acceptance.closed(goal, goal.acceptance!.pr!, reason);
-  await note(goal, 'done', `${goal.key}'s ${reason}, so it goes back to drafting with that reason recorded`);
-  return null;
-}
-
-async function awaiting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
-  const result = pending.get(goal.id);
-  if (result && 'judgement' in result) {
-    if (!result.judgement && result.deferred) return deferred(cycle, goal, result, 'judge', note);
-    if (!result.judgement) {
-      pending.delete(goal.id); later(cycle, goal, 'judge', acceptanceRetryMs);
-      return note(goal, 'failed', `The approver returned no judgement on ${goal.key}'s ${acceptanceName(goal)}: ${result.runs.join('; ')}; it is judged again in an hour`);
-    }
-    if (!due(cycle, goal, 'verdict')) return;
-    try { await acceptance.judge(goal, result.judgement); }
-    catch (error) { if (stepCallCarried(error)) throw error; later(cycle, goal, 'verdict', acceptanceStepRetryMs); return note(goal, 'failed', `The approver's ${result.judgement.verdict} of ${goal.key} could not be recorded: ${message(error)}; it is posted again in ten minutes`, error); }
-    pending.delete(goal.id);
-    return note(goal, 'done', `The approver ${result.judgement.verdict === 'approve' ? 'approved' : 'refused'} ${goal.key}'s ${acceptanceName(goal)}: ${clip(result.judgement.reason, 600)}`);
-  }
-  if (live.has(goal.id)) return;
-  if (!await polled(cycle, acceptance, goal, note) || !due(cycle, goal, 'judge')) return;
-  launch(cycle, acceptance, goal, 'judge');
-  await note(goal, 'done', `Launched the approver's judgement of ${goal.key}'s ${acceptanceName(goal)}, drafted by ${goal.acceptance!.author}`);
-}
-
 /**
- * An approved draft is landed by the control plane, asked at most once per poll interval. Merged, its
+ * An accepted draft is landed by the control plane, asked at most once per poll interval. Merged, its
  * cases are protected. Conflicting with its base (another goal's contract binding merged first) or
- * moved off its approved head, it was closed: the same outcomes are opened again from the current
- * base without another run, and judged again. Not merged a day after its approval, it is the master's.
+ * moved off its drafted head, it was closed: the same outcomes are opened again from the current
+ * base without another run. Not merged a day after its draft, it is the master's.
  */
 async function accepted(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
   const { pr, outcomes } = goal.acceptance!;
@@ -337,34 +274,33 @@ async function accepted(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
   later(cycle, goal, 'land', acceptancePollMs);
   let answer: { goal: Goal; landing: Landing };
   try { answer = await acceptance.land(goal); }
-  catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `Could not land ${goal.key}'s approved acceptance pull request #${pr}: ${message(error)}; it is asked again in five minutes`, error); }
+  catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `Could not land ${goal.key}'s acceptance pull request #${pr}: ${message(error)}; it is asked again in five minutes`, error); }
   const { landing } = answer;
   if (landing.state === 'merged') return note(goal, 'done', `${goal.key}'s acceptance pull request #${pr} merged; its cases ${outcomes.map(outcome => outcome.case.id).join(', ')} are protected`);
   if (landing.state === 'waiting') {
-    const approved = goal.approval ? Date.parse(goal.approval.at) : cycle.clock;
-    if (cycle.clock - approved > acceptanceStuckMs)
-      return note(goal, 'failed', `${goal.key}'s acceptance pull request #${pr} was approved ${goal.approval!.at} and has not merged: ${landing.detail}. The master decides: graphyard goal closed ${goal.key} ${pr} -- REASON drafts it again`);
-    return note(goal, 'done', `Published the gate verdicts on ${goal.key}'s approved acceptance pull request #${pr} and asked GitHub to merge it: ${landing.detail}; asked again in five minutes`);
+    if (cycle.clock - Date.parse(goal.acceptance!.draftedAt) > acceptanceStuckMs)
+      return note(goal, 'failed', `${goal.key}'s acceptance pull request #${pr} was drafted ${goal.acceptance!.draftedAt} and has not merged: ${landing.detail}. The master decides: graphyard goal closed ${goal.key} ${pr} -- REASON drafts it again`);
+    return note(goal, 'done', `Published the gate verdicts on ${goal.key}'s acceptance pull request #${pr} and asked GitHub to merge it: ${landing.detail}; asked again in five minutes`);
   }
   closedPulls.add(pr);
-  if (landing.state === 'unapproved') return note(goal, 'failed', `${goal.key}'s ${landing.detail}. It went back to drafting with that reason recorded; the master decides what the merged files stand for`);
+  if (landing.state === 'stray') return note(goal, 'failed', `${goal.key}'s ${landing.detail}. It went back to drafting with that reason recorded; the master decides what the merged files stand for`);
   if (landing.state !== 'closed') pending.set(goal.id, { revision: answer.goal.revision, draft: { outcomes }, runs: [] });
-  return note(goal, 'done', `${goal.key}'s ${landing.detail}, so it went back to drafting${landing.state === 'closed' ? ' with that reason recorded' : '; the same outcomes are opened again from the current base and judged again'}`);
+  return note(goal, 'done', `${goal.key}'s ${landing.detail}, so it went back to drafting${landing.state === 'closed' ? ' with that reason recorded' : '; the same outcomes are opened again from the current base'}`);
 }
 
 /**
- * GY-1535: an approved merge-writer change is landed by the merge writer's own steps, tried at most
+ * GY-1535: an accepted merge-writer change is landed by the merge writer's own steps, tried at most
  * once per poll interval. Merged, the control plane records it (checking the base holds the merge
  * commit) and protects its cases exactly as a merged acceptance pull request; a lost record is posted
- * again without a second push. Conflicting with its base or moved off its approved head, it is
- * recorded closed and the same outcomes are committed again from the current base and judged again.
+ * again without a second push. Conflicting with its base, it is recorded closed and the same
+ * outcomes are committed again from the current base.
  */
 async function landChange(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal, note: Note) {
   const { outcomes } = goal.acceptance!, named = acceptanceName(goal);
   if (!due(cycle, goal, 'land')) return;
   later(cycle, goal, 'land', acceptancePollMs);
   if (!acceptance.writer || !acceptance.landed)
-    return note(goal, 'failed', `${goal.key}'s ${named} is approved for the merge writer, but this loop runs without the merge writer's steps; it is tried again in five minutes`);
+    return note(goal, 'failed', `${goal.key}'s ${named} is accepted for the merge writer, but this loop runs without the merge writer's steps; it is tried again in five minutes`);
   let landing: Landing;
   try { landing = await mergeAcceptanceChange(acceptance.writer, goal); }
   catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `The merge writer could not land ${goal.key}'s ${named}: ${message(error)}; it is tried again in five minutes`); }
@@ -374,33 +310,29 @@ async function landChange(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goa
     return note(goal, 'done', `${landing.detail}; ${goal.key}'s cases ${outcomes.map(outcome => outcome.case.id).join(', ')} are protected and it moves to planning`);
   }
   if (landing.state === 'waiting') {
-    const approved = goal.approval ? Date.parse(goal.approval.at) : cycle.clock;
-    if (cycle.clock - approved > acceptanceStuckMs)
-      return note(goal, 'failed', `${goal.key}'s ${named} was approved ${goal.approval!.at} and the merge writer has not landed it: ${landing.detail}. The master decides: graphyard goal closed ${goal.key} change -- REASON drafts it again`);
+    if (cycle.clock - Date.parse(goal.acceptance!.draftedAt) > acceptanceStuckMs)
+      return note(goal, 'failed', `${goal.key}'s ${named} was drafted ${goal.acceptance!.draftedAt} and the merge writer has not landed it: ${landing.detail}. The master decides: graphyard goal closed ${goal.key} change -- REASON drafts it again`);
     return note(goal, 'done', `The merge writer has not landed ${goal.key}'s ${named} yet: ${landing.detail}; it is tried again in five minutes`);
   }
   let reopened: Goal;
   try { reopened = await acceptance.closed(goal, null, landing.detail); }
   catch (error) { if (stepCallCarried(error)) throw error; return note(goal, 'failed', `${goal.key}'s ${landing.detail}, but it could not be recorded closed: ${message(error)}; it is tried again in five minutes`, error); }
-  if (landing.state === 'unapproved') return note(goal, 'failed', `${goal.key}'s ${landing.detail}. It went back to drafting with that reason recorded`);
+  if (landing.state === 'stray') return note(goal, 'failed', `${goal.key}'s ${landing.detail}. It went back to drafting with that reason recorded`);
   pending.set(goal.id, { revision: reopened.revision, draft: { outcomes }, runs: [] });
-  return note(goal, 'done', `${goal.key}'s ${landing.detail}, so it went back to drafting; the same outcomes are committed again from the current base and judged again`);
+  return note(goal, 'done', `${goal.key}'s ${landing.detail}, so it went back to drafting; the same outcomes are committed again from the current base`);
 }
 
 /**
- * GY-1535: one approved acceptance change through the merge writer's steps. The change is classified
- * sensitive (model/goal.ts acceptanceChangeRisk), so it lands only on the judge session's verdict
- * on its exact head, by an identity other than its author, and only when the merge adds nothing but
+ * GY-1535: one accepted acceptance change through the merge writer's steps. The change is classified
+ * sensitive (model/goal.ts acceptanceChangeRisk), so it lands only when the merge adds nothing but
  * its cases and the contract. The merge commit of the head onto the fetched tip is pushed leased on
  * that tip, made again on a moved tip up to the writer's retrials; a head the base already holds a
  * merge of is answered merged without a push.
  */
 export async function mergeAcceptanceChange(writer: AcceptanceWriterPorts, goal: Goal): Promise<Landing> {
-  const { acceptance, approval } = goal;
-  if (!acceptance || acceptance.pr !== null || !approval || goal.stage !== 'accepted') throw new Error(`${goal.key} is ${goal.stage}; only an approved merge-writer acceptance change is landed by the merge writer`);
+  const { acceptance } = goal;
+  if (!acceptance || acceptance.pr !== null || goal.stage !== 'accepted') throw new Error(`${goal.key} is ${goal.stage}; only an accepted merge-writer acceptance change is landed by the merge writer`);
   const named = acceptanceName(goal);
-  if (approval.head !== acceptance.head) return { state: 'moved', mergeSha: null, detail: `${named} is not the approved head ${approval.head.slice(0, 12)}` };
-  if (approval.by === acceptance.author) return { state: 'unapproved', mergeSha: null, detail: `${named} was approved by its own author ${approval.by}; a sensitive change lands only on another identity's verdict` };
   const already = await writer.merged(acceptance.head);
   if (already) return { state: 'merged', mergeSha: already, detail: `${writer.baseBranch} already holds ${goal.key}'s ${named} as ${already}` };
   const allowed = new Set(draftFiles({ outcomes: acceptance.outcomes }, null).map(file => file.path));
@@ -409,11 +341,11 @@ export async function mergeAcceptanceChange(writer: AcceptanceWriterPorts, goal:
     const merged = await writer.merge(acceptance.head, tip, { key: goal.key, title: named });
     if ('conflict' in merged) return { state: 'conflicting', mergeSha: null, detail: `${named} conflicts with ${writer.baseBranch} at ${tip.slice(0, 12)} in ${merged.conflict.slice(0, 20).join(', ')}` };
     const stray = merged.files.filter(path => !allowed.has(path));
-    if (stray.length) return { state: 'unapproved', mergeSha: null, detail: `${named} changes ${stray.slice(0, 20).join(', ')}, which are not its cases or contract; no approver judged them` };
+    if (stray.length) return { state: 'stray', mergeSha: null, detail: `${named} changes ${stray.slice(0, 20).join(', ')}, which are not its cases or contract` };
     const risk = acceptanceChangeRisk(merged.files);
     if ((await writer.push(merged.mergeSha, tip)) === 'pushed') {
       await writer.fetch();
-      return { state: 'merged', mergeSha: merged.mergeSha, detail: `The merge writer merged ${goal.key}'s ${named} as ${merged.mergeSha} onto ${writer.baseBranch} at ${tip.slice(0, 12)}: a ${risk.risk} change (${clip(risk.reasons.join('; '), 300)}) approved by ${approval.by}, not its author ${acceptance.author}` };
+      return { state: 'merged', mergeSha: merged.mergeSha, detail: `The merge writer merged ${goal.key}'s ${named} as ${merged.mergeSha} onto ${writer.baseBranch} at ${tip.slice(0, 12)}: a ${risk.risk} change (${clip(risk.reasons.join('; '), 300)}) drafted by ${acceptance.author}` };
     }
   }
   return { state: 'waiting', mergeSha: null, detail: `${named}'s push was refused: ${baseMovedReason(writer.retrials + 1)}` };
@@ -472,7 +404,7 @@ export const openAcceptancePullRequest = (run: ChildRun, root: string, scratch: 
     const open = JSON.parse(String(await run('gh', ['pr', 'list', '--repo', config.repository, '--head', branch, '--state', 'open', '--json', 'number', '--limit', '1']))) as { number: number }[];
     if (open[0]) return { pr: open[0].number, branch, head };
     const body = [`Acceptance for ${goal.key}: ${goal.statement}`, '', ...draft.outcomes.map(outcome => `- **${outcome.title}** (${outcome.id}), proved by required uat case \`${outcome.case.id}\`: ${outcome.criteria.join('; ')}`), '',
-      'Drafted by the acceptance role and judged in a separate session; once approved Graphyard lands it at the approved head, and its cases and bindings are protected from then on.'].join('\n');
+      'Drafted by the acceptance role; Graphyard lands it at this head, and its cases and bindings are protected from then on.'].join('\n');
     const url = String(await run('gh', ['pr', 'create', '--repo', config.repository, '--base', config.baseBranch, '--head', branch, '--title', `${goal.key}: acceptance — ${clip(goal.statement, 80)}`, '--body', body])).trim();
     const pr = Number(url.match(/\/pull\/(\d+)/)?.[1]);
     if (!Number.isSafeInteger(pr) || pr <= 0) throw new Error(`gh pr create answered ${clip(url, 200)}, which names no pull request`);
@@ -489,8 +421,8 @@ interface Calls {
 }
 /**
  * The acceptance role's effects under the live configuration: runners as the diagnostician's (the
- * registry's acceptance or approver role when an operator defines one, else Pi on
- * `run.diagnostician`'s models, whatever its `enabled`), drafts and verdicts posted as the master's operator-agent identity, and GitHub through `gh`. Under the
+ * registry's acceptance role when an operator defines one, else Pi on
+ * `run.diagnostician`'s models, whatever its `enabled`), drafts posted as the master's operator-agent identity, and GitHub through `gh`. Under the
  * control-plane merger (GY-1535) a draft is committed in the coordinator checkout instead and landed
  * by the merge writer's reads, recorded merged as the operator agent.
  */
@@ -505,8 +437,8 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
   };
   return {
     settings, cwd: root,
-    goals: async () => (await calls.asCoordinator('goals')).goals, // every goal: a delivered one still protects its cases and may carry a requested change (GY-1806)
-    runner: async (role, attempt, goal) => {
+    goals: async () => (await calls.asCoordinator('goals?open=1')).goals,
+    runner: async (attempt, goal) => {
       if (attempt === 'primary') {
         const name = acceptanceRole, principal = config.operatorAgent!.id;
         const fleet = await selectFleetSession(config, name, { name, principal }, await heldAwareProbe(config, { work: goal.key })); // an account held here, or its twin, is spent (GY-1574)
@@ -517,9 +449,6 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
     },
     open: (goal, draft) => openAcceptancePullRequest(run, root, worktreeRoot(root, config), config, goal, draft),
     draft: (goal, input) => calls.asOperatorAgent('POST', `goals/${goal.key}/draft`, input, `acceptance:${goal.id}:${goal.revision}`),
-    judge: (goal, judgement) => calls.asOperatorAgent('POST', `goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
-    judgeCaseChange: (goal, change, judgement) => calls.asOperatorAgent('POST', `goals/${goal.key}/case-change-${judgement.verdict}`, { change: change.id, reason: judgement.reason }, `acceptance:${goal.id}:case-change:${change.id}:judged`),
-    pullRequest: read,
     land: goal => calls.asOperatorAgent('POST', `goals/${goal.key}/land`, {}, `acceptance:${goal.id}:${goal.revision}:land:${Date.now()}`),
     close: async (pr, comment) => { if ((await read(pr)).state === 'open') await gh(['pr', 'close', String(pr), '--comment', comment, '--delete-branch']); },
     closed: (goal, pr, reason) => calls.asOperatorAgent('POST', `goals/${goal.key}/closed`, { pr, reason }, `acceptance:${goal.id}:${goal.revision}:closed`),

@@ -58,7 +58,7 @@ export const cycleStepsSchema = z.object({
   observe: stepCostSchema,
   /** Closing finished sessions, failing over exhausted ones, and reclaiming worktrees and lapsed leases. */
   close: stepCostSchema,
-  /** Requesting, supervising and retiring the routine decisions an approver applies. */
+  /** Re-checking blockers, setting base failures aside and sending reworks. */
   decisions: stepCostSchema,
   /** Dispatching claimable work and shepherding the review and proof requests. */
   dispatch: stepCostSchema,

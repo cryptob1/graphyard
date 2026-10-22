@@ -11,7 +11,7 @@ import { baseFailureHoldMs, baseFailurePrefix } from '../merge-writer/executor.j
  * What `master status` says about work that is waiting on a judgement rather than on capacity
  * (GY-104).
  *
- * `escalate` and `request-rework` are judgments made in the step itself, so no executor holds a
+ * `attention` and `request-rework` are judgments made in the step itself, so no executor holds a
  * handler for either: their rows are never claimed, never fail, and never appear as a refused
  * launch. Counted with the queue they were indistinguishable from work an executor was about to
  * take, and noticed only if somebody read the idle list five minutes later. Here they are their

@@ -67,15 +67,7 @@ export interface Evidence {
   exercise?: ProofExercise;
   /** Set by the control plane, never the producer: why this pass does not exercise its criterion. */
   unexercised?: string;
-  /**
-   * GY-615: set by the control plane when an approved attest decision recorded this record, never
-   * by a submitter: the decision, who requested it and who approved it. An attested record declares
-   * no scope, so it carries across a Graphyard-authored base refresh only when the
-   * item's own diff kept its patch-id (see model/carry.ts), and never over a changed patch.
-   */
-  attestation?: EvidenceAttestation;
 }
-export interface EvidenceAttestation { decision: string; requestedBy: string; approvedBy: string }
 
 /**
  * GY-1842: the evidence links of one imported external case as artifacts. Every link is a public

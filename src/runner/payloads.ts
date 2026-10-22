@@ -99,16 +99,17 @@ export function diagnosticianSettings(run: { diagnostician?: unknown; pi?: { com
 export const narrowRoleRuntimes = ['herdr', 'pi'] as const;
 export type NarrowRoleRuntime = typeof narrowRoleRuntimes[number];
 export const narrowRoleRuntimeSchema = z.object({
-  approver: z.enum(narrowRoleRuntimes).optional(),
   producer: z.enum(narrowRoleRuntimes).optional(),
-}).strict();
+  /** Retired (GY-2874): the approver's runtime; an existing master.json still loads. */
+  approver: z.unknown().optional(),
+}).strict().transform(({ approver: _approver, ...kept }) => kept);
 export const piRuntimeSchema = z.object({
   /** The environment wrapper (`pi-a`, `pi-b`) or Pi binary on PATH. */
   command: z.string().trim().min(1).max(500).default('pi'),
   model: z.string().trim().min(1).max(200).default('zai/glm-5.3-flash'),
-  /** The bound on one approver run; a producer run is bounded by `producerTimeoutMinutes`. */
-  approverTimeoutMinutes: z.number().int().min(1).max(120).default(10),
-}).strict();
+  /** Retired (GY-2874): the bound on one approver run; an existing master.json still loads. */
+  approverTimeoutMinutes: z.unknown().optional(),
+}).strict().transform(({ approverTimeoutMinutes: _approverTimeoutMinutes, ...kept }) => kept);
 export type PiRuntime = z.infer<typeof piRuntimeSchema>;
 
 /** The runtime a narrow role launches on; the producer runs on Pi only for the unit group. */

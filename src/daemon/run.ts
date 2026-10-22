@@ -83,7 +83,7 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
   state.config = carryUndeclared(previous, { at: reload.at, changed: reload.changed.slice(0, 100), refused: reload.refused?.slice(0, 1000) ?? null });
   const noted: DaemonAction[] = [];
   if (reload.refused && previous?.refused !== state.config.refused) {
-    noted.push(storeAction(state, `escalation:config:${reload.at}`, { kind: 'attention', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
+    noted.push(storeAction(state, `attention:config:${reload.at}`, { kind: 'attention', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
   }
   // GY-2600: a dead Herdr workspace replaced with a live one is recorded with its reason.
   if (reload.workspace) {
@@ -106,12 +106,12 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
 export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof watchdogPlan>, at: string, persist: DaemonEffects['persist']) {
   if (!plan.refusal) {
     if (!plan.supervised || plan.windowMs === null) return [];
-    const cleared = Object.entries(state.actions).filter(([key, action]) => key.startsWith('escalation:watchdog:') && action.state === 'failed')
+    const cleared = Object.entries(state.actions).filter(([key, action]) => key.startsWith('attention:watchdog:') && action.state === 'failed')
       .map(([key, action]) => storeAction(state, key, { ...action, state: 'done', detail: `Cleared: the supervisor's watchdog window is now ${Math.round(plan.windowMs! / 1000)}s, longer than two cycle intervals; it was: ${action.detail}`, cycle: state.cycle, at }));
     if (cleared.length) await persist(state);
     return cleared;
   }
-  const key = `escalation:watchdog:${plan.windowMs}`;
+  const key = `attention:watchdog:${plan.windowMs}`;
   if (state.actions[key]?.state === 'failed') return [];
   const entry = storeAction(state, key, { kind: 'attention', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at });
   await persist(state);
@@ -405,7 +405,7 @@ export async function serveLoopRequests(config: Pick<MasterConfig, 'credentialFi
   return served;
 }
 
-const escalationKey = 'escalation:dirty-checkout';
+const escalationKey = 'attention:dirty-checkout';
 /** The remedy a dirty-checkout escalation names (GY-1658): one the installation runs itself. */
 export const checkoutRestoreRemedy = 'Remedy the installation runs itself: graphyard master checkout-restore REASON saves every dirty path under refs/graphyard/checkout-restore/, returns them to HEAD and restarts the loop through graphyard-master.service.';
 /** The same remedy for a clean checkout whose HEAD moved (GY-1680): the request restarts the loop onto that HEAD, the adoption GY-1531 sanctions. */
@@ -494,7 +494,7 @@ export function coordinatorCheckoutGuard(deps: {
     expectedHead = to;
     return recovered;
   };
-  const escalate = async (checkout: CoordinatorCheckout) => {
+  const raise = async (checkout: CoordinatorCheckout) => {
     if (!applies(checkout.root)) return null;
     const refusal = coordinatorCheckoutRefusal(checkout, 'the master loop') ?? headDrift(checkout);
     if (!refusal) {
@@ -550,7 +550,7 @@ export function coordinatorCheckoutGuard(deps: {
     async start(loaded: string | null) {
       const checkout = await deps.read();
       expectedHead = checkout.commit ?? loaded;
-      const refusal = await escalate(checkout);
+      const refusal = await raise(checkout);
       if (refusal && runsSnapshot() && !headDrift(checkout)) {
         deps.log(`[graphyard-master] the coordinator checkout at ${checkout.root} is dirty, but this loop runs the held snapshot of ${runsSnapshot()!.slice(0, 12)} and cycles from it`);
         return null;
@@ -579,8 +579,8 @@ export function coordinatorCheckoutGuard(deps: {
       }
       // A forward move adopted here settles any drift attention it raised, and is this cycle's upgrade.
       const recovered = selfUpgrade ? await recoverDrift(checkout, keepAlive) : null;
-      if (recovered) { await escalate(checkout); return { refusal: null, upgraded: recovered }; }
-      const refusal = await escalate(checkout);
+      if (recovered) { await raise(checkout); return { refusal: null, upgraded: recovered }; }
+      const refusal = await raise(checkout);
       // A snapshot-loaded loop runs no checkout code, so the checkout's HEAD moving is no drift to refuse it for;
       // a dirty tree never holds the upgrade back, however its HEAD moved (GY-1773), so only a clean moved HEAD does.
       if (!selfUpgrade || (refusal && !runsSnapshot() && !coordinatorCheckoutRefusal(checkout, 'the master loop') && headDrift(checkout))) return { refusal, upgraded: null };
@@ -618,7 +618,7 @@ export function coordinatorCheckoutGuard(deps: {
       const checkout = await deps.read();
       if (options.revert) expectedHead = options.revert;
       else if (options.adopt && checkout.commit === options.adopt && applies(checkout.root) && !coordinatorCheckoutRefusal(checkout, 'the master loop')) expectedHead = checkout.commit;
-      return escalate(checkout);
+      return raise(checkout);
     },
   };
 }

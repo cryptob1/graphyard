@@ -1562,9 +1562,7 @@ export function tickWaits(waiting: DispatchWait[]) {
   return [...byRequest.values()].sort((a, b) => (a.kind === 'review' ? 0 : 1) - (b.kind === 'review' ? 0 : 1) || requested(a) - requested(b)).slice(0, launchWaitLimit)
     .map(({ kind, work, requestId, sha, reason, group, answeredAt }) => ({ kind, work: work.slice(0, 40), requestId: requestId.slice(0, 64), sha: sha.slice(0, 40), reason: bounded(reason, cursorTextLimit), ...(group ? { group: group.slice(0, 40) } : {}), ...(answeredAt ? { answeredAt: answeredAt.slice(0, 40) } : {}) }));
 }
-// GY-1067 follow-up 17: launchWaits reports review and producer requests managed by the
-// dispatcher; approver launches are managed separately by the daemon's cycle-decisions
-// loop (state.approvals) with their own escalation and tracking mechanisms.
+// GY-1067 follow-up 17: launchWaits reports review and producer requests managed by the dispatcher.
 /** A review request waiting longer than this without a launch raises attention (GY-710). */
 export const reviewLaunchWaitAttentionMs = 15 * 60_000;
 /** `answeredAt` is when a reviewer's verdict answered the request (GY-1429): the wait is then the verdict's settlement, aged from it. */

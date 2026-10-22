@@ -37,7 +37,7 @@ export type { HumanNeeded, HumanNeededRow, OpenAction } from './concerns.js';
  * Three properties make that safe to build on:
  *
  * - **Totality.** Every refusal a gate can produce maps to exactly one action kind, or to
- *   `escalate`. `refusalAction` is that mapping, and nothing else classifies a refusal. A
+ *   `attention`. `refusalAction` is that mapping, and nothing else classifies a refusal. A
  *   refusal nobody thought about becomes an escalation rather than silence. `refusalRules` makes
  *   that total over *rules*; `gateRefusalCatalogue` is what makes it provable over *outcomes*.
  * - **Accountability.** An item that needs nothing says which nothing it is. `actionAccount`
@@ -119,7 +119,7 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
 
   // Backlog is not open work: an item nobody has released is waiting on the operator deciding it
   // is ready, which is a goal-setting call and not an action anyone runs. Its refusal still maps
-  // (to `escalate`); the item simply raises none until it is released.
+  // (to `attention`); the item simply raises none until it is released.
   if (!work.ready) return waits({ kind: 'human', on: 'operator', detail: `${key} has not been released from the backlog; releasing it is a goals-and-priorities decision, which is the operator's` },
     'ready', 'Not released from backlog');
 
@@ -181,18 +181,18 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
         const proof = proofStep(work, all, now);
         // Every unproven proof is manual: the master's attestation (GY-521), else an escalate action.
         const attest = proof ? null : attestationWait(work, all, now); if (attest) return waits(attest, failing.name, refusal);
-        if (!proof) return make('escalate', `${key} waits on proof no producer session may run: ${failing.reasons.join('; ')}`, { kind: 'escalate', trigger: 'operator-proof', detail: refusal }, binding, failing.name, refusal);
+        if (!proof) return make('attention', `${key} waits on proof no producer session may run: ${failing.reasons.join('; ')}`, { kind: 'attention', trigger: 'operator-proof', detail: refusal }, binding, failing.name, refusal);
         // A failed proof holds the head at this gate for good: a unit or integration failure is the
         // worker's to fix on a new head, and a manual one is the operator's judgement to make.
         if (proof.step === 'failed') {
           const detail = proof.detail;
           if (proof.mechanical) return make('request-rework', `${key} needs a new head: ${detail}`,
             { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
-          return make('escalate', `${key} failed a proof no producer session may re-run on this head: ${detail}`,
-            { kind: 'escalate', trigger: 'operator-proof', detail }, binding, failing.name, refusal);
+          return make('attention', `${key} failed a proof no producer session may re-run on this head: ${detail}`,
+            { kind: 'attention', trigger: 'operator-proof', detail }, binding, failing.name, refusal);
         }
-        if (proof.step === 'stopped') return make('escalate', `${key}: ${proof.detail}`,
-          { kind: 'escalate', trigger: 'operator-proof', detail: proof.detail }, binding, failing.name, refusal);
+        if (proof.step === 'stopped') return make('attention', `${key}: ${proof.detail}`,
+          { kind: 'attention', trigger: 'operator-proof', detail: proof.detail }, binding, failing.name, refusal);
         if (proof.step === 'wait') return waits({ kind: 'session', on: 'graphyard', detail: `${key}: ${proof.detail}` }, failing.name, refusal);
         const inputs = proof.inputs;
         return make('dispatch', `${key} needs ${inputs.kind === 'dispatch' && inputs.target === 'proof' ? inputs.proofs.join(', ') : refusal} on ${short(work.candidate?.sha)}`, inputs, binding, failing.name, refusal);
@@ -229,8 +229,8 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       // while `needed`, so asking for a reviewer when it is false would hand an executor a row
       // nothing can settle. `reviewStandstill` names an action for every such state today; a state
       // added tomorrow without one escalates — visible and owed — rather than looping in the queue.
-      if (!need.needed) return make('escalate', `${key} cannot be reviewed and no executor step answers it: ${need.reason}`,
-        { kind: 'escalate', trigger: failing.name, detail: need.reason }, binding, failing.name, refusal);
+      if (!need.needed) return make('attention', `${key} cannot be reviewed and no executor step answers it: ${need.reason}`,
+        { kind: 'attention', trigger: failing.name, detail: need.reason }, binding, failing.name, refusal);
       const request = work.autoDispatch?.review ?? null;
       return make('request-review', `${key}: ${need.reason}`,
         { kind: 'request-review', provider: work.policy.reviewProvider ?? 'github', requestId: request?.id ?? null, pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision },
@@ -244,12 +244,12 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       { kind: 'merge', pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision }, binding, failing.name, refusal);
     // `detail` again rather than the refusal: a review refusal standing over a spent reviewer
     // roster says "a review is required", and what the operator has to decide is the roster.
-    return make('escalate', `${key} is refused at the ${failing.name} gate and no executor step answers it: ${detail}`,
-      { kind: 'escalate', trigger: failing.name, detail }, binding, failing.name, refusal);
+    return make('attention', `${key} is refused at the ${failing.name} gate and no executor step answers it: ${detail}`,
+      { kind: 'attention', trigger: failing.name, detail }, binding, failing.name, refusal);
   }
 
-  if (work.violations.length) return make('escalate', `${key} carries ${work.violations.length} violation(s): ${work.violations[0]}`,
-    { kind: 'escalate', trigger: 'violation', detail: work.violations[0] }, `violation:${work.violations[0]}`);
+  if (work.violations.length) return make('attention', `${key} carries ${work.violations.length} violation(s): ${work.violations[0]}`,
+    { kind: 'attention', trigger: 'violation', detail: work.violations[0] }, `violation:${work.violations[0]}`);
   // Every gate passed: the merge writer pushed and reconciled the head (GY-2010), and its
   // reconciled record delivers the item; nothing is left for an executor.
   if (work.candidate) return waits({ kind: 'settled', on: null, detail: `${key} has passed every gate on ${short(work.candidate.sha)}; the merge writer merged it${work.mergeLedger?.mergeSha ? ` as ${short(work.mergeLedger.mergeSha)}` : ''} and its delivery record follows` });

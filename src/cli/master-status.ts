@@ -5,7 +5,6 @@ import { agentOwner, diskPressure, diskPressureAttention, diskThresholdBytes, fr
 import { reclaimableNow } from '../master/worktrees.js';
 import { worktreePassOf } from '../master/worktree-disk.js';
 import { type Work } from '../model/work.js';
-import { pendingCaseChanges } from './master-status-case-changes.js';
 import { deployLine, leftBehindCheckoutAttention, readHeldCli } from '../daemon/upgrade.js';
 import { loopCodeRoot } from '../daemon/checkout-state.js';
 import { daemonSummary, loopAttention, progressAttention, readDaemonState } from '../master-daemon.js';
@@ -116,8 +115,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
   // queue-head lag (GY-492), slow renewals (GY-558) and conflict hotspots (GY-566).
   const observation = observationThroughputStatus(snapshot), health = leaseHealthStatus(coordinator);
   const stalledItems = [...derivedStalls, ...observation.attention, ...health.attention, ...hs.attention];
-  const { changes: caseChanges, items: caseChangeItems } = await pendingCaseChanges(sections, masterApi);
-  const attentionItems = [...diskAttention, ...requests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...overlong, ...budget, ...triage, ...owed.items, ...caseChangeItems, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
+  const attentionItems = [...diskAttention, ...requests, ...unanswered, ...conflicted, ...stuck.attentionItems, ...stalledItems, ...actorless, ...overlong, ...budget, ...triage, ...owed.items, ...status.attentionItems, ...(sudo ? [{ subject: 'installation', text: sudo.instruction,
     ...(Date.parse(sudo.deadline) <= Date.now() ? agentOwner('master', `graphyard master browser ${sudo.flow}`) : humanOwner('issuing credentials to people', sudo.instruction)) }] : [])];
   // First: loop health, dispatcher, release lag (GY-437).
   const ahead = [...loopItems, ...dispatchItems, ...lag.attention];
@@ -137,7 +135,7 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
       // item is the pipeline working, one with nothing moving it is the pipeline stopped.
       actionless: actionless.length, actorless: actorless.length, livenessViolations: liveness.violations, waitingOnAnother: actionless.filter(entry => entry.outcome === 'waiting-on').length, stalled: stalledItems.length,
       ...backlog,
-      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + overlong.length + triage.length + ahead.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + caseChangeItems.length + resources.attention.length + delivery.attention.length } }, snapshot.work);
+      attention: status.counts.attention + diskAttention.length + generatedFiles.length + unanswered.length + conflicted.length + stuck.attentionItems.length + stalledItems.length + actorless.length + overlong.length + triage.length + ahead.length + budget.length + (throughput.attention ? 1 : 0) + observation.attention.length + owed.counted + resources.attention.length + delivery.attention.length } }, snapshot.work);
   const sectionsReport = await assembleStatusSections({
     master, snapshot, coordinator, cli, probe, observation, health, hs,
     setup, administration, daemon, dispatch, reviewRecords, producerRecords,
@@ -150,7 +148,6 @@ async function buildStatusReport(root: string, master: MasterConfig, masterApi: 
     ...mergeWriterLine(coordinator),
     ...status, ...attributed, attentionItems: attributeAttention(attributed.attentionItems, resources.readings), resources: resources.report,
     unavailable: sections.unavailable,
-    pendingCaseChanges: caseChanges,
     // GY-1511: the Herdr server holding this install's agents, and the command that opens them.
     herdr: { instance: master.herdrInstance ?? null, attach: herdrAttachCommand(master.herdrInstance ?? null), running: runtime.available },
     delivery: delivery.report,

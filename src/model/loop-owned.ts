@@ -47,7 +47,7 @@ const workerCannotServe = /\bnot a worker(?:'s)?(?=\s*(?:[(,;:]|\.(?:\s|$)|$|to\
  * GY-1768: whether an item with a standing worker blocker has nothing left for a worker: it is loop-owned (GY-1760) or only waits for the loop's own post-deploy reading (GY-1762), no
  * attempt holds it, and the report's cause is the worker's inability to take the reading it owes (workerCannotServe) — a `blocked` report recorded before those guards, or by an attempt
  * already running when they shipped, saying the reading cannot be taken from a sandbox: the very reason the item is off the dispatch board. Left standing it is an open escalation until
- * a master unblocks it by hand; the loop clears it instead, and the item's own next action (`escalate`, the loop's reading owed) names who records the reading. Only such a report on
+ * a master unblocks it by hand; the loop clears it instead, and the item's own next action (`attention`, the loop's reading owed) names who records the reading. Only such a report on
  * such an item qualifies: a human's decision wait stays, and so does any actionable fault the item's shape does not make moot.
  */
 export const loopHeldBlocker = (work: Pick<Work, 'systemDriven' | 'criteria' | 'stage' | 'description' | 'lease'>, blocker: string, blockerClass: string, now: number) =>

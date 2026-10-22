@@ -8,10 +8,9 @@ import type { Goal, GoalContext } from './goal.js';
 /**
  * The plan of a goal (GY-1418): once its acceptance pull request merged, the `planner` role
  * (src/daemon/planner.ts) writes a short architecture note and a dependency-ordered set of work
- * items with file boundaries. A plan that leaves an approved outcome uncovered, names no case,
- * lets parallel items share a file or touches a required case is refused with the reason before
- * any approver sees it; an approver who is not its author approves it, and only then are its
- * items created and released (src/server/routes/goals.ts releasePlan).
+ * items with file boundaries. A plan that leaves an outcome uncovered, names no case, lets
+ * parallel items share a file or touches a required case is refused with the reason; a plan that
+ * passes is recorded planned and its items are created and released (src/server/routes/goals.ts releasePlan).
  *
  * GY-2011: the plan also carries a plain `summary` (at most three sentences a person can read in a
  * minute) and each item a one-sentence `plain` description; both are required on the payload and
@@ -67,8 +66,8 @@ function reaches(plan: Pick<GoalPlan, 'items'>) {
 }
 
 /**
- * Pure: every reason a plan cannot go to approval, each naming what to change. The note is at most
- * planNoteMaxWords words; every approved outcome is served by at least one item; each item names
+ * Pure: every reason a plan is refused, each naming what to change. The note is at most
+ * planNoteMaxWords words; every outcome is served by at least one item; each item names
  * the goal's required cases it must make pass (at least the case of every outcome it serves);
  * each item's criterion ids are unique; and dependencies name items of the plan without a cycle.
  */
@@ -121,9 +120,7 @@ export const releasedItemSchema = z.object({ ref: planRef, key: z.string().regex
 
 export const planCommandSchemas = {
   plan: goalPlanSchema,
-  'plan-approve': z.object({ reason }).strict(),
-  'plan-refuse': z.object({ reason }).strict(),
-  // A plan the loop refused before approval (planRefusals, or a 422 on posting it): it counts toward maxPlanRounds.
+  // A plan the loop refused (planRefusals, or a 422 on posting it): it counts toward maxPlanRounds.
   'plan-invalid': z.object({ reason }).strict(),
   release: z.object({}).strict(),
   released: z.object({ items: z.array(releasedItemSchema).min(1).max(30) }).strict(),
@@ -131,7 +128,7 @@ export const planCommandSchemas = {
 export type PlanCommand = keyof typeof planCommandSchemas;
 export const isPlanCommand = (command: string): command is Exclude<PlanCommand, 'release'> => command !== 'release' && command in planCommandSchemas;
 
-/** Pure: one plan command applied to `next` (a copy of `goal`): its author never judges it, and a release is recorded only once every item is released. */
+/** Pure: one plan command applied to `next` (a copy of `goal`): a release is recorded only once every item is released. */
 export function applyPlanCommand(goal: Goal, next: Goal, command: Exclude<PlanCommand, 'release'>, input: unknown, context: GoalContext) {
   const { actor, at } = context;
   if (command === 'plan') {
@@ -139,20 +136,15 @@ export function applyPlanCommand(goal: Goal, next: Goal, command: Exclude<PlanCo
     demand(goal.stage === 'planning', `${goal.key} is ${goal.stage}; a plan is accepted only while the goal is being planned`);
     const refusals = planRefusals(goal, data);
     demand(!refusals.length, `Plan refused for ${goal.key}: ${refusals.join('; ')}`, 422);
-    next.plan = { ...data, author: actor.id, draftedAt: at }; next.planApproval = null; next.stage = 'plan-review'; next.planDrafts = (goal.planDrafts ?? 0) + 1;
-  } else if (command === 'plan-approve' || command === 'plan-refuse') {
-    const data = planCommandSchemas[command].parse(input);
-    demand(goal.stage === 'plan-review' && goal.plan, `${goal.key} is ${goal.stage}; only a plan awaiting approval is judged`);
-    if (command === 'plan-approve') { next.planApproval = { by: actor.id, at, reason: data.reason }; next.stage = 'planned'; }
-    else { next.planRefusal = { by: actor.id, at, reason: data.reason }; next.plan = null; next.stage = 'planning'; }
+    next.plan = { ...data, author: actor.id, draftedAt: at }; next.stage = 'planned'; next.planDrafts = (goal.planDrafts ?? 0) + 1;
   } else if (command === 'plan-invalid') {
     const data = planCommandSchemas[command].parse(input);
-    demand(goal.stage === 'planning', `${goal.key} is ${goal.stage}; only a plan being drafted is refused before approval`);
+    demand(goal.stage === 'planning', `${goal.key} is ${goal.stage}; only a plan being drafted is refused`);
     next.planRefusal = { by: actor.id, at, reason: data.reason }; next.planDrafts = (goal.planDrafts ?? 0) + 1;
   } else if (command === 'released') {
     // Recorded by the release route once every planned item exists, carries its dependencies and is released.
     const data = planCommandSchemas.released.parse(input);
-    demand(goal.stage === 'planned' && goal.plan && goal.planApproval, `${goal.key} is ${goal.stage}; only an approved plan is released`);
+    demand(goal.stage === 'planned' && goal.plan, `${goal.key} is ${goal.stage}; only a recorded plan is released`);
     const named = data.items.map(item => item.ref);
     const missing = goal.plan.items.map(item => item.ref).filter(ref => !named.includes(ref));
     demand(!missing.length && named.length === goal.plan.items.length, `${goal.key}'s release names ${named.join(', ')}; its plan has ${goal.plan.items.map(item => item.ref).join(', ')}`, 422);
@@ -164,9 +156,8 @@ export function applyPlanCommand(goal: Goal, next: Goal, command: Exclude<PlanCo
 /** Who acts next on a goal past its acceptance, while the plan is its; null otherwise. */
 export function planNext(goal: Goal): { who: string; command: string } | null {
   if (goal.stage === 'planning' && (goal.planDrafts ?? 0) >= maxPlanRounds) return { who: `master: ${maxPlanRounds} plans were refused (last: ${goal.planRefusal?.reason ?? 'none recorded'}); the loop plans no more`, command: `graphyard goal plan ${goal.key} PLAN.json` };
-  if (goal.stage === 'planning') return { who: 'planner role (the master loop launches it once its operator-agent and approver identities are provisioned)', command: `graphyard goal plan ${goal.key} PLAN.json` };
-  if (goal.stage === 'plan-review') return { who: `an approver other than ${goal.plan!.author}`, command: `graphyard goal plan-approve ${goal.key} -- REASON (or goal plan-refuse)` };
-  if (goal.stage === 'planned') return { who: 'the loop: Graphyard creates and releases the approved plan\'s items, carrying their dependencies', command: `graphyard goal release ${goal.key}` };
+  if (goal.stage === 'planning') return { who: 'planner role (the master loop launches it once its operator-agent identity is provisioned)', command: `graphyard goal plan ${goal.key} PLAN.json` };
+  if (goal.stage === 'planned') return { who: 'the loop: Graphyard creates and releases the plan\'s items, carrying their dependencies', command: `graphyard goal release ${goal.key}` };
   if (goal.stage === 'delivering' && goal.items?.length) return { who: `the loop: the dispatcher delivers ${goal.items.map(item => item.key).join(', ')} in dependency order; the goal is delivered once every one is merged`, command: `graphyard goal deliver ${goal.key} ${goal.items.map(item => item.key).join(' ')} -- REASON` };
   return null;
 }
@@ -175,12 +166,12 @@ export function planNext(goal: Goal): { who: string; command: string } | null {
 export const mergedItem = (work: Work | undefined) => !!work && work.stage === 'done' && !work.closure && !!work.delivery;
 /** The first line of a released plan item's description: the durable mark a retried release finds it by, whatever receipts expired. */
 export const planItemMark = (goal: Pick<Goal, 'key'>, plan: { draftedAt: string }, item: Pick<PlanItem, 'ref'>) => `Plan item ${item.ref} of ${goal.key}'s plan drafted ${plan.draftedAt}.`;
-/** What creating one approved plan item sends: its criteria, the dependencies already created, and the goal, outcomes, required cases and architecture note it serves. */
-export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance'> & { plan: GoalPlan & { author: string; draftedAt: string }; planApproval: { by: string } }, item: PlanItem, created: ReadonlyMap<string, { id: string }>) {
+/** What creating one plan item sends: its criteria, the dependencies already created, and the goal, outcomes, required cases and architecture note it serves. */
+export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance'> & { plan: GoalPlan & { author: string; draftedAt: string } }, item: PlanItem, created: ReadonlyMap<string, { id: string }>) {
   const outcomes = (goal.acceptance?.outcomes ?? []).filter(outcome => item.outcomes.includes(outcome.id));
   const description = [planItemMark(goal, goal.plan, item), item.description, '',
-    `Planned for ${goal.key} (${goal.statement}) by ${goal.plan.author}; the plan was approved by ${goal.planApproval.by}.`,
-    `It serves outcome${outcomes.length === 1 ? '' : 's'} ${outcomes.map(outcome => `${outcome.id} (${outcome.title})`).join(', ') || item.outcomes.join(', ')}, and must make the required uat case${item.cases.length === 1 ? '' : 's'} ${item.cases.map(id => `${caseDirectory}/${id}.json`).join(', ')} pass. Those cases are protected: never edit or weaken them; a needed change goes through graphyard goal case-change.`,
+    `Planned for ${goal.key} (${goal.statement}) by ${goal.plan.author}.`,
+    `It serves outcome${outcomes.length === 1 ? '' : 's'} ${outcomes.map(outcome => `${outcome.id} (${outcome.title})`).join(', ') || item.outcomes.join(', ')}, and must make the required uat case${item.cases.length === 1 ? '' : 's'} ${item.cases.map(id => `${caseDirectory}/${id}.json`).join(', ')} pass. Those cases are protected: never edit or weaken them; a needed change is the master's to grant (graphyard goal case-change).`,
     '', `Architecture note for ${goal.key}:`, goal.plan.note].join('\n').trim();
   return {
     title: `${goal.key}: ${item.title}`.slice(0, 200), description: description.length > 20000 ? `${description.slice(0, 19999)}…` : description,
@@ -188,14 +179,6 @@ export function planItemInput(goal: Pick<Goal, 'key' | 'statement' | 'acceptance
     summary: item.plain,
     type: item.type, priority: item.priority, criteria: item.criteria,
     dependencies: item.dependsOn.map(ref => { const dependency = created.get(ref); if (!dependency) throw new Error(`${item.ref} depends on ${ref}, which is not created yet`); return dependency.id; }),
-    reason: `${goal.key}'s approved plan item ${item.ref}`,
+    reason: `${goal.key}'s plan item ${item.ref}`,
   };
 }
-
-/** A goal's case change still `requested` (GY-1805), with the goal it protects cases for: what `master status` lists among the decisions the loop owes an independent approver. */
-export interface CaseChangeRequest { goal: string; goalId: string; id: string; work: string; cases: string[]; reason: string; requestedBy: string; requestedAt: string }
-/** The goals API path a case change is read from: every goal, delivered ones included (`open=1` drops them, and a protecting stage's `delivered` still accepts a case change). */
-export const caseChangeGoalsPath = 'goals';
-export const requestedCaseChanges = (goals: readonly Goal[]): CaseChangeRequest[] => goals
-  .flatMap(goal => goal.caseChanges.filter(change => change.state === 'requested').map(({ id, work, cases, reason, requestedBy, requestedAt }) => ({ goal: goal.key, goalId: goal.id, id, work, cases, reason, requestedBy, requestedAt })))
-  .sort((a, b) => Date.parse(a.requestedAt) - Date.parse(b.requestedAt));

@@ -1,7 +1,7 @@
 import { z } from 'zod';
 
 // Provider capacity (GY-89/68/182): pre-launch quota checks, mid-session limit notices, fleet-wide
-// holds, and per-role escalations when every account is spent. Neither delays a different role.
+// holds, and per-role spent marks when every account is spent. Neither delays a different role.
 
 /** Roles launched into session slots. */
 export const capacityRoles = ['worker', 'reviewer', 'producer'] as const;
@@ -237,20 +237,20 @@ export const capacityAccountSchema = z.object({
   resetsAt: instant.nullable(), reason: z.string().min(1).max(500),
 }).strict();
 export type CapacityAccount = z.infer<typeof capacityAccountSchema>;
-export const capacityEscalationSchema = z.object({
-  event: z.literal('escalated'), role: z.enum(quotaRoles),
+export const capacitySpentSchema = z.object({
+  event: z.literal('spent'), role: z.enum(quotaRoles),
   accounts: z.array(capacityAccountSchema).min(1).max(40),
 }).strict();
 export const capacityRestoredSchema = z.object({ event: z.literal('restored'), role: z.enum(quotaRoles), reason: z.string().trim().min(1).max(500) }).strict();
-export const capacityEventSchema = z.union([exhaustionReportSchema, capacityEscalationSchema, capacityRestoredSchema]);
+export const capacityEventSchema = z.union([exhaustionReportSchema, capacitySpentSchema, capacityRestoredSchema]);
 
 export interface ExhaustionRecord extends Omit<ExhaustionReport, 'event'> { at: string; owner: string | null; recordedBy: string }
-export interface CapacityEscalation { role: CapacityRole; at: string; accounts: CapacityAccount[]; /** The first reset among them: when the role is tried again. Null when none is known. */ retryAt: string | null }
+export interface SpentCapacity { role: CapacityRole; at: string; accounts: CapacityAccount[]; /** The first reset among them: when the role is tried again. Null when none is known. */ retryAt: string | null }
 export interface CapacityState {
   /** Sessions of this item that ran out of provider quota mid-work, most recent last. */
   exhaustions: ExhaustionRecord[];
   /** Standing per role: every configured account is spent, and the role is not launched. */
-  escalations: CapacityEscalation[];
+  spent: SpentCapacity[];
 }
 export const retainedExhaustions = 20;
 
@@ -268,8 +268,8 @@ export function describeCapacity(role: CapacityRole, accounts: readonly Capacity
   return `${role} capacity is exhausted on every configured account (${accounts.map(entry => `${entry.account} resets ${entry.resetsAt ?? 'at an unknown time'}`).join(', ')}); `
     + `${role} launches are paused${retryAt ? ` until ${retryAt}` : ' until an account reports quota again'}, and nothing else is delayed`;
 }
-export function standingCapacity(work: { capacity?: CapacityState | null }, role?: CapacityRole): CapacityEscalation[] {
-  return (work.capacity?.escalations ?? []).filter(entry => !role || entry.role === role);
+export function standingCapacity(work: { capacity?: CapacityState | null }, role?: CapacityRole): SpentCapacity[] {
+  return (work.capacity?.spent ?? []).filter(entry => !role || entry.role === role);
 }
 
 type AttemptWork = { capacity?: CapacityState | null; pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null };

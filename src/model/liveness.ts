@@ -50,8 +50,8 @@ type Computed = Pick<ActionAccount, 'gate' | 'refusal' | 'action' | 'wait' | 'de
 const iso = (ms: number) => new Date(ms).toISOString();
 const heldSince = (work: Work) => work.stageEnteredAt ?? work.updatedAt;
 const liveLease = (work: Work, now: Date) => !!work.lease && Date.parse(work.lease.expiresAt) > now.getTime();
-const escalate = (work: Work, trigger: string, reason: string, detail: string, binding: string, gate: string | null = null, refusal: string | null = null): NextAction =>
-  ({ kind: 'escalate', work: work.id, key: work.key, gate, refusal, reason, inputs: { kind: 'escalate', trigger, detail }, llmRole: nextActionLlmRoles.escalate, binding });
+const attend = (work: Work, trigger: string, reason: string, detail: string, binding: string, gate: string | null = null, refusal: string | null = null): NextAction =>
+  ({ kind: 'attention', work: work.id, key: work.key, gate, refusal, reason, inputs: { kind: 'attention', trigger, detail }, llmRole: nextActionLlmRoles.attention, binding });
 
 // ---- Rows as obligations ----------------------------------------------------------------------
 
@@ -100,15 +100,15 @@ function failureRun(work: Work, id: string) {
 
  */
 function stalledConversion(work: Work, action: NextAction, now: Date): NextAction | null {
-  if (action.kind === 'escalate') return null;
+  if (action.kind === 'attention') return null;
   const id = actionId(action.kind, work.id, action.binding);
   const run = failureRun(work, id);
   if (!run) return null;
   if (run.failures < livenessRetryLimit || now.getTime() - Date.parse(run.lastAt) >= actionStallMaxMs) return null;
   const binding = `stalled:${id}:${run.reason}`;
-  const answered = latestRow(work, actionId('escalate', work.id, binding));
+  const answered = latestRow(work, actionId('attention', work.id, binding));
   if (answered?.result === 'done' && Date.parse(answered.resolvedAt!) >= Date.parse(run.lastAt)) return null;
-  return escalate(work, 'stalled-action', `${work.key}'s ${action.kind} failed ${run.failures} times in a row for one unchanged reason and is escalated rather than retried until ${iso(Date.parse(run.lastAt) + actionStallMaxMs)}: ${run.reason}`,
+  return attend(work, 'stalled-action', `${work.key}'s ${action.kind} failed ${run.failures} times in a row for one unchanged reason and is escalated rather than retried until ${iso(Date.parse(run.lastAt) + actionStallMaxMs)}: ${run.reason}`,
     `${action.kind} failed ${run.failures} times since ${run.since}: ${run.reason}`, binding, action.gate, action.refusal);
 }
 
@@ -122,7 +122,7 @@ function stalledConversion(work: Work, action: NextAction, now: Date): NextActio
 export function stalledActionLifts(work: Work): number[] {
   const lifts: number[] = [];
   for (const row of [...(work.actionQueue?.actions ?? []), ...(work.actionQueue?.history ?? [])]) {
-    if (row.kind === 'escalate') continue;
+    if (row.kind === 'attention') continue;
     const run = failureRun(work, row.id);
     if (run && run.failures >= livenessRetryLimit) lifts.push(Date.parse(run.lastAt) + actionStallMaxMs);
   }
@@ -193,13 +193,13 @@ export function livenessFallback(work: Work, all: Work[], now: Date, computed?: 
   if (work.stage === 'done' || !work.ready) return null;
   const account = computed ?? actionAccount(work, all, now);
   if (account.action) return null;
-  if (account.defect) return escalate(work, 'unaccounted', `${work.key} has no rule naming its next step: ${account.defect}`, account.defect, `liveness:unaccounted:${account.defect}`, account.gate, account.refusal);
+  if (account.defect) return attend(work, 'unaccounted', `${work.key} has no rule naming its next step: ${account.defect}`, account.defect, `liveness:unaccounted:${account.defect}`, account.gate, account.refusal);
   const wait = account.wait;
   if (!wait || wait.kind === 'settled' && !work.candidate) return null;
   const due = waitDueAt(work, wait, all, now);
-  if (due === null) return escalate(work, 'stale-wait', `${work.key} waits on ${wait.on}, which no longer holds it up: ${wait.detail}`, wait.detail, `liveness:stale-wait:${wait.kind}:${wait.on}`, account.gate, account.refusal);
+  if (due === null) return attend(work, 'stale-wait', `${work.key} waits on ${wait.on}, which no longer holds it up: ${wait.detail}`, wait.detail, `liveness:stale-wait:${wait.kind}:${wait.on}`, account.gate, account.refusal);
   if (!ownedWait(wait) || Date.parse(due) > now.getTime()) return null;
-  return escalate(work, 'stale-wait', `${work.key} has waited past ${due} on ${wait.on ?? 'nobody named'}: ${wait.detail}`,
+  return attend(work, 'stale-wait', `${work.key} has waited past ${due} on ${wait.on ?? 'nobody named'}: ${wait.detail}`,
     `${wait.kind} wait on ${wait.on ?? 'nobody named'} due ${due}: ${wait.detail}`, `liveness:stale-wait:${wait.kind}:${wait.on}:${heldSince(work)}`, account.gate, account.refusal);
 }
 
@@ -209,8 +209,8 @@ function classify(work: Work, all: Work[], now: Date, successor: NextAction | nu
   if (!successor) return 'unaccounted';
   if (successor.kind === 'merge') return 'stranded-merge';
   if (successor.binding.startsWith('stalled:')) return 'stalled-action';
-  if (successor.inputs.kind === 'escalate' && successor.inputs.trigger === 'stale-wait') return 'stale-wait';
-  if (successor.inputs.kind === 'escalate' && successor.inputs.trigger === 'unaccounted') return 'unaccounted';
+  if (successor.inputs.kind === 'attention' && successor.inputs.trigger === 'stale-wait') return 'stale-wait';
+  if (successor.inputs.kind === 'attention' && successor.inputs.trigger === 'unaccounted') return 'unaccounted';
   if (work.candidate && producerGroupDecisions(work, all, now).some(decision => decision.state === 'failed')) return 'failed-proof';
   return 'unowned-action';
 }
