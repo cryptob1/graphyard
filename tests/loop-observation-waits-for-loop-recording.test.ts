@@ -47,7 +47,7 @@ test('unit:loop-observation-waits-for-loop-recording — a due reading is a wind
     assert.equal(nextAction(work, all, new Date(now)), null);
     assert.equal(dispatchable(work, now), false);
     const queued = { ...work, actionQueue: { actions: [], history: [] } } as Work;
-    assert.ok(reconcileActions(queued, [parent, queued], new Date(now)).every(entry => entry.action.kind !== 'escalate' && entry.action.kind !== 'dispatch'), `${work.key} queues no escalation and no dispatch`);
+    assert.ok(reconcileActions(queued, [parent, queued], new Date(now)).every(entry => entry.action.kind !== 'attention' && entry.action.kind !== 'dispatch'), `${work.key} queues no escalation and no dispatch`);
     // The liveness fallback owns the wait to the loop: it is due a bound ahead of every evaluation, never a stale wait.
     assert.equal(livenessFallback(work, all, new Date(now)), null);
     assert.equal(livenessFallback(work, all, new Date(now + 48 * hour)), null);
@@ -65,7 +65,7 @@ test('unit:loop-observation-waits-for-loop-recording — a due reading is a wind
   assert.equal(nextAction(read, [parent, read], new Date(now)), null);
   assert.equal(dispatchable(read, now), false);
   const queuedRead = { ...read, actionQueue: { actions: [], history: [] } } as Work;
-  assert.ok(reconcileActions(queuedRead, [parent, queuedRead], new Date(now + 48 * hour)).every(entry => entry.action.kind !== 'escalate' && entry.action.kind !== 'dispatch'), 'a recorded pass queues no escalation and no dispatch, however long it stays open');
+  assert.ok(reconcileActions(queuedRead, [parent, queuedRead], new Date(now + 48 * hour)).every(entry => entry.action.kind !== 'attention' && entry.action.kind !== 'dispatch'), 'a recorded pass queues no escalation and no dispatch, however long it stays open');
   assert.equal(livenessFallback(read, [parent, read], new Date(now + 48 * hour)), null);
 });
 

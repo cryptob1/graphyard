@@ -110,7 +110,7 @@ test('integration:loop-records-due-observation-reading — the deployment-verifi
   assert.match(run.closed.find(entry => entry.key === 'GY-1724')!.reason, /passed on the serving release bbbbbbbbbbbb: manual:webhook-deliveries-clean-24h-on-serving-release: the advanced delivery log shows 0 failed deliveries/);
   assert.equal(run.closed.find(entry => entry.key === 'GY-1724')!.idempotency, `reading:close:${passing.id}:${serving}`);
   // A fail records the reading, raises the item's escalation naming the measured values and is asked again on the backoff, never closed.
-  const escalation = run.state.actions[`escalation:reading:${failing.id}`];
+  const escalation = run.state.actions[`attention:reading:${failing.id}`];
   assert.equal(escalation?.kind, 'attention');
   assert.match(escalation!.detail, /GY-1726's reading of manual:webhook-deliveries-clean-24h-on-serving-release failed on the serving release bbbbbbbbbbbb: .*3 failed deliveries \(2 × 502, 1 connection failure\)/);
   assert.equal(run.state.actions[`reading:${failing.id}`]?.state, 'waiting');
@@ -183,7 +183,7 @@ test('integration:loop-records-due-observation-reading — a definite fail is re
   const reader: DaemonEffects['readPostDeploy'] = async input => input.proof === proof ? { result: 'fail', detail: 'three failed deliveries' } : { unavailable: 'no reader' };
   const run = await cycleOver([two, multi], await temporaryDirectory('loop-readings-fail-unavailable'), reader);
   assert.deepEqual(run.recorded.map(entry => [entry.reading.proof, entry.reading.result]), [[own, 'fail']]);
-  assert.match(run.state.actions[`escalation:reading:${multi.id}`]!.detail, /three failed deliveries/);
+  assert.match(run.state.actions[`attention:reading:${multi.id}`]!.detail, /three failed deliveries/);
   assert.deepEqual(run.closed, []);
 });
 

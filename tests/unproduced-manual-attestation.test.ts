@@ -42,7 +42,7 @@ test('unit:unproduced-manual-proof-owned-by-loop — an unproduced manual proof 
   const current = { ...work, stage: result.stage, gates: result.gates } as Work;
   assert.deepEqual(unproducedManualProofs(current, [current], now), [], 'nothing waits on the proof');
   const account = actionAccount(current, [current], now);
-  assert.notEqual(account.action?.kind, 'escalate', 'no escalation to a person');
+  assert.notEqual(account.action?.kind, 'attention', 'no escalation to a person');
   const stored = { ...current, nextAction: account.action } as Work;
   assert.deepEqual(humanNeededActions([stored], now), []);
   assert.deepEqual(stalledItems([stored], now, 0), []);

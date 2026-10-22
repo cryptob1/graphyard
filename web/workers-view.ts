@@ -83,15 +83,12 @@ export function remoteAttachCommand(handle: Pick<SessionHandle, 'state' | 'attac
   return pane ? `herdr --machine ${handle.host} agent focus ${pane} && herdr --remote ${handle.host}` : null;
 }
 
-/** The role a session plays, as an operator names it: worker, reviewer, producer, approver, escalation handler or master. */
-export type SessionRoleKind = 'worker' | 'reviewer' | 'producer' | 'approver' | 'escalation handler' | 'master';
+/** The role a session plays, as an operator names it: worker, reviewer, producer or master. */
+export type SessionRoleKind = 'worker' | 'reviewer' | 'producer' | 'master';
 export function sessionRoleKind(handle: Pick<SessionHandle, 'kind' | 'role'>): SessionRoleKind {
-  const role = (handle.role ?? '').toLowerCase();
   if (handle.kind === 'implementation') return 'worker';
   if (handle.kind === 'review') return 'reviewer';
   if (handle.kind === 'proof') return 'producer';
-  if (role.includes('approv')) return 'approver';
-  if (role.includes('escalat')) return 'escalation handler';
   return 'master';
 }
 

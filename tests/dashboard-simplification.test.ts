@@ -129,7 +129,7 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['acceptance', 'Trusted unit:x evidence from ci is no longer independent: ci has since held an assignment on GY-9'],
     // GY-1235: the merge gate reads no observation age and no protection verification, only whether GitHub was seen at the candidate.
     ['merge', 'The merge writer has not observed the current candidate'],
-    ['merge', 'Pull request is not mergeable against the current base'], ['merge', 'Unresolved lease-loss escalation requires operator resolution: worker vanished'],
+    ['merge', 'Pull request is not mergeable against the current base'],
     ['merge', 'Slice lead lead-1 ruled hold under rule R-2; delivery is blocked until the authorized recovery: redo the migration'],
   ];
   for (const [gate, reason] of reasons) {

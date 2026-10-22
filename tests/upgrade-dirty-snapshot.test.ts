@@ -343,7 +343,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   const logs: string[] = [];
   const checkoutLoaded = guardFor(null, () => tree, logs);
   assert.match((await checkoutLoaded.guard.start(loaded)) ?? '', /refuses to start, self-upgrade or restart/, 'a loop whose modules came from the dirty tree is refused at startup');
-  const escalated = checkoutLoaded.guardState.actions['escalation:dirty-checkout'];
+  const escalated = checkoutLoaded.guardState.actions['attention:dirty-checkout'];
   assert.equal(escalated?.state, 'failed');
   assert.match(escalated!.detail, /The self-upgrade is not held by it: a merged release restarts the loop onto a held snapshot of it, the checkout left where it stands\.$/);
   const between = await checkoutLoaded.guard.betweenCycles(checkoutLoaded.selfUpgrade);
@@ -351,7 +351,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   assert.equal(checkoutLoaded.upgrades.length, 1, 'but the self-upgrade runs');
   const snapshotLoaded = guardFor(tip, () => tree, logs);
   assert.equal(await snapshotLoaded.guard.start(loaded), null, 'a loop loaded from the snapshot is not refused by the dirty tree');
-  assert.match(snapshotLoaded.guardState.actions['escalation:dirty-checkout']!.detail, new RegExp(`This loop runs the held snapshot of ${tip.slice(0, 12)}, not the checkout, and cycles from it; master status names the checkout left behind under upgrade\\.$`));
+  assert.match(snapshotLoaded.guardState.actions['attention:dirty-checkout']!.detail, new RegExp(`This loop runs the held snapshot of ${tip.slice(0, 12)}, not the checkout, and cycles from it; master status names the checkout left behind under upgrade\\.$`));
   assert.ok(logs.some(line => line.includes(`this loop runs the held snapshot of ${tip.slice(0, 12)} and cycles from it`)));
   const beside = await snapshotLoaded.guard.betweenCycles(snapshotLoaded.selfUpgrade);
   assert.deepEqual([beside.upgraded?.outcome, snapshotLoaded.upgrades.length], ['skipped', 1], 'the self-upgrade runs beside the dirty tree');
@@ -379,7 +379,7 @@ test('unit:snapshot-pin-reported-and-lifted — master status reports the loop\'
   assert.equal((await stillCheckoutLoaded.guard.betweenCycles(stillCheckoutLoaded.selfUpgrade)).upgraded?.outcome, 'skipped');
   tree = { root, commit: tip, modified: [], untracked: [] };
   assert.equal((await snapshotLoaded.guard.betweenCycles(snapshotLoaded.selfUpgrade)).refusal, null, 'a clean checkout at the commit the loop runs refuses nothing');
-  assert.equal(snapshotLoaded.guardState.actions['escalation:dirty-checkout']!.state, 'done', 'and settles the escalation');
+  assert.equal(snapshotLoaded.guardState.actions['attention:dirty-checkout']!.state, 'done', 'and settles the escalation');
 
   // Wired through runDaemon: the snapshot's commit is the release the process records, and a dirty
   // checkout beside a snapshot loop lets it cycle; beside a checkout-loaded loop it still does not.

@@ -154,7 +154,7 @@ test('integration:checkout-restore-release-pinned-serve — the loop serves a ch
   const { base, root, git, release, loaded, record, file, grant, env } = await fixture('checkout-restore-release-pinned');
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
   writeFileSync(join(root, 'scratchpad.mjs'), '// scratch\n');
-  const request = await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  const request = await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout', 'graphyard-doctor');
   const settled: (string | null)[] = []; let restarts = 0;
   const restore = withEnv(env);
   let outcome;
@@ -175,7 +175,7 @@ test('integration:checkout-restore-release-pinned-serve — the loop serves a ch
   assert.ok(record1.grant.content, 'the entry read the grant');
   assert.equal(record1.grant.content!.signature, signCheckoutRestoreGrant(payloadOf(record1.grant.content!), credentialValue), 'the grant is signed with the coordinator credential');
   assert.equal(record1.grant.content!.kind, checkoutRestoreGrantKind);
-  assert.equal(record1.grant.content!.root, root); assert.equal(record1.grant.content!.reason, 'escalation:dirty-checkout (requested by graphyard-doctor)');
+  assert.equal(record1.grant.content!.root, root); assert.equal(record1.grant.content!.reason, 'attention:dirty-checkout (requested by graphyard-doctor)');
   assert.deepEqual(record1.grant.content!.request, { id: request.id });
   assert.deepEqual(record1.grant.content!.loop, { pid: process.pid }, 'one issuing pid: this process, which the cursor lock names');
   assert.equal(record1.grant.consumed, true, 'the grant was consumed by the entry before it acted');
@@ -231,7 +231,7 @@ test('integration:freeze-fail-closed-preserved — served from the release snaps
     assert.deepEqual(settled, []); assert.equal(restarts, 0);
   };
   // The thread shows the process inside the checkout: it is frozen, not skipped, and when it never shows stopped the act refuses with what it stopped continued.
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout', 'graphyard-doctor');
   let restore = withEnv({ ...env, GRAPHYARD_TEST_DENY_PATHS: `${join(proc, '1372', 'cwd')},${join(proc, '410', 'cwd')}`, GRAPHYARD_TEST_NEVER_STOPS: '410' });
   let outcome;
   try { outcome = await serve(); } finally { restore(); }
@@ -243,7 +243,7 @@ test('integration:freeze-fail-closed-preserved — served from the release snaps
   untouched(served);
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.state, 'failed');
   // The thread's cwd cannot be read either: the process cannot be judged, so the act refuses before signalling anything.
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout again', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout again', 'graphyard-doctor');
   restore = withEnv({ ...env, GRAPHYARD_TEST_DENY_PATHS: `${join(proc, '1372', 'cwd')},${join(proc, '410', 'cwd')},${join(proc, '410', 'task', '411', 'cwd')}` });
   try { outcome = await serve(); } finally { restore(); }
   assert.equal(outcome?.state, 'failed', outcome?.detail);
@@ -256,7 +256,7 @@ test('integration:freeze-fail-closed-preserved — served from the release snaps
   // refuses with what it stopped continued; its leader's refusal alone never skips it.
   execFileSync('rm', ['-rf', join(proc, '410')]);
   processEntry(proc, 1380, { cwd: checkout }); threadEntry(proc, 1380, 1380, { cwd: checkout }); threadEntry(proc, 1380, 1381, { cwd: join(checkout, 'src') });
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout, a live daemon in the checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout, a live daemon in the checkout', 'graphyard-doctor');
   restore = withEnv({ ...env, GRAPHYARD_TEST_DENY_PATHS: `${join(proc, '1372', 'cwd')},${join(proc, '1380', 'cwd')}`, GRAPHYARD_TEST_NEVER_STOPS: '1380' });
   try { outcome = await serve(); } finally { restore(); }
   assert.equal(outcome?.state, 'failed', outcome?.detail);
@@ -270,7 +270,7 @@ test('integration:freeze-fail-closed-preserved — served from the release snaps
 test('unit:serve-timeout-thaws-frozen-writers — an entry the loop\'s timeout ends after it stopped the checkout\'s writers never reaches its own thaw, so the loop finishes it: the freeze ledger the entry wrote beside the cursor before each SIGSTOP names them, the loop continues every one still stopped, leaves alone the ones gone or already running, removes the ledger and records the failure naming what it continued; nothing was restored', { timeout: 60_000 }, async () => {
   const { root, release, loaded, file, grant } = await fixture('checkout-restore-timeout-thaw');
   writeFileSync(join(root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout', 'graphyard-doctor');
   const ledger = checkoutRestoreFreezeLedgerPath({ credentialFile: grant.credentialFile }), record = join(root, '..', 'hang-record.json');
   // The loop's view of the writers once the entry is gone: 4242 still stopped by it, 4343 running again (continued by a hand), 4444 gone.
   const states: Record<number, string | null> = { 4242: 'T', 4343: 'S', 4444: null };
@@ -544,9 +544,9 @@ test('unit:serve-entry-bound-to-loop-grant — the serve entry acts only on a gr
   const head = git('rev-parse', 'HEAD');
   const { credentialFile, cursor, file, grantFile } = installation(root, join(base, 'state'));
   writeFileSync(cursor, JSON.stringify({ lock: { id: 'lock', pid: process.pid, host: 'machine-a' } }));
-  const request = await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  const request = await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout', 'graphyard-doctor');
   const now = new Date('2026-10-11T00:05:00Z');
-  const payload = (overrides: Partial<CheckoutRestoreGrantPayload> = {}): CheckoutRestoreGrantPayload => ({ kind: checkoutRestoreGrantKind, root, reason: 'escalation:dirty-checkout (requested by graphyard-doctor)', request: { id: request.id }, loop: { pid: process.pid }, issuedAt: '2026-10-11T00:00:00.000Z', expiresAt: '2026-10-11T00:15:00.000Z', nonce: 'a'.repeat(32), ...overrides });
+  const payload = (overrides: Partial<CheckoutRestoreGrantPayload> = {}): CheckoutRestoreGrantPayload => ({ kind: checkoutRestoreGrantKind, root, reason: 'attention:dirty-checkout (requested by graphyard-doctor)', request: { id: request.id }, loop: { pid: process.pid }, issuedAt: '2026-10-11T00:00:00.000Z', expiresAt: '2026-10-11T00:15:00.000Z', nonce: 'a'.repeat(32), ...overrides });
   /** A grant the loop issued: the payload signed with the installation's coordinator credential. */
   const issued = (overrides: Partial<CheckoutRestoreGrantPayload> = {}, credential = credentialValue): CheckoutRestoreGrant => ({ ...payload(overrides), signature: signCheckoutRestoreGrant(payload(overrides), credential) });
   const env = { [checkoutRestoreGrantVariable]: grantFile };
@@ -664,11 +664,11 @@ test('unit:clean-drift-settles-and-restarts — a request that finds no dirty pa
   const drift = (await guard.betweenCycles()).refusal;
   assert.ok(drift && drift.includes(`its HEAD moved from ${loaded.slice(0, 12)} to ${moved.slice(0, 12)} while the loop was running`), drift ?? 'no refusal');
   assert.ok(drift.endsWith(`which loads it. ${checkoutRestoreDriftRemedy}`), 'the drift refusal names the remedy the installation runs itself');
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'failed');
   assert.equal(guard.expected(), loaded);
 
   // The request, served against the clean moved checkout.
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout', 'graphyard-doctor');
   const settled: (string | null)[] = []; let restarts = 0;
   // GY-2016: this proof's subject is the serve loop's own logic — adopt, settle, restart, clean — not
   // the host's process table, whose exit races once failed the serve here and passed on its rerun. The
@@ -685,8 +685,8 @@ test('unit:clean-drift-settles-and-restarts — a request that finds no dirty pa
   assert.equal(quiesced, 1); assert.equal(thawed, 1, 'the act quiesced the checkout once and its thaw ended with the act');
   // The guard adopted the HEAD and settled the escalation before the restart.
   assert.equal(guard.expected(), moved);
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
-  assert.match(state.actions['escalation:dirty-checkout']!.detail, new RegExp(`clean again at ${moved.slice(0, 12)}, the commit the loop runs`));
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'done');
+  assert.match(state.actions['attention:dirty-checkout']!.detail, new RegExp(`clean again at ${moved.slice(0, 12)}, the commit the loop runs`));
   assert.ok(journal.some(line => line.includes('attention done:')));
   const stored = await readCheckoutRestoreRequest(file);
   assert.equal(stored?.outcome?.state, 'adopted');
@@ -715,7 +715,7 @@ test('unit:clean-drift-settles-and-restarts — a request that finds no dirty pa
   assert.equal(guard.expected(), moved);
   assert.equal(await guard.settle({ adopt: loaded }), null);
   assert.equal(guard.expected(), loaded, 'the HEAD the checkout holds is adopted');
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'done');
 });
 
 test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart through the unit cannot be asked (no user bus, no unit) is un-adopted: the guard\'s expectation returns to the commit the loop still runs and the drift escalation is raised again, the failed restart saying so; the next pass adopts and asks again, and when the restart lands the escalation is settled onto the adopted HEAD before it', async () => {
@@ -743,9 +743,9 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   assert.equal(await guard.start(loaded), null);
   git('checkout', '-q', '--detach', moved);
   assert.ok((await guard.betweenCycles()).refusal?.includes(`its HEAD moved from ${loaded.slice(0, 12)} to ${moved.slice(0, 12)}`));
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'failed');
 
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout', 'graphyard-doctor');
   const settled: (string | null)[] = [], unadopted: string[] = [], asked: string[] = [];
   let restartFails = true;
   // GY-2016: the serve loop's logic again, not the host's process table — the act's quiesce is the
@@ -762,8 +762,8 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   assert.deepEqual(settled, [moved], 'adopted before the ask'); assert.deepEqual(asked, [moved], 'the restart was asked with the HEAD adopted');
   assert.deepEqual(unadopted, [loaded], 'reverted to the commit the loop runs when the ask failed');
   assert.equal(guard.expected(), loaded);
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', 'the drift escalation stands again');
-  assert.match(state.actions['escalation:dirty-checkout']!.detail, new RegExp(`its HEAD moved from ${loaded.slice(0, 12)} to ${moved.slice(0, 12)} while the loop was running`));
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'failed', 'the drift escalation stands again');
+  assert.match(state.actions['attention:dirty-checkout']!.detail, new RegExp(`its HEAD moved from ${loaded.slice(0, 12)} to ${moved.slice(0, 12)} while the loop was running`));
   assert.equal(outcome!.restart?.state, 'failed');
   assert.match(outcome!.restart!.detail, /No medium found; the adoption of \w{12} is reverted and the drift escalation stands until a restart lands$/);
   const done = journal.findIndex(line => line.includes('attention done:')), raised = journal.findIndex((line, index) => index > done && line.includes('attention failed:'));
@@ -775,7 +775,7 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   assert.equal(retried?.state, 'adopted'); assert.equal(retried!.restart?.state, 'requested'); assert.equal(retried!.restart?.pid, 100);
   assert.deepEqual(settled, [moved]); assert.deepEqual(asked, [moved]); assert.deepEqual(unadopted, []);
   assert.equal(guard.expected(), moved);
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'done');
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.restart?.state, 'requested');
   assert.equal((await guard.betweenCycles()).refusal, null);
   // Review of GY-1680: the owed restart's record failing (the state directory unwritable) reverts the
@@ -784,7 +784,7 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   if (process.getuid?.() === 0) return;
   git('checkout', '-q', '--detach', loaded); await guard.settle({ revert: loaded }); git('checkout', '-q', '--detach', moved);
   assert.ok((await guard.betweenCycles()).refusal, 'the drift stands again for the next request');
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout again', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout again', 'graphyard-doctor');
   settled.length = 0; unadopted.length = 0; asked.length = 0;
   chmodSync(join(base, 'state'), 0o500);
   try {
@@ -792,7 +792,7 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   } finally { chmodSync(join(base, 'state'), 0o700); }
   assert.deepEqual(settled, [moved], 'adopted before the record'); assert.deepEqual(unadopted, [loaded], 'reverted when the record failed'); assert.deepEqual(asked, [], 'no restart was asked');
   assert.equal(guard.expected(), loaded);
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed', 'the drift escalation stands');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'failed', 'the drift escalation stands');
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome, null, 'the request stands unanswered for the next pass');
   assert.equal(quiesced, 2); assert.equal(thawed, 2, 'the two serves that run the act quiesced and thawed it; the retry that only re-asks the owed restart runs no act');
 });
@@ -878,7 +878,7 @@ test('integration:checkout-restore-stale-loop-handoff — a checkout-restore fil
   const restoreEnv = withEnv(env);
   let result: Awaited<ReturnType<typeof checkoutRestoreCommand>>;
   try {
-    const command = checkoutRestoreCommand(config, ['escalation:dirty-checkout', 'standing'], 'graphyard-doctor', { waitMs: 60_000, pollMs: 20 });
+    const command = checkoutRestoreCommand(config, ['attention:dirty-checkout', 'standing'], 'graphyard-doctor', { waitMs: 60_000, pollMs: 20 });
     // The host: the stale loop's pass once both files stand; its unit restarts it onto HEAD — the loop of this release, this process.
     while (!existsSync(restartFile)) await delay(10);
     await baseLoopPass(config, 100, async () => {
@@ -906,7 +906,7 @@ test('integration:checkout-restore-stale-loop-handoff — a checkout-restore fil
   const stored = await readCheckoutRestoreRequest(file);
   assert.deepEqual(stored?.handoff, { loaded: before, restart: result!.handoff!.restart }, 'the request carries the handoff');
   assert.equal(stored?.outcome?.state, 'restored'); assert.equal(stored?.outcome?.restart?.pid, process.pid);
-  assert.equal(stored?.requestedBy, 'graphyard-doctor'); assert.equal(stored?.reason, 'escalation:dirty-checkout standing');
+  assert.equal(stored?.requestedBy, 'graphyard-doctor'); assert.equal(stored?.reason, 'attention:dirty-checkout standing');
   const owed = await readCheckoutRestoreRequest(restartFile);
   assert.equal(owed?.id, result!.handoff!.restart); assert.equal(owed?.act, 'restart'); assert.equal(owed?.requestedBy, 'graphyard-doctor');
   assert.match(owed!.reason, new RegExp(`^GY-1680 handoff for checkout-restore: the loop \\(pid 100\\) runs ${before.slice(0, 12)}, from before the serve path`));
@@ -983,7 +983,7 @@ test('integration:checkout-restore-stale-loop-old-head-handoff — a dirty check
   const restoreEnv = withEnv(env);
   let result: Awaited<ReturnType<typeof checkoutRestoreCommand>>;
   try {
-    const command = checkoutRestoreCommand(config, ['escalation:dirty-checkout', 'old-HEAD'], 'graphyard-doctor', {
+    const command = checkoutRestoreCommand(config, ['attention:dirty-checkout', 'old-HEAD'], 'graphyard-doctor', {
       waitMs: 60_000, pollMs: 20,
       release: () => ({ deployment: { source: 'endpoint', sha: release }, baseBranch: 'main' }),
     });
@@ -1052,7 +1052,7 @@ test('unit:old-head-handoff-timeout-thaws-frozen-writers — the command\'s old-
   const restoreEnv = withEnv({ GRAPHYARD_TEST_FREEZE_LEDGER: ledger, GRAPHYARD_TEST_SERVE_RECORD: record, GRAPHYARD_TEST_HANG_WRITERS: '4242,4343,4444', GRAPHYARD_TEST_HANG_ROOT: root });
   let result: Awaited<ReturnType<typeof checkoutRestoreCommand>>;
   try {
-    result = await checkoutRestoreCommand(config, ['escalation:dirty-checkout', 'old-HEAD timeout'], 'graphyard-doctor', {
+    result = await checkoutRestoreCommand(config, ['attention:dirty-checkout', 'old-HEAD timeout'], 'graphyard-doctor', {
       waitMs: 10_000, pollMs: 20,
       release: () => ({ deployment: { source: 'endpoint', sha: release }, baseBranch: 'main' }),
       serve: { timeoutMs: 1_500, command: () => ({ command: process.execPath, args: ['--import', tsx, hangHelper] }), ledger: { signal: (pid, name) => { continued.push(`${name}:${pid}`); }, state: pid => states[pid] ?? null } },
@@ -1079,7 +1079,7 @@ test('unit:old-head-handoff-timeout-thaws-frozen-writers — the command\'s old-
   assert.equal(result!.handoff!.pid, 100);
   // A handoff grant whose release to advance onto does not hold the serve entry is refused before anything is
   // touched (review of GY-1680): a restart onto it could not serve, so the entry never freezes or moves HEAD for it.
-  const standing = await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout again', 'graphyard-doctor');
+  const standing = await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout again', 'graphyard-doctor');
   const payload = { kind: checkoutRestoreGrantKind, root, reason: 'advance onto a pre-serve commit', request: { id: standing.id }, loop: { pid: process.pid }, handoff: { head: before, advance: before }, issuedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), nonce: 'b'.repeat(32) } as const;
   await atomicPrivateWrite(grantFile, { ...payload, signature: signCheckoutRestoreGrant(payload, credentialValue) });
   let quiesced = 0;
@@ -1166,7 +1166,7 @@ test('unit:checkout-restore-serve-starts-from-held-snapshot — the serve child 
   // from — and the child ran the snapshot's own entry under imports resolved before it started.
   const heldFixture = await fixture('checkout-restore-serve-held-snapshot');
   writeFileSync(join(heldFixture.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
-  await fileCheckoutRestoreRequest(heldFixture.file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(heldFixture.file, 'attention:dirty-checkout', 'graphyard-doctor');
   const restore = withEnv(heldFixture.env);
   let outcome;
   try {
@@ -1189,7 +1189,7 @@ test('unit:checkout-restore-refuses-loudly-on-serve-failure — a serve that can
   // A boot crash: the act records the failure with the serve's stderr as the reason; the dirty path stands.
   const crashed = await entryFixture('checkout-restore-serve-crash', crashingEntry);
   writeFileSync(join(crashed.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
-  await fileCheckoutRestoreRequest(crashed.file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(crashed.file, 'attention:dirty-checkout', 'graphyard-doctor');
   let outcome;
   try {
     outcome = await serveCheckoutRestore(crashed.file, crashed.root, { pid: process.pid, restart: async () => {}, settle: async () => {},
@@ -1203,7 +1203,7 @@ test('unit:checkout-restore-refuses-loudly-on-serve-failure — a serve that can
   // A boot hang: the child never consumes the grant, so the act ends it at the startup bound and refuses naming that.
   const hung = await entryFixture('checkout-restore-serve-hang', hangingEntry);
   writeFileSync(join(hung.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
-  await fileCheckoutRestoreRequest(hung.file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(hung.file, 'attention:dirty-checkout', 'graphyard-doctor');
   try {
     outcome = await serveCheckoutRestore(hung.file, hung.root, { pid: process.pid, restart: async () => {}, settle: async () => {},
       restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: hung.release }, baseBranch: 'main' }), grant: hung.grant, startupTimeoutMs: 400 }) });
@@ -1217,7 +1217,7 @@ test('unit:checkout-restore-refuses-loudly-on-serve-failure — a serve that can
   const windowed = await entryFixture('checkout-restore-serve-crash-window', crashingEntry);
   writeFileSync(join(windowed.root, 'src', 'loop.ts'), 'export const loop = 2; // hotfix\n');
   const started = Date.now();
-  const command = checkoutRestoreCommand({ credentialFile: windowed.grant.credentialFile, baseBranch: 'main', cliPath: join(windowed.root, 'bin', 'graphyard.mjs') }, ['escalation:dirty-checkout'], 'graphyard-doctor', { pollMs: 20 });
+  const command = checkoutRestoreCommand({ credentialFile: windowed.grant.credentialFile, baseBranch: 'main', cliPath: join(windowed.root, 'bin', 'graphyard.mjs') }, ['attention:dirty-checkout'], 'graphyard-doctor', { pollMs: 20 });
   while (!existsSync(windowed.file)) await delay(10);
   await serveCheckoutRestore(windowed.file, windowed.root, { pid: process.pid, restart: async () => {}, settle: async () => {},
     restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: windowed.release }, baseBranch: 'main' }), grant: windowed.grant }) });
@@ -1247,7 +1247,7 @@ test('integration:checkout-restore-restores-dirty-tree-in-client-window — mast
   let result: Awaited<ReturnType<typeof checkoutRestoreCommand>>;
   try {
     const started = Date.now();
-    const command = checkoutRestoreCommand({ credentialFile: dirty.grant.credentialFile, baseBranch: 'main', cliPath: join(dirty.root, 'bin', 'graphyard.mjs') }, ['escalation:dirty-checkout', 'in the client window'], 'graphyard-doctor', { pollMs: 20 });
+    const command = checkoutRestoreCommand({ credentialFile: dirty.grant.credentialFile, baseBranch: 'main', cliPath: join(dirty.root, 'bin', 'graphyard.mjs') }, ['attention:dirty-checkout', 'in the client window'], 'graphyard-doctor', { pollMs: 20 });
     while (!existsSync(dirty.file)) await delay(10);
     const served = await serveCheckoutRestore(dirty.file, dirty.root, { pid: process.pid, restart: async () => {}, settle: async () => {}, loaded: () => dirty.loaded,
       restore: releasePinnedRestore({ release: () => ({ deployment: { source: 'endpoint', sha: dirty.release }, baseBranch: 'main' }), grant: dirty.grant }) });

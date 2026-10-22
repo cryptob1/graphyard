@@ -49,11 +49,9 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
     release403: goal('forbidden', 'planned'), release401: goal('lapsed', 'planned'), release502: goal('gateway', 'planned') }));
   // A goal whose acceptance merged, planned by the planner role: its plan's post is refused 403 until the second morning.
   const planAuthor: Principal = { id: 'soak-refusal-planner', role: 'operator-agent', sessionKind: 'ai' } as Principal;
-  const approver: Principal = { id: 'soak-refusal-approver', role: 'admin', sessionKind: 'ai' } as Principal;
   const at = new Date(start).toISOString();
   let planning = recordGoal({ statement: 'Customers can sign up', users: ['Customers'], constraints: [], deployTarget: 'uat then production' }, 'GOAL-PLAN', { actor: master, at });
   planning = applyGoalCommand(planning, 'draft', { outcomes: [{ id: 'signup', title: 'A customer can sign up', criteria: ['The signup page answers'], case: caseOf('signup-case') }], pr: 1, branch: 'graphyard/goal-plan', head: 'a'.repeat(40) }, { actor: planAuthor, at });
-  planning = applyGoalCommand(planning, 'approve', { reason: 'Right' }, { actor: approver, at });
   planning = applyGoalCommand(planning, 'merged', { pr: 1, mergeSha: 'b'.repeat(40) }, { actor: master, at });
   assert.equal(planning.stage, 'planning');
   goals.set('plan403', planning);
@@ -90,7 +88,7 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
   const acceptance: AcceptanceEffects = {
     settings: diagnosticianSettings({}), cwd: root,
     goals: async () => [...goals.values()].filter(entry => entry.stage === 'acceptance-drafting'),
-    runner: async (_role, attempt, target) => {
+    runner: async (attempt, target) => {
       runs.push({ goal: nameOf(target), at: now });
       pendingDraft = { goal: target.key, outcomes: [{ id: `${nameOf(target).toLowerCase()}-${runs.length}`, title: 'A customer sees the board', criteria: ['The board answers'], case: caseOf(`${nameOf(target).toLowerCase()}-${runs.length}`) }] };
       return { runner, runtime: 'soak', model: attempt };
@@ -101,21 +99,19 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
       return { pr: 1000 + opens.length, branch: `graphyard/${target.key.toLowerCase()}`, head: 'c'.repeat(40) };
     },
     draft: async target => { posts.push({ goal: nameOf(target), at: now }); throw refused(409); },
-    judge: async target => target,
-    pullRequest: async () => ({ state: 'open', mergeSha: null, head: null }),
     land: async () => { throw new Error('nothing is landed'); },
     close: async pr => { closes.push(pr); },
     closed: async target => target,
   };
 
-  // The 403 never lifts; the 401 lifts on the second morning; the 502 answers after an hour.
+  // The 403 never lifts; the 401 lifts on the second morning; the 502 answers after an hour; the recorded plan releases at once.
   const releases: { goal: string; at: number; ok: boolean }[] = [];
-  const answers: Record<string, (at: number) => number | null> = { release403: () => 403, release401: at => at < start + 30 * hour ? 401 : null, release502: at => at < start + hour ? 502 : null };
+  const answers: Record<string, (at: number) => number | null> = { release403: () => 403, release401: at => at < start + 30 * hour ? 401 : null, release502: at => at < start + hour ? 502 : null, plan403: () => null };
   const planner: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: root,
     goals: async () => [...goals.values()].filter(entry => entry.stage === 'planning' || entry.stage === 'planned' || entry.stage === 'delivering'),
-    runner: async (role, attempt, target) => {
-      assert.equal(role === 'plan' && nameOf(target), 'plan403', 'only the planning goal is planned');
+    runner: async (attempt, target) => {
+      assert.equal(nameOf(target), 'plan403', 'only the planning goal is planned');
       planRuns.push(now);
       return { runner: planRunner, runtime: 'soak', model: attempt };
     },
@@ -123,11 +119,11 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
       const ok = now >= start + 26 * hour;
       planPosts.push({ at: now, ok });
       if (!ok) throw refused(403);
-      const recorded = { ...target, stage: 'plan-review', revision: target.revision + 1 } as unknown as Goal;
+      const recorded = { ...target, stage: 'planned', revision: target.revision + 1 } as unknown as Goal;
       goals.set('plan403', recorded);
       return recorded;
     },
-    invalid: async (target, reason) => { invalids.push(reason); return target; }, judge: async target => target,
+    invalid: async (target, reason) => { invalids.push(reason); return target; },
     release: async target => {
       const name = nameOf(target), status = answers[name]!(now);
       releases.push({ goal: name, at: now, ok: status === null });
@@ -185,7 +181,8 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
   assert.ok(planPosts.length >= 20 && planPosts.length <= 27, `the plan was posted about once an hour until the refusal lifted: ${planPosts.length}`);
   assert.equal(planPosts.filter(entry => entry.ok).length, 1, 'the lifted refusal records the plan once');
   assert.ok(planPosts.at(-1)!.ok && planPosts.at(-1)!.at - (start + 26 * hour) <= planRetryMs + cycleMs, 'within an hour of the refusal lifting');
-  assert.equal(goals.get('plan403')!.stage, 'plan-review');
-  assert.match(state.actions[`planner:${goals.get('plan403')!.id}`]!.detail, /Recorded GOAL-PLAN's plan/);
+  assert.equal(asked('plan403').length, 1, 'the recorded plan is released once');
+  assert.equal(goals.get('plan403')!.stage, 'delivering');
+  assert.match(state.actions[`planner:${goals.get('plan403')!.id}`]!.detail, /Released GOAL-PLAN's plan/);
   assert.equal(Object.keys(state.actions).filter(key => key.startsWith('acceptance:') || key.startsWith('planner:')).length, 6, 'one action per goal');
 });

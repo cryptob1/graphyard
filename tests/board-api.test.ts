@@ -279,8 +279,8 @@ test('unit:board-blocked-classified-before-item-wait — a classified fault that
 
 test('unit:board-blocked-next-action-no-echo — the item page Next-action paragraph points at the recorded blocker instead of repeating it', () => {
   const { work, item } = blockedScenario(agentReason);
-  const escalated = { ...item, nextAction: { kind: 'escalate', work: item.id, key: item.key, gate: 'ready', refusal: agentReason, reason: `${item.key} has waited past ${at(-minute)} on nobody named: ${agentReason}`,
-    inputs: { kind: 'escalate', trigger: 'stale-wait', detail: agentReason }, llmRole: 'decide', binding: 'liveness:stale-wait' } } as unknown as Work;
+  const escalated = { ...item, nextAction: { kind: 'attention', work: item.id, key: item.key, gate: 'ready', refusal: agentReason, reason: `${item.key} has waited past ${at(-minute)} on nobody named: ${agentReason}`,
+    inputs: { kind: 'attention', trigger: 'stale-wait', detail: agentReason }, llmRole: 'decide', binding: 'liveness:stale-wait' } } as unknown as Work;
   const view = details(work.map(entry => entry.id === item.id ? escalated : entry), escalated);
   for (const fragment of fragments) assert.equal(view.split(fragment).length - 1, 1, `${fragment} once on the item page`);
   assert.match(view, /the recorded blocker, above/);

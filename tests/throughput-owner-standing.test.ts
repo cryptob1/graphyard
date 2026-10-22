@@ -20,7 +20,7 @@ const now = base + 120 * minute;
 const sha = (seed: string) => seed.repeat(40).slice(0, 40);
 const revision = sha('e');
 const deployed = { revision, version: '1', origin: 'https://example.invalid', observedAt: at(0), containsClaim: true, reason: null };
-const controlPlaneKinds = ['escalate', 'request-rework', 'resync', 'request-review', 'dispatch', 'approve-scope', 'reclaim', 'merge'];
+const controlPlaneKinds = ['attention', 'request-rework', 'resync', 'request-review', 'dispatch', 'approve-scope', 'reclaim', 'merge'];
 /** The words a binary predating the settled rule recorded for a superseded row (the 15:30 measurement's family). */
 const preRuleExclusion = (kind: string) => `its ${kind} action was superseded before any executor ran it (now needs another action), so something outside the queue moved the item on`;
 const preRule = 'A delivery is counted when it is a merged pull request of this repository with a recorded submission, at most one rework round, at least one action an executor claimed and completed, and no trace of a coordinator on it: no action superseded before an executor ran it, no coordination session recorded, no blocked report and no requirements revision while it was under way. Every delivery the window holds is listed either way, with its own figures and, when it is excluded, the reason.';
@@ -84,7 +84,7 @@ test('unit:throughput-rule-settled-superseded-actions — a delivery set exclude
   for (const rule of [preRule, populationRule]) assert.equal(throughputStall(preRuleReport(rule)), null, `no stall under ${rule === populationRule ? 'the settled' : 'the pre-revision'} rule string`);
   // A delivery a master did drive stays excluded, and the settled re-judging never names the superseded family as a reason.
   const blocked = measure(blockedWindow());
-  const mixed = { ...blocked, excluded: blocked.excluded.map(record => ({ ...record, exclusions: [...record.exclusions, preRuleExclusion('escalate')] })) };
+  const mixed = { ...blocked, excluded: blocked.excluded.map(record => ({ ...record, exclusions: [...record.exclusions, preRuleExclusion('attention')] })) };
   const stall = throughputStall(mixed)!;
   assert.ok(stall, 'a coordinator fingerprint beside the family still stalls');
   assert.deepEqual(stall.reasons, [{ reason: 'a blocked report handed it to a master or operator to clear', deliveries: throughputStallBound, coordinator: true }]);

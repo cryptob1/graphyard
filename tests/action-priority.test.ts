@@ -32,9 +32,9 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   const refusal = 'Required Graphyard check and merge-queue branch protection have not been verified';
   const owedItem = probe({ gates: [{ name: 'merge', passed: false, reasons: [refusal] }] } as Partial<Work>);
   const computed = nextAction(owedItem, [owedItem], new Date(at))!;
-  assert.equal(computed.kind, 'escalate');
-  assert.equal(actionJudgment.escalate, 'in-step');
-  assert.ok(!executorRunnableKinds.includes('escalate'), 'no executor may hold a handler for it, so no executor will ever claim the row');
+  assert.equal(computed.kind, 'attention');
+  assert.equal(actionJudgment.attention, 'in-step');
+  assert.ok(!executorRunnableKinds.includes('attention'), 'no executor may hold a handler for it, so no executor will ever claim the row');
   assert.deepEqual(computed.needsHuman, { decision: `resolving ${owedItem.key}'s refusal`, resolve: `graphyard diagnose ${owedItem.key} — ${refusal}` });
   assert.deepEqual(humanNeeded(computed), computed.needsHuman, 'what the action records is what the rule says');
 
@@ -50,7 +50,7 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   // Visible as needing a person straight away: the wait is measured from the moment the control
   // plane computed the action, not from the moment the row grew old enough for the idle list.
   const owed = humanNeededActions(work, now);
-  assert.deepEqual(owed.map(entry => [entry.key, entry.source, entry.kind]), [[owedItem.key, 'action', 'escalate']]);
+  assert.deepEqual(owed.map(entry => [entry.key, entry.source, entry.kind]), [[owedItem.key, 'action', 'attention']]);
   assert.equal(owed[0].action, rows(owedItem)[0].id, 'the row it belongs to is named');
   assert.equal(owed[0].since, at);
   assert.equal(owed[0].waitedMs, 30_000);
@@ -66,7 +66,7 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   // Counted apart from work that is merely queued: the two rows are both unclaimed, and only one
   // of them is waiting for an executor.
   const queue = queueSnapshot(work, now);
-  assert.deepEqual(queue.waiting.map(row => row.kind).sort(), ['dispatch', 'escalate']);
+  assert.deepEqual(queue.waiting.map(row => row.kind).sort(), ['attention', 'dispatch']);
   const report = needsHumanActions({ ...queue, idle: idleActionable(work, new Date(now.getTime() + actionIdleMs + 1000)) }, owed);
   assert.deepEqual(report.needsHuman, owed);
   assert.deepEqual(report.waiting.map(row => row.kind), ['dispatch'], 'the queue executors read holds only what they can take');

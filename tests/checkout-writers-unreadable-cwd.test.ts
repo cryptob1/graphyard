@@ -198,7 +198,7 @@ test('integration:checkout-restore-completes-unreadable-writer — checkout-rest
   writeFileSync(join(root, 'notes', 'deep', 'plan.md'), '# plan\n');
   const file = join(base, 'state', 'graphyard-master.checkout-restore.json');
   mkdirSync(join(base, 'state'), { recursive: true });
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout', 'graphyard-doctor');
   const sent: string[] = [];
   let restarts = 0, settled = 0;
   const restore = denyCwd(proc, [1372]);

@@ -63,7 +63,7 @@ export function useLiveNow(observedAt: number) {
 
 /** Each role in the words the Workers design uses. */
 export const roleWords: Record<SessionRoleKind, string> = {
-  worker: 'Builds code', reviewer: 'Reviews code', producer: 'Proves requirements', approver: 'Approves decisions', 'escalation handler': 'Handles escalations', master: 'Runs the loop',
+  worker: 'Builds code', reviewer: 'Reviews code', producer: 'Proves requirements', master: 'Runs the loop',
 };
 
 /**

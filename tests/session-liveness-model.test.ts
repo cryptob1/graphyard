@@ -285,7 +285,7 @@ test('unit:session-liveness-model — GY-1532: a session whose attempt or reques
   const gone = 'ended without submitting: its agent session work-claude is gone from Herdr and its supervisor has exited without releasing the lease';
   const relaunched = item({ lease: { owner: 'agent-b', epoch: 2, expiresAt: ahead(90_000) }, sessions: [unseen],
     pipeline: { attempts: [{ epoch: 1, owner: 'agent-a', claimedAt: ago(600_000), endedAt: ago(40_000), end: 'released' }, { epoch: 2, owner: 'agent-b', claimedAt: ago(10_000), endedAt: null, end: null }] },
-    capacity: { exhaustions: [{ role: 'worker', epoch: 1, cause: 'interrupted', reason: gone }], escalations: [] } } as unknown as Partial<Work>);
+    capacity: { exhaustions: [{ role: 'worker', epoch: 1, cause: 'interrupted', reason: gone }], spent: [] } } as unknown as Partial<Work>);
   const [recovered] = observeSessions([relaunched], [], now, { hostId: 'host-1', firstMissed: { 'w\u0000agent-a:1': ago(25_000) } }).entries;
   assert.deepEqual([recovered.closed, recovered.observed, recovered.missedReports], ['ended', 'ended', 0]);
   assert.equal(recovered.outcome, `the claude runtime on host-1 no longer reports pane wF:p1 (unlisted for 25s): attempt 1 of GY-1513 was released at ${ago(40_000)} (${gone}); attempt 2 runs under a fresh lease held by agent-b, so the session is over`);

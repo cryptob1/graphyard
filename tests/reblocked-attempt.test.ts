@@ -146,11 +146,11 @@ test('unit:first-block-still-waits — a first block, or a block on a new epoch 
 test('unit:reblocked-attempt-redispatched-elsewhere — after a reblocked end, a profile on another runtime is chosen first; otherwise the order is unchanged', () => {
   const entry = (name: string, kind: string) => ({ profile: { name, kind, mode: 'launch' }, healthy: true });
   const health = [entry('claude-primary', 'claude'), entry('claude-secondary', 'claude'), entry('opencode-primary', 'opencode')];
-  const reblocked = { capacity: { exhaustions: [{ role: 'worker', cause: 'interrupted', epoch: 7, runtime: 'claude', reason: `${reblockedMarker}7 after its blocker was cleared ("x"); it now reports "y"` }], escalations: [] } } as unknown as Work;
+  const reblocked = { capacity: { exhaustions: [{ role: 'worker', cause: 'interrupted', epoch: 7, runtime: 'claude', reason: `${reblockedMarker}7 after its blocker was cleared ("x"); it now reports "y"` }], spent: [] } } as unknown as Work;
   assert.equal(runtimeToAvoid(reblocked), 'claude');
   assert.deepEqual(preferOtherRuntime(health, runtimeToAvoid(reblocked)).map(candidate => candidate.profile.name), ['opencode-primary', 'claude-primary', 'claude-secondary'], 'another runtime first, the same runtime still possible after it');
   // An idle hand-over or a quota end is not a session-local cause: no runtime is avoided.
-  const idle = { capacity: { exhaustions: [{ role: 'worker', cause: 'interrupted', epoch: 7, runtime: 'claude', reason: 'idle with a live lease: no activity' }], escalations: [] } } as unknown as Work;
+  const idle = { capacity: { exhaustions: [{ role: 'worker', cause: 'interrupted', epoch: 7, runtime: 'claude', reason: 'idle with a live lease: no activity' }], spent: [] } } as unknown as Work;
   assert.equal(runtimeToAvoid(idle), null);
   assert.equal(runtimeToAvoid({ capacity: undefined } as unknown as Work), null);
   assert.deepEqual(preferOtherRuntime(health, null).map(candidate => candidate.profile.name), ['claude-primary', 'claude-secondary', 'opencode-primary']);

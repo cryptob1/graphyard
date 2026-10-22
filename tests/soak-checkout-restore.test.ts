@@ -163,7 +163,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
     };
     const checkout = async () => {
       const read = await readCoordinatorCheckout(main);
-      const escalation = state.actions['escalation:dirty-checkout'];
+      const escalation = state.actions['attention:dirty-checkout'];
       reads.push({ at: clock, pid: own, escalation: escalation?.state ?? null, attempts: escalation?.attempts ?? null });
       return read;
     };
@@ -231,7 +231,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
   assert.ok(after.length >= 100 && after.at(-1)!.at - lastRestore >= day, `the days ran on ${(after.at(-1)!.at - lastRestore) / hour} hours past the last restore`);
   assert.ok(after.every(entry => entry.escalation === 'done'), 'the escalation stays settled');
   assert.equal(new Set(after.map(entry => entry.attempts)).size, 1, 'no further failed attempt is recorded');
-  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:dirty-checkout')).length, 1, 'one escalation row all days');
+  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('attention:dirty-checkout')).length, 1, 'one escalation row all days');
   assert.ok(!journal.some(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart|attention failed/.test(entry.line) && !/restart done/.test(entry.line)),
     `the last restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
   assert.ok(new Set(reads.map(entry => entry.pid)).size >= 4, 'the days ran four loop processes');
@@ -254,7 +254,7 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
   const plan = [
     // A hand checkout moves HEAD forward onto a new commit, clean: the drift the guard refuses.
     { at: 1 * hour, act: () => { writeFileSync(join(main, 'src', 'next.ts'), 'export const next = 1;\n'); git(main, 'add', 'src/next.ts'); git(main, 'commit', '-q', '-m', 'moved under the loop'); moved = git(main, 'rev-parse', 'HEAD'); } },
-    { at: 3 * hour, act: request(checkoutRestoreRequestPath(config), 'checkout-restore', 'escalation:dirty-checkout standing: HEAD moved while the loop ran', 'graphyard-doctor') },
+    { at: 3 * hour, act: request(checkoutRestoreRequestPath(config), 'checkout-restore', 'attention:dirty-checkout standing: HEAD moved while the loop ran', 'graphyard-doctor') },
   ];
   let pid = 2000;
   const end = start + 2 * day;
@@ -270,7 +270,7 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
     };
     const checkout = async () => {
       const read = await readCoordinatorCheckout(main);
-      const escalation = state.actions['escalation:dirty-checkout'];
+      const escalation = state.actions['attention:dirty-checkout'];
       reads.push({ at: clock, pid: own, head: read.commit, escalation: escalation?.state ?? null, attempts: escalation?.attempts ?? null, detail: escalation?.detail ?? null });
       return read;
     };
@@ -305,7 +305,7 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
   assert.ok(after.length >= 100 && after.at(-1)!.at - restarts[0].at >= day, `the days ran on ${(after.at(-1)!.at - restarts[0].at) / hour} hours past the restart`);
   assert.ok(after.every(entry => entry.escalation === 'done' && entry.pid !== restarts[0].pid), 'the escalation stays settled under a new loop process');
   assert.equal(new Set(after.map(entry => entry.attempts)).size, 1, 'no further failed attempt is recorded');
-  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:dirty-checkout')).length, 1, 'one escalation row all days');
+  assert.equal(Object.keys(state.actions).filter(key => key.startsWith('attention:dirty-checkout')).length, 1, 'one escalation row all days');
   assert.ok(!journal.some(entry => entry.at > restarts[0].at && /checkout-restore|attention failed|loop-restart/.test(entry.line) && !/restart done/.test(entry.line)),
     `the restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts[0].at && /checkout-restore|attention failed/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
   const settledLine = journal.find(entry => entry.pid === served[0].pid && entry.line.includes('attention done:'));
@@ -330,7 +330,7 @@ test('integration:soak-checkout-restore-diverged — over two simulated days of 
   const plan = [
     // A hand checkout moves HEAD onto an orphan commit, clean: neither merged nor forward of the loaded commit.
     { at: 1 * hour, act: () => { git(main, 'checkout', '-q', '--orphan', 'side'); writeFileSync(join(main, 'side.ts'), 'export const side = 1;\n'); git(main, 'add', 'side.ts'); git(main, 'commit', '-q', '-m', 'orphan'); diverged = git(main, 'rev-parse', 'HEAD'); git(main, 'checkout', '-q', '--detach'); git(main, 'branch', '-q', '-D', 'side'); } },
-    { at: 3 * hour, act: request(checkoutRestoreRequestPath(config), 'checkout-restore', 'escalation:dirty-checkout standing: HEAD diverged', 'graphyard-doctor') },
+    { at: 3 * hour, act: request(checkoutRestoreRequestPath(config), 'checkout-restore', 'attention:dirty-checkout standing: HEAD diverged', 'graphyard-doctor') },
   ];
   let pid = 3000;
   const end = start + 2 * day;
@@ -346,7 +346,7 @@ test('integration:soak-checkout-restore-diverged — over two simulated days of 
     };
     const checkout = async () => {
       const read = await readCoordinatorCheckout(main);
-      const escalation = state.actions['escalation:dirty-checkout'];
+      const escalation = state.actions['attention:dirty-checkout'];
       reads.push({ at: clock, pid: own, escalation: escalation?.state ?? null, attempts: escalation?.attempts ?? null });
       return read;
     };

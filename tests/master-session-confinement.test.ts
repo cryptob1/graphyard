@@ -120,7 +120,7 @@ test('integration:standing-pane-writer-attribution — the dirty-checkout escala
   const panes = [{ name: 'agy', pane_id: 'w1V:pHHY', cwd: root }, { name: 'graphyard-claude-1', pane_id: 'w1V:pW1', cwd: join(root, '.graphyard', 'worktrees', 'GY-1-1') }, { name: 'elsewhere', pane_id: 'w1V:pX', cwd: base }];
   const refusal = await guardFor(root, state, async () => panes).start(null);
   assert.ok(refusal);
-  const escalation = state.actions['escalation:dirty-checkout'];
+  const escalation = state.actions['attention:dirty-checkout'];
   assert.equal(escalation?.state, 'failed');
   assert.match(escalation!.detail, /Suspected writer — one standing session's pane still points at it: agy \(pane w1V:pHHY, cwd [^)]+\)/, 'the standing pane is named as the suspected writer');
   assert.ok(!escalation!.detail.includes('graphyard-claude-1') && !escalation!.detail.includes('w1V:pX'), 'managed worktrees and other directories are not suspects');
@@ -150,7 +150,7 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   const state = emptyDaemonState(config(base));
   const guard = guardFor(root, state);
   assert.ok(await guard.start(null), 'the dirty checkout is refused');
-  assert.equal(state.actions['escalation:dirty-checkout']?.attempts, 1);
+  assert.equal(state.actions['attention:dirty-checkout']?.attempts, 1);
   // The operator agent files the request beside the cursor; the loop carries it out.
   const file = checkoutRestoreRequestPath(config(base));
   assert.equal(file, join(base, 'coordinator.checkout-restore.json'));
@@ -210,10 +210,10 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   assert.equal(git('status', '--porcelain'), '', 'no non-ignored dirty path is left');
   assert.equal(git('stash', 'list'), '', 'the shared stash stack is untouched');
   // The escalation settled before the restart, and records no further failed attempt.
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
-  assert.equal(state.actions['escalation:dirty-checkout']?.attempts, 1);
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'done');
+  assert.equal(state.actions['attention:dirty-checkout']?.attempts, 1);
   assert.equal((await guard.betweenCycles()).refusal, null);
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'done');
   // The request carries its outcome, and is served once.
   assert.equal((await readCheckoutRestoreRequest(file))?.outcome?.ref, outcome!.ref);
   assert.equal(await serveCheckoutRestore(file, root, { restart: restart(43), pid: 43, quiesce: hostQuiesce }), null);
@@ -244,7 +244,7 @@ test('integration:coordinator-serves-current-release — after a restore, a rest
   const restarted = guardFor(root, state);
   assert.equal(await restarted.start(null), null);
   assert.equal(restarted.expected(), git('rev-parse', 'HEAD'));
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'done');
   // The command side: a request the loop does not answer in time is reported as filed.
   const pending = await checkoutRestoreCommand(config(base), ['restore', 'again'], 'graphyard-master', { waitMs: 20, pollMs: 5 });
   assert.equal(pending.state, 'requested');
@@ -346,7 +346,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1666: a HEAD 
   const drift = (await guard.betweenCycles()).refusal;
   assert.match(drift ?? '', /moved from/);
   assert.ok(drift!.endsWith(checkoutRestoreDriftRemedy), 'the refusal names the remedy the installation runs itself, never only a person\'s git');
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'failed');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'failed');
   const file = checkoutRestoreRequestPath(config(base));
   await fileCheckoutRestoreRequest(file, 'the coordinator HEAD moved onto unpushed commits', 'graphyard-master');
   const restarts: number[] = [];
@@ -354,7 +354,7 @@ test('manual:intervention-pattern-human-only-decision-build — GY-1666: a HEAD 
   assert.equal(outcome?.state, 'adopted', outcome?.detail);
   assert.equal(outcome!.commit, moved);
   assert.deepEqual(restarts, [1], 'the loop restarts onto the HEAD');
-  assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done', 'the escalation settles around the restart');
+  assert.equal(state.actions['attention:dirty-checkout']?.state, 'done', 'the escalation settles around the restart');
   assert.equal(guard.expected(), moved);
   assert.equal(git('rev-parse', 'HEAD'), moved, 'nothing is rolled back');
   assert.equal(git('log', '--format=%s', `${loaded}..HEAD`), 'operator wip 2\noperator wip 1', 'every unpushed commit is still in place: nothing is discarded');

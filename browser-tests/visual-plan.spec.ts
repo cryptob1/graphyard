@@ -28,7 +28,7 @@ const goal = {
   users: ['Customers'], constraints: [], deployTarget: 'uat', createdAt: now, updatedAt: now,
   acceptance: { author: 'author', pr: 1, branch: 'graphyard/goal-v', head: 'c'.repeat(40), draftedAt: now,
     outcomes: [{ id: 'signup', title: 'A customer can sign up', criteria: ['The signup page answers'], case: { id: 'signup-case' } }] },
-  plan, planApproval: { by: 'approver', at: now, reason: 'Fine' },
+  plan,
   items: [{ ref: 'api', key: 'GY-10', id: 'w-api' }, { ref: 'page', key: 'GY-11', id: 'w-page' }, { ref: 'billing', key: 'GY-12', id: 'w-billing' }, { ref: 'notify', key: 'GY-13', id: 'w-notify' }],
 };
 

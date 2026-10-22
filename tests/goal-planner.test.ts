@@ -27,13 +27,12 @@ import * as pi from '../integrations/pi/index.js';
 const planner = async () => ({ ...await import('../src/model/goal-plan.js'), ...await import('../src/daemon/planner.js'), ...await import('../src/model/goal.js') });
 
 // GY-1418: a goal whose acceptance merged becomes a short architecture note and a dependency-ordered
-// set of work items with file boundaries, written by the planner, approved by an identity that did
-// not write it, and only then created and released, so the dispatcher delivers them in order.
+// set of work items with file boundaries, written by the planner, recorded, and then created and
+// released, so the dispatcher delivers them in order.
 const repository = 'owner/planner';
 const master: Principal = { id: 'plan-master', role: 'coordinator', sessionKind: 'ai' };
 const planAuthor: Principal = { id: 'plan-author', role: 'admin', sessionKind: 'ai' };
-const approver: Principal = { id: 'plan-approver', role: 'admin', sessionKind: 'ai' };
-const credentials = [master, planAuthor, approver].map(principal => ({ ...principal, token: `plan-${principal.id}-${'x'.repeat(32)}` }));
+const credentials = [master, planAuthor].map(principal => ({ ...principal, token: `plan-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
@@ -66,12 +65,11 @@ const ok = async (principal: Principal, method: 'GET' | 'POST', path: string, bo
 const caseOf = (id: string) => ({ id, title: `The ${id} outcome is reachable`, description: 'A customer reads the page.', tags: ['api'], target: 'uat', required: true,
   steps: [{ kind: 'http', name: 'read the page', method: 'GET', path: '/api/board', status: 200, expect: [{ path: 'groups.backlog', type: 'array' }] }] });
 const outcome = (id: string) => ({ id, title: `A customer can ${id}`, criteria: [`The ${id} page answers`], case: caseOf(`${id}-case`) });
-/** A goal whose acceptance pull request merged, built through the goal commands themselves: drafted, approved by another identity, merged. */
+/** A goal whose acceptance pull request merged, built through the goal commands themselves: drafted, merged. */
 function mergedGoal(key: string, outcomes = ['signup', 'billing']): Goal {
   const at = new Date().toISOString();
   let goal = recordGoal({ statement: `Customers can ${outcomes.join(' and ')}`, users: ['Customers'], constraints: [], deployTarget: 'uat then production' }, key, { actor: master, at });
   goal = applyGoalCommand(goal, 'draft', { outcomes: outcomes.map(outcome), pr: 1, branch: `graphyard/${key.toLowerCase()}`, head: 'a'.repeat(40) }, { actor: planAuthor, at });
-  goal = applyGoalCommand(goal, 'approve', { reason: 'Right' }, { actor: approver, at });
   return applyGoalCommand(goal, 'merged', { pr: 1, mergeSha: 'b'.repeat(40) }, { actor: master, at });
 }
 const criteria = (text: string) => [{ id: 'AC-1', text, proofs: ['unit:planned-behaviour'] }];
@@ -97,8 +95,8 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
   githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-planner', autoMerge: true, mergeMethod: 'merge', workers: [] });
 const allWork = async () => (await store.pool.query('SELECT document FROM work_items ORDER BY id')).rows.map(row => row.document as Work);
 
-test('unit:planner-plan-validation — a plan covers every approved outcome, names its cases, and orders dependencies; one that fails is refused with the reason before approval', async () => {
-  const { clearPlans, maxPlanRounds, planOrder, planRefusals, planJudgementTool, plansSettled, plannerStep, planTool } = await planner();
+test('unit:planner-plan-validation — a plan covers every approved outcome, names its cases, and orders dependencies; one that fails is refused with the reason', async () => {
+  const { clearPlans, maxPlanRounds, planOrder, planRefusals, plansSettled, plannerStep, planTool } = await planner();
   clearPlans();
   const goal = mergedGoal('GOAL-1');
   assert.equal(goal.stage, 'planning', 'a merged acceptance hands the goal to the planner');
@@ -112,7 +110,7 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
   const refused = (plan: GoalPlan) => planRefusals(goal, plan).join('; ');
   // Coverage: every approved outcome is served by at least one item.
   assert.match(refused({ summary, note, items: [item('api', ['signup'])] }), /no item serves approved outcome billing/);
-  // A criterion id an item names twice would be refused at create, after approval: it is refused before.
+  // A criterion id an item names twice would be refused at create: it is refused before.
   assert.match(refused({ summary, note, items: [{ ...item('api', ['signup']), criteria: [...criteria('one'), ...criteria('two')] }, item('billing', ['billing'])] }), /item api names criterion AC-1 twice/);
   // Cases: each item names the required cases it must make pass, and only the goal's.
   assert.match(refused({ summary, note, items: [{ ...item('api', ['signup']), cases: ['billing-case'] }, item('billing', ['billing'])] }), /item api serves an outcome without naming the case that proves it: add signup-case/);
@@ -125,7 +123,7 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
   assert.throws(() => planOrder(cycle), /depend on each other in a cycle/);
   // The note is at most 400 words.
   assert.match(refused({ ...goodPlan(), note: Array.from({ length: 401 }, () => 'word').join(' ') }), /the architecture note is 401 words; it is at most 400/);
-  // The model refuses such a plan outright, with every reason, so it never reaches an approver.
+  // The model refuses such a plan outright, with every reason, so it is never recorded.
   assert.throws(() => applyGoalCommand(goal, 'plan', { summary, note, items: [item('api', ['signup'])] }, { actor: planAuthor, at: new Date().toISOString() }),
     (error: Error & { status?: number }) => error.status === 422 && /Plan refused for GOAL-1: no item serves approved outcome billing/.test(error.message));
 
@@ -133,23 +131,21 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
   assert.ok((registryRoles as readonly string[]).includes('planner'));
   assert.equal(roleSchema.parse({ name: 'planner', accounts: [], concurrency: 1 }).name, 'planner');
   assert.equal(proposedConcurrency.planner, 1);
-  const { planParameters, planJudgementParameters } = pi as unknown as Record<string, pi.JsonSchema>;
+  const { planParameters } = pi as unknown as Record<string, pi.JsonSchema>;
   assert.deepEqual(pi.graphyardTools('planner').map(tool => tool.name), [planTool]);
-  assert.deepEqual(pi.graphyardTools('plan-judge').map(tool => tool.name), [planJudgementTool]);
   assert.deepEqual(pi.schemaErrors(planParameters, { goal: 'GOAL-1', ...goodPlan() }), []);
-  assert.deepEqual(pi.schemaErrors(planJudgementParameters, { goal: 'GOAL-1', verdict: 'approve', reason: 'Small items in a sensible order' }), []);
 
-  // The loop, with a stubbed runner: a plan missing an outcome is refused before approval with its reason, never posted, and the next run is told why.
+  // The loop, with a stubbed runner: a plan missing an outcome is refused with its reason, never posted, and the next run is told why.
   let current: Goal = goal;
   const prompts: string[] = [], tools: string[] = [], posted: GoalPlan[] = [];
   const plans: unknown[] = [{ goal: goal.key, summary, note, items: [item('api', ['signup'])] }, { goal: goal.key, ...goodPlan() }];
   const fx: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: process.cwd(),
     goals: async () => [current],
-    runner: async (role, attempt) => ({ runner: stubRunner(() => role === 'plan' ? plans.shift() : { goal: goal.key, verdict: 'approve', reason: 'Fine' }, prompts, tools), runtime: 'stub', model: attempt }),
+    runner: async attempt => ({ runner: stubRunner(() => plans.shift(), prompts, tools), runtime: 'stub', model: attempt }),
     plan: async (target, plan) => { posted.push(plan); current = applyGoalCommand(target, 'plan', plan, { actor: planAuthor, at: new Date().toISOString() }); return current; },
     invalid: async (target, reason) => (current = applyGoalCommand(target, 'plan-invalid', { reason }, { actor: planAuthor, at: new Date().toISOString() })),
-    judge: async target => target, release: async target => target, deliver: async target => target,
+    release: async target => target, deliver: async target => target,
   };
   const state = emptyDaemonState(config);
   let clock = Date.parse('2026-10-07T00:00:00Z');
@@ -162,26 +158,26 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
   assert.deepEqual(tools, [`${planTool} planner`]);
   assert.match(prompts[0], /at most 400 words/); assert.match(prompts[0], /signup-case/);
   await step();
-  assert.deepEqual(posted, [], 'a refused plan never reaches an approver');
+  assert.deepEqual(posted, [], 'a refused plan is never posted');
   assert.equal(state.actions[`planner:${goal.id}`].state, 'failed');
-  assert.match(state.actions[`planner:${goal.id}`].detail, /refused before approval: no item serves approved outcome billing/);
+  assert.match(state.actions[`planner:${goal.id}`].detail, /was refused: no item serves approved outcome billing/);
   // The refusal is recorded on the goal, so it counts toward the plan rounds whatever restarts the loop.
   assert.equal(current.stage, 'planning'); assert.equal(current.planDrafts, 1); assert.match(current.planRefusal!.reason, /no item serves approved outcome billing/);
   await step(); assert.equal(tools.length, 1, 'the next plan waits out the retry');
   await step(60 * 60_000);
   assert.match(prompts[1], /no item serves approved outcome billing/, 'the next run answers the refusal');
   await step();
-  assert.equal(posted.length, 1); assert.equal(current.stage, 'plan-review'); assert.equal(current.plan?.author, planAuthor.id); assert.equal(current.planDrafts, 2);
-  assert.match(state.actions[`planner:${goal.id}`].detail, /Recorded GOAL-1's plan: ui after api; api; billing; it awaits approval/);
+  assert.equal(posted.length, 1); assert.equal(current.stage, 'planned'); assert.equal(current.plan?.author, planAuthor.id); assert.equal(current.planDrafts, 2);
+  assert.match(state.actions[`planner:${goal.id}`].detail, /Recorded GOAL-1's plan: ui after api; api; billing; its items are released next/);
   // Past its plan rounds, a refused goal is the master's.
   assert.match(goalSummary({ ...goal, planDrafts: maxPlanRounds }).next!.who, new RegExp(`${maxPlanRounds} plans were refused`));
 
-  // Plans refused before approval use up the rounds too: a planner that keeps missing an outcome is run maxPlanRounds times, an hour apart, then never again.
+  // Refused plans use up the rounds too: a planner that keeps missing an outcome is run maxPlanRounds times, an hour apart, then never again.
   let stubborn: Goal = mergedGoal('GOAL-2');
   const uncovered = () => ({ goal: stubborn.key, summary, note, items: [item('api', ['signup'])] });
   const stubbornRuns: string[] = [];
   fx.goals = async () => [stubborn];
-  fx.runner = async (_role, attempt) => ({ runner: stubRunner(uncovered, stubbornRuns, []), runtime: 'stub', model: attempt });
+  fx.runner = async attempt => ({ runner: stubRunner(uncovered, stubbornRuns, []), runtime: 'stub', model: attempt });
   fx.invalid = async (target, reason) => (stubborn = applyGoalCommand(target, 'plan-invalid', { reason }, { actor: planAuthor, at: new Date().toISOString() }));
   for (let hour = 0; hour < maxPlanRounds + 2; hour++) { await step(60 * 60_000); await step(); }
   assert.equal(stubbornRuns.length, maxPlanRounds, 'one paid run per round, and none past the cap');
@@ -215,10 +211,10 @@ test('unit:planner-validation-failure-feeds-back — every run whose graphyard_p
   const fx: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: process.cwd(),
     goals: async () => [current],
-    runner: async (_role, attempt) => ({ runner: stubRunner(undeclared, prompts, tools), runtime: 'stub', model: attempt }),
+    runner: async attempt => ({ runner: stubRunner(undeclared, prompts, tools), runtime: 'stub', model: attempt }),
     plan: async () => { throw new Error('a payload that failed validation must never be posted'); },
     invalid: async (target, reason) => { invalids.push(reason); return current = applyGoalCommand(target, 'plan-invalid', { reason }, { actor: planAuthor, at: new Date(clock).toISOString() }); },
-    judge: async target => target, release: async target => target, deliver: async target => target,
+    release: async target => target, deliver: async target => target,
   };
   const state = emptyDaemonState(config);
   const step = async (advance = 60_000) => {
@@ -273,8 +269,8 @@ test('unit:plan-validation-accepts-declared-post-deploy-criterion — the plan p
     'the same item with the declaration removed is refused, naming the criterion and its observed phrase');
 });
 
-test('unit:planner-approval-and-dispatch-order — only once an approver approves the plan are its items created and released with their dependencies, the dispatcher holds each until those are delivered, and the goal moves planned, delivering, delivered', async () => {
-  const { clearPlans, currentGoal, planItemInput, planJudgementTool, planOrder, plansSettled, plannerStep, planTool, mergedItem } = await planner();
+test('unit:planner-approval-and-dispatch-order — once the plan is recorded its items are created and released with their dependencies, the dispatcher holds each until those are delivered, and the goal moves planned, delivering, delivered', async () => {
+  const { clearPlans, currentGoal, planItemInput, planOrder, plansSettled, plannerStep, planTool, mergedItem } = await planner();
   clearPlans();
   // A goal whose acceptance merged, in the ledger as the land route leaves it.
   const goal = mergedGoal('GOAL-1');
@@ -285,27 +281,25 @@ test('unit:planner-approval-and-dispatch-order — only once an approver approve
   assert.equal(currentGoal({ ...goal, stage: 'planned', merged: null }).stage, 'accepted');
   assert.equal(currentGoal(goal).stage, 'planning');
 
-  // Nothing is released before a plan is approved.
+  // Nothing is released before a plan is recorded.
   assert.equal((await call(planAuthor, 'POST', `goals/${goal.key}/release`, {})).status, 409);
   const uncovered = await call(planAuthor, 'POST', `goals/${goal.key}/plan`, { summary, note, items: [item('api', ['signup'])] });
   assert.equal(uncovered.status, 422); assert.match(uncovered.text, /no item serves approved outcome billing/);
 
-  // The loop drives the rest, as the planner's effects do: the plan posted by its author, judged by the approver, released, delivered.
+  // The loop drives the rest, as the planner's effects do: the plan posted by its author, released, delivered.
   const prompts: string[] = [], tools: string[] = [];
-  let verdict: { verdict: 'approve' | 'refuse'; reason: string } = { verdict: 'refuse', reason: 'Split the billing item; it is too large for one worker' };
   let failRelease = 1;
   const fx: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: process.cwd(),
     goals: async () => (await ok(master, 'GET', 'goals?open=1')).goals,
-    runner: async (role, attempt, target) => ({ runner: stubRunner(() => role === 'plan' ? { goal: target.key, ...goodPlan() } : { goal: target.key, ...verdict }, prompts, tools), runtime: 'stub', model: attempt }),
+    runner: async (attempt, target) => ({ runner: stubRunner(() => ({ goal: target.key, ...goodPlan() }), prompts, tools), runtime: 'stub', model: attempt }),
     plan: (target, plan) => ok(planAuthor, 'POST', `goals/${target.key}/plan`, plan),
     invalid: (target, reason) => ok(planAuthor, 'POST', `goals/${target.key}/plan-invalid`, { reason }),
-    judge: (target, judgement) => ok(approver, 'POST', `goals/${target.key}/plan-${judgement.verdict}`, { reason: judgement.reason }),
     release: async target => {
       if (failRelease-- > 0) {
         // The control plane created the first item, then died; that create's receipt is long gone by the retry.
         const plan = target.plan!, first = planOrder(plan)[0];
-        await engine.execute(planAuthor, 'create', null, planItemInput({ ...target, plan, planApproval: target.planApproval! }, first, new Map()), randomUUID());
+        await engine.execute(planAuthor, 'create', null, planItemInput({ ...target, plan }, first, new Map()), randomUUID());
         throw new Error('Graphyard refused goals (502)');
       }
       return ok(planAuthor, 'POST', `goals/${target.key}/release`, {});
@@ -321,26 +315,14 @@ test('unit:planner-approval-and-dispatch-order — only once an approver approve
   };
   await step(); await step();
   let current = await read();
-  assert.equal(current.stage, 'plan-review'); assert.equal(current.plan?.author, planAuthor.id);
-  assert.equal((await call(planAuthor, 'POST', `goals/${goal.key}/release`, {})).status, 409, 'a plan awaiting approval releases nothing');
-  assert.deepEqual(await allWork(), [], 'no item exists before the plan is approved');
-  // The approver refuses: the goal is planned again, the refusal answered by the next run.
-  await step(); await step();
-  current = await read();
-  assert.equal(current.stage, 'planning'); assert.equal(current.planRefusal?.by, approver.id);
-  verdict = { verdict: 'approve', reason: 'Three small items; ui after api, billing beside them on its own files' };
-  await step(); await step();
-  assert.match(prompts.at(-1)!, /Split the billing item/);
-  await step(); await step();
-  current = await read();
-  assert.equal(current.stage, 'planned'); assert.equal(current.planApproval?.by, approver.id); assert.equal(current.planDrafts, 2);
-  assert.deepEqual(tools, [`${planTool} planner`, `${planJudgementTool} plan-judge`, `${planTool} planner`, `${planJudgementTool} plan-judge`]);
-  assert.deepEqual(await allWork(), [], 'approved, nothing is created until the release');
+  assert.equal(current.stage, 'planned'); assert.equal(current.plan?.author, planAuthor.id); assert.equal(current.planDrafts, 1);
+  assert.deepEqual(tools, [`${planTool} planner`]);
+  assert.deepEqual(await allWork(), [], 'recorded, nothing is created until the release');
 
   // Released in dependency order, each with the ids of the items it depends on; a failed release is retried and makes nothing twice.
   await step();
   assert.equal((await allWork()).length, 1, 'the failed release left its first item behind');
-  assert.match(state.actions[`planner:${goal.id}`].detail, /Could not release GOAL-1's approved plan/);
+  assert.match(state.actions[`planner:${goal.id}`].detail, /Could not release GOAL-1's plan/);
   await step(10 * 60_000);
   current = await read();
   assert.equal(current.stage, 'delivering');
@@ -392,18 +374,17 @@ test('unit:planner-approval-and-dispatch-order — only once an approver approve
   assert.equal(current.stage, 'delivered');
   assert.match(state.actions[`planner:${goal.id}`].detail, /GOAL-1 is delivered/);
   const history = (await ok(master, 'GET', `goals/${goal.key}`)).history.map((entry: any) => `${entry.kind}:${entry.actor}:${entry.stage}`);
-  assert.deepEqual(history, [`goal.recorded:${master.id}:planning`, `goal.plan:${planAuthor.id}:plan-review`, `goal.plan-refuse:${approver.id}:planning`, `goal.plan:${planAuthor.id}:plan-review`,
-    `goal.plan-approve:${approver.id}:planned`, `goal.released:${planAuthor.id}:delivering`, `goal.deliver:${planAuthor.id}:delivered`]);
+  assert.deepEqual(history, [`goal.recorded:${master.id}:planning`, `goal.plan:${planAuthor.id}:planned`, `goal.released:${planAuthor.id}:delivering`, `goal.deliver:${planAuthor.id}:delivered`]);
 });
 
-test('manual:goal-pipeline-docs-review — the docs describe the goal pipeline (intake, acceptance, approval, planning, approval, delivery) and that the master no longer hand-decomposes goals, within the word budget', async () => {
+test('manual:goal-pipeline-docs-review — the docs describe the goal pipeline (intake, acceptance, planning, delivery) and that the master no longer hand-decomposes goals, within the word budget', async () => {
   const page = (name: string) => readFile(new URL(`../docs/${name}`, import.meta.url), 'utf8');
   const [guide, works, validation] = await Promise.all([page('master-agent.md'), page('how-graphyard-works.md'), page('validation.md')]);
   assert.match(guide, /no longer hand-decomposes goals/);
   assert.match(guide, /\(how-graphyard-works\.md#from-goal-to-work-items\)/);
   assert.match(works, /^## From goal to work items$/m);
-  assert.match(works, /intake, acceptance, approval, planning, approval and delivery/);
-  for (const fragment of ['`planner` role', 'at most 400 words', 'a plan of files', 'refused with the reason', 'Another identity approves the plan', '`planned`, then `delivering`', 'before its dependencies are delivered', '`delivered` once every item is done and production serves it'])
+  assert.match(works, /intake, acceptance, planning and delivery/);
+  for (const fragment of ['`planner` role', 'at most 400 words', 'a plan of files',  'refused with the reason', '`planned`, then `delivering`', 'before its dependencies are delivered', '`delivered` once every item is done and production serves it'])
     assert.ok(works.includes(fragment), `docs/how-graphyard-works.md states ${fragment}`);
   assert.match(validation, /`goal deliver` needs each done and served in production/);
 });

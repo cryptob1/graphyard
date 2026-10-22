@@ -236,6 +236,5 @@ test('unit:stale-session-marked — a running handle not seen inside the thresho
   assert.match(rowOf(html, 'proof-gy-15'), /<td data-label="Doing now">evidence submitted<\/td>/);
   assert.match(rowOf(html, 'proof-gy-15'), />Finished<\/span>/);
   assert.doesNotMatch(rowOf(html, 'proof-gy-15'), /data-reconciled/);
-  assert.equal(sessionRoleKind({ kind: 'coordination', role: 'escalation' }), 'escalation handler');
 });
 

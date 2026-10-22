@@ -56,7 +56,7 @@ test('unit:diverged-checkout-saved-and-moved — a clean detached HEAD neither o
 
   // The diverged HEAD: saved under a ref, the checkout detached at the serving release, clean.
   git('checkout', '-q', '--detach', diverged);
-  const outcome = await restoreInProcess(undefined, noQuiesce, null, async () => inputs)(root, 'escalation:dirty-checkout', at, { file: 'f', id: 'i' });
+  const outcome = await restoreInProcess(undefined, noQuiesce, null, async () => inputs)(root, 'attention:dirty-checkout', at, { file: 'f', id: 'i' });
   assert.equal(outcome.restored, null);
   assert.ok(outcome.diverged?.ref.startsWith(`${checkoutRestoreRefPrefix}diverged-20300101T000000Z-${diverged.slice(0, 12)}`), outcome.diverged?.ref);
   assert.equal(git('rev-parse', outcome.diverged!.ref), diverged, 'the old HEAD is reachable from the ref');
@@ -67,7 +67,7 @@ test('unit:diverged-checkout-saved-and-moved — a clean detached HEAD neither o
   // The loop's side: the outcome is an adoption of the release it moved onto, with the restart asked.
   git('checkout', '-q', '--detach', diverged);
   const base = await temporaryDirectory('diverged-state-', tmpdir()), file = join(base, 'request.json');
-  await fileCheckoutRestoreRequest(file, 'escalation:dirty-checkout', 'graphyard-doctor');
+  await fileCheckoutRestoreRequest(file, 'attention:dirty-checkout', 'graphyard-doctor');
   const settled: (string | null)[] = []; let restarts = 0;
   const served = await serveCheckoutRestore(file, root, {
     pid: 100, restart: async () => { restarts++; }, settle: async adopt => { settled.push(adopt); }, loaded: () => loaded,

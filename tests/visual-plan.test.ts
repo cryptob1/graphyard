@@ -54,7 +54,6 @@ function mergedGoal(): Goal {
     case: { id: 'signup-case', title: 'signup answers', description: 'A customer reads the page.', tags: ['api'], target: 'uat', required: true,
       steps: [{ kind: 'http' as const, name: 'read', method: 'GET' as const, path: '/api/board', status: 200 }] } };
   goal = applyGoalCommand(goal, 'draft', { outcomes: [outcome], pr: 1, branch: 'graphyard/goal-1', head: 'a'.repeat(40) }, { actor: admin, at });
-  goal = applyGoalCommand(goal, 'approve', { reason: 'Right' }, { actor: { id: 'other-admin', role: 'admin', sessionKind: 'ai' }, at });
   return applyGoalCommand(goal, 'merged', { pr: 1, mergeSha: 'b'.repeat(40) }, { actor: admin, at });
 }
 
@@ -78,7 +77,7 @@ test('unit:plan-plain-fields — the planner prompt asks for a summary of at mos
 test('unit:item-plain-summary — planItemInput copies plain onto summary; master create stores an optional summary', async () => {
   const goal = mergedGoal();
   const planned = plan().items[1];
-  const input = planItemInput({ ...goal, plan: { ...plan(), author: 'planner', draftedAt: new Date().toISOString() }, planApproval: { by: 'approver' } }, planned, new Map());
+  const input = planItemInput({ ...goal, plan: { ...plan(), author: 'planner', draftedAt: new Date().toISOString() } }, planned, new Map());
   assert.equal(input.summary, planned.plain);
   const parsed = createSchema.parse({ title: 'Hand-filed item', description: 'detail', summary: 'A plain sentence for readers.', criteria: criteria('It works') });
   assert.equal(parsed.summary, 'A plain sentence for readers.');

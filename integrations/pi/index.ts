@@ -92,14 +92,6 @@ export const acceptanceParameters: JsonSchema = {
   },
 };
 
-/** The approver's verdict on one acceptance draft (GY-1417, src/daemon/acceptance.ts judgementPayloadSchema). */
-export const acceptanceJudgementParameters: JsonSchema = {
-  type: 'object', additionalProperties: false, required: ['goal', 'verdict', 'reason'],
-  properties: {
-    goal: { type: 'string', pattern: '^GOAL-\\d+$', description: 'The goal whose draft you judged, exactly as given' },
-    verdict: { type: 'string', enum: ['approve', 'refuse'] }, reason: text(2000, 'Why; for a refusal, what the next draft must change'),
-  },
-};
 
 /** The planner's plan (GY-1418, src/model/goal.ts goalPlanSchema): an architecture note and the items that deliver the goal's approved outcomes. */
 export const planParameters: JsonSchema = {
@@ -122,14 +114,6 @@ export const planParameters: JsonSchema = {
   },
 };
 
-/** The approver's verdict on one plan (GY-1418, src/daemon/planner.ts planJudgementSchema). */
-export const planJudgementParameters: JsonSchema = {
-  type: 'object', additionalProperties: false, required: ['goal', 'verdict', 'reason'],
-  properties: {
-    goal: { type: 'string', pattern: '^GOAL-\\d+$', description: 'The goal whose plan you judged, exactly as given' },
-    verdict: { type: 'string', enum: ['approve', 'refuse'] }, reason: text(2000, 'Why; for a refusal, what the next plan must change'),
-  },
-};
 
 /** The triage judgement (GY-402, src/model/machine-backlog.ts triageJudgementSchema): release at a priority, close with a reason, or merge into another item. */
 export const triageParameters: JsonSchema = {
@@ -194,9 +178,7 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
   // The research session's brief (GY-259) is registered for its own role only.
   if (role === 'acceptance') return [tool('graphyard_acceptance', 'Graphyard acceptance', 'Record the acceptance draft for the goal you were asked to draft: each customer outcome in plain language with its criteria and the one required uat E2E case that proves it. Call it exactly once; it is your result.', acceptanceParameters, params => `acceptance ${params.goal}`, true)];
-  if (role === 'acceptance-judge') return [tool('graphyard_acceptance_judgement', 'Graphyard acceptance judgement', 'Record your verdict on the acceptance draft you were asked to judge: approve, or refuse naming what the next draft must change. Call it exactly once; it is your result.', acceptanceJudgementParameters, params => `judgement ${params.goal}`, true)];
   if (role === 'planner') return [tool('graphyard_plan', 'Graphyard plan', 'Record the plan for the goal you were asked to plan: a plain summary of at most three sentences, an architecture note of at most 400 words and the work items that deliver its approved outcomes, each with a one-sentence plain description, the cases it must make pass, its criteria and dependencies. Call it exactly once; it is your result.', planParameters, params => `plan ${params.goal}`, true)];
-  if (role === 'plan-judge') return [tool('graphyard_plan_judgement', 'Graphyard plan judgement', 'Record your verdict on the plan you were asked to judge: approve, or refuse naming what the next plan must change. Call it exactly once; it is your result.', planJudgementParameters, params => `plan judgement ${params.goal}`, true)];
   if (role === 'decomposition') return [tool('graphyard_decompose', 'Graphyard decompose', 'Record how the broad item you were asked to split divides into small child items, each with the parent criterion IDs it takes and the earlier children it lands after; or an empty children list to keep it whole. Call it exactly once; it is your result.', decomposeParameters, () => 'the split', true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.

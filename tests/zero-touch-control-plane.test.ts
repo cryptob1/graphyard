@@ -43,10 +43,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  */
 const repository = 'owner/project';
 const operatorAgent: Principal = { id: 'graphyard-master-operator', role: 'admin', sessionKind: 'ai' };
-const approver: Principal = { id: 'graphyard-approver', role: 'admin', sessionKind: 'ai' };
 const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
-const credentials = [operatorAgent, approver, coordinator, worker].map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
+const credentials = [operatorAgent, coordinator, worker].map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`the zero-touch run called GitHub (${String(name)})`); } });
 const sha = (...parts: unknown[]) => createHash('sha1').update(JSON.stringify(parts)).digest('hex');
@@ -178,7 +177,7 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
 
   // 2. The loop's acceptance and planner roles, driven by stubbed runtimes that post through the real plane.
   //    No GitHub (GY-1535): the acceptance role commits its change in the coordinator checkout and the
-  //    merge writer's reads land it on the bare origin; the planner's posts hit /api/goals as the operator-agent and approver.
+  //    merge writer's reads land it on the bare origin; the planner's posts hit /api/goals as the operator-agent.
   const runs: string[] = [];
   let clock = Date.parse('2026-10-08T00:00:00Z');
   const config = masterConfigSchema.parse({ version: 1, url, credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard', repository, baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { worktreeRoot: worktreeBase, mergeWriter: { deployKeyFile: join(directory, 'install-dir', 'deploy-key'), retrials: 3 } } });
@@ -197,27 +196,22 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
     ...acceptanceEffects(config, checkout, { run, fetcher: fetch, asCoordinator: path => request(coordinator, path), asOperatorAgent: (_method, path, body, key) => request(operatorAgent, path, body, key), merger: recordedMerger, writer: reads }),
     settings: diagnosticianSettings({}),
     goals: async () => (await request(coordinator, 'goals?open=1')).goals,
-    runner: async (role, attempt, goal) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
-      ? { goal: goal.key, verdict: 'approve', reason: 'The outcome is what a customer asked for and its case checks it' }
-      : { goal: goal.key, outcomes: [{ id: 'greeting', title: 'A customer is greeted by name', criteria: ['The greeting names the customer'], case: greetingCase }] }, runs) }),
-    judge: (goal, judgement) => request(approver, `goals/${goal.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goal.id}:${goal.revision}:judged`),
+    runner: async (attempt, goal) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() =>
+      ({ goal: goal.key, outcomes: [{ id: 'greeting', title: 'A customer is greeted by name', criteria: ['The greeting names the customer'], case: greetingCase }] }), runs) }),
     open: async () => { throw new Error('the control-plane acceptance opened a pull request'); },
-    pullRequest: async () => { throw new Error('the control-plane acceptance read a pull request'); },
     land: async () => { throw new Error('the control-plane acceptance asked GitHub to land it'); },
     close: async () => { throw new Error('the control-plane acceptance closed a pull request'); },
   };
   const planner: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: directory,
     goals: async () => (await request(coordinator, 'goals?open=1')).goals,
-    runner: async (role, attempt, goal) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
-      ? { goal: goal.key, verdict: 'approve', reason: 'One small item a worker finishes in one change' }
-      : { goal: goal.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
+    runner: async (attempt, goal) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() =>
+      ({ goal: goal.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
         items: [{ ref: 'greeting', title: 'Greet the customer', plain: 'Customers see a greeting.', description: 'Add the greeting module', type: 'feature', priority: 2,
           outcomes: ['greeting'], cases: ['greeting'],
-          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], dependsOn: [] }] }, runs) }),
+          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], dependsOn: [] }] }), runs) }),
     plan: (goal, plan) => request(operatorAgent, `goals/${goal.key}/plan`, plan, `planner:${goal.id}:${goal.revision}`),
     invalid: (goal, reason) => request(operatorAgent, `goals/${goal.key}/plan-invalid`, { reason }, `planner:${goal.id}:${goal.revision}:invalid`),
-    judge: (goal, judgement) => request(approver, `goals/${goal.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goal.id}:${goal.revision}:judged`),
     release: goal => request(operatorAgent, `goals/${goal.key}/release`, {}, `planner:${goal.id}:${goal.revision}:release`),
     deliver: (goal, items, reason) => request(operatorAgent, `goals/${goal.key}/deliver`, { items, reason }, `planner:${goal.id}:${goal.revision}:deliver`),
   };
@@ -272,12 +266,9 @@ test('unit:zero-touch-control-plane — up --agent --goal FILE against a bare or
   }
   assert.ok(runs.includes('acceptance'), `the acceptance role ran: ${runs.join(', ')}`);
   assert.ok(runs.includes('planner'), `the planner role ran: ${runs.join(', ')}`);
-  assert.ok(runs.includes('acceptance-judge') && runs.includes('plan-judge'), `both judges ran: ${runs.join(', ')}`);
   const goal = (await request(coordinator, `goals/${key}`)).goal as Goal;
   assert.ok(goal.merged?.pr !== undefined, `the goal's acceptance merged through the stubbed acceptance role: ${goal.stage}`);
-  assert.notEqual(goal.acceptance!.author, goal.approval!.by, 'acceptance was approved by an identity that did not draft it');
   assert.ok(goal.plan, `the planner posted a plan: ${goal.stage}`);
-  assert.notEqual(goal.plan!.author, goal.planApproval!.by, 'the plan was approved by an identity that did not write it');
   assert.ok(first, 'the plan was released into a work item by the planner role, not the test body');
   assert.ok(submittedHead, `the stub worker submitted ${first!.key}; goal stage ${goal.stage}; runs: ${runs.join(', ')}`);
   await mergeTick(first!);

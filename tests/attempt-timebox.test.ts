@@ -70,7 +70,7 @@ const overlongEnd = (epoch: number, ageMs: number, runtime = 'claude') => ({
 });
 
 /** An item between attempts whose record holds the row of overlong ends the ladder reads. */
-const betweenAttempts = (ends: ReturnType<typeof overlongEnd>[]) => held({ lease: null, capacity: { exhaustions: ends, escalations: [] } } as Partial<Work>);
+const betweenAttempts = (ends: ReturnType<typeof overlongEnd>[]) => held({ lease: null, capacity: { exhaustions: ends, spent: [] } } as Partial<Work>);
 
 function harness(item: { current: Work[] }, agents: HerdrAgent[]) {
   const log = { closed: [] as string[], capacity: [] as Record<string, unknown>[], dispatches: [] as string[] };
@@ -93,7 +93,7 @@ function harness(item: { current: Work[] }, agents: HerdrAgent[]) {
         if (entry.id !== work.id) return entry;
         const { endsBlocker: _endsBlocker, ...report } = event as Record<string, unknown>;
         return { ...entry, lease: null,
-          capacity: { exhaustions: [...(entry.capacity?.exhaustions ?? []), { ...report, at: iso(0), owner: 'alpha-principal', recordedBy: 'loop', resetsAt: null, partialWork: { state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/gy-885-1' } }], escalations: entry.capacity?.escalations ?? [] } } as Work;
+          capacity: { exhaustions: [...(entry.capacity?.exhaustions ?? []), { ...report, at: iso(0), owner: 'alpha-principal', recordedBy: 'loop', resetsAt: null, partialWork: { state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/gy-885-1' } }], spent: entry.capacity?.spent ?? [] } } as Work;
       });
       return item.current[0];
     },

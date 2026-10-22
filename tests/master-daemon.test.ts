@@ -531,7 +531,7 @@ test('a stable detail over the bound is recorded once, not re-recorded every cyc
     const reason = `Worker credential file is unreadable: ${'y'.repeat(actionDetailMax * 2)}`;
     const broken = effects({ snapshot: async () => ({ work: [ready], now: iso(0) }), credentials: async () => ({ codex: { available: false, reason } }) });
     const state = emptyDaemonState(master);
-    const key = 'escalation:dispatch:ready-long';
+    const key = 'attention:dispatch:ready-long';
     const first = await runCycle(master, state, broken, () => clock);
     const escalation = state.actions[key];
     assert.ok(escalation, 'the escalation is recorded');

@@ -228,7 +228,7 @@ test('What is left names who clears each state from the refusal itself: exhauste
   // plane computed from it names who moves the item — proofs first, a fresh reading, or an escalation — never the reviewer.
   const standstill = (kind: string) => ({ ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', [])],
     nextAction: { kind, gate: 'review', refusal: 'Independent approval of the current commit is required', reason: 'standstill', llmRole: null } }) as unknown as Work;
-  assert.deepEqual(['dispatch', 'resync', 'escalate', 'request-review'].map(kind => prSteps(standstill(kind), NOW).who), ['Prover agent', 'Graphyard (automatic)', 'Master agent', 'Reviewer agent']);
+  assert.deepEqual(['dispatch', 'resync', 'attention', 'request-review'].map(kind => prSteps(standstill(kind), NOW).who), ['Prover agent', 'Graphyard (automatic)', 'Master agent', 'Reviewer agent']);
   assert.deepEqual(whatIsLeft(standstill('dispatch'), NOW).map(group => [group.label, group.who]), [['Checking', 'Prover agent']]);
   // A blocker recorded before the hand-in fails the ready gate: the item is Blocked, and only the
   // master agent clears it — the What is left group and Who acts next both say so.

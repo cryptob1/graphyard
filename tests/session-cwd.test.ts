@@ -405,7 +405,7 @@ test('unit:coordinator-checkout-drift-detected — the loop cycles nothing from 
     const refused = await runDaemon(config, state, loopEffects([], { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }), loopOptions(fixture));
     assert.deepEqual(refused.cycles, [], 'the loop cycles nothing from a dirty checkout');
     assert.equal(upgrades, 0, 'the self-upgrade never runs from a dirty checkout');
-    const escalation = state.actions['escalation:dirty-checkout'];
+    const escalation = state.actions['attention:dirty-checkout'];
     assert.ok(escalation, 'the refusal is raised as attention');
     assert.match(escalation.detail, /src\/loop\.ts/);
     assert.match(escalation.detail, /tests\//, 'the untracked test directory is named');
@@ -439,7 +439,7 @@ test('unit:coordinator-checkout-drift-detected — the loop checks the checkout 
     // for as long as it stood; it is escalated as before, and the upgrade runs — from a dirty tree
     // it snapshots the merged commit under .graphyard/held-cli and restarts onto that.
     assert.equal(upgrades, 1, 'the self-upgrade runs from the cycle the tree turned dirty: a dirty tree holds it back no longer');
-    const escalation = state.actions['escalation:dirty-checkout'];
+    const escalation = state.actions['attention:dirty-checkout'];
     assert.ok(escalation, 'the turned-dirty tree is raised as attention');
     assert.match(escalation.detail, /src\/loop\.ts/);
     assert.match(escalation.detail, /The self-upgrade is not held by it: a merged release restarts the loop onto a held snapshot of it, the checkout left where it stands/, 'and says the upgrade is not held by it');
@@ -466,7 +466,7 @@ test('unit:coordinator-checkout-drift-detected — a HEAD that moves under a run
     await runDaemon(config, state, loopEffects([], { agents: async () => agents, selfUpgrade: async () => { upgrades++; return { outcome: 'skipped' as const, reason: 'nothing deployed yet' }; } }),
       loopOptions(fixture, { checkout }));
     assert.equal(upgrades, 0, 'the self-upgrade is skipped while HEAD is not the commit the loop runs');
-    const escalation = state.actions['escalation:dirty-checkout'];
+    const escalation = state.actions['attention:dirty-checkout'];
     assert.ok(escalation, 'the moved HEAD is raised as attention');
     assert.match(escalation.detail, new RegExp(`moved from ${C1.slice(0, 12)} to ${C2.slice(0, 12)}`), 'the attention names the HEAD it expects and the HEAD it found');
     assert.ok(escalation.detail.includes('review-claude-1 (pane wC:p1'), 'the session whose pane points at the checkout is named');
@@ -493,7 +493,7 @@ test('unit:coordinator-checkout-drift-detected — during a Herdr outage the dri
         loopOptions(fixture, { checkout }));
       assert.equal(result.cycles.length + result.failed.length, 1, 'the loop ran its cycle and the guard after it did not end the loop on the unreadable inventory');
       assert.equal(upgrades, 0, 'nothing self-upgrades from the moved HEAD');
-      const escalation = state.actions['escalation:dirty-checkout'];
+      const escalation = state.actions['attention:dirty-checkout'];
       assert.ok(escalation, 'the moved HEAD is raised as attention while Herdr is down');
       assert.match(escalation.detail, new RegExp(`moved from ${C1.slice(0, 12)} to ${C2.slice(0, 12)}`));
       assert.match(escalation.detail, /sessions whose panes point at it are unknown/);
@@ -530,7 +530,7 @@ test('unit:coordinator-checkout-drift-detected — the loop\u2019s own alignment
     clearTimeout(stopTimer);
     assert.deepEqual(upgrades, [2], 'the alignment ran once on the clean checkout');
     assert.ok(alignments >= 2, 'the next cycle offered the alignment again and it found nothing to move');
-    assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'the alignment\u2019s own HEAD move raises no drift attention');
+    assert.equal(state.actions['attention:dirty-checkout'], undefined, 'the alignment\u2019s own HEAD move raises no drift attention');
     assert.ok(phase >= 4, 'the loop checked the coordinator checkout on every cycle');
     await cleanup();
   } finally { await fixture.cleanup(); }
@@ -563,7 +563,7 @@ for (const ending of ['failed', 'threw', 'foreign'] as const) {
       await runDaemon(config, state, effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGTERM'], process: fakeProcess, checkout, log: () => {} });
       clearTimeout(stopTimer);
       assert.ok(phase >= 4, 'the loop checked the coordinator checkout on later cycles');
-      const escalation = state.actions['escalation:dirty-checkout'];
+      const escalation = state.actions['attention:dirty-checkout'];
       if (ending === 'foreign') {
         assert.ok(escalation, 'a HEAD the cursor does not name stays drift');
         assert.match(escalation.detail, new RegExp(`moved from ${C1.slice(0, 12)} to ${C2.slice(0, 12)}`));

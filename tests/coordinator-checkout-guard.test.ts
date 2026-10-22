@@ -144,7 +144,7 @@ test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from
     const clean = await runDaemon(config, cleanState, loopEffects([], { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped', reason: 'nothing deployed yet' }; } }), loopOptions(fixture));
     assert.equal(clean.cycles.length, 1, 'a clean checkout starts the loop');
     assert.equal(upgrades, 1, 'the between-cycles self-upgrade runs on a clean checkout');
-    assert.equal(cleanState.actions['escalation:dirty-checkout'], undefined);
+    assert.equal(cleanState.actions['attention:dirty-checkout'], undefined);
 
     // Dirty it the way the incident was: a modified module and an untracked test. A scratch file
     // outside the source paths is nobody's code and dirties nothing.
@@ -171,7 +171,7 @@ test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from
     const log: string[] = [];
     const refused = await runDaemon(config, state, loopEffects(work), loopOptions(fixture, { log: line => log.push(line) }));
     assert.deepEqual(refused.cycles, [], 'the loop cycles nothing from a dirty checkout');
-    const escalation = state.actions['escalation:dirty-checkout'];
+    const escalation = state.actions['attention:dirty-checkout'];
     assert.ok(escalation, 'the refusal is raised as attention on the cursor');
     assert.equal(escalation.kind, 'attention');
     assert.match(escalation.detail, /src\/loop\.ts/);

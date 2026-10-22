@@ -303,7 +303,7 @@ test('integration:docs-sync-stall-named-attention — a hold past half its bound
   await run.cycle(clock);
   const name = run.record.agents[0];
   await run.cycle(clock + docsSyncStallMs - minute);
-  const key = `escalation:docs-sync-stall:work-stall:${reviewed}`;
+  const key = `attention:docs-sync-stall:work-stall:${reviewed}`;
   assert.equal(run.state.actions[key], undefined, 'not before half the bound');
   await run.cycle(clock + docsSyncStallMs);
   await run.cycle(clock + docsSyncStallMs + minute);

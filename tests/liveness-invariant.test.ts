@@ -119,7 +119,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   const stale = await staleWait();
   await strand(failed);
 
-  const expected: [Work, ViolationClass, string][] = [[failed, 'failed-proof', 'request-rework'], [stale, 'stale-wait', 'escalate']];
+  const expected: [Work, ViolationClass, string][] = [[failed, 'failed-proof', 'request-rework'], [stale, 'stale-wait', 'attention']];
   const found = livenessViolations(await store.list(), now());
   for (const [item, kind, successor] of expected) {
     const verdict = await judge(item);
@@ -132,7 +132,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   assert.deepEqual(found.map(entry => entry.key).sort(), expected.map(([item]) => item.key).sort(), 'and nothing healthy is');
   // What the stale wait is owed, precisely: an escalation.
   const escalation = (await judge(stale)).violation!.successor!;
-  assert.ok(escalation.inputs.kind === 'escalate' && escalation.inputs.trigger === 'stale-wait', JSON.stringify(escalation));
+  assert.ok(escalation.inputs.kind === 'attention' && escalation.inputs.trigger === 'stale-wait', JSON.stringify(escalation));
 
   // Two states no rule answers at all are violations too, never silence: a gate refusing with no
   // reason, and a wait on an item that does not exist.
@@ -151,7 +151,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
 test('unit:violations-get-successor-actions — one reconciliation tick opens exactly one successor for each violation (request-rework, escalate), deduplicated by reason across ticks, and an action failing N times for one unchanged reason is converted to escalate instead of retried', async () => {
   const failed = await candidate('fail'), stale = await staleWait();
   await strand(failed);
-  const cases: [Work, ViolationClass, string, string | null][] = [[failed, 'failed-proof', 'request-rework', null], [stale, 'stale-wait', 'escalate', 'stale-wait']];
+  const cases: [Work, ViolationClass, string, string | null][] = [[failed, 'failed-proof', 'request-rework', null], [stale, 'stale-wait', 'attention', 'stale-wait']];
   for (const [item, kind] of cases) assert.equal((await judge(item)).violation?.class, kind, `${item.key} starts in violation`);
 
   await engine.reconcile();
@@ -162,7 +162,7 @@ test('unit:violations-get-successor-actions — one reconciliation tick opens ex
     assert.equal(verdict.obligation!.kind, 'action');
     const owed = rows(after).filter(row => row.kind === successor);
     assert.equal(owed.length, 1, `${item.key}: exactly one ${successor} row`);
-    if (tag) assert.ok(owed[0].inputs.kind === 'escalate' && owed[0].inputs.trigger === tag, JSON.stringify(owed[0].inputs));
+    if (tag) assert.ok(owed[0].inputs.kind === 'attention' && owed[0].inputs.trigger === tag, JSON.stringify(owed[0].inputs));
     const repaired = await events(item, 'liveness.repaired');
     assert.equal(repaired.length, 1, `${item.key}: the repair is on the ledger`);
     assert.equal(repaired[0].class, kind);
@@ -197,16 +197,16 @@ test('unit:violations-get-successor-actions — one reconciliation tick opens ex
   await fail();
   await engine.reconcile();
   current = await reload(item);
-  assert.equal(current.nextAction?.kind, 'escalate', `the ${livenessRetryLimit}th identical failure converts it`);
-  assert.ok(current.nextAction!.inputs.kind === 'escalate' && current.nextAction!.inputs.trigger === 'stalled-action' && current.nextAction!.inputs.detail.includes(reason));
-  assert.deepEqual(rows(current).map(row => row.kind), ['escalate'], 'the dispatch is retired, not retried');
+  assert.equal(current.nextAction?.kind, 'attention', `the ${livenessRetryLimit}th identical failure converts it`);
+  assert.ok(current.nextAction!.inputs.kind === 'attention' && current.nextAction!.inputs.trigger === 'stalled-action' && current.nextAction!.inputs.detail.includes(reason));
+  assert.deepEqual(rows(current).map(row => row.kind), ['attention'], 'the dispatch is retired, not retried');
   const escalationId = rows(current)[0].id;
   await engine.reconcile();
   current = await reload(item);
   assert.deepEqual(rows(current).map(row => row.id), [escalationId], 'and it stays converted: one escalation, no dispatch reopened');
   assert.equal((await engine.claimNextAction(coordinator, { host: 'host-1', kinds: ['dispatch'], work: item.key }, id())).action, null, 'no executor is offered the dispatch again');
   assert.equal((await judge(item)).violation, null, 'the escalation owns the item');
-  assert.equal(actionId('escalate', item.id, rows(current)[0].binding), escalationId);
+  assert.equal(actionId('attention', item.id, rows(current)[0].binding), escalationId);
 });
 
 test('unit:violations-get-successor-actions — resync and request-review rows refused for one stable reason keep being retried on the widest backoff after they escalate', () => {
@@ -237,13 +237,13 @@ test('unit:violations-get-successor-actions — resync and request-review rows r
     tick();
     for (let failure = 1; failure < livenessRetryLimit; failure++) { clock = fail(); assert.equal(next().kind, kind, `${kind}: failure ${failure} is retried`); }
     fail();
-    assert.equal(next().kind, 'escalate', `${kind}: escalated after ${livenessRetryLimit} identical refusals`);
+    assert.equal(next().kind, 'attention', `${kind}: escalated after ${livenessRetryLimit} identical refusals`);
     for (let round = 1; round <= 3; round++) {
       clock += actionStallMaxMs;
       tick();
       assert.equal(next().kind, kind, `${kind}: round ${round} retries it on the widest backoff`);
       fail();
-      assert.equal(next().kind, 'escalate', `${kind}: round ${round} re-escalates on the unchanged refusal`);
+      assert.equal(next().kind, 'attention', `${kind}: round ${round} re-escalates on the unchanged refusal`);
     }
   }
 });

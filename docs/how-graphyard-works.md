@@ -14,7 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## From goal to work items
 
-Goal passes intake, acceptance, approval, planning, approval and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), non-author-approved. Merged, `planner` role writes a ≤3-sentence `summary`, architecture note (at most 400 words) and items, each naming one-sentence `plain`, outcomes, cases, a plan of files and predecessors; a serving-release criterion carries `manual:post-deploy/NAME` beside a buildable one. Another identity approves the plan (`goal plan-approve`); a plan leaving outcome uncovered or parallel items sharing file is refused with the reason. Loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it.
+Goal passes intake, acceptance, planning and delivery. `graphyard goal FILE` records it; acceptance role writes outcomes and required `uat` cases ([validation](validation.md)), landed as drafted. Merged, `planner` role writes a ≤3-sentence `summary`, architecture note (at most 400 words) and items, each naming one-sentence `plain`, outcomes, cases, a plan of files and predecessors; a serving-release criterion carries `manual:post-deploy/NAME` beside a buildable one. A plan leaving outcome uncovered or parallel items sharing file is refused with the reason. Loop creates and releases items (`planned`, then `delivering`), dispatching none before its dependencies are delivered. Goal is `delivered` once every item is done and production serves it.
 
 ## Risk lanes
 

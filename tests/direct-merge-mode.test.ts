@@ -84,7 +84,7 @@ test('integration:direct-merge-delivers-inside-window — with the mode on, an u
   assert.equal(inside.work.stage, 'done'); assert.deepEqual(inside.work.violations, []);
   const record = (inside.work.delivery as any).operatorAuthorization;
   assert.equal(inside.work.delivery!.mergeSha, inside.mergeSha); assert.equal(record.execution, null); assert.equal(record.operator, operator.id);
-  assert.equal(record.directMerge.setBy, operator.id); assert.equal(record.directMerge.since, '2026-01-01T00:00:00.000Z'); assert.match(record.decision, /^direct-merge:\d+$/);
+  assert.equal(record.directMerge.setBy, operator.id); assert.equal(record.directMerge.since, '2026-01-01T00:00:00.000Z'); assert.match(record.directMerge.event, /^\d+$/);
   const recorded = await events(inside.work.id, 'merge.operator-authorized');
   assert.equal(recorded.length, 1); assert.equal(recorded[0].actor, operator.id);
   assert.equal(recorded[0].payload.details.directMerge.reason, 'The development repository merges straight into main'); assert.match(recorded[0].payload.details.judgement, /inside the direct-merge window from 2026-01-01T00:00:00.000Z that human-operator set/);
@@ -133,7 +133,7 @@ test('integration:direct-merge-environment — GRAPHYARD_DIRECT_MERGE_SINCE alon
     const delivered = await reload(held.work.id);
     assert.equal(delivered.stage, 'done'); assert.deepEqual(delivered.violations, []);
     const recorded = await events(held.work.id, 'merge.operator-authorized');
-    assert.equal(recorded.length, 1); assert.equal(recorded[0].actor, 'deployment environment'); assert.equal(recorded[0].payload.details.decision, 'direct-merge:environment');
+    assert.equal(recorded.length, 1); assert.equal(recorded[0].actor, 'deployment environment'); assert.equal(recorded[0].payload.details.directMerge.event, null);
     const status = await directMergeStatus(store.pool, deployed.directMergeEnvironment, new Date());
     assert.match(status.line!, /since 2024-01-01T00:00:00.000Z, set by deployment environment/);
     // The observation path honours it too.

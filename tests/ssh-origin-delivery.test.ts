@@ -35,15 +35,15 @@ import { keylessSshCommand, sshOrigin, type SshOrigin } from './helpers/ssh-orig
  * records each caller with whether it presented the key. Everything Graphyard runs itself is real:
  * the control plane (embedded Postgres, the HTTP server, the engine that reads a `complete --head`
  * submission from the coordinator checkout's shared object store), the loop's acceptance, planner
- * and merge-writer steps, and git. Only the agents' model runs are stubbed with fixed drafts,
- * plans and verdicts; nothing touches GitHub.
+ * and merge-writer steps, and git. Only the agents' model runs are stubbed with fixed drafts
+ * and plans; nothing touches GitHub.
  *
  * Through one goal: the acceptance change is drafted by the acceptance role, committed in the
- * coordinator checkout for the merge writer, approved by the approver identity, landed by the
+ * coordinator checkout for the merge writer, landed by the
  * merge writer's own fetch/merge/push and recorded merged through the real land route — whose own
  * `git fetch` runs with the compose container's SSH (no deploy key, no host key), fails with
  * `Host key verification failed.`, and leaves the judgement to the checkout's origin ref the loop
- * fetches (GY-1922). The approved plan is released; the first item is claimed by a worker whose
+ * fetches (GY-1922). The plan is released; the first item is claimed by a worker whose
  * environment holds no deploy key, committed in its linked worktree of the coordinator checkout
  * (the shared object store), and submitted with the real `graphyard complete GY-N 1 --head` child
  * process (GY-1925: the head form pushes nothing, so a sandbox whose SSH cannot work still
@@ -65,10 +65,9 @@ import { keylessSshCommand, sshOrigin, type SshOrigin } from './helpers/ssh-orig
  */
 const repository = 'owner/project';
 const operatorAgent: Principal = { id: 'graphyard-master-operator', role: 'admin', sessionKind: 'ai' };
-const approver: Principal = { id: 'graphyard-approver', role: 'admin', sessionKind: 'ai' };
 const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const worker: Principal = { id: 'ssh-worker', role: 'worker' };
-const credentials = [operatorAgent, approver, coordinator, worker].map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
+const credentials = [operatorAgent, coordinator, worker].map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 
 let fixture: string, origin: SshOrigin, checkout: string, managed: string, baseTip: string;
@@ -242,27 +241,22 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
     ...acceptanceEffects(config, checkout, { run, fetcher: fetch, asCoordinator: path => request(coordinator, path), asOperatorAgent: (_method, path, body, key) => request(operatorAgent, path, body, key), merger: recordedMerger, writer: reads }),
     settings: diagnosticianSettings({}),
     goals: async () => (await request(coordinator, 'goals?open=1')).goals,
-    runner: async (role, attempt, goalAtHand) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
-      ? { goal: goalAtHand.key, verdict: 'approve', reason: 'The outcome is what a customer asked for and its case checks it' }
-      : { goal: goalAtHand.key, outcomes: [{ id: 'greeting', title: 'A customer is greeted by name', criteria: ['The greeting names the customer'], case: greetingCase }] }, runs) }),
-    judge: (goalAtHand, judgement) => request(approver, `goals/${goalAtHand.key}/${judgement.verdict}`, { reason: judgement.reason }, `acceptance:${goalAtHand.id}:${goalAtHand.revision}:judged`),
+    runner: async (attempt, goalAtHand) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() =>
+      ({ goal: goalAtHand.key, outcomes: [{ id: 'greeting', title: 'A customer is greeted by name', criteria: ['The greeting names the customer'], case: greetingCase }] }), runs) }),
     open: async () => { throw new Error('the control-plane acceptance opened a pull request'); },
-    pullRequest: async () => { throw new Error('the control-plane acceptance read a pull request'); },
     land: async () => { throw new Error('the control-plane acceptance asked GitHub to land it'); },
     close: async () => { throw new Error('the control-plane acceptance closed a pull request'); },
   };
   const planner: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: fixture,
     goals: async () => (await request(coordinator, 'goals?open=1')).goals,
-    runner: async (role, attempt, goalAtHand) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => role === 'judge'
-      ? { goal: goalAtHand.key, verdict: 'approve', reason: 'One small item a worker finishes in one change' }
-      : { goal: goalAtHand.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
+    runner: async (attempt, goalAtHand) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() =>
+      ({ goal: goalAtHand.key, summary: 'Customers get a greeting. One module serves it. It ships with the app.', note: 'A greeting module under src/, served by the existing application.',
         items: [{ ref: 'greeting', title: 'Greet the customer', plain: 'Customers see a greeting.', description: 'Add the greeting module', type: 'feature', priority: 2,
           outcomes: ['greeting'], cases: ['greeting'],
-          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], dependsOn: [] }] }, runs) }),
+          criteria: [{ id: 'AC-1', text: 'The greeting module answers', proofs: ['unit:app-works'] }], dependsOn: [] }] }), runs) }),
     plan: (goalAtHand, plan) => request(operatorAgent, `goals/${goalAtHand.key}/plan`, plan, `planner:${goalAtHand.id}:${goalAtHand.revision}`),
     invalid: (goalAtHand, reason) => request(operatorAgent, `goals/${goalAtHand.key}/plan-invalid`, { reason }, `planner:${goalAtHand.id}:${goalAtHand.revision}:invalid`),
-    judge: (goalAtHand, judgement) => request(approver, `goals/${goalAtHand.key}/plan-${judgement.verdict}`, { reason: judgement.reason }, `planner:${goalAtHand.id}:${goalAtHand.revision}:judged`),
     release: goalAtHand => request(operatorAgent, `goals/${goalAtHand.key}/release`, {}, `planner:${goalAtHand.id}:${goalAtHand.revision}:release`),
     deliver: (goalAtHand, items, reason) => request(operatorAgent, `goals/${goalAtHand.key}/deliver`, { items, reason }, `planner:${goalAtHand.id}:${goalAtHand.revision}:deliver`),
   };
@@ -323,11 +317,8 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
   }
   assert.ok(runs.includes('acceptance'), `the acceptance role ran: ${runs.join(', ')}`);
   assert.ok(runs.includes('planner'), `the planner role ran: ${runs.join(', ')}; actions ${JSON.stringify(state.actions)}`);
-  assert.ok(runs.includes('acceptance-judge') && runs.includes('plan-judge'), `both judges ran: ${runs.join(', ')}`);
   const planned = await request(coordinator, `goals/${goal.key}`) as { goal: Goal };
   assert.equal(planned.goal.stage, 'delivering', `the goal is past planning, its plan released: ${planned.goal.stage}`);
-  assert.notEqual(planned.goal.acceptance!.author, planned.goal.approval!.by, 'acceptance was approved by an identity that did not draft it');
-  assert.notEqual(planned.goal.plan!.author, planned.goal.planApproval!.by, 'the plan was approved by an identity that did not write it');
   assert.ok(submittedHead && submitted, `the worker submitted ${first?.key}; goal stage ${planned.goal.stage}; actions: ${JSON.stringify(state.actions)}; runs: ${runs.join(', ')}`);
 
   // 4. The merge writer merges the submitted head and pushes it through the deploy-key door.
@@ -365,7 +356,7 @@ test('unit:ssh-origin-delivery — on a control-plane-merger install whose SSH o
   assert.equal(mergeSha, submittedHead, 'the worker\'s head sat on the tip, so main fast-forwarded to the submitted head itself');
   assert.match(git(origin.repository, 'show', `${mergeSha}:src/greeting.ts`), /Hello/, 'the worker\'s file is on the origin\'s main');
   const history = (await request(coordinator, `goals/${goal.key}`)).history as { kind: string }[];
-  assert.deepEqual(history.map(entry => entry.kind), ['goal.recorded', 'goal.draft', 'goal.approve', 'goal.merged', 'goal.plan', 'goal.plan-approve', 'goal.released'], 'the goal moved through acceptance, landing, planning and release');
+  assert.deepEqual(history.map(entry => entry.kind), ['goal.recorded', 'goal.draft', 'goal.merged', 'goal.plan', 'goal.released'], 'the goal moved through acceptance, landing, planning and release');
 
   // 6. The door's record: every remote access it saw presented the merge writer's deploy key.
   const calls = await origin.accesses();

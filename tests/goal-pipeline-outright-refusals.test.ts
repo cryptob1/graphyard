@@ -98,11 +98,9 @@ test('unit:goal-pipeline-outright-refusals — an acceptance draft whose gh pull
     const fx: AcceptanceEffects = {
       settings: diagnosticianSettings({}), cwd: root,
       goals: async () => [goal],
-      runner: async (_role, attempt) => ({ runner: stubRunner(() => { runs++; return draftOf(goal.key); }), runtime: 'stub', model: attempt }),
+      runner: async attempt => ({ runner: stubRunner(() => { runs++; return draftOf(goal.key); }), runtime: 'stub', model: attempt }),
       open: async (target, draft) => { opens++; return openAcceptancePullRequest(child as never, '/outside/root', scratch, config, target, draft); },
       draft: async target => target,
-      judge: async target => target,
-      pullRequest: async () => ({ state: 'open', mergeSha: null, head: null }),
       land: async () => { throw new Error('nothing is landed'); },
       close: async () => {},
       closed: async target => target,
@@ -138,11 +136,9 @@ test('unit:goal-pipeline-outright-refusals — an acceptance draft whose open or
     const fx: AcceptanceEffects = {
       settings: diagnosticianSettings({}), cwd: root,
       goals: async () => [goal],
-      runner: async (_role, attempt) => ({ runner: stubRunner(() => { runs++; return draftOf(goal.key); }), runtime: 'stub', model: attempt }),
+      runner: async attempt => ({ runner: stubRunner(() => { runs++; return draftOf(goal.key); }), runtime: 'stub', model: attempt }),
       open: async () => { opens++; if (step === 'open') throw refused(status); return { pr: 900 + opens, branch: `graphyard/${goal.key.toLowerCase()}`, head: 'c'.repeat(40) }; },
       draft: async () => { posts++; throw refused(status); },
-      judge: async target => target,
-      pullRequest: async () => ({ state: 'open', mergeSha: null, head: null }),
       land: async () => { throw new Error('nothing is landed'); },
       close: async pr => { closes.push(pr); },
       closed: async target => target,
@@ -177,14 +173,14 @@ test('unit:goal-pipeline-outright-refusals — a plan release refused with 401, 
   for (const status of [401, 403, 409, 502]) {
     clearPlans();
     const recorded = recordGoal({ statement: 'Customers can read the board', users: ['Customers'], constraints: [], deployTarget: 'uat then production' }, `GOAL-R${status}`, { actor: master, at: new Date().toISOString() });
-    // The release step reads only the goal's stage and identity: an approved plan awaiting release.
+    // The release step reads only the goal's stage and identity: a recorded plan awaiting release.
     const goal = { ...recorded, stage: 'planned', merged: { pr: 1, mergeSha: 'b'.repeat(40) } } as unknown as Goal;
     const releases: number[] = [];
     const fx: PlannerEffects = {
       settings: diagnosticianSettings({}), cwd: root,
       goals: async () => [goal],
       runner: async () => { throw new Error('no run is launched for a planned goal'); },
-      plan: async target => target, invalid: async target => target, judge: async target => target,
+      plan: async target => target, invalid: async target => target,
       release: async () => { releases.push(clock); throw refused(status); },
       deliver: async target => target,
     };
@@ -204,7 +200,7 @@ test('unit:goal-pipeline-outright-refusals — a plan release refused with 401, 
       assert.equal(releases.length, 2, 'a failure that is not a refusal is asked again in ten minutes');
       continue;
     }
-    assert.match(detail, new RegExp(`Could not release ${goal.key}'s approved plan: Graphyard refused goals \\(${status}\\).*refused it outright, so it is asked again in an hour`));
+    assert.match(detail, new RegExp(`Could not release ${goal.key}'s plan: Graphyard refused goals \\(${status}\\).*refused it outright, so it is asked again in an hour`));
     for (let minutes = 0; minutes < 50; minutes += 10) await step(planStepRetryMs);
     assert.equal(releases.length, 1, `a release refused with ${status} is not asked again every ten minutes`);
     await step(planRetryMs - 50 * 60_000);
@@ -216,7 +212,6 @@ test('unit:goal-pipeline-outright-refusals — a plan release refused with 401, 
 test('unit:goal-pipeline-outright-refusals — a plan whose post is refused with 401, 403 or 409 is kept and posted again after planRetryMs, never recorded as invalid; a 422 is a refused plan round', async () => {
   const { clearPlans, plannerStep, planRetryMs, plansSettled, planStepRetryMs, planTool } = await loop();
   const planAuthor: Principal = { id: 'refusal-planner', role: 'operator-agent', sessionKind: 'ai' } as Principal;
-  const approver: Principal = { id: 'refusal-approver', role: 'admin', sessionKind: 'ai' } as Principal;
   const item = (ref: string, outcomes: string[], plannedFiles: string[]) => ({ ref, title: `Build ${ref}`, plain: `Customers get the ${ref} part.`, description: `The ${ref} part`, type: 'feature' as const, priority: 2, outcomes,
     cases: outcomes.map(id => `${id}-case`), criteria: [{ id: 'AC-1', text: `${ref} works`, proofs: ['unit:planned-behaviour'] }], dependsOn: [] as string[] });
   for (const status of [401, 403, 409, 422]) {
@@ -224,7 +219,6 @@ test('unit:goal-pipeline-outright-refusals — a plan whose post is refused with
     const at = new Date().toISOString();
     let goal = recordGoal({ statement: 'Customers can sign up', users: ['Customers'], constraints: [], deployTarget: 'uat then production' }, `GOAL-P${status}`, { actor: master, at });
     goal = applyGoalCommand(goal, 'draft', { outcomes: [{ id: 'signup', title: 'A customer can sign up', criteria: ['The signup page answers'], case: caseOf('signup-case') }], pr: 1, branch: `graphyard/goal-p${status}`, head: 'a'.repeat(40) }, { actor: planAuthor, at });
-    goal = applyGoalCommand(goal, 'approve', { reason: 'Right' }, { actor: approver, at });
     goal = applyGoalCommand(goal, 'merged', { pr: 1, mergeSha: 'b'.repeat(40) }, { actor: master, at });
     const plan = { goal: goal.key, summary: 'Customers can sign up. The build is one module. It ships with the release pipeline.', note: 'Node server, one module per outcome under src/, deployed by the release pipeline.', items: [item('signup', ['signup'], ['src/signup.ts'])] };
     let launches = 0;
@@ -232,10 +226,10 @@ test('unit:goal-pipeline-outright-refusals — a plan whose post is refused with
     const fx: PlannerEffects = {
       settings: diagnosticianSettings({}), cwd: root,
       goals: async () => [goal],
-      runner: async (_role, attempt) => { launches++; return { runner: stubRunner(() => plan), runtime: 'stub', model: attempt }; },
+      runner: async attempt => { launches++; return { runner: stubRunner(() => plan), runtime: 'stub', model: attempt }; },
       plan: async () => { posts.push(clock); throw refused(status); },
       invalid: async (target, reason) => { invalids.push(reason); return target; },
-      judge: async target => target, release: async target => target, deliver: async target => target,
+      release: async target => target, deliver: async target => target,
     };
     const state = emptyDaemonState(config);
     let clock = Date.parse('2026-10-10T00:00:00Z');
@@ -250,7 +244,7 @@ test('unit:goal-pipeline-outright-refusals — a plan whose post is refused with
     const detail = state.actions[`planner:${goal.id}`].detail;
     if (status === 422) {
       assert.equal(invalids.length, 1, 'a plan the control plane rejects as input is a refused plan round');
-      assert.match(detail, /refused before approval: Graphyard refused goals \(422\)/);
+      assert.match(detail, /was refused: Graphyard refused goals \(422\)/);
       continue;
     }
     assert.deepEqual(invalids, [], `a ${status} is not recorded as an invalid plan with the same refused credential`);

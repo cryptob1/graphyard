@@ -19,13 +19,12 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * whose `git fetch origin` over SSH fails (no GitHub host key, no credential), while the loop fetches
  * into that same checkout from the host. The land route judges a merge-writer acceptance landing from
  * the checkout's refs/remotes/origin/BASE when its own fetch fails; GY-1661's
- * refusals still hold for a ref that does not show the merge of the approved head on its first-parent history.
+ * refusals still hold for a ref that does not show the merge of the drafted head on its first-parent history.
  */
 const admin: Principal = { id: 'gl-admin', role: 'admin', sessionKind: 'human' };
 const coordinator: Principal = { id: 'gl-master', role: 'coordinator', sessionKind: 'ai' };
 const author: Principal = { id: 'gl-operator-agent', role: 'admin', sessionKind: 'ai' };
-const approver: Principal = { id: 'gl-approver', role: 'admin', sessionKind: 'ai' };
-const credentials = [admin, coordinator, author, approver].map(principal => ({ ...principal, token: `gl-${principal.id}-${'x'.repeat(32)}` }));
+const credentials = [admin, coordinator, author].map(principal => ({ ...principal, token: `gl-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let fixture: string, origin: string, writer: string, plane: string, goals = 0;
@@ -86,23 +85,21 @@ function land(head: string) {
   git(writer, 'push', '-q', 'origin', 'main');
   return git(writer, 'rev-parse', 'HEAD');
 }
-/** A goal the approver accepted at `head`, for the control-plane merge writer (no pull request). */
+/** A goal drafted (and so accepted) at `head`, for the control-plane merge writer (no pull request). */
 async function acceptedGoal(head: string): Promise<Goal> {
   const at = new Date(0).toISOString(), outcome = `outcome-${++goals}`;
   const recorded = recordGoal({ statement: `Customers are greeted (${outcome})`, users: ['Customers'], constraints: [], deployTarget: 'uat then production' }, `GOAL-${goals}`, { actor: author, at });
   const outcomes = [{ id: outcome, title: `A customer is greeted (${outcome})`, criteria: ['The greeting names the customer'],
     case: { id: outcome, title: `${outcome} answers`, tags: ['api'], target: 'uat', required: true, steps: [{ kind: 'http', name: 'read the greeting', method: 'GET', path: '/', status: 200 }] } }];
-  const drafted = applyGoalCommand(recorded, 'draft', { outcomes, pr: null, branch: `graphyard/goal-${goals}-acceptance-1`, head }, { actor: author, at });
-  const accepted = applyGoalCommand(drafted, 'approve', { reason: 'what customers asked for' }, { actor: approver, at });
+  const accepted = applyGoalCommand(recorded, 'draft', { outcomes, pr: null, branch: `graphyard/goal-${goals}-acceptance-1`, head }, { actor: author, at });
   await store.transaction(async db => {
     await appendGoal(db, author.id, 'record', recorded, {});
-    await appendGoal(db, author.id, 'draft', drafted, {});
-    await appendGoal(db, approver.id, 'approve', accepted, {});
+    await appendGoal(db, author.id, 'draft', accepted, {});
   });
   return accepted;
 }
 
-test('unit:goal-land-without-server-fetch — with the server\'s fetch failing on host-key verification, a landing the checkout\'s origin ref already holds at the approved head is recorded merged and the goal plans', { timeout: 120_000 }, async () => {
+test('unit:goal-land-without-server-fetch — with the server\'s fetch failing on host-key verification, a landing the checkout\'s origin ref already holds at the drafted head is recorded merged and the goal plans', { timeout: 120_000 }, async () => {
   const head = await acceptanceHead('acceptance-1');
   const goal = await acceptedGoal(head);
   const mergeSha = land(head);
@@ -140,29 +137,29 @@ test('unit:goal-land-stale-ref-refused — a landing neither the checkout\'s ori
   assert.equal((await readGoal(goal.key)).merged ?? null, null);
 
   // An obsolete merge on the ref: main's first-parent history holds a merge of an earlier head, not the
-  // approved one. Named as the landing, it is refused whether or not the fetch succeeds.
+  // drafted one. Named as the landing, it is refused whether or not the fetch succeeds.
   const obsoleteHead = await acceptanceHead('acceptance-obsolete');
   const obsolete = land(obsoleteHead);
-  const approvedHead = await acceptanceHead('acceptance-3');
-  const current = await acceptedGoal(approvedHead);
+  const draftedHead = await acceptanceHead('acceptance-3');
+  const current = await acceptedGoal(draftedHead);
   reachable(); loopFetches(); unreachable();
   assert.equal(git(plane, 'rev-parse', 'refs/remotes/origin/main'), obsolete, 'the checkout\'s ref holds the obsolete merge');
   const unreached = await call(author, `goals/${current.key}/land`, { mergeSha: obsolete });
   assert.equal(unreached.status, 503, unreached.text);
   reachable();
   const refused = await call(author, `goals/${current.key}/land`, { mergeSha: obsolete });
-  assert.equal(refused.status, 422, refused.text); assert.match(refused.text, /is not a merge of the approved head/);
-  // A merge of the approved head that the base's first-parent history does not hold is refused too.
+  assert.equal(refused.status, 422, refused.text); assert.match(refused.text, /is not a merge of the drafted head/);
+  // A merge of the drafted head that the base's first-parent history does not hold is refused too.
   git(writer, 'checkout', '-q', '-b', 'side', 'main');
-  git(writer, 'merge', '-q', '--no-ff', '-m', 'side merge', approvedHead);
+  git(writer, 'merge', '-q', '--no-ff', '-m', 'side merge', draftedHead);
   const offBase = git(writer, 'rev-parse', 'HEAD');
   git(writer, 'push', '-q', 'origin', 'side'); git(writer, 'checkout', '-q', 'main');
   execFileSync('git', ['-C', plane, 'fetch', '-q', origin, 'side']);
   const sideways = await call(author, `goals/${current.key}/land`, { mergeSha: offBase });
   assert.equal(sideways.status, 422, sideways.text); assert.match(sideways.text, /main's first-parent history does not hold/);
   assert.equal((await readGoal(current.key)).stage, 'accepted', 'nothing is recorded');
-  // Once the base holds the approved landing, the goal is recorded merged.
-  const landed = land(approvedHead);
+  // Once the base holds the drafted head's landing, the goal is recorded merged.
+  const landed = land(draftedHead);
   const recorded = await call(author, `goals/${current.key}/land`, { mergeSha: landed });
   assert.equal(recorded.status, 200, recorded.text);
   assert.equal((await readGoal(current.key)).stage, 'planning');

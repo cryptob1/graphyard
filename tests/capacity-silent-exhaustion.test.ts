@@ -74,9 +74,9 @@ test('unit:hold-charged-to-selected-account — sessionAccount and repeatedLimit
     recordedBy: 'loop', owner: null, runtime: 'claude', partialWork: { state: 'not-applicable' as const, detail: 'n/a' },
   });
   // Distinct sessions share one request id across failover relaunches — they still count.
-  const work = { key: 'GY-1', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('same-decision', 0), exhaustion('same-decision', 60_000)] } };
+  const work = { key: 'GY-1', epoch: 2, capacity: { spent: [], exhaustions: [exhaustion('same-decision', 0), exhaustion('same-decision', 60_000)] } };
   assert.equal(repeatedLimitAccount(work, base + 60_000, 'reviewer')?.account, 'claude-c');
-  const duplicateReport = { key: 'GY-1', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('req-1', 0), exhaustion('req-1', 0)] } };
+  const duplicateReport = { key: 'GY-1', epoch: 2, capacity: { spent: [], exhaustions: [exhaustion('req-1', 0), exhaustion('req-1', 0)] } };
   assert.equal(repeatedLimitAccount(duplicateReport, base, 'reviewer'), null, 'the same instant reported twice is one session');
 });
 
@@ -99,7 +99,7 @@ test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAcco
     requestId: 'shared-request', recordedBy: 'loop', owner: null, runtime: 'claude', partialWork: { state: 'not-applicable' as const, detail: 'n/a' },
   });
   // Two spent reviewer sessions sharing one request id hold before selectAccount (the launchReview path).
-  const reviewWork = { key: 'GY-1701', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('reviewer', 0), exhaustion('reviewer', 90_000)] } };
+  const reviewWork = { key: 'GY-1701', epoch: 2, capacity: { spent: [], exhaustions: [exhaustion('reviewer', 0), exhaustion('reviewer', 90_000)] } };
   assert.equal(repeatedLimitAccount(reviewWork, base + 90_000, 'reviewer')?.account, 'env-a');
   const at = base + 90_000;
   const reviewHold = await holdRepeatedLimitAccount(config, reviewWork, at, {}, 'reviewer');

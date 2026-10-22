@@ -12,7 +12,7 @@ const base = Date.parse('2026-10-07T12:00:00.000Z');
 const at = (minutes: number) => new Date(base + minutes * minute).toISOString();
 const now = base + 120 * minute;
 const sha = (seed: string) => seed.repeat(40).slice(0, 40);
-const controlPlaneKinds = ['escalate', 'request-rework', 'resync', 'request-review', 'dispatch', 'approve-scope', 'reclaim', 'merge'];
+const controlPlaneKinds = ['attention', 'request-rework', 'resync', 'request-review', 'dispatch', 'approve-scope', 'reclaim', 'merge'];
 
 function row(kind: string, history: ActionRow['history']): ActionRow {
   return { id: `${kind}-${history.length}-${history[0]!.at}`, kind, work: 'w', key: 'GY-1', inputs: { kind }, gate: 'build', refusal: null, reason: '', binding: `${kind}:0`,

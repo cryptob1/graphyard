@@ -111,7 +111,7 @@ test('integration:typed-next-action — the control plane names one typed action
   let item = await created();
   assert.equal(item.nextAction, null);
   assert.deepEqual(item.actionQueue!.actions, []);
-  assert.equal(refusalAction(item, 'ready', 'Not released from backlog'), 'escalate');
+  assert.equal(refusalAction(item, 'ready', 'Not released from backlog'), 'attention');
 
   // Ready and unassigned: a dispatch, carrying what a launcher needs to choose a profile.
   item = await release(item);
@@ -144,7 +144,7 @@ test('integration:typed-next-action — the control plane names one typed action
   item = await engine.observe(item.id, item.revision, observation(item, { reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] }));
   assert.equal(item.nextAction!.kind, 'request-rework');
   assert.equal(item.nextAction!.gate, 'review');
-  assert.equal(item.nextAction!.llmRole, 'approve-decision', 'a new head is a judgment owed, not a step an executor runs');
+  assert.equal(item.nextAction!.llmRole, 'judge-rework', 'a new head is a judgment owed, not a step an executor runs');
   assert.match(inputs(item).detail, /reviewer requested changes on [0-9a-f]{12}; the next head is reviewed afresh/);
   assert.equal(item.autoDispatch!.review, null, 'and the control plane asks nobody to review a head nobody may review');
   assert.equal(refusalAction(item, 'review', item.nextAction!.refusal!), 'request-rework', 'the refusal maps there too, so the queue and the gate agree');
@@ -187,7 +187,7 @@ test('integration:typed-next-action — the control plane names one typed action
     return probe;
   };
   const claude = { name: 'claude', runtime: 'claude', reviewerApp: 'claude-app', timeoutSeconds: 1800 };
-  const answerable: NextActionKind[] = [...executorRunnableKinds, 'escalate'];
+  const answerable: NextActionKind[] = [...executorRunnableKinds, 'attention'];
   for (const provider of reviewProviders) {
     const probe = providerProbe(provider === 'agent' ? { reviewProvider: provider, reviewerProfiles: [claude] } : { reviewProvider: provider });
     const action = nextAction(probe, [probe], new Date())!;
@@ -213,13 +213,13 @@ test('integration:typed-next-action — the control plane names one typed action
   const spent = providerProbe({ reviewProvider: 'agent', reviewerProfiles: [claude] }, { reviewFailovers: [{ profile: 'claude', reviewerApp: 'claude-app', runtime: 'claude',
     exhaustion: 'usage-limit', reason: 'the reviewer runtime reported a usage limit', at: new Date().toISOString(), sha: head, baseSha: base, policyRevision: 1, requestCommentId: 7, nextProfile: null }] } as Partial<Work>);
   const spentAction = nextAction(spent, [spent], new Date())!;
-  assert.equal(spentAction.kind, 'escalate');
+  assert.equal(spentAction.kind, 'attention');
   assert.equal(spentAction.gate, 'review');
-  assert.equal(spentAction.llmRole, 'resolve-escalation');
+  assert.equal(spentAction.llmRole, 'attend');
   assert.match(spentAction.reason, /no executor step answers it: every configured reviewer profile is exhausted for [0-9a-f]{12} \(claude\)/);
   assert.match((spentAction.inputs as any).detail, /adding reviewer capacity or selecting another review provider is the operator's decision/);
   assert.equal(spentAction.refusal, 'Every configured reviewer profile is exhausted for this candidate (claude); add reviewer capacity or select another review provider', 'and the refusal it classified is carried verbatim');
-  assert.equal(refusalAction(spent, 'review', spentAction.refusal!), 'escalate');
+  assert.equal(refusalAction(spent, 'review', spentAction.refusal!), 'attention');
 
   // A change request answers a head under every provider as well: an agent reviewer records its
   // verdict against the dispatched request rather than as a GitHub review, and either way the
@@ -229,7 +229,7 @@ test('integration:typed-next-action — the control plane names one typed action
   Object.assign(answered, evaluate(answered, [answered], new Date()));
   const answeredAction = nextAction(answered, [answered], new Date())!;
   assert.equal(answeredAction.kind, 'request-rework');
-  assert.equal(answeredAction.llmRole, 'approve-decision', 'a new head is a judgment owed, not a step an executor runs');
+  assert.equal(answeredAction.llmRole, 'judge-rework', 'a new head is a judgment owed, not a step an executor runs');
   assert.match((answeredAction.inputs as any).detail, /codex requested changes on [0-9a-f]{12}; the next head is reviewed afresh/);
 
   // Approved: the merge writer trials and merges it (GY-2010), so nothing is named — the item
@@ -272,12 +272,12 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.ok(seen.size >= 10, `the battery covered ${seen.size} distinct refusals`);
   assert.deepEqual([...new Set(probes.flatMap(probe => probe.gates.map(gate => gate.name)))].sort(), ['acceptance', 'build', 'merge', 'ready', 'review', 'test'], 'every gate contributed a refusal');
   // The named mappings, one per gate, and the catch-all that makes the function total.
-  assert.equal(refusalAction(all[0], 'ready', 'Not released from backlog'), 'escalate');
+  assert.equal(refusalAction(all[0], 'ready', 'Not released from backlog'), 'attention');
   assert.equal(refusalAction(all[0], 'ready', 'Dependency GY-9 is unfinished'), 'dispatch');
   assert.equal(refusalAction(all[0], 'build', 'Worker has not submitted implementation for this attempt'), 'dispatch');
   assert.equal(refusalAction(all[0], 'build', 'Pull request has not been independently observed'), 'resync');
   assert.equal(refusalAction(all[0], 'review', 'Independent approval of the current commit is required'), 'request-review');
-  assert.equal(refusalAction(all[0], 'nowhere', 'A refusal nobody has written a rule for yet'), 'escalate', 'an unmapped refusal escalates rather than vanishing');
+  assert.equal(refusalAction(all[0], 'nowhere', 'A refusal nobody has written a rule for yet'), 'attention', 'an unmapped refusal escalates rather than vanishing');
   // The merge writer's trial and push are its own merge step (GY-2010), whatever GitHub check a pull-request-era observation carries.
   const failing = { ...all[0], observation: { ...observation(item), checks: [{ name: 'test', result: 'failure', appId: 15368 }] } } as Work;
   assert.equal(refusalAction(failing, 'test', `merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}`), 'merge');
@@ -425,23 +425,23 @@ test('integration:no-llm-in-critical-path — every judgment has one action that
   // The roles are declared per kind: judgment happens inside what an action starts, never in the
   // step that starts it. Four kinds name a judgment; the other three are mechanical.
   assert.deepEqual(Object.entries(nextActionLlmRoles).filter(([, role]) => role !== null).map(([kind]) => kind).sort(),
-    ['dispatch', 'escalate', 'request-review', 'request-rework'].sort());
+    ['dispatch', 'attention', 'request-review', 'request-rework'].sort());
   assert.deepEqual([...mechanicalActionKinds].sort(), ['merge', 'reclaim', 'resync'].sort());
-  assert.deepEqual([...llmRoles].sort(), ['approve-decision', 'implement', 'produce-evidence', 'resolve-escalation', 'review']);
+  assert.deepEqual([...llmRoles].sort(), ['attend', 'implement', 'judge-rework', 'produce-evidence', 'review']);
   // Every judgment the project names has exactly one action that starts it, and nothing else does.
-  assert.deepEqual([...new Set(Object.values(nextActionLlmRoles))].filter(Boolean).sort(), ['approve-decision', 'implement', 'resolve-escalation', 'review'],
+  assert.deepEqual([...new Set(Object.values(nextActionLlmRoles))].filter(Boolean).sort(), ['attend', 'implement', 'judge-rework', 'review'],
     'produce-evidence is the dispatch of a producer session, which the computed action names on the row');
 
   // A kind whose judgment happens in the step itself is never mechanical.
   assert.deepEqual([...executorRunnableKinds].sort(), ['dispatch', 'merge', 'reclaim', 'request-review', 'resync'].sort());
-  assert.equal(actionJudgment.escalate, 'in-step');
+  assert.equal(actionJudgment.attention, 'in-step');
   assert.equal(actionJudgment['request-rework'], 'in-step');
 
   // An item that does raise an escalation stalls at that row rather than being resolved by the
   // loop: the escalation is outside the critical path, not quietly automated inside it.
   let escalated = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
   escalated = await engine.execute(worker, 'request', escalated.id, { type: 'blocker', epoch: escalated.epoch, reason: 'The provider account has no quota left' }, randomUUID());
-  assert.equal(escalated.nextAction!.kind, 'escalate');
+  assert.equal(escalated.nextAction!.kind, 'attention');
   assert.equal((await reload(escalated)).actionQueue!.actions[0].state, 'pending', 'the escalate row waits for a judgment nobody mechanised');
   await engine.execute(operator, 'unblock', escalated.id, { reason: 'Quota restored' }, randomUUID());
 });
@@ -477,7 +477,7 @@ test('integration:typed-agent-requests — an agent that needs something records
   assert.deepEqual([line.role, line.human, line.humanOnly], ['master', false, null]);
   assert.equal(line.next, blocker.decider.command);
   assert.ok(agentRequestReport(snapshot).some(entry => entry.key === blocked.key && entry.waitedMs >= 90_000));
-  assert.ok(actionReport(snapshot).next.some(entry => entry.key === blocked.key && entry.kind === 'escalate'));
+  assert.ok(actionReport(snapshot).next.some(entry => entry.key === blocked.key && entry.kind === 'attention'));
 
   // A note is a record, not a hand-off: it keeps the lease and asks nobody for anything.
   let noted = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
@@ -593,7 +593,7 @@ test('integration:typed-agent-requests — the bound on recorded requests retire
   assert.equal(item.agentRequests!.length, agentRequestLimit, 'the list stays bounded');
   assert.ok(item.agentRequests!.some(entry => entry.id === ask.id), 'the open blocker survived every one of them');
   assert.equal(openAgentRequests(item, new Date()).filter(entry => entry.type === 'blocker').length, 1);
-  assert.equal(item.nextAction!.kind, 'escalate', 'so the control plane still names the escalation the blocker raises');
+  assert.equal(item.nextAction!.kind, 'attention', 'so the control plane still names the escalation the blocker raises');
   assert.equal(inputs(item).trigger, 'ready');
   // The notes themselves are what the bound retired: resolved entries, oldest first.
   const resolvedNote = item.agentRequests!.find(entry => entry.type === 'note')!;
@@ -841,8 +841,8 @@ test('integration:typed-next-action — the queue is pure over the snapshot: the
   first.gates = [{ name: 'ready', passed: false, reasons: [first.blocker] }];
   const moved = reconcileActions(first, [first], new Date(clock + 7 * 60_000));
   assert.deepEqual(moved.map(entry => entry.event), ['cancelled', 'requested']);
-  assert.match(moved[0].action.resolution!, /now needs escalate instead/);
-  assert.equal(first.actionQueue!.actions[0].kind, 'escalate');
+  assert.match(moved[0].action.resolution!, /now needs attention instead/);
+  assert.equal(first.actionQueue!.actions[0].kind, 'attention');
   assert.equal(first.actionQueue!.history.length, 1);
 
   // Settling a row nobody claimed, or one claimed by somebody else, is refused.

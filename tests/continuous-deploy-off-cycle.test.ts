@@ -135,7 +135,7 @@ test('unit:continuous-deploy-off-cycle — with a deploy that outlasts several c
   // One deploy is running: no second starts, nothing settles yet, and the checkout the deploy holds is never drift.
   assert.equal(started.length, 1, 'no second deploy started while the first runs');
   assert.equal(state.promotion === null, true, 'the deploy has settled nothing onto the cursor yet');
-  assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'the deploy holding the checkout at the tip is never the guard\'s drift');
+  assert.equal(state.actions['attention:dirty-checkout'], undefined, 'the deploy holding the checkout at the tip is never the guard\'s drift');
   // The deploy settles: its success is recorded, and the loop restarts onto the tip it deployed.
   release();
   await waitFor(() => state.promotion?.promotedSha === tip, 'the deploy never settled onto the cursor');
@@ -147,7 +147,7 @@ test('unit:continuous-deploy-off-cycle — with a deploy that outlasts several c
   assert.equal(state.upgrade.last?.to, tip);
   assert.equal(state.upgrade.last?.code, true, 'the deployed tip is loaded code whatever the diff says');
   assert.equal(started.length, 1, 'still no second deploy');
-  assert.equal(state.actions['escalation:dirty-checkout'], undefined);
+  assert.equal(state.actions['attention:dirty-checkout'], undefined);
   loop.stop();
   const result = await loop.done;
   assert.ok(result.cycles.length >= 4, `the loop completed ${result.cycles.length} cycles across the deploy`);
@@ -175,7 +175,7 @@ test('unit:continuous-deploy-off-cycle-rollback — a deploy whose health check 
   assert.equal(state.promotion?.promotedSha, released);
   assert.equal(state.actions['upgrade:deploy']?.state, 'failed');
   assert.equal(fleet.self, 0, 'nothing restarted onto the failed tip');
-  assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'the rollback moving the checkout back is never the guard\'s drift');
+  assert.equal(state.actions['attention:dirty-checkout'], undefined, 'the rollback moving the checkout back is never the guard\'s drift');
   // The second attempt starts off the cycle, fails the same way, and the settle records it.
   await waitFor(() => tipDeploys() === 2, 'the second attempt never started');
   await waitFor(() => state.promotion?.deployFailed?.attempts === 2, 'the second attempt never settled');
@@ -185,7 +185,7 @@ test('unit:continuous-deploy-off-cycle-rollback — a deploy whose health check 
   await waitFor(() => state.cycle >= spentAt + 3, 'the loop never kept cycling past the spent tip');
   assert.equal(tipDeploys(), 2, 'a tip that failed twice is not attempted again');
   assert.match(deployLine(state.promotion?.deployFailed) ?? '', /failed at health/);
-  assert.equal(state.actions['escalation:dirty-checkout'], undefined);
+  assert.equal(state.actions['attention:dirty-checkout'], undefined);
   loop.stop();
   const result = await loop.done;
   assert.ok(result.cycles.length >= 5, `the loop completed ${result.cycles.length} cycles across both attempts`);

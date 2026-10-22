@@ -109,7 +109,7 @@ test('integration:no-failing-gate-without-action — an item whose review gate r
       work: graded({ ...item, observation: { ...item.observation!, baseTipContained: false, mergeable: false, conflicting: true } } as Work) },
     { name: 'the control plane dispatches this provider through its own observation job', kind: 'resync',
       work: graded({ ...item, evidence: provenHead, policy: { ...item.policy, reviewProvider: 'codex' } } as Work) },
-    { name: 'every configured reviewer profile is exhausted', kind: 'escalate',
+    { name: 'every configured reviewer profile is exhausted', kind: 'attention',
       work: graded({ ...item, evidence: provenHead, policy: { ...item.policy, reviewProvider: 'agent', reviewerProfiles: profiles },
         reviewFailovers: [{ profile: 'reviewer-a', reviewerApp: 'app-a', runtime: 'claude', exhaustion: 'usage-limit', reason: 'the account is out of quota', at: now.toISOString(), sha: head, baseSha: base, policyRevision: item.policyRevision, requestCommentId: 7, nextProfile: null }] } as Work) },
   ];
@@ -206,10 +206,9 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     // and has not pushed, and one whose trial it refused; no GitHub check refuses either gate.
     { name: 'trialled, not pushed', work: { ...unproven, mergeLedger: { key: unproven.key, state: 'intent', head, baseTip: base, mergeSha: null, risk: null, intentAt: now.toISOString(), pushedAt: null, observedTip: null, refusal: null, events: 2 } } as Work },
     { name: 'trial refused', work: { ...unproven, mergeLedger: { key: unproven.key, state: 'refused', head, baseTip: base, mergeSha: null, risk: null, intentAt: now.toISOString(), pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason: 'trial failed: tests/a.test.ts' }, events: 3 } } as Work },
-    // The merge gate also reads the control plane's reading of the current candidate and standing
-    // escalations — no proof, queue, observation age, mergeability or protection gates it.
+    // The merge gate also reads the control plane's reading of the current candidate — no proof,
+    // queue, observation age, mergeability or protection gates it.
     { name: 'observed at another head', work: { ...unproven, observation: { ...unproven.observation!, candidate: { ...unproven.observation!.candidate, sha: sha40('dd') } } } as Work },
-    { name: 'a standing escalation', work: { ...unproven, escalations: [{ trigger: 'security-concern', reason: 'the candidate ships a credential', at: now.toISOString(), actor: 'reviewer' }] } as Work },
     { name: 'a slice lead hold', work: { ...unproven, leadHold: { action: 'send-back', rulingId: 'R-1', leadId: 'lead-a', slice: 'product', ruleId: 'R-1', reason: 'the slice is frozen for the release', at: now.toISOString() } } as Work },
   ];
 

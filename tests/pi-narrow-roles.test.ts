@@ -61,7 +61,7 @@ out({ type: 'agent_end', messages: [], willRetry: false });
 out({ type: 'agent_settled' });
 `;
 
-async function installation(runtimes?: { approver?: 'herdr' | 'pi'; producer?: 'herdr' | 'pi' }) {
+async function installation(runtimes?: { producer?: 'herdr' | 'pi' }) {
   const scratch = await realpath(await temporaryDirectory('pi-roles'));
   const root = join(scratch, 'repository'), credentials = join(scratch, 'credentials'), managed = join(scratch, 'data', 'worktrees');
   await mkdir(root); await mkdir(credentials, { mode: 0o700 });
@@ -111,12 +111,12 @@ const evidence = (proof: string, result = 'pass') => ({ proof, sha: H, baseSha: 
 test('integration:pi-narrow-roles the master config selects each narrow role\'s runtime, and an absent setting is today\'s Herdr launch', () => {
   assert.equal(narrowRoleRuntime(undefined, 'producer', 'unit'), 'herdr');
   assert.equal(narrowRoleRuntime({}, 'producer', 'unit'), 'herdr');
-  assert.equal(narrowRoleRuntime({ runtimes: { approver: 'pi' } }, 'producer', 'unit'), 'herdr', 'each role is selected on its own');
   assert.equal(narrowRoleRuntime({ runtimes: { producer: 'pi' } }, 'producer', 'unit'), 'pi');
   assert.equal(narrowRoleRuntime({ runtimes: { producer: 'pi' } }, 'producer', 'integration'), 'herdr', 'only the unit proof producer runs on Pi');
-  assert.throws(() => masterConfigSchema.shape.run.parse({ runtimes: { approver: 'opencode' } }), 'an unknown runtime is refused at load');
+  assert.throws(() => masterConfigSchema.shape.run.parse({ runtimes: { producer: 'opencode' } }), 'an unknown runtime is refused at load');
+  assert.deepEqual(masterConfigSchema.shape.run.parse({ runtimes: { approver: 'pi' }, pi: { approverTimeoutMinutes: 10 } }).runtimes, {}, 'the retired approver settings still load and are dropped');
   assert.throws(() => masterConfigSchema.shape.run.parse({ runtimes: { reviewer: 'pi' } }), 'only the narrow roles are selectable');
-  assert.deepEqual(piRuntimeSchema.parse({}), { command: 'pi', model: 'zai/glm-5.3-flash', approverTimeoutMinutes: 10 });
+  assert.deepEqual(piRuntimeSchema.parse({}), { command: 'pi', model: 'zai/glm-5.3-flash' });
 });
 
 test('integration:pi-narrow-roles with pi selected the unit proof producer runs headless, its evidence is submitted as the producer principal, and the session record keeps the run', async () => {
@@ -183,7 +183,7 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
     assert.equal(existsSync(`${scenario}.launched`), false, 'Pi was never started');
   } finally { await cleanup(); }
 
-  const selected = await installation({ approver: 'pi', producer: 'pi' });
+  const selected = await installation({ producer: 'pi' });
   try {
     const config = await loadMasterConfig(selected.root);
     const item = work('GY-91', 'integration', ['integration:pi-narrow-roles']);

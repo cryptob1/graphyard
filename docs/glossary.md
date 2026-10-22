@@ -40,7 +40,7 @@ Role | Held by | May | Never
 | `admin` | Human operator | Any decision | Share with AI
 | `operator-agent` | Master | Apply decisions | Merge
 | `coordinator` | Master loop | Dispatch, reconcile merges | Implement, prove
-| `slice-lead` | Slice lead | Rule, escalate | Implement, merge
+| `slice-lead` | Slice lead | Rule, hold | Implement, merge
 | `worker` | Worker | Claim, heartbeat, register, submit | Satisfy acceptance
 | `producer` | CI, runner, observer | Report granted proofs | Prove own work
 | `reader` | Dashboards | Read | Mutate

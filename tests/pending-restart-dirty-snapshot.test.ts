@@ -246,13 +246,13 @@ test('unit:snapshot-upgrade-survives-head-drift — a loop running a held-cli sn
   const dirtyMoved = await guard.betweenCycles(selfUpgrade);
   assert.ok(dirtyMoved.refusal, 'the moved dirty checkout is escalated');
   assert.match(dirtyMoved.refusal ?? '', /refuses to start, self-upgrade or restart/);
-  assert.equal(guardState.actions['escalation:dirty-checkout']?.state, 'failed', 'the attention stands');
+  assert.equal(guardState.actions['attention:dirty-checkout']?.state, 'failed', 'the attention stands');
   assert.equal(upgrades.length, 1, 'the guard withholds no snapshot upgrade for it');
   // A clean moved HEAD is the drift refusal itself — still recorded, still no upgrade withheld.
   tree = cleanAt(movedTo);
   const cleanMoved = await guard.betweenCycles(selfUpgrade);
   assert.match(cleanMoved.refusal ?? '', new RegExp(`HEAD moved from ${short(w.tip)} to ${short(movedTo)}`), 'the HEAD drift is reported as standing attention');
-  assert.equal(guardState.actions['escalation:dirty-checkout']?.state, 'failed');
+  assert.equal(guardState.actions['attention:dirty-checkout']?.state, 'failed');
   assert.equal(upgrades.length, 2, 'and still withholds no snapshot upgrade from a snapshot loop');
 });
 
