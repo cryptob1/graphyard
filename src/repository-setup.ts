@@ -416,7 +416,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   // an agent runtime gets no worker principal rather than an unreviewed one.
   const workerPrincipals = [...new Set(proposal.profiles.workers.map(profile => profile.principal))];
   const desired = [
-    { id: 'operator', role: 'admin' as const },
+    { id: 'operator', role: 'admin' as const, proofs: ['manual:*'] },
     { id: 'master', role: 'coordinator' as const },
     ...workerPrincipals.map(id => ({ id, role: 'worker' as const })),
     { id: 'evidence', role: 'producer' as const, proofs: grants },

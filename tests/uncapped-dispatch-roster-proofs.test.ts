@@ -5,6 +5,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import { authorizedForProof, unauthorizedProofs, type Principal, type Work } from '../src/model.js';
 import { apiRoutes } from '../src/server/index.js';
+import { HumanSignIn } from '../src/server/auth.js';
 import { migration, retiredTables, tables } from '../src/store/schema.js';
 
 // GY-2876 AC-2: dispatch is not capped and nothing is measured; proof authority is the roster's.
@@ -58,6 +59,10 @@ test('unit:uncapped-dispatch-roster-proofs — six ready items with six free wor
   assert.equal(authorizedForProof(seeded, 'unit:works'), true);
   assert.equal(authorizedForProof(admin, 'manual:works'), false);
   assert.equal(authorizedForProof(attester, 'manual:works'), true);
+  // A human sign-in session keeps its roster entry's patterns, and gains none it lacks.
+  const signIn = new HumanSignIn(), session = (issuer: Principal) => signIn.authenticate(signIn.redeem(signIn.issue({ ...issuer, sessionKind: 'human' }, true).code).token)!;
+  assert.equal(authorizedForProof(session(attester), 'manual:works'), true);
+  assert.equal(authorizedForProof(session(admin), 'manual:works'), false);
   assert.deepEqual(unauthorizedProofs([admin], ['manual:works']), ['manual:works']);
   assert.deepEqual(unauthorizedProofs([bare], ['unit:works']), ['unit:works']);
   assert.deepEqual(unauthorizedProofs([bare, seeded], ['unit:works']), []);

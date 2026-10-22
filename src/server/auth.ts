@@ -143,9 +143,10 @@ export class HumanSignIn {
     demand(configured && issuer.role === 'admin', 'Only the operator\'s own admin credential issues a sign-in link', 403);
     demand(issuer.sessionKind === 'human', `A sign-in link opens a human session; ${issuer.id} is ${issuer.sessionKind === 'ai' ? 'declared an AI session' : 'not declared "sessionKind": "human"'} and issues none`, 403);
     const now = this.prune(), code = randomBytes(32).toString('base64url');
-    const { displayName } = issuer;
+    // The session keeps the issuer's roster --proof patterns: proof authority is the roster's alone.
+    const { displayName, proofs } = issuer;
     bounded(this.links, maxSignInLinks - 1);
-    this.links.set(digest(code), { principal: { id: issuer.id, role: 'admin', ...(displayName ? { displayName } : {}) }, expiresAt: now + signInLinkTtlMs });
+    this.links.set(digest(code), { principal: { id: issuer.id, role: 'admin', ...(displayName ? { displayName } : {}), ...(proofs ? { proofs: [...proofs] } : {}) }, expiresAt: now + signInLinkTtlMs });
     return { code, principal: issuer.id, expiresAt: new Date(now + signInLinkTtlMs).toISOString() };
   }
 
