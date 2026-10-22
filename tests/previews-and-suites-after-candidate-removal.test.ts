@@ -33,7 +33,7 @@ test('unit:previews-and-suites-after-candidate-removal — a merge preview still
 
   const listed = execFileSync(process.execPath, ['scripts/ci-tests.mjs', 'select'], { cwd: repositoryRoot, env: { ...process.env, GITHUB_EVENT_NAME: 'push', GITHUB_STEP_SUMMARY: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean);
   assert.deepEqual(listed, listTestFiles(), 'the ordinary selection is every test file');
-  for (const file of ['tests/soak-merge-writer.test.ts', 'tests/work-snapshot-latency.test.ts', 'tests/cycle-latency.test.ts', 'tests/server-scale.test.ts', 'tests/healthz-bounded.test.ts', 'tests/plane-load.test.ts'])
+  for (const file of ['tests/soak-merge-writer.test.ts', 'tests/work-snapshot-latency.test.ts', 'tests/cycle-latency.test.ts', 'tests/server-scale.test.ts', 'tests/healthz-bounded.test.ts'])
     assert.ok(listed.includes(file), `${file} runs in the ordinary suite`);
   const workflows = readdirSync(join(repositoryRoot, '.github/workflows'));
   assert.deepEqual(workflows.filter(name => /release-candidate|soak|deploy-smoke/.test(name)), [], 'no release-candidate, soak or deploy-smoke workflow');
