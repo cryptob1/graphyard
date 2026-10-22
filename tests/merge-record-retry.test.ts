@@ -23,7 +23,7 @@ const gates = ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name,
 const candidate = { sha: sha('head1'), baseSha: tip, pr: 1, branch: 'graphyard/gy-1-1', author: 'worker' };
 const submitted = () => ({
   id: 'w1', key: 'GY-1', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
-  policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start - 600_000),
+  policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start - 600_000),
   ready: true, epoch: 1, lease: null, workspaces: [], submission: { epoch: 1, pr: 1 }, candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [], gates, stage: 'build',
   observation: { source: 'control-plane', candidate, files: ['src/app.ts'], checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false, baseTip: tip, baseTipContained: true, at: iso(start) },
 }) as unknown as Work;

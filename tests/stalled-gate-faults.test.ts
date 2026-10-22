@@ -104,7 +104,7 @@ function submitted(instance: Instance, extra: Partial<Work> = {}, at = new Date(
   const candidate = { sha: instance.sha!, baseSha: base, pr, branch: `graphyard/${instance.subject.toLowerCase()}-1`, author: 'implementer' };
   const observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at,
     prState: 'open', draft: false, baseTip: base, baseTree: base, baseTipContained: true } as unknown as Observation;
-  return { id: `work-${instance.id}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: `work-${instance.id}`, key: instance.subject, title: instance.subject, description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Works', proofs: instance.proofs ?? ['unit:x'] }], producerProofs: (instance.proofs ?? []).filter(proof => proof.startsWith('manual:')), policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 1, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: `/w/${instance.subject}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }],
     candidate, submission: { epoch: 1, pr }, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, blocker: null,

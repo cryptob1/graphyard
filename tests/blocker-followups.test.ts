@@ -7,8 +7,6 @@ import { classifyBlocker, itemSpecificPlaneError } from '../src/model/blocker-cl
 import { blockedAttemptAccount, blockedAttemptProfile, probeBlocker } from '../src/daemon/blocker-probes.js';
 import { recordEnvironmentLog, recordObservedExhaustion, selectionKey } from '../src/master/environments.js';
 import { emptyRegistry } from '../src/model/registry.js';
-import { closeEndedScopeRequest } from '../src/engine.js';
-import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { credentialFailure } from '../src/worker-credential.js';
 import { keepBlockedWork } from '../src/cli/lease.js';
 import { blockerEscalateMs, blockerProbeConcurrency, blockerStep } from '../src/daemon/cycle-blockers.js';
@@ -21,7 +19,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1055: the follow-ups from the approved review of GY-1008 (PR #529), each pinned where it was fixed.
 
-test('unit:blocker-followups-classifier — memory, permission and outside-scope texts land in the class that can act on them, every credential failure the engine ends is github-credential, and any commit abbreviation is read', () => {
+test('unit:blocker-followups-classifier — memory, permission and outside-scope texts land in the class that can act on them, and every credential failure the engine ends is github-credential', () => {
   // A worker's own build or test running out of memory is about the item; the server's is the plane's.
   for (const text of ['npm run build failed: FATAL ERROR: Reached heap limit Allocation failed - JavaScript heap out of memory', 'graphyard verify GY-7 failed: the test runner hit ENOMEM'])
     assert.equal(classifyBlocker(text).class, 'genuine', text);
@@ -50,12 +48,6 @@ test('unit:blocker-followups-classifier — memory, permission and outside-scope
   for (const text of ['the integration test expects 200 but the API answers HTTP 401', 'ssh deploy@prod: Permission denied (publickey)']) {
     assert.equal(credentialFailure(text), false, text);
     assert.notEqual(classifyBlocker(text).class, 'github-credential', text);
-  }
-
-  // After the word "commit", an all-digit or all-letter abbreviation is a commit too.
-  for (const commit of ['1234567', 'abcdefa', '8106499e9f']) {
-    const scope = classifyBlocker(`SCOPE NEEDED: src/model/queue.ts for commit ${commit}`);
-    assert.deepEqual([scope.class, scope.commit], ['planned-file-scope', commit]);
   }
 });
 
@@ -98,7 +90,7 @@ const config = () => masterConfigSchema.parse({ version: 1, url: 'http://127.0.0
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1, hostId: 'host', masterAgentName: 'master', workers: [] }) as MasterConfig;
 
 const blocked = (n: number, blocker: string, extra: Partial<Work> = {}) => ({ id: `id-${n}`, key: `GY-${n}`, epoch: 1, stage: 'build', blocker, humanRequest: null, blockerProbe: null,
-  lease: null, lastAssignment: { epoch: 1, owner: `worker-${n}` }, workspaces: [{ epoch: 1, host: 'host', path: `/srv/wt/gy-${n}`, branch: `graphyard/gy-${n}-1`, owner: `worker-${n}` }], plannedFiles: [], criteria: [], ...extra }) as unknown as Work;
+  lease: null, lastAssignment: { epoch: 1, owner: `worker-${n}` }, workspaces: [{ epoch: 1, host: 'host', path: `/srv/wt/gy-${n}`, branch: `graphyard/gy-${n}-1`, owner: `worker-${n}` }], criteria: [], ...extra }) as unknown as Work;
 
 function cycleOf(open: Work[], effects: Record<string, unknown>, clock: number, state = emptyDaemonState(config())) {
   const performed: any[] = [];
@@ -191,7 +183,7 @@ test('unit:blocker-followups-plane-and-base — a server error on the item\'s ow
   assert.equal(read?.failedOn, failedOn);
 });
 
-test('unit:blocker-followups-attempt-launch — the probe uses the profile and the account the blocked attempt ran under, and a blocker closes the attempt\'s scope request without clearing itself', async () => {
+test('unit:blocker-followups-attempt-launch — the probe uses the profile and the account the blocked attempt ran under', async () => {
   const root = await temporaryDirectory('blocker-followups-launch');
   const homes = { held: join(root, 'held'), out: join(root, 'out'), good: join(root, 'good') };
   for (const [name, home] of Object.entries(homes)) {
@@ -219,11 +211,4 @@ test('unit:blocker-followups-attempt-launch — the probe uses the profile and t
   const account = await blockedAttemptAccount(launchConfig, item, launchConfig.workers[1], { registry: local });
   assert.equal(account?.name, 'acct-good');
 
-  // `blocked` ends the attempt, so its scope request closes on the record; the blocker it just
-  // recorded stands, whatever its words.
-  const scoped = { key: 'GY-31', lease: null, blocker: `${scopeRefusalBlocker} src/a.ts and the new blocker`, scopeRequest: { epoch: 1, paths: ['src/a.ts'], requestedBy: 'worker-p', at: new Date().toISOString(), reason: 'x', decision: null } } as unknown as Work;
-  const closed = closeEndedScopeRequest(scoped, new Date(), 'blocked');
-  assert.equal(closed?.by, 'blocked');
-  assert.equal(scoped.scopeRequest, null);
-  assert.ok(scoped.blocker?.endsWith('and the new blocker'), 'the blocker the worker reported is kept');
 });

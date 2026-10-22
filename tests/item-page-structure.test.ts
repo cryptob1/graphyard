@@ -39,11 +39,11 @@ const page = (item: Work, all: Work[], overrides: Partial<Dashboard> = {}) => re
  * A real-shaped item in the middle of review, as `graphyard status` returns one: handed in, its
  * checks passed, waiting for an independent approval, two proofs owed and the merge not yet
  * observed — the control plane's own gate reasons, a running implementation session with its
- * attach command, an open scope request and a computed next action.
+ * attach command, an open decision request and a computed next action.
  */
 function midReview(base: Work): Work {
   return {
-    ...base, id: 'gy-171-probe', key: 'GY-171', stage: 'review', plannedFiles: ['web/', 'tests/item-page-structure.test.ts'],
+    ...base, id: 'gy-171-probe', key: 'GY-171', stage: 'review', 
     criteria: [
       { id: 'AC-1', text: 'Below the existing summary the item page shows What is left, Requirements, Pull request and Activity in this order. A test renders a real-shaped item mid-review and asserts the section order.', proofs: ['unit:item-page-sections'] },
       { id: 'AC-2', text: 'Everything technical sits in one collapsed Technical details section, and planned-file overlaps render as a single line.', proofs: ['unit:item-page-technical-collapsed'] },
@@ -61,8 +61,8 @@ function midReview(base: Work): Work {
     ],
     sessions: [{ id: 'graphyard-cursor-1:1', tab: null, head: null, host: 'vishrog', kind: 'implementation', pane: 'w1V:p32M', role: null, epoch: null, state: 'running', attach: 'herdr pane attach w1V:p32M --workspace w1V',
       endedAt: null, outcome: null, runtime: 'claude', subject: 'GY-171: item page hierarchy', agentName: null, principal: 'graphyard-cursor-1', startedAt: at(-20 * minute), updatedAt: at(-20 * minute), workspace: 'w1V', transcript: null }],
-    agentRequests: [{ id: 'scope-1', type: 'scope-request', epoch: 1, requestedBy: 'graphyard-cursor-1', at: at(-10 * minute), reason: 'The browser suite pins the old section name', paths: ['browser-tests/dashboard.spec.ts'],
-      decider: { who: 'Master agent', command: 'graphyard master scope GY-171' }, releasedLease: false, state: 'open' }],
+    agentRequests: [{ id: 'decision-1', type: 'decision', epoch: 1, requestedBy: 'graphyard-cursor-1', at: at(-10 * minute), reason: 'The browser suite pins the old section name', action: 'requirements',
+      decider: { who: 'Master agent', command: 'graphyard master decisions GY-171' }, releasedLease: false, state: 'open' }],
     nextAction: { kind: 'request-review', gate: 'review', refusal: 'Independent approval of the current commit is required', reason: 'the candidate passed the build gate', llmRole: 'judgment' },
   } as unknown as Work;
 }
@@ -148,7 +148,7 @@ test('unit:item-page-technical-collapsed — gate internals, sessions with attac
   assert.doesNotMatch(inside.slice(0, inside.indexOf('>') + 1), /\sopen/, 'collapsed');
   // Everything technical is inside it, and none of it is above it.
   const technicalParts = ['<h3>Gate decisions</h3>', '<h3>Sessions (1)</h3>', 'herdr pane attach w1V:p32M --workspace w1V', '<h3>Code review</h3>', 'Provider: Formal GitHub approval',
-    '<h3>Next action</h3>', '<code>request-review</code>', '<h3>Agent requests (1)</h3>', 'graphyard master scope GY-171', 'graphyard-cursor-1'];
+    '<h3>Next action</h3>', '<code>request-review</code>', '<h3>Agent requests (1)</h3>', 'graphyard master decisions GY-171', 'graphyard-cursor-1'];
   for (const part of technicalParts) {
     assert.ok(inside.includes(part), `inside Technical details: ${part}`);
     assert.ok(!above.includes(part), `not above Technical details: ${part}`);
@@ -159,20 +159,20 @@ test('unit:item-page-technical-collapsed — gate internals, sessions with attac
   // It is the last thing on the page: nothing technical follows it outside a collapsed section.
   assert.ok(html.endsWith('</details></article>'));
 
-  // Planned-file overlaps: four overlapping items make one line naming each of them and the shared paths.
-  const peers = ['GY-166', 'GY-167', 'GY-168', 'GY-169'].map((key, i) => ({ ...item, id: `peer-${i}`, key, plannedFiles: i < 2 ? ['tests/'] : ['web/pages/'], observation: { ...item.observation!, files: [] }, sessions: [], agentRequests: [] }) as unknown as Work);
-  const overlapping = { ...item, plannedFiles: ['web/', 'tests/'], observation: { ...item.observation!, files: [] } } as Work;
+  // Overlaps on observed files: four overlapping items make one line naming each of them and the shared paths.
+  const peers = ['GY-166', 'GY-167', 'GY-168', 'GY-169'].map((key, i) => ({ ...item, id: `peer-${i}`, key, observation: { ...item.observation!, files: i < 2 ? ['tests/b.test.ts'] : ['web/a.tsx'] }, sessions: [], agentRequests: [] }) as unknown as Work);
+  const overlapping = { ...item, observation: { ...item.observation!, files: ['web/a.tsx', 'tests/b.test.ts'] } } as Work;
   const work = [...all, overlapping, ...peers];
   const line = overlapLine(overlapping, work);
-  assert.equal(line, 'Shares files with GY-166, GY-167, GY-168, GY-169 (tests/, web/)');
+  assert.equal(line, 'Shares files with GY-166, GY-167, GY-168, GY-169 (tests/b.test.ts, web/a.tsx)');
   const rendered = page(overlapping, work);
   assert.equal(rendered.match(/class="overlap-line"/g)?.length, 1, 'exactly one overlap line');
   assert.equal(rendered.match(/Shares files with/g)?.length, 1);
   assert.doesNotMatch(rendered, /Possible overlap with/, 'no box per overlapping item');
   assert.ok(rendered.indexOf('class="overlap-line"') > rendered.indexOf('aria-label="Technical details"'), 'the overlap line is technical detail');
   // Two overlapping items name only themselves; none makes no line at all.
-  assert.equal(overlapLine(overlapping, [...all, overlapping, ...peers.slice(0, 2)]), 'Shares files with GY-166, GY-167 (tests/)');
-  const alone = { ...overlapping, plannedFiles: ['docs/'] } as Work;
+  assert.equal(overlapLine(overlapping, [...all, overlapping, ...peers.slice(0, 2)]), 'Shares files with GY-166, GY-167 (tests/b.test.ts)');
+  const alone = { ...overlapping, observation: { ...item.observation!, files: ['docs/x.md'] } } as Work;
   assert.equal(overlapLine(alone, [...all, alone]), null);
   assert.doesNotMatch(page(alone, [...all, alone]), /overlap-line/);
 });
@@ -181,7 +181,7 @@ test('the Activity section reads the kinds the ledger records — command names 
   // Every command is recorded under its own name (src/engine.ts save(db, work, actor, command, …)); each reads as what happened.
   // Typed over every command: a command added to the engine without a plain label fails typecheck here.
   const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true, mechanicalplan: true,
-    heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, defer: true, window: true, dispatchblock: true, scope: true, autoscope: true, evidence: true,
+    heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, defer: true, window: true, dispatchblock: true, evidence: true,
     reading: true, revoke: true, session: true, request: true, adopt: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),

@@ -4,7 +4,6 @@ import { nextActionLlmRoles, type NextAction } from './action-kinds.js';
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { producerGroupDecisions } from './mechanical-proofs.js';
 import { roleSessionMaximumMs } from './sessions.js';
-import { redecidableScopeRefusal, routableScopeRequest, scopeRefusalBlocker, terminalScopeRefusal } from './scope.js';
 import type { Work } from './work.js';
 import { stallRemedy } from '../stall-remedies.js';
 
@@ -14,8 +13,8 @@ import { stallRemedy } from '../stall-remedies.js';
  *
  * Correctness is enforced transactionally everywhere; liveness used to be left to whoever happened
  * to look next, so a guard that correctly refused became a terminal state in disguise: a merge
- * whose provider outcome was retained and never re-read, a failed proof nobody reworked, a scope
- * refusal nobody decided, a dispatch attempted 782 times for one unchanged reason. An item's
+ * whose provider outcome was retained and never re-read, a failed proof nobody reworked, a dispatch
+ * attempted 782 times for one unchanged reason. An item's
  * obligation is one of three things:
  *
  * - `session` — a live leased session doing what the item waits for, due when its lease expires;
@@ -36,7 +35,7 @@ export const livenessWaitBoundMs = 30 * 60_000;
 
 export type ObligationKind = 'session' | 'action' | 'wait';
 export interface Obligation { kind: ObligationKind; owner: string | null; dueAt: string; detail: string; action?: { id: string; kind: ActionRow['kind']; state: ActionRow['state'] } }
-export const violationClasses = ['stranded-merge', 'failed-proof', 'refused-scope', 'stale-wait', 'stalled-action', 'unaccounted', 'unowned-action'] as const;
+export const violationClasses = ['stranded-merge', 'failed-proof', 'stale-wait', 'stalled-action', 'unaccounted', 'unowned-action'] as const;
 export type ViolationClass = typeof violationClasses[number];
 export interface LivenessViolation {
   work: string; key: string; class: ViolationClass;
@@ -135,29 +134,6 @@ export function stalledActionLifts(work: Work): number[] {
 }
 
 /**
- * A refused scope request is owed a scope decision: the rule again when it would now approve;
- * otherwise one escalation row, the only one. For an additive request of the live attempt the loop
- * routes that row's judgement to an independent approver as a requirements decision (GY-176), so it
- * names that owner rather than a master; a terminal over-cap refusal names `master requirements`,
- * whose revision can fold or split the ask the plain union `master scope` posts is refused by the
- * same bound (GY-936); anything else is the master's.
- */
-function scopeDecision(work: Work, action: NextAction, now: Date): NextAction | null {
-  const request = work.scopeRequest;
-  if (action.kind !== 'escalate' || action.gate !== 'ready' || !action.refusal?.startsWith(scopeRefusalBlocker) || request?.decision?.state !== 'refused') return null;
-  if (redecidableScopeRefusal(work) && liveLease(work, now) && work.lease!.epoch === request.epoch)
-    return { ...action, kind: 'approve-scope', reason: `${work.key}'s refused scope request would be approved by the rules as they stand; the control plane decides it again`,
-      inputs: { kind: 'approve-scope', epoch: request.epoch, paths: [...request.paths], requestedBy: request.requestedBy, detail: request.reason }, llmRole: null, binding: `scope:${request.epoch}:${request.at}:redecide` };
-  const decides = routableScopeRequest(work, now.getTime())
-    ? `the independent approver judges the requirements decision the loop requests for it (graphyard master decisions ${work.key}), which`
-    : terminalScopeRefusal(work)
-      ? `graphyard master requirements ${work.key} FILE REASON, whose plannedFiles can fold or split the ask under the cap, which`
-      : `graphyard master scope ${work.key}`;
-  return escalate(work, 'scope', `${request.requestedBy}'s scope request on ${work.key} was refused and is owed a scope decision: ${request.decision.reason}`,
-    `${decides} decides ${request.paths.join(', ')} (${request.reason}); refused because ${request.decision.reason}`, `scope-refused:${request.epoch}:${request.at}`, action.gate, action.refusal);
-}
-
-/**
  * When a wait is due, or null when what it names is gone. A wait on another item is due when that item's own step is.
  *
  * Exported for the reconciliation's due instants (GY-1873): the bound a held wait runs to is the
@@ -199,12 +175,12 @@ const ownedWait = (wait: ActionWait) => wait.kind !== 'dependency';
 
 /**
  * The liveness rules applied to what the derivation computed (`actionAccount` calls this): a
- * stalled row becomes an escalation and a refused scope request a scope decision. Everything else
+ * stalled row becomes an escalation. Everything else
  * passes through; a wait or a defect is judged by `livenessFallback`, which only the engine queues.
  */
 export function livenessCarry(work: Work, computed: Computed, _all: Work[], now: Date): Computed {
   if (!computed.action) return computed;
-  const next = stalledConversion(work, computed.action, now) ?? scopeDecision(work, computed.action, now);
+  const next = stalledConversion(work, computed.action, now);
   return next ? { ...computed, action: next } : computed;
 }
 
@@ -239,7 +215,6 @@ function classify(work: Work, all: Work[], now: Date, successor: NextAction | nu
   if (successor.binding.startsWith('stalled:')) return 'stalled-action';
   if (successor.inputs.kind === 'escalate' && successor.inputs.trigger === 'stale-wait') return 'stale-wait';
   if (successor.inputs.kind === 'escalate' && successor.inputs.trigger === 'unaccounted') return 'unaccounted';
-  if (work.scopeRequest?.decision?.state === 'refused' && work.blocker?.startsWith(scopeRefusalBlocker)) return 'refused-scope';
   if (work.candidate && producerGroupDecisions(work, all, now).some(decision => decision.state === 'failed')) return 'failed-proof';
   return 'unowned-action';
 }

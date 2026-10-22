@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { documentationGlobMatches } from './documentation-glob.js';
-import { documentationScopes } from './scope.js';
 import { deliveryPolicySchema } from './delivery-policy.js';
 import { repositoryPolicySchema } from './repository-policy.js';
 
@@ -18,6 +17,14 @@ import { repositoryPolicySchema } from './repository-policy.js';
 // diff inside them or by the worker's explicit statement that the change alters no documented
 // behaviour, and the independent reviewer judges which it is: nobody writes it into a ticket.
 // ---------------------------------------------------------------------------
+
+/** The documentation paths of a repository that configures none (GY-215): Graphyard's own layout. */
+export const documentationScopes = ['docs/', 'AGENTS.md', 'README.md'] as const;
+/** The documentation an item carries: the paths and changelog its repository configured at create time. */
+export interface ItemDocumentation { paths: readonly string[]; changelog?: string | null }
+/** The documentation paths an item carries: its own, or the default for an item created before GY-215. */
+export const itemDocumentationPaths = (item: { documentation?: ItemDocumentation | null }) =>
+  item.documentation ? [...new Set([...item.documentation.paths, ...(item.documentation.changelog ? [item.documentation.changelog] : [])])] : [...documentationScopes];
 
 /** The committed repository configuration file that carries the documentation policy. */
 export const repositoryConfigFile = 'graphyard.json';

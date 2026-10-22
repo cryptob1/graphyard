@@ -22,7 +22,8 @@ import { escalationTriggers, type Work } from './work.js';
  * with that reason (master-daemon.ts); this is what it should have recorded.
  */
 
-export const agentRequestTypes = ['scope-request', 'decision', 'blocker', 'note', 'escalation'] as const;
+// GY-1992: `scope-request` is retired; a stored one still loads, and a new one is refused.
+export const agentRequestTypes = ['decision', 'blocker', 'note', 'escalation'] as const;
 export type AgentRequestType = typeof agentRequestTypes[number];
 export const deciderKinds = ['rule', 'approver', 'follow-up', 'human'] as const;
 export type DeciderKind = typeof deciderKinds[number];
@@ -37,10 +38,6 @@ export interface AgentRequest {
   /** The attempt that raised it; a request from a lease that ended is never acted on. */
   epoch: number | null;
   requestedBy: string; at: string; reason: string;
-  /** scope-request: the paths outside plannedFiles the attempt needs. */
-  paths?: string[];
-  /** scope-request: the asked paths the session's reading of the repository tree found to be no repository file (GY-1764); validated and refuse-only, exactly as the `autoscope` command takes the loop's. */
-  nonRepository?: { path: string; nearMiss: string | null; why: 'install-local' | 'untracked' }[];
   /** decision: the two-party decision action an approver agent must approve. */
   action?: string;
   /** escalation: which standing concern the request raises. */
@@ -58,8 +55,6 @@ export const agentRequestSchema = z.object({
   type: z.enum(agentRequestTypes),
   reason: z.string().trim().min(1).max(2000),
   epoch: z.number().int().positive().optional(),
-  paths: z.array(z.string().min(1).max(500)).max(50).optional(),
-  nonRepository: z.array(z.object({ path: z.string().min(1).max(1000), nearMiss: z.string().max(300).nullable(), why: z.enum(['install-local', 'untracked']) }).strict()).max(50).optional(),
   action: z.string().trim().min(1).max(100).optional(),
   trigger: z.enum(escalationTriggers).optional(),
   humanDecision: z.enum(humanDecisions).optional(),
@@ -71,8 +66,7 @@ export const agentRequestSchema = z.object({
 export type AgentRequestInput = z.infer<typeof agentRequestSchema>;
 
 const command = (key: string, type: AgentRequestType, action?: string) =>
-  type === 'scope-request' ? `graphyard master scope ${key}`
-    : type === 'decision' ? `graphyard master decide ${key} ${action ?? 'ACTION'} REASON, then graphyard master approver ${key} DECISION`
+  type === 'decision' ? `graphyard master decide ${key} ${action ?? 'ACTION'} REASON, then graphyard master approver ${key} DECISION`
       : type === 'escalation' ? `graphyard master decide ${key} resolve-escalation REASON, then graphyard master approver ${key} DECISION`
         : type === 'blocker' ? `graphyard master create — a follow-up item naming ${key} and the external cause`
           : null;
@@ -84,9 +78,6 @@ const command = (key: string, type: AgentRequestType, action?: string) =>
 export function deciderFor(key: string, request: Pick<AgentRequest, 'type' | 'action' | 'humanDecision'>): Decider {
   if (request.humanDecision) return { kind: 'human', who: `the human operator (${request.humanDecision.replace(/-/g, ' ')})`, command: null };
   switch (request.type) {
-    // Decided in the same transaction the request is recorded in (engine.ts), from the item's own
-    // criteria and this repository's documentation rule; a refusal becomes the item's blocker.
-    case 'scope-request': return { kind: 'rule', who: 'the additive planned-files widening rule', command: command(key, 'scope-request') };
     case 'decision': return { kind: 'approver', who: 'an independent approver agent', command: command(key, 'decision', request.action) };
     case 'escalation': return { kind: 'approver', who: 'an independent approver agent', command: command(key, 'escalation') };
     case 'blocker': return { kind: 'follow-up', who: 'a tracked follow-up work item', command: command(key, 'blocker') };
@@ -102,8 +93,8 @@ export const agentRequestLimit = 50, agentRequestCeiling = 200;
  *
  * Trimming the oldest entries would be a way to remove somebody else's ask: a `note` needs no
  * lease, so any credential that reaches the item could push the open requests off the end by
- * writing fifty of them. A `decision`'s only durable effect *is* its record — `blocker`,
- * `escalation` and `scope-request` each project onto state that survives — so losing it loses
+ * writing fifty of them. A `decision`'s only durable effect *is* its record — `blocker` and
+ * `escalation` each project onto state that survives — so losing it loses
  * both the ask and the `escalate` action the control plane raises from it. Room is therefore made
  * from resolved entries first, oldest first, and then from notes, which name no decider and move
  * nothing anybody is waiting on; the request just recorded is never the one dropped to make room
@@ -127,8 +118,7 @@ export function boundedAgentRequests(requests: AgentRequest[], recorded: AgentRe
 
 /**
  * The types that move state a gate reads. Recording one is the same fact as the command it
- * replaces — `blocked` sets the blocker, an escalation fences the merge, a scope ask widens the
- * planned files — so it needs exactly the authority that command needs: the live lease on the
+ * replaces — `blocked` sets the blocker, an escalation fences the merge — so it needs exactly the authority that command needs: the live lease on the
  * item, under the attempt that is asking. Without that rule any worker or producer credential
  * could block or fence any item in the graph, which is the opposite of what a typed request is
  * for. A `note` records nothing a gate reads, so it needs no lease.
@@ -175,21 +165,8 @@ export function attentionAgentRequests(work: Work, now: Date) {
 }
 
 /**
- * Close every open scope request whose paths the planned files now cover. Widening is the
- * deterministic rule that decides a scope ask, so applying it is the answer — the request must
- * not stay open naming files the item is already allowed to touch.
- */
-export function resolveSatisfiedScopeRequests(work: Work, covered: (path: string) => boolean, now: Date) {
-  for (const request of work.agentRequests ?? []) {
-    if (request.state !== 'open' || request.type !== 'scope-request' || !request.paths?.every(covered)) continue;
-    request.state = 'resolved'; request.resolvedAt = now.toISOString();
-    request.resolution = `planned files now cover ${request.paths.join(', ')}`;
-  }
-}
-
-/**
  * Close every open request raised by an attempt that no longer holds the item: a fresh attempt
- * asks afresh, exactly as a scope request does, and a stale ask must never look like a live one.
+ * asks afresh, and a stale ask must never look like a live one.
  */
 export function expireAgentRequests(work: Work, now: Date, reason: string) {
   for (const request of work.agentRequests ?? []) {

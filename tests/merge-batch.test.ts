@@ -15,7 +15,7 @@ const tip = sha('main-tip');
 const head = (n: number) => sha(`head${n}`);
 const queued = (n: number) => {
   const candidate = { sha: head(n), baseSha: tip, pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' };
-  return { id: `w${n}`, key: `GY-${n}`, type: 'feature', plannedFiles: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: [`unit:item-${n}`] }], submission: { epoch: 1, pr: n }, candidate,
+  return { id: `w${n}`, key: `GY-${n}`, type: 'feature', criteria: [{ id: 'AC-1', text: 'Works', proofs: [`unit:item-${n}`] }], submission: { epoch: 1, pr: n }, candidate,
     observation: { source: 'control-plane', candidate, files: ['src/app.ts'], checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false, baseTip: tip, baseTipContained: true, at: new Date(start).toISOString() }, mergeLedger: null } as unknown as Work;
 };
 

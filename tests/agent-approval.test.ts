@@ -42,7 +42,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 const decide = (credential: string, work: Work, action: string, input: unknown, reason: string) => call(credential, 'POST', `work/${work.key}/decide`, { action, input, reason });
 const approve = (credential: string, work: Work, decision: string, reason: string) => call(credential, 'POST', `work/${work.key}/approve`, { decision, reason });
 const events = async (work: Work) => (await store.pool.query('SELECT actor, kind, payload FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows;
-const input = (title: string) => ({ title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal: approvals run without a human' });
+const input = (title: string) => ({ title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal: approvals run without a human' });
 function observation(work: Work): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
     checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }],
@@ -110,7 +110,7 @@ test('integration:agent-approval-flow — release, unblock, requirement rewrite,
   // A requirement rewrite, which an operator agent alone may never make, applies with approval;
   // the requirement-weakening escalation it raises is resolved by that same approval (GY-1348).
   work = await reload(work.id);
-  const rewrite = { expectedPolicyRevision: work.policyRevision, criteria: [{ id: 'AC-1', text: 'Works on every platform', proofs: ['unit:works'] }], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [] };
+  const rewrite = { expectedPolicyRevision: work.policyRevision, criteria: [{ id: 'AC-1', text: 'Works on every platform', proofs: ['unit:works'] }], dependencies: [], exclusiveResources: [], producerProofs: [] };
   const alone = await call(master.token, 'POST', `work/${work.key}/requirements`, { ...rewrite, reason: 'Alone' });
   assert.notEqual(alone.status, 200); assert.match(alone.body.error, /cannot weaken or rewrite/, 'the operator agent alone is refused a rewrite');
   requested = await decide(master.token, work, 'requirements', rewrite, 'AC-2 moved to a follow-up item');
@@ -196,7 +196,7 @@ test('integration:agent-approval-separation — self-approval and conflicted app
   const deferral = { id: 'AC-1', text: 'Works', proofs: ['unit:works'], bootstrap: { reason: 'Self-proving change', contractPaths: [`src/${work.title}.ts`] } };
   assert.deepEqual(requiredDecisionCapabilities('requirements', { criteria: [deferral] }, work), ['policy:requirements', 'policy:bootstrap']);
   assert.deepEqual(requiredDecisionCapabilities('requirements', { criteria: work.criteria }, work), ['policy:requirements']);
-  const deferred = await decide(master.token, work, 'requirements', { expectedPolicyRevision: work.policyRevision, criteria: [deferral], dependencies: [], plannedFiles: work.plannedFiles, exclusiveResources: [], producerProofs: [] }, 'Defer the proof');
+  const deferred = await decide(master.token, work, 'requirements', { expectedPolicyRevision: work.policyRevision, criteria: [deferral], dependencies: [], exclusiveResources: [], producerProofs: [] }, 'Defer the proof');
   assert.equal(deferred.status, 403); assert.match(deferred.body.error, /Capability policy:bootstrap is required/);
   // Folding ignores entries for unknown decisions.
   assert.deepEqual(foldDecisions('w', [{ kind: 'decision.approved', actor: 'x', at: '', payload: { id: 'nope' } }]), []);

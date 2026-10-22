@@ -76,7 +76,7 @@ after(async () => { http?.close(); await store?.close(); await database?.stop();
 
 /** An item whose candidate `head` on `base` carries a rework merge refusal, and a rework requested for `situation`. */
 async function held(title: string, refusal: { baseSha?: string; policyRevision?: number }, situation: { sha: string; baseSha: string } | null, revisedAfterRequest = false) {
-  const created = await call(master.token, 'POST', 'work', { title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: a refused rework lifts its merge refusal' });
+  const created = await call(master.token, 'POST', 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: a refused rework lifts its merge refusal' });
   assert.equal(created.status, 200, JSON.stringify(created.body));
   const decision = randomUUID();
   await store.transaction(async (db, now) => {

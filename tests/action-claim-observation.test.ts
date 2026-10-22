@@ -22,7 +22,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * submitted work still refuses it.
  * unit:observation-saved-on-revision-change — GY-1310: any save between an observation's read and
  * its save that leaves everything the observation was derived from unchanged (here a retitle and a
- * priority change, neither bookkeeping) leaves the observation saved; a moved submission, candidate, observation, policy, planned files or workspace still refuses it.
+ * priority change, neither bookkeeping) leaves the observation saved; a moved submission, candidate, observation, policy or workspace still refuses it.
  */
 
 const operator: Principal = { id: 'operator', role: 'admin', sessionKind: 'human' };
@@ -48,7 +48,7 @@ const resyncRow = (item: Work) => item.actionQueue!.actions.find(row => row.kind
 
 let sequence = 0;
 async function submitted() {
-  let item = await engine.execute(operator, 'create', null, { title: `Resync ${++sequence}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title: `Resync ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/resync/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}` }, randomUUID());
@@ -150,7 +150,6 @@ test('unit:observation-saved-on-revision-change — a save that moved nothing th
     ['candidate', work => { work.candidate = { ...work.candidate!, sha: 'f'.repeat(40) }; }],
     ['observation', work => { work.observation = { ...work.observation!, at: new Date(Date.parse(work.observation!.at) + 1).toISOString() }; }],
     ['policy', work => { work.policyRevision += 1; }],
-    ['planned files', work => { work.plannedFiles = [...(work.plannedFiles ?? []), 'src/other.ts']; }],
     ['workspace', work => { work.workspaces = [...work.workspaces, { ...work.workspaces.at(-1)!, branch: 'graphyard/other' }]; }],
   ];
   for (const [name, change] of inputs) { const next = structuredClone(after); change(next); assert.ok(!sameObservationInputs(after, next), `a moved ${name} refuses the observation`); }

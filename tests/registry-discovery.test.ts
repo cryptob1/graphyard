@@ -155,7 +155,7 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
   function item(key: string): Work {
     return {
       id: `work-${key}`, key, title: `Master session ${key}`, description: '', type: 'feature', priority: 0, dependencies: [],
-      criteria: [{ id: 'AC-1', text: 'Done', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+      criteria: [{ id: 'AC-1', text: 'Done', proofs: ['manual:x'] }], policy: { checks: ['test'], review: true }, 
       stage: 'build', revision: 1, policyRevision: 1, createdAt: iso(-7_200_000), updatedAt: iso(), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 0,
       lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
       gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }], violations: [],

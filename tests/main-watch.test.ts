@@ -28,7 +28,7 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
 const item = (fields: Record<string, unknown>) => ({
   description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item'] }],
-  policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
+  policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
   stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false,
   scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [], ...fields,
 }) as unknown as Work;

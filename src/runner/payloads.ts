@@ -41,12 +41,13 @@ const line = (max: number) => z.string().trim().min(1).max(max);
  * What `graphyard_decompose` submits (GY-1126, src/decomposition.ts): the child items a broad item
  * is split into, or none to keep it whole. A child names the parent's criteria by ID only — the
  * control plane copies their text and proofs, so a split can drop or reword nothing — with the
- * planned files it changes and the earlier children (by position) it must land after.
+ * earlier children (by position) it must land after. A payload written before GY-1992 may still
+ * name each child's planned files; they are ignored.
  */
 export const decomposedChildSchema = z.object({
   title: line(200), description: line(6000).optional(),
   criteria: z.array(z.string().trim().regex(/^[A-Z]+-\d+$/)).min(1).max(20),
-  plannedFiles: z.array(line(500)).min(1).max(100),
+  plannedFiles: z.unknown().transform(() => undefined).optional(),
   after: z.array(z.number().int().min(0).max(9)).max(9).default([]),
 }).strict();
 export const decompositionPayloadSchema = z.object({ reason: line(2000), children: z.array(decomposedChildSchema).max(10) }).strict()
@@ -56,27 +57,20 @@ export type DecompositionPayload = z.infer<typeof decompositionPayloadSchema>;
 /**
  * `run.decomposition` in .graphyard/master.json (GY-1126): the size bounds an item is judged
  * against before its first dispatch, and the bound on one decomposition run. The run uses the
- * research account and model (`run.research`); a loop without one splits nothing. `maxPlannedFiles`
- * counts planned source files only (GY-1858): test files under `tests/`, test helpers, docs pages
- * and the timing baseline are companions of the source change and never count toward it. The
- * estimated-lines bound scales with it: left unset it is `maxPlannedFiles` at
- * `estimatedLinesPerSourceFile` a file (600 at the default bound of 5), and an installation may
- * still set either bound explicitly in `run.decomposition`.
+ * research account and model (`run.research`); a loop without one splits nothing.
  */
-export const estimatedLinesPerSourceFile = 120;
 export const decompositionSettingsSchema = z.object({
   enabled: z.boolean().default(true),
   maxCriteria: z.number().int().min(1).max(50).default(4),
-  maxBroadScopes: z.number().int().min(0).max(20).default(2),
-  maxPlannedFiles: z.number().int().min(1).max(200).default(5),
-  maxEstimatedLines: z.number().int().min(100).max(100_000).optional(),
+  // Retired with plannedFiles (GY-1992): an installation that still sets either loads, and they bound nothing.
+  maxBroadScopes: z.unknown().transform(() => undefined).optional(), maxPlannedFiles: z.unknown().transform(() => undefined).optional(),
+  maxEstimatedLines: z.number().int().min(100).max(100_000).default(600),
   timeoutMinutes: z.number().int().min(1).max(60).default(10),
   concurrency: z.number().int().min(1).max(16).default(4),
 }).strict();
 export type DecompositionSettings = z.infer<typeof decompositionSettingsSchema>;
-/** The estimated-lines bound in force: what the installation set, else scaled to its source-file bound. */
-export const estimatedLinesBound = (settings: DecompositionSettings) =>
-  settings.maxEstimatedLines ?? settings.maxPlannedFiles * estimatedLinesPerSourceFile;
+/** The estimated-lines bound in force. */
+export const estimatedLinesBound = (settings: DecompositionSettings) => settings.maxEstimatedLines;
 
 export const graphyardTools = { decide: 'graphyard_decide', evidence: 'graphyard_submit_evidence', decompose: 'graphyard_decompose' } as const;
 

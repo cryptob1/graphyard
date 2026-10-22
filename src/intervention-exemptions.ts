@@ -1,9 +1,7 @@
 import type pg from 'pg';
 import { endedLeaseLoss, leaseLossSettleMs, type Escalation, type Stage, type Work } from './model.js';
 import { containmentGraceMs, containmentSettleWaitBoundMs } from './model/containment.js';
-import { standingScopeRequest } from './model/fault-classes.js';
 import { laneApprover, mergeWriterApprover } from './model/rework-ground.js';
-import { routedWideningDecision, wideningSettlement } from './model/scope-provenance.js';
 import { reworkGroundFields, routineReworkGround as routineGround, type ReworkGroundsWork } from './rework-grounds.js';
 import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
 
@@ -15,21 +13,13 @@ import { applyWorkDelta, type DeltaOp } from './store/snapshot-delta.js';
  * pattern adds or edits one rule here rather than a condition inside the fold.
  */
 
-/**
- * A worker's open ask: a scope request or a blocked report, until something answers it.
- * `epoch`: the attempt a scope request was raised by; `routed`: the widening decision the loop put to the independent approver for it, while it stands (GY-1682).
- * `askedAt`: the instant the server stamped the scope request with (`scopeRequest.at`, read off the refusal that made the ask `refused-by-loop`), the half of its identity beside `epoch` a routed decision names (`askIdentity`); the row's own instant (`at`) is written later and differs.
- */
-export interface Ask { seq: number; at: string; stage: Stage | null; kind: 'scope-request' | 'blocked-report'; blocked: string; paths: string[]; trigger?: string; epoch?: number | null; askedAt?: string | null; routed?: { seq: number; at: string; decision: string } | null; sources: { seq: number; kind: string }[] }
+/** A worker's open ask: a blocked report, until something answers it. */
+export interface Ask { seq: number; at: string; stage: Stage | null; kind: 'blocked-report'; blocked: string; sources: { seq: number; kind: string }[] }
 /** A rework decision the fold has seen requested and not yet settled. */
 export interface ReworkDecision { seq: number; at: string; id: string; stage: Stage | null; binding: string | null; loopRequested: boolean; approvedBy: string | null; self?: boolean }
 
 /** The moment the fold is judging: the row (or, past the last row, the open need) a rule may exempt. */
 export type ExemptionMoment =
-  /** An `autoscope` row deciding the item's open scope request. */
-  | { at: 'autoscope'; decision: { state?: unknown } }
-  /** A `requirements` row that widens the plan (`widened`), with whether it answers open asks (`asked`) and whether its revised record implies every added path (`implied`, GY-1719). */
-  | { at: 'requirements'; details: Record<string, any>; reason: string; widened: boolean; implied?: boolean; asked: boolean; routed: readonly string[]; stage: Stage | null; work: { epoch?: number | null; blocker?: string | null } | null; blockerBefore: string | null | undefined }
   /** A `rework` row (`rework`), or a rework decision still open past the last row (`open-rework`). */
   | { at: 'rework' | 'open-rework'; decision: ReworkDecision | null; asked: boolean; grounds: ReworkGroundsWork | null; candidate: { sha: string } | null | undefined }
   /** A `merge.operator-authorized` or `merge.reconciled` row, its kind carried beside its payload. */
@@ -37,7 +27,7 @@ export type ExemptionMoment =
   /** An `autosettle` or `recover` row lowering the item's containment fence. */
   | { at: 'settlement'; kind: string; details: Record<string, any>; when: string }
   /** An ask still open past the last row, on the item as the current record holds it, judged at the fold's own instant. */
-  | { at: 'open-ask'; ask: Ask; item: Work; now: string; routes?: boolean }
+  | { at: 'open-ask'; ask: Ask; item: Work; now: string }
   /** An escalation still standing on the item past the last row. */
   | { at: 'open-escalation'; item: Work; escalation: Escalation; now: string }
   /** An `escalation.resolved` row: the trigger, the escalation it resolved and the decision that resolved it. */
@@ -67,23 +57,6 @@ export const failedCheckBinding = (binding: string | null, candidate: { sha: str
 };
 
 const isObject = (value: unknown): value is Record<string, any> => !!value && typeof value === 'object' && !Array.isArray(value);
-/**
- * Whether a requirements revision re-plans work no attempt has started (GY-1396), judged from the
- * item as the revision found it. An operator agent's row records that whole document as `before`:
- * the item is unstarted when it was never claimed, or when every attempt lapsed leaving nothing on
- * the record (no submission, candidate, scope ask or decision, human request, kept commit). Any
- * other row records only the planned files, so only an item never claimed (epoch 0) is unstarted.
- * A blocker standing before the revision is always something the revision answers.
- */
-export function unstarted(before: unknown, epochAfter: number | null | undefined, blockerBefore: string | null | undefined): boolean {
-  if (!isObject(before) || !('epoch' in before)) return epochAfter === 0 && !blockerBefore;
-  if (before.blocker) return false;
-  if (!before.epoch) return true;
-  const attempts = before.pipeline?.attempts, exhaustions = before.capacity?.exhaustions;
-  return !before.submission && !before.candidate && !before.scopeRequest && !before.scopeDecision && !before.humanRequest
-    && Array.isArray(attempts) && attempts.every((attempt: { end?: unknown }) => attempt?.end === 'expired')
-    && !(Array.isArray(exhaustions) && exhaustions.some((entry: { role?: unknown; partialWork?: { commit?: unknown } }) => entry?.role === 'worker' && entry.partialWork?.commit));
-}
 
 /**
  * The rework decision a `decision.requested` row opens, or null. A request carrying a grounds
@@ -98,8 +71,6 @@ export function requestedRework(row: { seq: number; at: string; payload?: any },
   const loopRequested = !row.payload.requester || row.payload.requester.role === 'operator-agent';
   return { seq: row.seq, at: row.at, id: row.payload.id, stage, binding: typeof row.payload.input?.binding === 'string' && row.payload.input.binding ? row.payload.input.binding : null, loopRequested, approvedBy: null };
 }
-/** The reason of a requirements decision the loop routed to the approver (GY-1388), or null. */
-export const routedReason = (payload: any): string | null => routedWideningDecision(payload) && typeof payload.reason === 'string' ? payload.reason : null;
 /**
  * Record on an open rework decision who approved it. Approved by the control plane on a ground the
  * record shows on the exact head (GY-1394), it is `self`: a lane approval with no recorded ground
@@ -175,42 +146,6 @@ export interface InterventionExemption { name: string; exempts: (moment: Exempti
 const rule = (name: string, exempts: (moment: ExemptionMoment) => boolean): InterventionExemption => ({ name, exempts });
 const reworkMoment = (moment: ExemptionMoment) => moment.at === 'rework' || moment.at === 'open-rework' ? moment : null;
 
-/** An autoscope the control plane approved itself: nobody stepped in. */
-export const approvedAutoscope = rule('approved-autoscope', moment => moment.at === 'autoscope' && moment.decision.state === 'approved');
-/**
- * The loop's own re-plan onto the successors of files the base split or renamed (GY-1397) is the
- * control plane doing its job, as an approved autoscope is: nobody stepped in, so neither it nor an
- * ask it covers is a signal. Rows written before the rule was recorded carry the re-plan's own
- * wording (successorStep). Only an operator agent's row carries `intent`.
- */
-export const successorReplan = rule('successor-replan', moment => moment.at === 'requirements' && moment.widened && isObject(moment.details.intent)
-  && (moment.details.intent.rule === 'successor' || /^Re-planned \S+ onto the successors of the files it plans/.test(moment.reason)));
-/**
- * A widening the loop granted on its audited grounds (GY-1388) is no signal, as an approved
- * autoscope is not. It answers the asks it covers; a partly widened ask stays open, so the rest is
- * one signal when somebody does step in, never a second one beside this.
- */
-export const auditedScopeWidening = rule('audited-scope-widening', moment => moment.at === 'requirements' && moment.widened && wideningSettlement(moment.details, moment.routed) === 'loop-rule');
-/** A widening the independent approver settled on an ask the loop routed to it (GY-1388): it answers the blocked report beside the ask as well. */
-export const routedScopeWidening = rule('routed-scope-widening', moment => moment.at === 'requirements' && moment.widened && wideningSettlement(moment.details, moment.routed) === 'routed-approver');
-/**
- * An item at backlog or ready that no attempt has worked on, that nobody asked about and that
- * nothing blocked is being planned, not rescued: its coordinator revising the scope of work no
- * worker has started waited on no one, so it is no intervention (GY-1396). A blocker it answers, or
- * an item an attempt holds, released, submitted or was reworked from, still is. `liveScopeWidening`
- * says only that the revision is additive, not that a lease was live, so the item as the revision
- * found it decides.
- */
-export const unstartedReplan = rule('unstarted-replan', moment => moment.at === 'requirements' && moment.widened && !moment.asked && (moment.stage === 'backlog' || moment.stage === 'ready')
-  && !!moment.work && unstarted(moment.details.before, moment.work.epoch, moment.blockerBefore === undefined ? moment.work.blocker : moment.blockerBefore));
-/**
- * GY-1719: a revision that widens the plan only by paths its own revised record implies — the files
- * its criteria name, the test its proofs live in, the companions beside planned tests and
- * documentation, which the engine's rule grants a worker with nobody stepping in — or that a
- * duplicate closed into the item had already planned (interventions/implied-widening.ts) decided no
- * scope. A widening that answers a worker's ask stays judged as that ask's answer.
- */
-export const criteriaImpliedWidening = rule('criteria-implied-widening', moment => moment.at === 'requirements' && moment.widened && !moment.asked && moment.implied === true);
 /**
  * A round answering a ground the loop's own rule acts on needed nobody (GY-1386, rework-grounds.ts):
  * whoever asked for it first, the product handled it, and the asks it ended went with it.
@@ -249,54 +184,10 @@ export const mergeWriterReconcile = rule('merge-writer-reconcile', moment =>
  */
 export const loopAutosettleInBound = rule('loop-autosettle-in-bound', moment => moment.at === 'settlement' && moment.kind === 'autosettle' && loopSettledInBound(moment.details, moment.when));
 /**
- * An ask whose item no longer carries a blocker or a scope request was met by a command the fold
- * does not read, so it is not reported as waiting.
+ * An ask whose item no longer carries a blocker was met by a command the fold does not read, so it
+ * is not reported as waiting.
  */
-export const answeredOffLedger = rule('answered-off-ledger', moment => moment.at === 'open-ask' && !moment.item.blocker && !moment.item.scopeRequest);
-/** An undecided scope request is the loop's to answer within minutes; only one the loop refused waits on a person. */
-export const undecidedScopeRequest = rule('undecided-scope-request', moment => moment.at === 'open-ask' && moment.ask.kind === 'scope-request' && !moment.ask.trigger);
-/**
- * GY-1682: a live attempt's additive ask the rule refused and the loop put to the independent
- * approver is the approver's while the approver holds it, not a person's: the record shows the
- * route — the `decision.requested` row the loop wrote for it (`routedWideningDecision`, kept on the
- * ask by the fold) — and the approver's answer settles it either way (an approval applies the
- * widening, `routedScopeWidening`; a decline leaves the ask refused by the approver, which this rule
- * never exempts). The judgement is the fault pass's own of a live attempt's request
- * (standingScopeRequest, GY-1085): one that has waited past the bound the loop promises, or that
- * nothing will judge again, is somebody's to decide and stays a signal, as does one whose attempt has
- * ended. A refused ask the record shows no route for is `scopeRefusalWithinBound`'s while the loop's
- * cycle still holds it.
- */
-export const approverHoldsScopeRequest = rule('approver-holds-scope-request', moment => moment.at === 'open-ask' && !!moment.ask.routed && refusedScopeAskInCycle(moment));
-/**
- * GY-1755: a live attempt's refused ask inside the bound the loop promises is the control plane's own
- * cycle, not a person's wait, however its routing stands. The seconds to minutes between the rule's
- * refusal (autoscope, in the loop's scope step) and the decision.requested row (its decision step,
- * later in the same cycle, behind dispatch and reclaim) are the loop's own: GY-1746, GY-1747 and
- * GY-1752 each sat refused 37 s to 3 min 42 s with no route on the record when the 7-day pattern read
- * them. And an ask the independent approver answered without applying is the same cycle still:
- * GY-1751's route stood from 00:02:17 and the approver declined it at 00:04:16, five minutes before
- * the pattern read the item — the decline settled the routed decision, and `answerScopeRequest`
- * rewrote the ask's decision as the approver's refusal, so the routed-ask exemption stopped matching
- * and the fold counted the whole span from the ask's own instant, though a multi-path additive ask a
- * decline leaves the live attempt a narrower ask to make within the bound, which the fault pass does
- * not stand (standingScopeRequest, GY-1757). The base exempted only a routed and held ask
- * (approver-holds-scope-request) and counted every other refused ask from its own instant, so it read
- * all four as scope widenings. The fold now judges a refused ask as the fault pass does: it is
- * counted exactly when `standingScopeRequest` stands it — past the bound, after the attempt's end,
- * or a one-path or non-additive ask nothing will judge again — and never before it.
- */
-export const scopeRefusalWithinBound = rule('scope-refusal-within-bound', moment => moment.at === 'open-ask' && !moment.ask.routed && refusedScopeAskInCycle(moment));
-/**
- * A live attempt's refused scope ask inside the loop's bound, whichever decision the record holds on it: the loop's cycle, or the attempt's narrower re-ask to make.
- * `routes` is whether the loop can route a refused ask at all (the fault pass's `scopeRoutes`): without it nothing will route the ask, so it stands at once, as the fault pass stands it.
- */
-function refusedScopeAskInCycle(moment: Extract<ExemptionMoment, { at: 'open-ask' }>) {
-  if (moment.ask.kind !== 'scope-request' || moment.ask.trigger !== 'refused-by-loop') return false;
-  const { item } = moment, request = item.scopeRequest, now = Date.parse(moment.now);
-  if (!request || !item.lease || item.lease.epoch !== request.epoch || Date.parse(item.lease.expiresAt) <= now) return false;
-  return request.decision?.state === 'refused' && !standingScopeRequest(item, now, moment.routes ?? true);
-}
+export const answeredOffLedger = rule('answered-off-ledger', moment => moment.at === 'open-ask' && !moment.item.blocker);
 /** A lease-loss reconciliation will settle on the record once its bound passes waits on nobody (GY-1393). */
 export const leaseLossResolve = rule('lease-loss-resolve', moment => moment.at === 'open-escalation' && !!endedLeaseLoss(moment.item, moment.escalation)
   && Date.parse(moment.now) - Date.parse(moment.escalation.at) < leaseLossSettleMs);
@@ -313,9 +204,8 @@ export const approvedDecisionWeakening = rule('approved-decision-weakening', mom
 
 /** Every exemption rule, in the order the fold consults them: the first that holds names the exemption. */
 export const interventionExemptions: readonly InterventionExemption[] = [
-  approvedAutoscope, successorReplan, auditedScopeWidening, routedScopeWidening, unstartedReplan, criteriaImpliedWidening,
   routineReworkGround, laneReworkGround, failedCheckRound, loopReworkRound,
-  directMergeWindow, mergeWriterReconcile, loopAutosettleInBound, answeredOffLedger, undecidedScopeRequest, approverHoldsScopeRequest, scopeRefusalWithinBound, leaseLossResolve, approvedDecisionWeakening,
+  directMergeWindow, mergeWriterReconcile, loopAutosettleInBound, answeredOffLedger, leaseLossResolve, approvedDecisionWeakening,
 ];
 
 /** The name of the first rule that exempts the moment, or null when it is a signal. */

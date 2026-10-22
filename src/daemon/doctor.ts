@@ -9,8 +9,7 @@ import { isClosed } from '../model/closure.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { workerReclaimBoundMs, workerSubmissionBoundMs } from '../model/attempt-bound.js';
-import { scopeRefusalBlocker, unplannedPaths } from '../model/scope.js';
-import { approverSessionName, guardBroadScope } from '../master/autonomy.js';
+import { approverSessionName } from '../master/autonomy.js';
 import { containmentPhase, masterHarness, type MasterConfig } from '../master.js';
 import { HarnessCheckoutRefusal, harnessApplyCheckout, recordServingUnits } from '../master/harness.js';
 import { installUnitsFile } from '../install/units.js';
@@ -37,7 +36,7 @@ import type { Cycle } from './cycle.js';
 // The deterministic remedies live in ./remedies.ts; they are used through `routineRemedies` below
 // and re-exported here, so every existing import keeps working.
 import { routineRemedies } from './remedies.js';
-export { settleSubmittedContainment, coveredScopePaths, clearCoveredBlockers, unansweredDecisionMs, relaunchUnansweredApprovers, decisionCheckMs, applyHarnessContract, routineRemedies } from './remedies.js';
+export { settleSubmittedContainment, unansweredDecisionMs, relaunchUnansweredApprovers, decisionCheckMs, applyHarnessContract, routineRemedies } from './remedies.js';
 
 // ---------------------------------------------------------------------------
 // GY-2003 / GY-2004: the loop's resolver. All day a master session ran a ten-minute monitor by
@@ -46,7 +45,7 @@ export { settleSubmittedContainment, coveredScopePaths, clearCoveredBlockers, un
 // at once when the loop's progress watchdog fires (GY-2005: cycle.ts marks a run due when the
 // watchdog's lines begin standing) — it
 // launches one: a headless session on the registry's doctor role, else Pi, with the master's read
-// access and the operator-agent identity's sanctioned commands only — scope, requirements,
+// access and the operator-agent identity's sanctioned commands only — requirements,
 // unblock, decide + approver, settle-containment, close, create, release and checkout-restore
 // (GY-1658: the loop saves a dirty coordinator checkout to a named ref) — never merge, dispatch,
 // evidence or lease commands (the shipped allowlist guard in integrations/pi blocks the rest and
@@ -71,7 +70,7 @@ export const doctorSessionTools = ['bash', doctorTool] as const;
 /** The launch arguments carrying that tool set, on the runtime's tools flag. */
 export const doctorSessionArgs = ['--tools', doctorSessionTools.join(',')] as const;
 
-/** The fault item a doctor run asks the loop to file: P0/P1, criteria and planned files (the shape state.ts keeps). */
+/** The fault item a doctor run asks the loop to file: P0/P1 and criteria (the shape state.ts keeps). */
 export { doctorFiledSchema };
 export type DoctorFile = DoctorFiled;
 /** `graphyard_doctor_report`: the doctor's structured report, re-validated here (GY-711). Findings and actions are bound at the run record's own 50, so everything a report may carry is everything the posted run keeps. */
@@ -133,7 +132,7 @@ export const doctorBounds = {
 } as const;
 
 /** The sanctioned master commands the resolver may run, the list the allowlist guard in integrations/pi shares. */
-export const doctorSanctionedCommands = ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
+export const doctorSanctionedCommands = ['requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
 
 export interface DoctorEffects {
   settings: DoctorSettings;
@@ -206,7 +205,7 @@ export function doctorPrompt(config: { repository: string; cliPath: string; merg
     `- a parked item, an escalation, a stale refusal, a lapsed containment quarantine (${cli} master settle-containment GY-N): decide within the item's intent with ${cli} master decide GY-N ACTION and a quoted reason`,
     `- a head that cannot land: send it back for rework with a concrete reason (${cli} master decide GY-N rework REASON)`,
     `- work that will never be delivered: close it with a reason (${cli} master close GY-N --obsolete, or --duplicate-of GY-M)`,
-    `- a scope or requirements ask within the item's intent: decide it (${cli} master scope GY-N, ${cli} master requirements GY-N FILE); never weaken a requirement`,
+    `- a requirements ask within the item's intent: decide it (${cli} master requirements GY-N FILE); never weaken a requirement`,
     `- every failed action and attention line below: take the simplest action that clears it; an escalation:dirty-checkout line is yours to run (${cli} master checkout-restore with a quoted reason)`,
     `Never approve a decision you requested yourself: request it with ${cli} master decide, then ${cli} master approver GY-N DECISION launches an independent approver.`,
     `A human-only decision (goals and priorities, money or accounts, credentials for people) is never asked for in chat: mark its finding unactionable and move on.`,
@@ -318,9 +317,9 @@ const normalisedCriteria = (entry: DoctorFile) => entry.criteria.map((criterion,
  */
 export function doctorFileItem(entry: DoctorFile, reason: string): DoctorFileInput {
   const criteria = normalisedCriteria(entry);
-  const input = createSchema.parse({ title: entry.title, description: entry.description, type: 'bug', priority: entry.priority, criteria, plannedFiles: entry.plannedFiles,
+  const input = createSchema.parse({ title: entry.title, description: entry.description, type: 'bug', priority: entry.priority, criteria,
     origin: { faultClass: { class: entry.faultClass, threshold: 1, windowHours: 1, count: 1, detectedAt: new Date().toISOString(), instances: [] } } });
-  return { ...input, reason: guardBroadScope(input, reason, { allow: false, command: 'master create' }) };
+  return { ...input, reason };
 }
 
 /**
@@ -353,8 +352,8 @@ export const unregisteredScenario = (error: unknown) => /Register E2E scenario (
  * own kind. The escalation beside it names what the master must mend by hand: the scenario the
  * filing cites with no registered revision, or the refusal itself.
  */
-/** The refused content's identity: what create judges (class, title, files, criteria), not the evidence prose, which carries a fresh timestamp every run. */
-export const filingDigest = (file: DoctorFile) => createHash('sha256').update(JSON.stringify([file.faultClass, file.title, file.plannedFiles, normalisedCriteria(file)])).digest('hex').slice(0, 32);
+/** The refused content's identity: what create judges (class, title, criteria), not the evidence prose, which carries a fresh timestamp every run. */
+export const filingDigest = (file: DoctorFile) => createHash('sha256').update(JSON.stringify([file.faultClass, file.title, normalisedCriteria(file)])).digest('hex').slice(0, 32);
 
 /**
  * The digest as seen refusal at `at`. Nothing evicts a refusal, neither a count nor an age: whenever

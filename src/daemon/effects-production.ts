@@ -6,9 +6,7 @@ import { worktreeReclaimPass } from './worktree-reclaim.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { DecisionSituation } from '../model/approval.js';
-import type { ScopeRequestState } from '../model/scope.js';
 import { loopBlockerProbe, type BlockerClassification, type BlockerProbeRecord, type BlockerProbeResult } from './blocker-probes.js';
-import { successorWidening } from '../model/successors.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import { type HostMemoryReading, type ResourceReclaimReport, disposableWorktrees, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
@@ -17,7 +15,6 @@ import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
 import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
-import { type ReviewFinding, type SuccessionRead, basePaths, baseText, baseMentions, successionReader } from '../review-scope.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
@@ -30,12 +27,10 @@ import { probeSupervisorAbsence } from '../containment-probe.js';
 import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
-import { answeringWidening } from './reconcile.js';
 import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
 import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
-import { currentBaseTree } from '../cli/planned-files-intent.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mainWatchReads, type MainWatchReads } from './main-watch.js';
@@ -287,32 +282,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     closeWork: (work, body, key) => mutate(`work/${work.id}/close`, body, key) as Promise<Work>,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
-    decideScope: (work, nonRepository, treeRead) => mutate(`work/${work.id}/autoscope`, { epoch: work.scopeRequest!.epoch, ...(treeRead ? { treeRead } : {}), ...(nonRepository?.length ? { nonRepository } : {}) }), repositoryFiles: async () => (await currentBaseTree(root, current().baseBranch, run)).files, wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
+    wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     observe: (work, waitMs) => wakeOwnObservation(body => mutate(`work/${work.id}/resync`, { ...body, prioritized: true }, randomUUID()), ms => delay(ms), { waitMs }),
-    basePaths: paths => basePaths(root, current().baseBranch, paths, run),
-    baseText: path => baseText(root, current().baseBranch, path, run),
-    baseMentions: identifier => baseMentions(root, current().baseBranch, identifier, run),
-    baseSuccessions: (() => { let reader: ReturnType<typeof successionReader> | null = null, branch = ''; return (since: string) => {
-      if (!reader || branch !== current().baseBranch) { branch = current().baseBranch; reader = successionReader(root, branch, run); }
-      return reader(since);
-    }; })(),
-    get replan() {
-      return current().operatorAgent ? async (work: Work, paths: string[], reason: string) =>
-        asOperatorAgent('POST', `work/${work.id}/requirements`, successorWidening(work, paths, reason)) : undefined;
-    },
     get withdrawReview() {
       // GY-2078: a change request is withdrawn in the control plane's own review record; no GitHub request is made.
       return (work: Work, reviewId: number, message: string) =>
         mutate(`work/${work.id}/review-withdraw`, { reviewId, reason: message.slice(0, 7000) }, randomUUID()).then(() => {});
-    },
-    get widenScope() {
-      return current().operatorAgent ? async (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
-        // An unrepresentable widening is refused before it is posted (GY-630): answeringWidening
-        // returns null rather than a revision the schema would reject on every retry.
-        const revision = answeringWidening(work, request, paths, reason);
-        return revision ? asOperatorAgent('POST', `work/${work.id}/requirements`, revision) : undefined;
-      } : undefined;
     },
     requestProof: async work => {
       const config = current();

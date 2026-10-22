@@ -28,14 +28,12 @@ const clip = (text: string, limit: number) => text.length > limit ? `${text.slic
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /** The decomposition session's request: the item, why it is too broad, and the rules its split must keep. */
-export function decompositionPrompt(config: { repository: string }, work: Pick<Work, 'key' | 'title' | 'type' | 'description' | 'criteria' | 'plannedFiles' | 'dependencies'>, bounds: string[], settings: Pick<DecompositionSettings, 'timeoutMinutes' | 'maxPlannedFiles'>) {
+export function decompositionPrompt(config: { repository: string }, work: Pick<Work, 'key' | 'title' | 'type' | 'description' | 'criteria' | 'dependencies'>, bounds: string[], settings: Pick<DecompositionSettings, 'timeoutMinutes'>) {
   return `You are the Graphyard decomposition agent for ${config.repository}. ${work.key} (${work.type}): ${work.title} is about to be dispatched to an implementation worker, but it is too broad for one small pull request: ${bounds.join('; ')}. `
     + 'Large pull requests conflict with the changes merging beside them and return for rework, so split it into 2 to 10 small child items that can each be built, reviewed and merged on their own. '
     + (work.description ? `Its description: ${clip(work.description, 6000)} ` : '')
     + `Its acceptance criteria: ${work.criteria.map(criterion => `${criterion.id}: ${clip(criterion.text, 1500)}`).join(' ')} `
-    + (work.plannedFiles?.length ? `Its planned files: ${work.plannedFiles.join(', ')}. ` : '')
-    + 'Read this checkout (the base branch) to see which files each criterion changes. Rules: give every criterion ID to exactly one child (Graphyard copies its text and proofs; you cannot change them); give each child a title, the planned files it changes, inside the parent\'s planned files and strictly narrower than them (name source files, never a source directory such as src/runner/, which the control plane refuses) and at most '
-    + `${settings.maxPlannedFiles} planned source files — test files under tests/ and docs/ pages are companions of the source change and do not count toward that bound, and the control plane refuses a child planning more — and in \`after\` the positions (0-based) of earlier children it must land after because it builds on them. `
+    + 'Read this checkout (the base branch) to see which files each criterion changes. Rules: give every criterion ID to exactly one child (Graphyard copies its text and proofs; you cannot change them); give each child a title and in \`after\` the positions (0-based) of earlier children it must land after because it builds on them. '
     + 'If the criteria cannot be built and merged separately, keep the item whole: submit an empty children list with your reason. '
     + `This session is read-only: do not edit, commit, push, claim work or ask anyone anything. Finish within ${settings.timeoutMinutes} minutes. `
     + `Then call the ${decompositionTool} tool exactly once with reason and children, and stop.`;
@@ -79,7 +77,7 @@ export async function decompositionStep(input: DecompositionStepInput): Promise<
     if (!bounds) continue;
     if (live.size >= limit) { held.add(work.id); continue; }
     const timeoutMs = input.settings.timeoutMinutes * 60_000;
-    try { await input.record(work, { event: 'started', runtime: input.runner.name, model: input.model, timeoutMs, bounds, maxPlannedFiles: input.settings.maxPlannedFiles }); }
+    try { await input.record(work, { event: 'started', runtime: input.runner.name, model: input.model, timeoutMs, bounds }); }
     catch (error) {
       actions.push({ work: work.key, state: 'failed', detail: `${work.key} was not put to decomposition, so it is dispatched whole: ${message(error)}` });
       continue;

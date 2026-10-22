@@ -38,13 +38,13 @@ function config(): MasterConfig {
 function item(key: string, at: number, overrides: Partial<Work> = {}): Work {
   return {
     id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/x.ts'], stage: 'backlog', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'backlog', revision: 1, policyRevision: 1,
     createdAt: iso(at), updatedAt: iso(at), stageEnteredAt: iso(at), ready: false, epoch: 0, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [], ...overrides,
   } as unknown as Work;
 }
-const filing = (faultClass: FaultClass, title: string, proofs: string[]): DoctorFile => ({ faultClass, priority: 1, title, description: 'The doctor\'s evidence: the bound passed on three items', plannedFiles: [`src/daemon/${faultClass}.ts`],
+const filing = (faultClass: FaultClass, title: string, proofs: string[]): DoctorFile => ({ faultClass, priority: 1, title, description: 'The doctor\'s evidence: the bound passed on three items', 
   criteria: [{ id: 'AC-1', text: `${title}, by a test`, proofs }] });
 const filings = {
   refusedAtOnce: filing('merge', 'Merge queue never drains after the base moves', [`e2e:${unregistered.merge}`]),
@@ -62,17 +62,17 @@ test('unit:soak-invariants-hold — over a simulated day the doctor drops and cl
 
   // The control plane's create route, as the operator-agent post sees it: a 502 while the plane is out, the
   // engine's own 409 for an e2e proof whose scenario nothing registered, else the item, once per idempotency key.
-  const creates: { key: string; title: string; at: number; outcome: string; origin: string | null; plannedFiles: string[] }[] = [];
+  const creates: { key: string; title: string; at: number; outcome: string; origin: string | null }[] = [];
   const created = new Map<string, Work>();
   let next = 100;
   const create = async (input: any, key: string): Promise<Work> => {
-    const log = (outcome: string) => creates.push({ key, title: input.title, at: now, outcome, origin: input.origin?.faultClass?.class ?? null, plannedFiles: [...(input.plannedFiles ?? [])] });
+    const log = (outcome: string) => creates.push({ key, title: input.title, at: now, outcome, origin: input.origin?.faultClass?.class ?? null });
     if (inOutage()) { log('502'); throw new RefusedResponse('Graphyard refused work (502): Application failed to respond', 502, null); }
     const scenario = (input.criteria as { proofs: string[] }[]).flatMap(criterion => criterion.proofs).map(proof => /^e2e:(.+)$/.exec(proof)?.[1]).find(name => name && !registered.has(name));
     if (scenario) { log('409'); throw new RefusedResponse(`Graphyard refused work (409): Register E2E scenario ${scenario} before creating work that requires it`, 409, { error: `Register E2E scenario ${scenario} before creating work that requires it` }); }
     log('created');
     if (created.has(key)) return created.get(key)!;
-    const filed = item(`GY-${next++}`, now, { title: input.title, description: input.description, priority: input.priority, criteria: input.criteria, plannedFiles: input.plannedFiles, type: input.type ?? 'bug', ...(input.origin ? { origin: input.origin } : {}) } as Partial<Work>);
+    const filed = item(`GY-${next++}`, now, { title: input.title, description: input.description, priority: input.priority, criteria: input.criteria, type: input.type ?? 'bug', ...(input.origin ? { origin: input.origin } : {}) } as Partial<Work>);
     work.push(filed); created.set(key, filed);
     return filed;
   };

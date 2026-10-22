@@ -30,7 +30,7 @@ function item(head = sha, overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-374', key: 'GY-374', title: 'Fault class: configuration', description: '', type: 'bug', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'The configuration fault class no longer recurs', proofs: [proof] }], producerProofs: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'acceptance', revision: 20, policyRevision: 2,
+    policy: { checks: ['test'], review: true }, stage: 'acceptance', revision: 20, policyRevision: 2,
     createdAt: iso(-3 * 60 * 60_000), updatedAt: iso(0), stageEnteredAt: iso(-2 * 60 * 60_000), ready: true, epoch: 1, lease: null, workspaces: [],
     submission: { epoch: 1, pr: 374, sha: head }, candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [],
     observation: { at: iso(-30_000), candidate, prState: 'open', draft: false, mergeable: true, protected: true, checks: [], reviews: [] },

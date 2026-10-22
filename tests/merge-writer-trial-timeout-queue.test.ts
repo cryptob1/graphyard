@@ -31,7 +31,7 @@ const item = (key: string, ageMinutes: number): Work => {
   return {
     id: `w-${key}`, key, title: key, type: 'feature', description: '', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/app.ts'], stage: 'build', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 1, policyRevision: 1, ready: true, epoch: 1, lease: null,
     workspaces: [], submission: { epoch: 1, pr: 7 },
     candidate: { sha: head, baseSha: base, pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: { source: 'control-plane', candidate: { sha: head, baseSha: base, pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' }, checks: [], reviews: [], merged: false, mergeSha: null,

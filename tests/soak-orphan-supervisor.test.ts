@@ -57,7 +57,7 @@ test('unit:orphan-status-two-observations — soak: over three days the establis
       const held = lastExpiry !== null && lastExpiry > now;
       return { id: 'work-83', key: 'GY-83', title: 'An orphaned watch supervisor renews a lease forever', description: '', type: 'bug', priority: 0,
         dependencies: [], criteria: [{ id: 'AC-1', text: 'Stops', proofs: ['unit:orphan-status-two-observations'] }],
-        policy: { checks: ['test'], review: true }, plannedFiles: ['src/supervisor.ts'], stage: 'build', revision: 9, policyRevision: 1,
+        policy: { checks: ['test'], review: true }, stage: 'build', revision: 9, policyRevision: 1,
         createdAt: new Date(start).toISOString(), updatedAt: at(0), stageEnteredAt: at(-10 * minute), ready: true, epoch,
         lease: held ? { owner: 'worker-a', epoch, expiresAt: new Date(lastExpiry!).toISOString() } : null,
         workspaces: [{ host: 'coordinator-host', path: `/srv/worktrees/GY-83-${epoch}`, branch: `graphyard/gy-83-${epoch}`, epoch, owner: 'worker-a' }],

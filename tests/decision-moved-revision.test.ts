@@ -61,7 +61,7 @@ async function start() {
     return (await response.json() as { decisions: any[] }).decisions.find(entry => entry.id === id);
   };
   const current = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
-  const create = (title: string) => call(master.token, 'work', { title, plannedFiles: [`src/moved/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Moved-revision fixture' }) as Promise<Work>;
+  const create = (title: string) => call(master.token, 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Moved-revision fixture' }) as Promise<Work>;
   /** An item a worker holds: released, claimed and given its workspace. */
   const leased = async (title: string) => {
     let work = await create(title);
@@ -168,7 +168,7 @@ test('integration:decision-moved-revision-independence — on a moved revision t
 test('unit:decision-grounds-change — renewals, liveness, observations and sessions never move a decision\'s grounds; submissions, heads, stages, requirements and lease epochs do', () => {
   const decisionGroundsChange: typeof engineModule.decisionGroundsChange = (...args) => engineModule.decisionGroundsChange(...args);
   const base = {
-    id: 'w', key: 'GY-1', stage: 'build', ready: true, revision: 10, policyRevision: 1, policy: { checks: ['test'], review: true }, criteria: [], plannedFiles: ['src/a.ts'],
+    id: 'w', key: 'GY-1', stage: 'build', ready: true, revision: 10, policyRevision: 1, policy: { checks: ['test'], review: true }, criteria: [],
     epoch: 1, lease: { owner: 'worker', epoch: 1, expiresAt: '2030-01-01T00:00:00.000Z' }, lastAssignment: { owner: 'worker', epoch: 1 },
     containmentQuarantine: { owner: 'worker', epoch: 1, at: '2030-01-01T00:00:00.000Z', settlementHash: 'h', leaseExpiresAt: '2030-01-01T00:00:00.000Z' },
     submission: null, candidate: null, observation: null, workspaces: [], sessions: [], updatedAt: '2030-01-01T00:00:00.000Z', blocker: null,
@@ -181,7 +181,7 @@ test('unit:decision-grounds-change — renewals, liveness, observations and sess
   assert.match(decisionGroundsChange(base, { ...renewed, candidate: { sha: 'a'.repeat(40) } } as unknown as Work) ?? '', /^a new head \(aaaaaaaaaaaa\)$/);
   assert.match(decisionGroundsChange(base, { ...renewed, stage: 'review' }) ?? '', /^a stage move \(build to review\)$/);
   assert.match(decisionGroundsChange(base, { ...renewed, policyRevision: 2 }) ?? '', /^a requirements or policy revision/);
-  assert.match(decisionGroundsChange(base, { ...renewed, plannedFiles: ['src/a.ts', 'src/b.ts'] }) ?? '', /^a requirements or policy revision/);
+  assert.match(decisionGroundsChange(base, { ...renewed, criteria: [{ id: 'AC-1', text: 'Revised', proofs: ['unit:revised'] }] }) ?? '', /^a requirements or policy revision/);
   assert.match(decisionGroundsChange(base, { ...renewed, epoch: 2, lease: { owner: 'other', epoch: 2, expiresAt: 'x' } }) ?? '', /^a lease epoch change \(epoch 1 to epoch 2\)$/);
   assert.match(decisionGroundsChange(base, { ...renewed, lease: null }) ?? '', /^a lease epoch change \(epoch 1 to no lease\)$/);
   assert.equal(decisionGroundsChange(base, { ...renewed, blocker: { reason: 'stuck' } } as unknown as Work), 'a change to its blocker');

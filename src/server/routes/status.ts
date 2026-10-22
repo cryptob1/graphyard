@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { demand, type Work } from '../../model.js';
+import { demand, dropRetiredScopeFields, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
@@ -18,7 +18,6 @@ import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment, leadTimeReport } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
-import { routedScopeDecisions } from '../scope-holds.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { doctorRoute, doctorRunEvent } from '../doctor-route.js';
 import { snapshotPage } from '../../store/paged-snapshot.js';
@@ -103,9 +102,8 @@ export const statusRoutes = defineRoutes('status', [
       const { engine, production } = services;
       const now = ((await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
       const work = operatorVisible(await engine.store.fleet());
-      // A scope ask's command reads the routed decisions the engine's guard reads (GY-1388).
       return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: await resolvedProductionEnvironment(engine.store.pool),
-        production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds, scopeDecisions: await routedScopeDecisions(engine.store.pool, work) });
+        production: actor.role === 'operator-agent' ? null : production?.status() ?? null, ciAppIds: engine.ciAppIds });
     },
   },
   {
@@ -219,7 +217,8 @@ export const statusRoutes = defineRoutes('status', [
     async handle({ services, operatorVisible }, [id]) {
       const work = await workDocument(services.engine.store.pool, decodeURIComponent(id));
       demand(work && operatorVisible([work]).length, 'Work item not found', 404);
-      return work;
+      // A document no evaluation has rewritten since GY-1992 reads without the retired scope fields.
+      return dropRetiredScopeFields({ ...work! });
     },
   },
   {

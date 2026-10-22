@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { isClosed } from './closure.js';
 import { standingCapacity } from './capacity.js';
-import { routableScopeRequest, scopeBlockedBudgetMs, scopeRefusalBlocker } from './scope.js';
 import { containmentPhase } from './containment.js';
 import { lapsedBeforeStart } from './escalation.js';
 import { blockerKind } from './blocker-kind.js';
@@ -16,7 +15,7 @@ import type { EscalationTrigger, Work } from './work.js';
 // Fault classes (GY-173).
 //
 // A recurring fault used to be fixed one instance at a time: a session that never started was
-// re-prompted, a scope request answered, a stale observation re-read — and the next instance of
+// re-prompted, a stale observation re-read — and the next instance of
 // the same cause arrived an hour later, handled by hand again. Noticing that several symptoms
 // share a cause was a coordinator's memory, not product behaviour. Here every attention item,
 // escalation and pipeline fault the loop records carries a class from one shipped catalogue;
@@ -39,8 +38,8 @@ export const faultClassMeaning: Record<FaultClass, string> = {
   'session-liveness': 'a session that did not start, stopped, went quiet, ran past its bound or lost its lease',
   'review-convergence': 'a review that does not settle: conflicting or dismissed verdicts, a review nobody obtains, a security concern',
   'decision': 'a two-party decision refused, stale, unanswered or without an approver, a request awaiting the decision its evidence calls for, or an escalation that outgrew its context',
-  'scope': 'work that needs files outside its plannedFiles, rewrites files outside them, or weakens its requirements',
-  'overlap-hold': 'work held behind overlapping work past the hold bound',
+  'scope': 'work that rewrites shipped work it does not own, or weakens its requirements',
+  'overlap-hold': 'work held behind work holding the same exclusive resource past the hold bound',
   'observation': 'a read of GitHub or of a check that is paused, stale or silent',
   'deployment': 'a merged change production does not serve, a claim unverified against the release, or a control plane not answering',
   'configuration': 'a permission, variable, setup step, executor or sandbox rule the installation lacks',
@@ -65,7 +64,7 @@ export const faultCatalogue = {
   'review-convergence': ['merge-base-dismissed', 'unobtainable-review', 'review-conflict', 'review-settlement', 'escalation:security-concern', 'action:review'],
   'decision': ['approver-launch', 'request-remedy', 'decision-refused', 'decision-stale', 'decision-unanswered', 'owed-decision', 'agent-request', 'context-overflow', 'intervention-pattern',
     'action:decision', 'action:escalation'],
-  'scope': ['scope-request', 'scope-violation', 'escalation:requirement-weakening', 'action:scope'],
+  'scope': ['scope-violation', 'escalation:requirement-weakening', 'action:scope'],
   'overlap-hold': ['hold-overdue'],
   'observation': ['github-budget', 'integration-job', 'action:refresh'],
   'deployment': ['production', 'throughput', 'plane-unavailable', 'action:deployment', 'action:smoke'],
@@ -120,7 +119,6 @@ const signatures: [FaultKind, (subject: string, text: string) => boolean][] = [
   ['resource-bound', (subject, text) => subject.startsWith('resource:') || /is held by a registered resource at its bound/.test(text)],
   ['ledger-refusal', (_, text) => /cannot be requested because the .+ refused the write/.test(text)],
   ['disk-pressure', subject => subject === 'disk'], ['memory-pressure', subject => subject === 'memory'],
-  ['scope-request', (_, text) => /needs files outside plannedFiles/.test(text)],
   ['consent-hold', (_, text) => /is awaiting consent/.test(text)],
   ['review-conflict', (_, text) => /^Review of \S+ head \S+ \(PR #\d+\) is conflicted/.test(text)],
   ['unobtainable-review', (_, text) => /cannot obtain a review of/.test(text)],
@@ -181,46 +179,24 @@ export interface FaultObservation extends Classified { subject: string; text: st
 const observe = (kind: FaultKind, subject: string, text: string): FaultObservation => ({ ...classified(kind), subject, text: text.slice(0, 500) });
 /**
  * The faults an open item's own record shows: its standing escalations, a lapsed containment
- * fence, a human-only park, a live attempt's standing scope request, a proof nobody may produce, a spent provider
- * account, its out-of-scope violations and its blocker. The dashboard and the loop read the same.
- */
-/**
- * GY-1085: a live attempt's scope request is a fault only when the product will not settle it
- * itself. Nine in one day were not: each was asked, decided by the widening rule on the loop's next
- * scope step or put to the independent approver (`routes`, GY-176), and widened within minutes — the
- * routine master status already leaves out of its attention (scopeRequestAttention). One stands when
- * it has waited past the bound the loop promises (scopeBlockedBudgetMs), or when it is refused and
- * nothing will judge it again: a non-additive or over-cap ask, an approver's refusal, or no approver.
- */
-export function standingScopeRequest(work: Pick<Work, 'scopeRequest' | 'lease' | 'plannedFiles' | 'criteria'>, now: number, routes = true): boolean {
-  const request = work.scopeRequest;
-  if (!request || !work.lease || work.lease.epoch !== request.epoch || Date.parse(work.lease.expiresAt) <= now) return false; /* an expired attempt's request is moot (owed-report's rule) */
-  if (now - Date.parse(request.at) > scopeBlockedBudgetMs) return true;
-  if (request.decision?.state !== 'refused') return false;
-  // GY-1757: the independent approver's refusal of an additive ask that names several paths leaves the live
-  // attempt a narrower ask to make within the bound; this is read from the ask's structure, never from the
-  // refusal's prose. A one-path ask has nothing narrower to re-ask and no route will judge it again, so its
-  // refusal stands at once, as does a non-additive one. The bound branch above catches an ask that sticks.
-  if (request.decision.decidedBy !== 'graphyard' && !request.remove?.length && !request.criteria?.length && request.paths.length > 1) return false;
-  return !(routes && request.decision.decidedBy === 'graphyard' && routableScopeRequest(work, now));
-}
-/**
+ * fence, a human-only park, a proof nobody may produce, a spent provider account, its violations
+ * and its blocker. The dashboard and the loop read the same.
+ *
  * `reclaimInMotion`, which the loop passes (daemon/faults.ts attemptReclaimInMotion, GY-1557): an
  * attempt past the worker bound that the loop's own reclaim remedy is still due to end, or ended
  * this cycle, is the record's to name — the dashboard reads it without the hook — not a fault to count.
  */
-export function workFaults(work: Work, now: number, routes = true, reclaimInMotion?: (attempt: UnsubmittedAttempt) => boolean): FaultObservation[] {
+export function workFaults(work: Work, now: number, reclaimInMotion?: (attempt: UnsubmittedAttempt) => boolean): FaultObservation[] {
   if (work.stage === 'done' || isClosed(work)) return [];
   const found: FaultObservation[] = [];
   const escalations = work.escalations ?? (work.escalation ? [work.escalation] : []);
   for (const escalation of escalations) if (!(escalation.trigger === 'requirement-weakening' && escalation.decision) && !lapsedBeforeStart(work, escalation)) found.push(observe(escalationFaultKind(escalation.trigger), work.key, `${escalation.trigger} escalation: ${escalation.reason}`)); // an approved decision's weakening: its audit, no scope fault (GY-1347)
   if (work.containmentQuarantine && containmentPhase(work, now)?.state === 'lapsed') found.push(observe('containment', work.key, `Containment quarantine from epoch ${work.containmentQuarantine.epoch} holds ${work.key}`));
   if (work.humanRequest && !work.humanRequest.answer) found.push(observe('human-request', work.key, `${work.key} is parked on a human-only decision: ${work.humanRequest.needed}`));
-  if (work.scopeRequest && standingScopeRequest(work, now, routes)) found.push(observe('scope-request', work.key, `${work.key} needs files outside plannedFiles: ${work.scopeRequest.paths.join(', ')}`));
   if (work.proofGaps?.length) found.push(observe('proof-gap', work.key, `No principal is authorized to produce ${work.proofGaps.join(', ')}`));
   if (standingCapacity(work).length) found.push(observe('role-capacity', work.key, `${work.key} waits on a provider account out of quota`));
   if (work.violations.length) found.push(observe('scope-violation', work.key, work.violations[0]));
-  const restated = /* a blocker restating a typed fault is that fault: a human-only park's wait, a refused scope request */ (work.humanRequest && !work.humanRequest.answer) || (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker));
+  const restated = /* a blocker restating a typed fault is that fault: a human-only park's wait */ work.humanRequest && !work.humanRequest.answer;
   if (work.blocker && !restated) found.push(observe(blockerKind(work.blocker), work.key, work.blocker));
   const unsubmitted = unsubmittedAttempt(work, now);
   if (unsubmitted && !reclaimInMotion?.(unsubmitted)) found.push(observe('unsubmitted-attempt', work.key, unsubmittedAttemptText(unsubmitted)));

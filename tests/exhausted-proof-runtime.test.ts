@@ -31,7 +31,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 1127, branch: 'graphyard/gy-1127-1', author: 'implementer' };
-  return { id: 'work-1127', key: 'GY-1127', title: 'Producer runtime exhaustion', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-1127', key: 'GY-1127', title: 'Producer runtime exhaustion', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Producer runtime notice', proofs: ['unit:never-started-producers-request-no-rework'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 1127 }, reworkRequested: false, scenarioRequirements: [], evidence: [] as Evidence[],

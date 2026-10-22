@@ -25,7 +25,6 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 // item judges its own diff by the same pre-merge evidence rule, never by a standard without it.
 const criteria = [{ id: 'AC-1', text: 'The feature ships behind its setting', proofs: ['unit:feature'] }, { id: 'AC-2', text: 'The restarted loop serves the change', proofs: ['manual:post-deploy/loop-serves-change'] }];
 const documentation = { id: 'DOCS' as const, text: 'Documentation reflects this change: the diff updates this repository\'s documentation for any user-visible behaviour it changes, or the worker states at submission that it alters no documented behaviour.', paths: ['docs/', 'README.md', 'AGENTS.md'], changelog: null };
-const plannedFiles = ['src/feature.ts', 'docs/feature.md'];
 
 test('unit:review-self-prints-standard — review self prints the reviewer standard for HEAD against the base merge-base, exits 0 and issues only reads', async t => {
   const work = await temporaryDirectory('review-self');
@@ -57,7 +56,7 @@ test('unit:review-self-prints-standard — review self prints the reviewer stand
     requests.push({ method: request.method ?? 'GET', path: request.url ?? '/' });
     const body = request.url === '/api/status' ? { baseBranch: 'main' }
       : request.url === '/api/work/GY-1' ? {
-        key: 'GY-1', title: 'Ship the feature', criteria, plannedFiles, documentation,
+        key: 'GY-1', title: 'Ship the feature', criteria, documentation,
       } : {};
     response.setHeader('Content-Type', 'application/json');
     response.end(JSON.stringify(body));
@@ -86,7 +85,7 @@ test('unit:review-self-prints-standard — review self prints the reviewer stand
   assert.ok(run.stdout.includes('Judge your own diff exactly as the independent reviewer will; fix every finding you would mark BLOCKING before you run complete.'), 'the printout opens with the one instruction');
   // The standard for this exact head and merge-base, criteria and obligation as the item holds them,
   // with the worktree's own (empty) set of verification maps.
-  const standard = reviewStandard({ key: 'GY-1', head, base }, criteria, { obligation: documentation, files: null }, { maps: [], plannedFiles });
+  const standard = reviewStandard({ key: 'GY-1', head, base }, criteria, { obligation: documentation, files: null }, { maps: [], paths: [] });
   assert.ok(run.stdout.includes(standard), 'the printout is reviewStandard for HEAD against the merge-base');
   assert.ok(run.stdout.includes(`[AC-1] ${criteria[0]!.text}`), 'the item\'s criterion is named by ID and text');
   assert.ok(run.stdout.includes(`[AC-2] ${criteria[1]!.text}`), 'the declared post-deploy criterion is named by ID and text too');

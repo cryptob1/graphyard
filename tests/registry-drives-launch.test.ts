@@ -106,7 +106,7 @@ const tabEnvironment = (calls: string[][]) => { const tab = calls.filter(args =>
 const valueOf = (args: string[], flag: string) => { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : undefined; };
 
 function item(key: string): Work {
-  return { id: `id-${key}`, key, title: 'Registry launch', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: [], criteria: [{ id: 'AC-2', text: 'Launch', proofs: ['integration:registry-drives-launch'] }],
+  return { id: `id-${key}`, key, title: 'Registry launch', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-2', text: 'Launch', proofs: ['integration:registry-drives-launch'] }],
     policy: { checks: ['test'], review: true }, stage: 'review', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate: null,
     submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: [], observation: null, autoDispatch: { review: null, producers: [], history: [] } } as unknown as Work;
 }

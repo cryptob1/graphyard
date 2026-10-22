@@ -23,7 +23,7 @@ function fenced(lease: Work['lease']): Work {
   return {
     id: 'work-GY-9', key: 'GY-9', title: 'GY-9', description: '', type: 'feature', priority: 2, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'The behaviour changes as described', proofs: ['unit:behaviour-changes'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'implementation', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'implementation', revision: 1, policyRevision: 1,
     createdAt: iso(-3_600_000), updatedAt: iso(-60_000), stageEnteredAt: iso(-60_000), ready: true, epoch: 5, lease,
     workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation: null, blocker: null, gates: [], violations: [],

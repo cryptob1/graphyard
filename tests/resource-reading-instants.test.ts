@@ -58,7 +58,7 @@ const session = (id: string, subject: string, pane: string, startedAt: string, u
   attach: null, transcript: null, subject, startedAt, updatedAt, endedAt, state, outcome: null });
 const item = (key: string, sessions: unknown[], lease: { expiresAt: number } | null = null) => ({
   id: `work-${key.toLowerCase()}`, key, title: key, description: '', type: 'bug', stage: 'build', epoch: 1, priority: 1, blocker: null, dependencies: [], criteria: [], policy: { checks: ['test'], review: true },
-  plannedFiles: [], revision: 1, policyRevision: 1, createdAt: '2026-10-08T00:00:00.000Z', updatedAt: iso(snapshotAt), stageEnteredAt: '2026-10-08T06:00:00.000Z', ready: true, workspaces: [], candidate: null,
+  revision: 1, policyRevision: 1, createdAt: '2026-10-08T00:00:00.000Z', updatedAt: iso(snapshotAt), stageEnteredAt: '2026-10-08T06:00:00.000Z', ready: true, workspaces: [], candidate: null,
   submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, gates: [], violations: [],
   lease: lease ? { owner: 'graphyard-claude-2', epoch: 13, expiresAt: iso(lease.expiresAt) } : null, sessions,
 }) as unknown as Work;

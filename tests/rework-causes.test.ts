@@ -26,7 +26,7 @@ const id = (key: string) => `00000000-0000-4000-8000-${key.padStart(12, '0')}`;
 const A = id('a00000000001'), B = id('b00000000001'), C = id('c00000000001'), D = id('d00000000001');
 const submittedAt = '2026-09-26T08:00:00.000Z';
 const deliveredItem = (id: string, key: string, rounds: number) => ({
-  id, key, title: `Fixture ${key}`, description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/x.ts'],
+  id, key, title: `Fixture ${key}`, description: '', type: 'feature', priority: 1, dependencies: [], 
   stage: 'done', createdAt: '2026-09-26T07:00:00.000Z', updatedAt: '2026-09-26T10:00:00.000Z', stageEnteredAt: '2026-09-26T10:00:00.000Z',
   epoch: rounds + 1, gates: [], violations: [], workspaces: [], sessions: [], policy: { checks: ['test', 'typecheck'], review: true },
   submission: { epoch: 1, pr: 400 },

@@ -134,7 +134,7 @@ test('unit:out-of-credits-session-fails-over-at-once — an approver session sto
   await fresh();
   config = await configWithCredentials('approver');
   // One machine-filed item the loop itself puts a close decision to: its approver is the session below.
-  const filed = await ok(operator, 'POST', 'work', { title: 'approver out of credits', plannedFiles: ['src/approver-out-of-credits.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
+  const filed = await ok(operator, 'POST', 'work', { title: 'approver out of credits', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
     origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: 'src/a.ts — a finding' }] } } }) as Work;
   const work = await ok(coordinator, 'POST', `work/${filed.id}/triage`, { judgement: { outcome: 'close', reason: 'Not worth doing once the parent shipped' } }) as Work;
 
@@ -270,7 +270,7 @@ after(async () => { http?.close(); await store?.close(); await database?.stop();
 
 const fresh = async () => { await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE'); };
 const released = async (title: string) => {
-  const work = await ok(operator, 'POST', 'work', { title, plannedFiles: [`src/${title.replace(/\W+/g, '-')}.ts`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
+  const work = await ok(operator, 'POST', 'work', { title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
   return ok(operator, 'POST', `work/${work.id}/ready`, {}) as Promise<Work>;
 };
 

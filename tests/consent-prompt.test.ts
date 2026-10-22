@@ -91,7 +91,7 @@ class ConsentPane {
 }
 
 function work(overrides: Partial<Work> = {}): Work {
-  return { id: 'work-130', key: 'GY-130', title: 'A runtime that stops on a first-run trust prompt holds its worker slot silently', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-130', key: 'GY-130', title: 'A runtime that stops on a first-run trust prompt holds its worker slot silently', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Consent', proofs: ['unit:consent-prompt-detected'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'ready', revision: 3, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides } as Work;

@@ -30,7 +30,7 @@ test('unit:resolver-prompt — the resolver\'s prompt is short and tells it to a
   assert.match(text, /a blocked item whose blocker no longer holds/);
   assert.match(text, /a parked item/);
   // The actions: re-dispatch, unblock, rework with a concrete reason, close as obsolete or
-  // duplicate with a reason, decide scope or requirements within the item's intent.
+  // duplicate with a reason, decide requirements within the item's intent.
   // Release is only for unreleased backlog work (the ready endpoint refuses the rest); an overdue
   // lease-holder is the loop's own reclaim, never a release.
   assert.match(text, /master release GY-N\) and the loop dispatches it; release refuses any other item/);
@@ -42,7 +42,7 @@ test('unit:resolver-prompt — the resolver\'s prompt is short and tells it to a
   assert.match(text, /close it with a reason/);
   assert.match(text, /--obsolete/);
   assert.match(text, /--duplicate-of GY-M/);
-  assert.match(text, /a scope or requirements ask within the item's intent: decide it/);
+  assert.match(text, /a requirements ask within the item's intent: decide it/);
   // The charter's discipline: never a person, simplest action, and an item only for a code change.
   assert.match(text, /you never ask a person/);
   assert.match(text, /take the simplest action/);
@@ -58,7 +58,7 @@ test('unit:resolver-prompt — the resolver\'s prompt is short and tells it to a
 
 test('unit:resolver-prompt — the built prompt carries every sanctioned command, and the loop\'s failed actions and attention lines reach the evidence it reads', () => {
   const text = prompt();
-  for (const command of ['scope', 'requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore']) {
+  for (const command of ['requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore']) {
     assert.ok(text.includes(`master ${command}`), `the charter names master ${command}`);
   }
   const evidence: DoctorInput = {
@@ -80,23 +80,22 @@ test('unit:resolver-prompt — the built prompt carries every sanctioned command
 });
 
 // GY-2005 AC-2 (unit:resolver-allowlist): the resolver's powers are its allowlist grammar —
-// re-dispatch, unblock, rework, close, scope and decide run; item creation is refused with no
+// re-dispatch, unblock, rework, close and decide run; item creation is refused with no
 // reason stated past the file — and its cadence is the five-minute interval plus the progress
 // watchdog's due mark. Every instant here derives from the test's fixed `now`.
-test('unit:resolver-allowlist — the allowlist permits re-dispatch, unblock, rework, close, scope and decide, refuses creation without a stated code-change reason, and the schedule is five minutes plus the watchdog', () => {
+test('unit:resolver-allowlist — the allowlist permits re-dispatch, unblock, rework, close and decide, refuses creation without a stated code-change reason, and the schedule is five minutes plus the watchdog', () => {
   const context = { cwd: process.cwd(), cli };
-  // The six sanctioned intents, as the prompt teaches them, run under the guard.
+  // The sanctioned intents, as the prompt teaches them, run under the guard.
   for (const line of [
     `node ${cli} master release GY-7 'unreleased backlog item idle 25 min'`,
-    `node ${cli} master unblock GY-7 'the scope refusal was granted'`,
+    `node ${cli} master unblock GY-7 'the missing credential was restored'`,
     `node ${cli} master decide GY-7 rework 'the candidate fails the trial merge on tests/x'`,
     `node ${cli} master close GY-7 --obsolete 'the delivered GY-2 fixed it'`,
     `node ${cli} master close GY-7 --duplicate-of GY-2 'same cause, one item'`,
-    `node ${cli} master scope GY-7 'adds the test the criterion names'`,
     `node ${cli} master decide GY-7 unblock 'the ask is within the item'`,
   ]) assert.equal(pi.doctorCommandVerdict(line, context).allow, true, `${line} is sanctioned`);
   // A create with nothing stated past the file is refused at the gate, so a notice never files an item.
-  for (const line of [`node ${cli} master create plan.json`, `graphyard master create plan.json`, `node ${cli} master create plan.json --allow-broad-scope`]) {
+  for (const line of [`node ${cli} master create plan.json`, `graphyard master create plan.json`]) {
     const verdict = pi.doctorCommandVerdict(line, context);
     assert.equal(verdict.allow, false, `${line} is refused`);
     if (!verdict.allow) {

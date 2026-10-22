@@ -1,5 +1,5 @@
 // Concern: the master status report — dispatch sessions, role concurrency, schedule, branches and deliveries.
-import { concurrentOverlap, scopeBreadth, inFlight, dispatchable, dispatchSort } from '../coordination.js';
+import { concurrentOverlap, inFlight, dispatchable, dispatchSort } from '../coordination.js';
 import { blockerView } from '../model/blocker-class.js';
 import { hotFileSet } from '../daemon/hotspots.js';
 import type { ConflictReport } from '../conflicts.js';
@@ -319,7 +319,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       restoredApproval: approvalRestored,
       // The standing blocker's class, the loop's last probe of it and when it runs next (GY-1008).
       blocker: blockerView(work),
-      scope: scopeBreadth(work.plannedFiles), overlap: { concurrent }, conflicts,
+      overlap: { concurrent }, conflicts,
       // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
       speed: pipelineSpeed(work, now),
       // The review and proofs held by carry across a Graphyard-authored merge, each with its ground:
@@ -350,13 +350,13 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
   // The fleet's concurrency beside its idle workers: every open item in flight or dispatchable may
-  // run at once — planned-file overlap holds nothing — so idle workers beside dispatchable items is
+  // run at once — overlap holds nothing — so idle workers beside dispatchable items is
   // a dispatch shortfall, not serialization.
   const inFlightCount = snapshot.work.filter(work => inFlight(work, now)).length;
   const idle = workerSessions.filter(session => session.mode === 'launch' && session.credential.available && (session.state === 'offline' || session.state === 'idle') && !rows.some(row => row.owner === session.principal));
   const launchProfiles = workerSessions.filter(session => session.mode === 'launch').length;
   const fleet = { effective: inFlightCount + scheduling.order.length, inFlight: inFlightCount, dispatchable: scheduling.order.length, idleWorkers: idle.length, workers: launchProfiles,
-    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; planned-file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle; the dispatcher starts new work while fewer than ${maxInFlight} ${inFlightCount === 1 ? 'item is' : 'items are'} in flight${atCapClause(inFlightCount)}` };
+    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle; the dispatcher starts new work while fewer than ${maxInFlight} ${inFlightCount === 1 ? 'item is' : 'items are'} in flight${atCapClause(inFlightCount)}` };
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
   const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text, ...classified('unrunnable-remedy'),
@@ -406,15 +406,13 @@ export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work'])
 }
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
- * would be offered (within a priority: starving first, then cold before hot, then smallest planned
- * scope, by the loop's own comparator over the same hot set and clock), and the broad scopes that
- * make a weak change-scope contract. Nothing is held for planned-file overlap: dispatch is
+ * would be offered (within a priority: starving first, then cold before hot, then oldest, by the
+ * loop's own comparator over the same hot set and clock). Nothing is held for overlap: dispatch is
  * optimistic, and a base refresh or a sync round integrates whichever overlapping item lands second.
  */
 export function dispatchSchedule(work: Work[], now: number) {
   const ready = dispatchSort(work.filter(item => dispatchable(item, now)), hotFileSet(work, now), now);
-  return { order: ready.map(item => ({ key: item.key, priority: item.priority, scope: scopeBreadth(item.plannedFiles) })),
-    highConflict: ready.filter(item => scopeBreadth(item.plannedFiles).highConflict).map(item => ({ key: item.key, broad: scopeBreadth(item.plannedFiles).broad })) };
+  return { order: ready.map(item => ({ key: item.key, priority: item.priority })) };
 }
 /** Fewest conflicts first: the order that forces the fewest re-integration rounds on the rest. */
 export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[]) {

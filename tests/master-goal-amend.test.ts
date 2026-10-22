@@ -70,7 +70,7 @@ test('unit:master-goal-amend — `graphyard master goal-amend GOAL-N REQUEST_ID`
   assert.deepEqual(goal.protected, { cases: ['promotion', 'promotion-audit'], outcomes: ['promotion', 'promotion-audit'] });
 
   // An item parked on the operator's goals-and-priorities request, answered "Go ahead as asked".
-  let work: Work = await engine.execute(operator, 'create', null, { title: 'retire promotion', plannedFiles: ['e2e/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID());
+  let work: Work = await engine.execute(operator, 'create', null, { title: 'retire promotion', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   await ok(worker, `work/${work.key}/park`, { epoch: work.epoch, kind: 'goals-and-priorities', needed: `A decision to amend ${goal.key}: retire its protected outcome promotion (case promotion)`,

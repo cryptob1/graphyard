@@ -61,7 +61,7 @@ before(async () => {
   engine.principals = [operator, ...workers];
   engine.submissionObserver = null;
   for (let n = 0; n < 100; n++) {
-    const work = await engine.execute(operator, 'create', null, { title: `Contended item ${n}`, plannedFiles: [`src/contended-${n}.ts`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID());
+    const work = await engine.execute(operator, 'create', null, { title: `Contended item ${n}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID());
     items.push(await engine.execute(operator, 'ready', work.id, {}, randomUUID()));
   }
   for (const [n, actor] of workers.entries()) leased.push({ work: await engine.execute(actor, 'claim', items[n].id, {}, randomUUID()), actor });
@@ -135,7 +135,7 @@ test('unit:reconcile-leaves-pool-headroom — while a tick runs, heartbeats, cla
   const watch = (async () => { while (ticking) { peakBackground = Math.max(peakBackground, store.background.inUse); await new Promise(resolve => setTimeout(resolve, 2)); } })();
   const extra: Principal = { id: 'contention-headroom', role: 'worker', sessionKind: 'ai' };
   engine.principals = [...engine.principals, extra];
-  const free = await engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { title: 'Claimed while the tick runs', plannedFiles: ['src/headroom.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID())).id, {}, randomUUID());
+  const free = await engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { title: 'Claimed while the tick runs', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID())).id, {}, randomUUID());
   const timings: { what: string; ms: number }[] = [];
   const timed = async (what: string, run: () => Promise<unknown>) => { const started = performance.now(); await run(); timings.push({ what, ms: performance.now() - started }); };
   const earlier = new Set(engine.reconcileTicks);

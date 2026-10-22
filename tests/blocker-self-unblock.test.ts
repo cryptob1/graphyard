@@ -11,8 +11,7 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { approverSessionName, decisionInput, masterConfigSchema, workerPrompt, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { blockerClasses, blockerView, classifyBlocker, environmentalBlockerClasses, maxAutomaticClears, needsSomeone, unrepresentableScope, type BlockerClass } from '../src/model/blocker-class.js';
-import { plannedFilesMax } from '../src/model/scope.js';
+import { blockerClasses, blockerView, classifyBlocker, environmentalBlockerClasses, maxAutomaticClears, needsSomeone, type BlockerClass } from '../src/model/blocker-class.js';
 import { blockedAttemptMarker } from '../src/model/capacity.js';
 import { humanRequestBlocker } from '../src/model/human-request.js';
 import { buildBoard, masterBoard } from '../src/model/board.js';
@@ -30,8 +29,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * hand, because nothing re-checked a blocker once it was recorded, while every blocked worker kept
  * its lease and sat idle holding a slot. A recorded blocker now ends its attempt in the same
  * transaction, the loop reads each blocker into a named class, probes the environmental ones every
- * cycle inside the worker's confinement and clears them once the probe passes, puts a planned-file
- * scope blocker to the independent approver as a widening, launches a needs-decision blocker's
+ * cycle inside the worker's confinement and clears them once the probe passes, launches a needs-decision blocker's
  * approver, and only a genuine or human-only blocker counts as needing someone. Everything but the
  * classification and the board runs against a real Postgres and the real HTTP routes; each test is
  * named for the proof it produces.
@@ -61,7 +59,7 @@ const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, 
 const criteria = [{ id: 'AC-1', text: 'The queue carries its entries across a base refresh', proofs: ['unit:queue'] }];
 
 async function ready(title: string) {
-  let work = await ok(master.token, 'POST', 'work', { title, plannedFiles: ['src/queue-carry.ts'], criteria, reason: 'Operator goal: blocked work unblocks itself' }) as Work;
+  let work = await ok(master.token, 'POST', 'work', { title, criteria, reason: 'Operator goal: blocked work unblocks itself' }) as Work;
   work = await ok(master.token, 'POST', `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready for an attempt' }) as Work;
   return work;
 }
@@ -122,7 +120,6 @@ const incidents: [string, BlockerClass][] = [
   ["git fetch failed: error: unable to append to '.git/logs/refs/remotes/origin/graphyard/gy-941-1': Read-only file system", 'sandbox-path'],
   ["This session is attached to GY-912's worktree, not this item's own: the worktree belongs to another item", 'worktree-mismatch'],
   ['npm test fails in tests/github-http.test.ts, outside plannedFiles; it fails on main as well', 'outside-scope-test-failure'],
-  ['SCOPE NEEDED: src/model/queue.ts (the carry reads the queue entry) for commit 8106499e9f', 'planned-file-scope'],
   ['Waiting on decision 5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b, already requested; its approver was never launched', 'needs-decision'],
   [`${humanRequestBlocker} (spending money or opening third-party accounts): a Railway team seat`, 'human-only'],
   ['The two criteria contradict each other about the retry order', 'genuine'],
@@ -139,22 +136,10 @@ test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their n
   assert.deepEqual([...new Set(incidents.map(([, expected]) => expected))].sort(), [...blockerClasses].sort(), 'every class is covered');
   // What each routine class carries for the loop to act on.
   assert.equal(classifyBlocker(incidents[2][0]).path, '.git/logs/refs/remotes/origin/graphyard/gy-941-1');
-  const scope = classifyBlocker(incidents[5][0]);
-  assert.deepEqual(scope.paths, ['src/model/queue.ts']);
-  assert.equal(scope.commit, '8106499e9f');
-  assert.equal(classifyBlocker(incidents[6][0]).decision, '5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b');
-  // A scope ask with no file or no commit derives no widening: the master reads it.
-  assert.equal(classifyBlocker('SCOPE NEEDED: a helper outside plannedFiles').class, 'genuine');
-  assert.equal(classifyBlocker('SCOPE NEEDED: src/model/queue.ts').class, 'genuine');
-  // A URL the blocker cites is a reference: its host and path never become a planned path.
-  const linked = classifyBlocker('SCOPE NEEDED: src/model/queue.ts (see https://github.com/org/repo/issues/12) for commit 8106499e9f');
-  assert.deepEqual([linked.class, linked.paths, linked.commit], ['planned-file-scope', ['src/model/queue.ts'], '8106499e9f']);
-  // Files no fold can represent under the plannedFiles cap need the master, not a widening.
-  const full = { plannedFiles: Array.from({ length: plannedFilesMax }, (_, index) => `tests/bulk/file-${index}.test.ts`), criteria: [] };
-  const far = classifyBlocker('SCOPE NEEDED: newtop/next.ts for commit 8106499e9f');
-  assert.equal(unrepresentableScope(full, far), true);
-  assert.equal(unrepresentableScope({ plannedFiles: ['src/a.ts'], criteria: [] }, far), false);
-  assert.equal(blockerView({ blocker: 'SCOPE NEEDED: newtop/next.ts for commit 8106499e9f', humanRequest: null, blockerProbe: null, ...full } as never)?.needsSomeone, true);
+  assert.equal(classifyBlocker(incidents[5][0]).decision, '5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b');
+  // A request for a file is no class of its own: nothing limits the files a change may edit, so the master reads it.
+  assert.equal(classifyBlocker('SCOPE NEEDED: src/model/queue.ts (the carry reads the queue entry) for commit 8106499e9f').class, 'genuine');
+  assert.equal(blockerView({ blocker: 'SCOPE NEEDED: newtop/next.ts for commit 8106499e9f', humanRequest: null, blockerProbe: null } as never)?.needsSomeone, true);
   // An open human request is human-only whatever its text says.
   assert.equal(classifyBlocker('anything at all', { humanRequest: true }).class, 'human-only');
   assert.equal(classifyBlocker('').class, 'genuine');
@@ -184,13 +169,7 @@ test('unit:blocked-attempt-frees-slot — recording a blocker ends the attempt i
   assert.equal(partialWork?.state, 'committed', 'the CLI keeps what was not committed as a WIP commit on the attempt branch');
   assert.equal(git(worktree, 'status', '--porcelain'), '');
   assert.match(git(worktree, 'log', '-1', '--format=%s'), /^WIP: .* attempt 1 blocked$/);
-  // An open scope request of the attempt is closed with it, on the record (GY-1055).
-  held = await ok(token(implementer), 'POST', `work/${held.id}/scope`, { epoch: held.epoch, paths: ['src/unrelated/far-away.ts'], reason: 'The carry may also need this file' }) as Work;
-  assert.ok(held.scopeRequest, 'the scope request stands while the attempt holds its lease');
   const blocked = await block(held, 'The two criteria contradict each other about the retry order', { partialWork });
-  assert.equal(blocked.scopeRequest, null, 'the ended attempt\'s scope request is closed');
-  const closed = (await events(blocked)).filter(row => row.kind === 'scope.closed');
-  assert.deepEqual(closed.map(row => [row.payload.details.by, row.payload.details.paths]), [['blocked', ['src/unrelated/far-away.ts']]], 'and the history says the blocker ended it');
 
   // The same transaction: blocker recorded, lease released, attempt ended as released, work kept.
   assert.equal(blocked.blocker, 'The two criteria contradict each other about the retry order');
@@ -239,7 +218,7 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   });
   const state = emptyDaemonState(loopConfig());
   const credential = await block(await claimed('Credential blocker'), incidents[0][0]);
-  const genuine = await block(await claimed('Genuine blocker'), incidents[8][0]);
+  const genuine = await block(await claimed('Genuine blocker'), incidents[7][0]);
 
   await loop.cycle(state);
   let work = await reload(credential.id);
@@ -276,7 +255,7 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   assert.equal(cleared.length, 1);
   assert.equal(cleared[0].actor, coordinator.id);
   assert.match(JSON.stringify(cleared[0].payload), /gh auth status and git ls-remote origin inside the codex sandbox passed/);
-  assert.equal((await reload(genuine.id)).blocker, incidents[8][0], 'the genuine blocker stands');
+  assert.equal((await reload(genuine.id)).blocker, incidents[7][0], 'the genuine blocker stands');
   assert.equal((await engine.execute(implementer, 'claim', work.id, {}, randomUUID())).epoch, credential.epoch + 1, 'the item is claimable again');
 
   // The control plane re-classifies before it clears: a genuine blocker, or a pass past the run's bound, is refused.
@@ -371,31 +350,11 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
   }
 });
 
-test('unit:scope-blocker-becomes-decision — a planned-file-scope blocker becomes an additive widening decision for the independent approver, and a needs-decision blocker gets its approver launched, without a master', async () => {
+test('unit:needs-decision-blocker-launches-approver — a needs-decision blocker gets its approver launched, without a master', async () => {
   const loop = harness(), state = emptyDaemonState(loopConfig());
-  const scoped = await block(await claimed('Scope blocker'), incidents[5][0]);
-
-  await loop.cycle(state);
-  const asked = loop.decided.filter(entry => entry.key === scoped.key);
-  assert.equal(asked.length, 1, 'one decision, requested by the loop');
-  assert.equal(asked[0].action, 'requirements');
-  assert.deepEqual(asked[0].input.plannedFiles, ['src/queue-carry.ts', 'src/model/queue.ts'], 'an additive widening by exactly the named file');
-  const [requested] = (await ok(master.token, 'GET', `work/${scoped.id}/decisions`)).decisions.filter((decision: any) => decision.action === 'requirements');
-  assert.equal(requested.requestedBy, master.id, "requested as the master's operator-agent identity");
-  assert.match(requested.reason, /8106499e9f/, 'the request names the commit the files are needed for');
-  assert.ok(loop.launched.includes(requested.id), 'its approver was launched');
-  assert.equal((await reload(scoped.id)).blockerProbe?.result, 'fail', 'the blocker waits on the widening');
-
-  await ok(approver.token, 'POST', `work/${scoped.id}/approve`, { decision: requested.id, reason: 'The carry reads the queue entry; AC-1 needs it' });
-  await loop.cycle(state);
-  const widened = await reload(scoped.id);
-  assert.deepEqual(widened.plannedFiles, ['src/queue-carry.ts', 'src/model/queue.ts']);
-  assert.equal(widened.blocker, null, 'cleared once plannedFiles cover the named file');
-  assert.equal(loop.decided.filter(entry => entry.key === scoped.key).length, 1, 'nothing more is requested');
-
   // A needs-decision blocker: a decision stands requested on the item and no session judges it.
   let waiting = await claimed('Decision blocker');
-  const standing = await ok(master.token, 'POST', `work/${waiting.id}/decide`, { action: 'requirements', input: decisionInput('requirements', waiting, { plannedFiles: ['src/queue-carry.ts', 'docs/queue.md'] }), reason: 'The carry is documented beside the queue' });
+  const standing = await ok(master.token, 'POST', `work/${waiting.id}/decide`, { action: 'requirements', input: decisionInput('requirements', waiting, {  }), reason: 'The carry is documented beside the queue' });
   waiting = await block(waiting, `Waiting on decision ${standing.id}, already requested; its approver was never launched`);
   assert.equal(classifyBlocker(waiting.blocker).class, 'needs-decision');
   await loop.cycle(state);
@@ -414,7 +373,7 @@ test('unit:blocked-board-shows-class — the board and master status show each b
   const loop = harness(() => { throw Object.assign(new Error('probe failed'), { stderr: 'fatal: could not read Username for https://github.com' }); });
   const state = emptyDaemonState(loopConfig());
   const routine = await block(await claimed('Board: credential'), `${incidents[0][0]} (board)`);
-  const genuine = await block(await claimed('Board: genuine'), `${incidents[8][0]} (board)`);
+  const genuine = await block(await claimed('Board: genuine'), `${incidents[7][0]} (board)`);
   const parked = await claimed('Board: human-only');
   await ok(token(implementer), 'POST', `work/${parked.id}/park`, { recommendation: 'Approve', why: 'Nothing else unblocks the item.', epoch: parked.epoch, kind: 'money-or-accounts', needed: 'a Railway team seat', reason: 'The deploy needs a paid seat' });
   await loop.cycle(state);

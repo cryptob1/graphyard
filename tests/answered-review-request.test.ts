@@ -51,7 +51,7 @@ function item(instance: Instance, observedAt = new Date(Date.now() - verdictInge
   const candidate = { sha: instance.sha, baseSha: base, pr: instance.pr, branch: `graphyard/${instance.key.toLowerCase()}-1`, author: 'implementer' };
   const observation: Observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: observedAt,
     prState: 'open', draft: false, baseTip: base, baseTree: '7b'.padEnd(40, '0'), baseTipContained: true };
-  const work = { id: `work-${instance.key}`, key: instance.key, title: 'Instance', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  const work = { id: `work-${instance.key}`, key: instance.key, title: 'Instance', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: instance.policyRevision,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: instance.pr }, reworkRequested: false,

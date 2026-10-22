@@ -80,10 +80,9 @@ export function plannerPrompt(config: { repository: string }, goal: Goal) {
     + simplicityParagraph
     + `Then call the ${planTool} tool exactly once with goal "${goal.key}", a summary of at most 3 plain sentences (what the user gets and how it will be built; no file paths, commit shas or internal terms), a note of at most ${planNoteMaxWords} words (stack, module layout, data and deploy approach), and items: `
     + 'each item a ref (lower-case letters, digits and -), a title, a plain one-sentence description a non-engineer understands, a description, the outcome ids it serves, the case ids it must make pass (at least the case of every outcome it serves), '
-    + 'criteria (AC-1, AC-2, ... each id once, each with text and unit:, integration: or manual: proofs), the plannedFiles it changes, and dependsOn naming the refs it must land after. '
+    + 'criteria (AC-1, AC-2, ... each id once, each with text and unit:, integration: or manual: proofs), and dependsOn naming the refs it must land after. '
     + 'Every outcome is served by at least one item. '
     + 'A criterion observed on the serving release — production, the deployed release, the restarted loop: an outcome no head can show before merge — must name a manual:post-deploy/NAME proof on the item that ships the change (the reviewer judges it on that head\'s pre-merge evidence, and the serving release is checked after), beside at least one criterion with a unit:, integration: or manual: proof a head can show before merge: no item may consist of post-deploy criteria alone. '
-    + 'Items that may run in parallel (neither depends on the other) share no planned file: make one depend on the other or split the files. '
     + 'No item plans a change to a required case or e2e/contract.json. Answer any refusal of the last plan. Stop after the call.\n\n'
     + `The goal, as JSON:\n${clip(JSON.stringify(input), 50_000)}`;
 }

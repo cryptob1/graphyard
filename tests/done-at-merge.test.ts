@@ -36,7 +36,7 @@ const legacyRow = (work: Work) => ({ id: 'legacy-row', kind: 'verify-deployment'
 const delivered = (key: string, itemPolicy: Work['policy'], overrides: Partial<Work> = {}): Work => ({
   id: `id-${key}`, key, title: key, description: '', type: 'bug', priority: 1,
   dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:done-at-merge-settles'] }],
-  policy: itemPolicy, plannedFiles: [],
+  policy: itemPolicy, 
   stage: 'done', revision: 40, policyRevision: 1, createdAt: iso(nowMs - 2 * day), updatedAt: iso(nowMs - day), stageEnteredAt: iso(nowMs - day),
   ready: true, epoch: 1, lease: null, workspaces: [], candidate: null, submission: { epoch: 1, pr: 1110 }, reworkRequested: false,
   scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
@@ -96,7 +96,7 @@ test('unit:verify-deployment-removed-history-loads — the kind, deployment comm
   assert.ok(!(nextActionKinds as readonly string[]).includes('verify-deployment'), 'no verify-deployment action kind');
   assert.equal(await operationsCommand({ id: 'verify-deployment', args: ['GY-1'] } as unknown as MasterSession), unhandled, 'master verify-deployment is no subcommand');
 
-  const created = await engine.execute(operator, 'create', null, { title: 'Delivered before GY-1981', plannedFiles: ['src/done/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:verify-deployment-removed-history-loads'] }] }, randomUUID()) as Work;
+  const created = await engine.execute(operator, 'create', null, { title: 'Delivered before GY-1981', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:verify-deployment-removed-history-loads'] }] }, randomUUID()) as Work;
   const dbNow = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
   const legacy = { ...created, stage: 'done', stageEnteredAt: iso(dbNow - day), updatedAt: iso(dbNow - day), ready: true, epoch: 1, lease: null, candidate: null, sessions: [], observation: null, violations: [], gates: [], policy: smokePolicy,
     delivery: { mergeSha, mergedAt: iso(dbNow - day), authorizationRevision: 1, deployment: { ...recorded, observedAt: iso(dbNow - day + 60_000), at: iso(dbNow - day + 61_000) } } } as Work;

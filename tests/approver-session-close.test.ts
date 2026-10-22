@@ -25,7 +25,7 @@ const decisionId = (label: string) => `${label.padEnd(8, '0').slice(0, 8)}-4cb5-
 function item(key: string, stage: string): Work {
   return {
     id: `work-${key}`, key, title: 'Approver sessions close', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Closed', proofs: ['unit:hand-approver-closed'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Closed', proofs: ['unit:hand-approver-closed'] }], policy: { checks: ['test'], review: true }, 
     stage, revision: 4, policyRevision: 1, createdAt: iso(-7_200_000), updatedAt: iso(), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 0,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [], violations: [],

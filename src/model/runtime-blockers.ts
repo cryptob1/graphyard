@@ -50,26 +50,3 @@ export const githubOutage = (text: string) =>
 
 /** The GitHub status components a worker's delivery needs: pushing its branch and opening its PR. */
 export const deliveryComponents = ['Git Operations', 'API Requests', 'Pull Requests'] as const;
-
-/**
- * The blocker's named paths that can be repository files a widening covers (GY-1567). Prose is
- * not a path list: a token that continues an API route (`/compare/:range`), a rate (`req/min`) or
- * a bare abbreviation (`e.g`) names nothing in the tree. A bare name counts as a root file or
- * dotfile (`package.json`, `.gitignore`); a bare source file (`index.ts`) counts unless it is the
- * basename of a full path beside it (`sync.ts` for `src/sync.ts`) or, beside full paths, stands
- * only in prose no sentence of which asks for scope (`scopeWords`); a nested one counts with a
- * file extension or as a directory scope (`docs/`, `tests/*`).
- */
-export function blockerPaths(text: string, paths: readonly string[], scopeWords: RegExp) {
-  const rootFile = /^(?:\.[A-Za-z_][\w.-]*|[\w-]+\.(?:md|json|ya?ml|toml|lock|txt))$/;
-  // `main.c` and `a.ts` are files; `e.g` and `i.e`, one letter either side, are prose.
-  const sourceFile = /^(?:[\w-]{2,}\.[A-Za-z][A-Za-z0-9]{0,4}|[\w-]\.[A-Za-z][A-Za-z0-9]{1,4})$/;
-  const lastSegment = /^(?:|\*|[\w.-]*\.[A-Za-z0-9]{1,5})$/;
-  const escaped = (path: string) => path.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const routed = (path: string) => new RegExp(String.raw`[/:]${escaped(path)}`).test(text);
-  const nested = paths.filter(path => path.includes('/') && lastSegment.test(path.slice(path.lastIndexOf('/') + 1)) && !routed(path));
-  const sentences = text.split(/(?<=[.;!?])\s+|\n+/);
-  const requested = (name: string) => sentences.some(sentence => new RegExp(String.raw`(?<![\w/.-])${escaped(name)}(?![\w/-])`).test(sentence) && scopeWords.test(sentence));
-  const named = (name: string) => !nested.some(path => path.endsWith(`/${name}`)) && (!nested.length || requested(name));
-  return paths.filter(path => nested.includes(path) || (!path.includes('/') && (rootFile.test(path) || (sourceFile.test(path) && named(path)))));
-}

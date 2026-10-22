@@ -21,7 +21,7 @@ export default function GuidePage() {
     <h2>Every <Term term="pull request">pull request</Term> takes six steps</h2>
     <ol>
       <li><strong>Build</strong>: a builder agent writes the change.</li>
-      <li><strong>Validate</strong>: it only touches the files it planned to.</li>
+      <li><strong>Validate</strong>: it merges cleanly onto the main branch.</li>
       <li><strong>Test</strong>: the automated checks run.</li>
       <li><strong>Review</strong>: a different agent approves it.</li>
       <li><strong>Prove</strong>: each requirement gets a passing <Term term="proof">proof</Term>.</li>

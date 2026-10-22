@@ -63,7 +63,7 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 131, branch: 'graphyard/gy-131-1', author: 'implementer' };
-  return { id: 'work-131', key: 'GY-131', title: 'Review ledger cap', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-131', key: 'GY-131', title: 'Review ledger cap', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:terminal-reviews-reaped'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'review', revision: 7, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 131 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

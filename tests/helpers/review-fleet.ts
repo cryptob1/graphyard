@@ -28,7 +28,7 @@ function observation(candidate: { sha: string; baseSha: string; pr: number; bran
 export function requested(n: number, head = 1): Work {
   const now = new Date();
   const candidate = { sha: sha40(head === 1 ? `a${n}` : `a${n}e${head}`), baseSha: B, pr: 500 + n, branch: `graphyard/gy-${500 + n}-1`, author: 'implementer' };
-  const item = { id: `work-${500 + n}`, key: `GY-${500 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  const item = { id: `work-${500 + n}`, key: `GY-${500 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:review'] }],
     policy: { checks: ['test', 'typecheck'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: `/w/gy-${500 + n}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [],

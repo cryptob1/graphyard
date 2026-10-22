@@ -25,10 +25,9 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   // The canonical way to take the base branch: a merge keeps the worker's history and makes every
   // resolution visible. Files the repository declares generated are rendered afresh from the
   // merged sources rather than merged by hand; every other conflict is the worker's, reported with
-  // the shipped items that landed it. The merge alone is judged (GY-1991): plannedFiles is a plan,
-  // not a lock, so a file outside the plan that differs from the base is this branch's change to
-  // submit — the merge writer's trial and the independent review decide it, nothing is classified,
-  // refused or restored here.
+  // the shipped items that landed it. The merge alone is judged (GY-1991): a file that differs from
+  // the base is this branch's change to submit — the merge writer's trial and the independent review
+  // decide it, nothing is classified, refused or restored here.
   const status = await api('status');
   const baseBranch = String(status.baseBranch ?? 'main');
   // GY-1523: the shared refs/remotes/origin/BASE the confinement re-exposes is the merge writer's own
@@ -97,7 +96,7 @@ export async function syncWork({ api, print }: CliContext, work: any) {
       all = await api('work-snapshot?view=coordination').then((snapshot: any) => Array.isArray(snapshot) ? snapshot : Array.isArray(snapshot?.work) ? snapshot.work : []).catch(() => null);
     }
     const remaining = attributeConflicts(conflicts, all ?? [], sha => landed.has(sha), generated?.files ?? []);
-    print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail, plannedFiles: work.plannedFiles,
+    print({ key: work.key, base: `origin/${baseBranch}`, baseTip, merged: false, conflicts: remaining, regenerated, detail,
       next: `Resolve each remaining conflict (each names the shipped items that landed it), stage it, and rerun sync ${work.key}: it regenerates the generated files from the resolved sources and commits the merge.` });
     process.exitCode = 1; return;
   }
@@ -108,7 +107,7 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   }
   if (quietly('rev-parse', '-q', '--verify', 'MERGE_HEAD').status === 0) git('commit', '--no-edit', '--quiet');
   else if (quietly('diff', '--cached', '--quiet').status !== 0) git('commit', '--quiet', '-m', `Regenerate generated files after sync ${work.key}`);
-  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, fetched: false, regenerated, generated: generated?.files ?? [], plannedFiles: work.plannedFiles, ok: true,
+  print({ key: work.key, base: `origin/${baseBranch}`, baseTip, head: git('rev-parse', 'HEAD'), merged: true, fetched: false, regenerated, generated: generated?.files ?? [], ok: true,
     next: `Nothing is pushed: complete ${work.key} EPOCH --head submits the commit the shared object store already holds.` });
 }
 
@@ -122,8 +121,8 @@ export const workspaceCommands = defineCommands([
       '                                (docs indexes, AGENTS.md blocks, the timing baseline) instead of',
       '                                hand-merging them, and name the shipped items behind each',
       '                                remaining conflict; run before complete --head. Only merge',
-      '                                conflicts are judged: plannedFiles is a plan, not a lock. It',
-      "                                fetches nothing: the shared origin/BASE is the merge writer's tip",
+      "                                conflicts are judged. It fetches nothing: the shared origin/BASE",
+      "                                is the merge writer's tip",
     ],
     async run(context, work) {
       // A write the worker's sandbox refused is recorded as that, naming the sandbox and the path,

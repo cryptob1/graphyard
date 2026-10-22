@@ -1,9 +1,6 @@
-import { reviewRoundCapOf, withReviewRounds } from '../review-cap.js';
-import { agentOwner, type AttentionItem, type AttentionOwner } from '../master.js';
+import { agentOwner, type AttentionItem } from '../master.js';
 import type { Work } from '../model.js';
 import { humanNeededActions, type HumanNeededRow } from '../model/next-action.js';
-import { decideScopeRequest, scopeRefusalBlocker } from '../model/scope.js';
-import { scopeAskCommand } from '../model/scope-provenance.js';
 import { elapsed } from '../model/sessions.js';
 import { maxDecisionRequests } from '../daemon/decisions.js';
 import { pushRefusal, trialRefusal } from '../model/gates.js';
@@ -22,66 +19,6 @@ import { staleRelease, staleReleaseWaitBoundMs, unappliedReleases, type Decision
  * take, and noticed only if somebody read the idle list five minutes later. Here they are their
  * own population — named, owed, and counted apart.
  */
-
-/**
- * One attention item per open worker scope request that somebody actually has to decide.
- *
- * A request the item's own criteria — or this repository's documentation rule — already imply is
- * nobody's decision: the control plane computes `approve-scope` for it and an executor applies the
- * widening, with no master session and no command. Naming those here asked a master to run
- * `master scope` for a verdict already determined, and an item one file short of finishing waited
- * on that line being read. The verdict is recomputed from the item itself, never taken from the
- * request; a request from a lease that ended is never surfaced. Nor is one the independent approver
- * holds or has decided (GY-176, GY-1388): routed (the loop's `approvals` watch on it is unsettled),
- * or refused by the rule within the bound before the loop routes it. That is being decided, the
- * engine refuses `master scope` for it, and the worker reads the outcome; `scopeAskCommand` names what the master runs once
- * the hold ends — `master requirements` for a terminal over-cap refusal, whose revision can fold or
- * split the ask, never the plain union `master scope` posts past the same bound (GY-936).
- */
-export function scopeRequestAttention(snapshot: { work: Work[]; now: string }, approvals: readonly RoutedWatch[] = []): AttentionItem[] {
-  const now = Date.parse(snapshot.now);
-  return snapshot.work.flatMap(work => {
-    const request = work.scopeRequest;
-    const live = request && work.lease && work.lease.epoch === request.epoch && Date.parse(work.lease.expiresAt) > now;
-    if (!live) return [];
-    const decision = request.decision ?? decideScopeRequest(work, request);
-    if (decision.state === 'approved') return [];
-    const watches = approvals.filter(watch => watch.work === work.key && watch.action === 'requirements' && watch.scope?.epoch === request.epoch && watch.scope.at === request.at);
-    // The approver's own verdict on a routed ask stands: the worker reads it and stays inside plannedFiles.
-    if (watches.length && request.decision && request.decision.decidedBy !== 'graphyard') return [];
-    const command = scopeAskCommand(work, now, watches.map(watch => ({ id: watch.decision, ended: !!watch.settledAt })));
-    if (command === `graphyard master decisions ${work.key}`) return [];
-    return [{ subject: work.key, text: `${request.requestedBy} needs files outside plannedFiles: ${request.paths.join(', ')} — ${request.reason}. The widening rule refuses it: ${decision.reason}`,
-      ...agentOwner('master', command) }];
-  });
-}
-
-type RoutedWatch = { work: string; action: string; decision: string; settledAt?: string | null; scope?: { epoch: number; at: string } | null };
-
-/**
- * A request the loop has routed to the independent approver (GY-176) is being decided. While its
- * watch is unsettled and only the rule has refused it, the item's row says so and names the
- * decision, rather than the rule refusal's gate and `master unblock`, which would send a master to
- * widen or unblock what the approver is already judging. `routedScope` marks the row, so its owed
- * action is named the same way (`owedAttention`).
- */
-export function routedScopeStatus<S extends { work: { key: string; attention: string | null; attentionOwner: AttentionOwner | null }[]; attentionItems: AttentionItem[] }>(status: S, work: readonly Work[], approvals: readonly RoutedWatch[] = [], config?: { reviewRoundCap?: number }): S {
-  const judging = new Map(approvals.filter(watch => watch.action === 'requirements' && watch.scope && !watch.settledAt).map(watch => [`${watch.work}:${watch.scope!.epoch}:${watch.scope!.at}`, watch.decision]));
-  let rows = status.work.map(row => {
-    const item = work.find(entry => entry.key === row.key), request = item?.scopeRequest;
-    const decision = request && judging.get(`${row.key}:${request.epoch}:${request.at}`);
-    if (!decision || !row.attention || request.decision?.decidedBy !== 'graphyard' || !item!.blocker?.startsWith(scopeRefusalBlocker)) return row;
-    const next = `Nothing to run: the approver judges requirements decision ${decision} (graphyard master decisions ${row.key}); ${request.requestedBy} reads the outcome with scope-request ${row.key} ${request.epoch} --wait`;
-    return { ...row, routedScope: next, attention: `${row.key}'s scope request for ${request.paths.join(', ')} is with the independent approver: the rule refused it and the loop routed it as requirements decision ${decision}`, attentionOwner: agentOwner('control plane', next, 'approver') };
-  });
-  const routed = new Map(rows.flatMap((row, index) => row !== status.work[index] ? [[row.key, { from: status.work[index].attention, row }]] : []));
-  // `master status` also shows each item's review round against the configured cap (GY-1118).
-  if (config) rows = withReviewRounds(rows, work, reviewRoundCapOf(config));
-  return { ...status, work: rows, attentionItems: status.attentionItems.map(entry => {
-    const change = routed.get(entry.subject);
-    return change && entry.text === change.from ? { subject: entry.subject, text: change.row.attention!, ...change.row.attentionOwner! } : entry;
-  }) };
-}
 
 /**
  * One attention item per action nobody in the executor loop may run, and per concern carried
@@ -249,20 +186,17 @@ export function needsHumanActions<T extends { waiting: { id: string }[]; idle: {
  * What `master status` adds for work waiting on a judgment: every owed row (counted apart from the
  * queue), the attention items for items whose row does not already carry an attention line — an
  * item says this once, and the rest would be named nowhere at all — and how many attention lines
- * the owed items and scope requests add to the total.
+ * the owed items and the other request items (`requests`) add to the total.
  */
-export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { key: string; attention: string | null; routedScope?: string }[], scopeRequests: AttentionItem[], writer?: MergeWriterSummary | null) {
+export function owedAttention(snapshot: { work: Work[]; now: string }, rows: { key: string; attention: string | null }[], requests: AttentionItem[], writer?: MergeWriterSummary | null) {
   const now = Date.parse(snapshot.now);
   const rowAttention = (key: string) => !!rows.find(row => row.key === key)?.attention;
   // GY-2015: the writer stall stands for a queue the writer cannot move, beside the per-item owed
   // lines it replaces (held heads are dropped from humanNeededAttention while it stands).
   const stall = mergeWriterStallAttention(writer, now);
   const items = [...(stall ? [stall] : []), ...humanNeededAttention(snapshot, writer).filter(item => !rowAttention(item.subject))];
-  // The rule refusal's escalation of a request the approver is judging is answered by that decision.
-  const routed = (key: string) => rows.find(row => row.key === key)?.routedScope;
-  return { rows: humanNeededActions(snapshot.work, new Date(snapshot.now)).map(row => row.source === 'action' && routed(row.key)
-    ? { ...row, decision: `the independent approver's judgement of ${row.key}'s routed scope request`, resolve: routed(row.key)! } : row), items,
-    counted: items.length + scopeRequests.filter(item => !rowAttention(item.subject)).length };
+  return { rows: humanNeededActions(snapshot.work, new Date(snapshot.now)), items,
+    counted: items.length + requests.filter(item => !rowAttention(item.subject)).length };
 }
 
 /**

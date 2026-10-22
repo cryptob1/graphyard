@@ -26,7 +26,7 @@ const proof = 'manual:post-deploy/webhook-deliveries-clean-24h', own = 'manual:w
 const base = (n: number, extra: Partial<Work> = {}): Work => ({
   id: `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`, key: `GY-${n}`, title: `Item ${n}`, description: '', type: 'chore', priority: 1, stage: 'ready', ready: true, epoch: 0, revision: 3, policyRevision: 1,
   createdAt: iso(now - 30 * hour), updatedAt: iso(now - 2 * hour), stageEnteredAt: iso(now - 2 * hour), lease: null, lastAssignment: null, systemDriven: true, implementers: [],
-  workspaces: [], sessions: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], criteria: [], plannedFiles: [],
+  workspaces: [], sessions: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], criteria: [], 
   policy: { checks: ['test', 'typecheck'], review: true }, dependencies: [],
   gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
   ...extra,

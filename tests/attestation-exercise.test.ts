@@ -16,7 +16,7 @@ function item(evidence: Partial<Evidence>[] = [], extra: Partial<Work> = {}): Wo
   const candidate = { sha: head, baseSha: base, pr: 393, branch: 'graphyard/gy-393-1', author: 'worker' };
   return {
     id: 'gy-393', key: 'GY-393', title: 'Attested item', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'The reproduction passes', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'The reproduction passes', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, 
     stage: 'acceptance', revision: 4, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate,
     submission: { epoch: 1, pr: 393 }, reworkRequested: false, scenarioRequirements: [], blocker: null, gates: [], violations: [],
     evidence: evidence.map(entry => ({ id: 'e1', proof: PROOF, sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, producer: 'master-operator', trusted: false, at, ...entry })),

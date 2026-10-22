@@ -71,7 +71,7 @@ after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if 
 
 /** An item claimed by the worker with its workspace registered on `branch`, ready to submit. */
 async function assigned(n: number, branch = `graphyard/gy-${n}-1`) {
-  let w = await engine.execute(operator, 'create', null, { title: `Head submission ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title: `Head submission ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
@@ -187,7 +187,7 @@ function submittedWork(source: 'control-plane' | undefined, ledger: Work['mergeL
   const candidate = { sha, baseSha: base, pr: 41, branch: 'graphyard/gy-41-1', author: 'implementer' };
   const observation: Observation = { ...(source ? { source } : {}), candidate, checks: [], reviews: [], protected: source ? false : true, mergeable: source ? true : false, merged: false, mergeSha: null, baseTip: base, baseTipContained: true, files: ['src/a.ts'],
     scopeFiles: [{ path: 'src/a.ts', status: 'modified', sha: 'd'.repeat(40), baseSha: 'e'.repeat(40), additions: 1, deletions: 1, binary: false }], at, ...overrides };
-  return { id: 'id-41', key: 'GY-41', title: 'Gates', description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:gates'] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'test', revision: 3, policyRevision: 1,
+  return { id: 'id-41', key: 'GY-41', title: 'Gates', description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:gates'] }], policy: { checks: ['test'], review: true }, stage: 'test', revision: 3, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: '/w', branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 41 }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation, blocker: null, gates: [], violations: [], ...(ledger === undefined ? {} : { mergeLedger: ledger }) } as unknown as Work;
 }
@@ -276,7 +276,7 @@ test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/stat
     execFileSync('git', ['clone', '-q', origin, other], { stdio: 'ignore' });
     git(other, 'config', 'user.email', 't@example.com'); git(other, 'config', 'user.name', 'T');
     const moved = await commit(other, 'docs/new.md', 'new\n', 'advance'); git(other, 'push', '-q', 'origin', 'main');
-    const work = { id: 'id-9', key: 'GY-9', plannedFiles: ['src/'], workspaces: [{ epoch: 1, branch: 'graphyard/gy-9-1', host: 'h', path: clone, owner: 'implementer' }], lease: null };
+    const work = { id: 'id-9', key: 'GY-9', workspaces: [{ epoch: 1, branch: 'graphyard/gy-9-1', host: 'h', path: clone, owner: 'implementer' }], lease: null };
     const run = async (status: Record<string, unknown>, args: string[] = []) => {
       const printed: any[] = [];
       await syncWork({ api: async (path: string) => { assert.equal(path, 'status'); return status; }, print: (value: unknown) => printed.push(value), base: 'http://graphyard.test', args } as unknown as CliContext, work);

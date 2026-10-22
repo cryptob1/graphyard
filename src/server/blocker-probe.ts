@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
-import { blockerClasses, environmentalBlockerClasses, itemBlockerClass, maxAutomaticClears, uncoveredBlockerPaths, type BlockerProbe } from '../model/blocker-class.js';
+import { blockerClasses, environmentalBlockerClasses, itemBlockerClass, maxAutomaticClears, type BlockerProbe } from '../model/blocker-class.js';
 import { loopHeldBlocker } from '../model/loop-owned.js';
 import { decisionsByWork } from './decision-ledger.js';
 import { save } from '../store.js';
@@ -15,8 +15,7 @@ import type { Services } from './routes.js';
  * Every probe is written on the item (`blockerProbe`), so the board and `master status` show the
  * class, the last result and when it runs next. A passing probe clears the blocker in the same
  * transaction, with the probe named in the item's history — but only after the control plane has
- * re-classified the blocker itself: an environmental class may be cleared on its probe, a
- * planned-file-scope blocker only once plannedFiles cover every file it names, and a needs-decision
+ * re-classified the blocker itself: an environmental class may be cleared on its probe, and a needs-decision
  * blocker only once no decision on the item stands requested. A genuine or human-only blocker is
  * never cleared here, and neither is one the loop has already cleared `maxAutomaticClears` times
  * in a row since the item last submitted.
@@ -53,10 +52,7 @@ export async function recordBlockerProbe(services: Services, actor: Principal, i
     const clears = previous?.clears ?? 0;
     if (data.result === 'pass') {
       demand(clears < maxAutomaticClears, `${work!.key}'s blocker was already cleared automatically ${clears} times in a row; the master decides this one`, 409);
-      if (classification.class === 'planned-file-scope') {
-        const missing = uncoveredBlockerPaths(work!, classification);
-        demand(!missing.length, `plannedFiles do not yet cover ${missing.join(', ')}`, 409);
-      } else if (classification.class === 'needs-decision') {
+      if (classification.class === 'needs-decision') {
         const standing = ((await decisionsByWork(db, [work!.id]))[work!.id] ?? []).filter(decision => decision.state === 'requested');
         demand(!standing.length, `decision ${standing[0]?.id} still stands requested`, 409);
       } else demand(environmentalBlockerClasses.includes(classification.class) || loopHeldBlocker(work!, data.blocker, classification.class, now.getTime()), `A ${classification.class} blocker is not cleared by a probe`, 409);

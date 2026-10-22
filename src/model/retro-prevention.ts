@@ -41,8 +41,7 @@ export function draftPrevention(pattern: RetroPattern): RetroDraft[] {
   const method = (text: string) => drafts.push({ kind: 'producer-method', registry: 'requirements', target: 'producer-method', title: `Producer method: prevent ${pattern.label}`.slice(0, 200), proposal: `${text} ${evidence}`.slice(0, 4000) });
   const shape = pattern.shape ?? '';
   if (pattern.cause.startsWith('trigger/') || /out-of-scope|landing|carried/.test(shape)) {
-    standards('criteria-wording', 'Word each criterion so the files it implies are named in plannedFiles, and state in the criteria when a test, doc or registry file outside the obvious module must change.');
-    check('planned-files', 'compares the candidate diff with plannedFiles and the documentation paths and names every path outside them');
+    standards('criteria-wording', 'State in the criteria when a test, doc or registry file outside the obvious module must change.');
   } else if (shape === 'base-conflict' || shape === 'not-mergeable' || shape === 'ejected') {
     standards('coding-standards', 'Bring the branch onto the current base with graphyard sync immediately before complete, and resolve conflicts keeping both sides of every edit that belongs to another item.');
     check('merges-onto-base', 'confirms the head merges cleanly onto the current base tip');

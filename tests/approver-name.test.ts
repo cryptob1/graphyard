@@ -175,7 +175,7 @@ function triaged(): Work {
   return {
     id: 'work-101', key: 'GY-101', title: 'Approver names fit the runtime', description: '', type: 'bug', priority: 0,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Bounded', proofs: ['unit:approver-name-bounded-and-unique'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 9, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 9, policyRevision: 1,
     createdAt: iso(-4 * hour), updatedAt: iso(), stageEnteredAt: iso(-hour), ready: false, epoch: 0,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null,

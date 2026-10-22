@@ -1,23 +1,4 @@
-import { configuredGeneratedFiles, isGeneratedFile } from './generated-files.js';
-import { pathScopeContains, type Observation, type ScopeFile, type Work } from './model.js';
-
-/**
- * Submit-time integration regression guard.
- *
- * A candidate may change what its work item planned, and it may add files nobody has shipped.
- * Every other file it touches must match the base branch tip byte for byte: a merge of the base
- * branch that re-resolves a file the worker does not own in favour of its branch silently
- * deletes code and tests that already merged, and only the file list tells the worker what to
- * restore. The classification is pure and shared by the control plane (provider-observed diff)
- * and by `graphyard sync` (local diff against `origin/<base>`). The one exception is the
- * enumerated set of generated files (see generated-files.ts): regenerated from their sources and
- * verified current by CI, they are owned by nobody, so a candidate that regenerates one is not
- * rewriting shipped work. Deleting one is still a deletion. The timing baseline is the other: a
- * change that writes only its own test files' lines there carries the implied companion verdict
- * (model/timing-companion.ts), read from both versions' contents by whoever compared the file.
- */
-export type ScopeKind = 'in-scope' | 'new' | 'generated' | 'companion' | 'matches-base' | 'already-absent' | 'reverted' | 'rewritten' | 'deleted' | 'renamed' | 'binary' | 'unverified';
-export interface ScopeFinding { path: string; kind: ScopeKind; refused: boolean; detail: string }
+import type { Work } from './model.js';
 
 /**
  * GY-863. The landing check's per-file record may carry the blob the three-way merge of the head
@@ -30,41 +11,6 @@ declare module './model/work.js' {
     /** The merged result's blob when the three-way merge was computed and was clean; absent otherwise. */
     mergeSha?: string | null;
   }
-}
-
-export const inPlannedScope = (plannedFiles: string[], path: string) => plannedFiles.some(scope => pathScopeContains(scope, path));
-
-const generatedFiles = configuredGeneratedFiles();
-export function classifyScope(plannedFiles: string[], files: ScopeFile[], generated: readonly string[] = generatedFiles): ScopeFinding[] {
-  const findings: ScopeFinding[] = [];
-  const add = (path: string, kind: ScopeKind, detail: string) => findings.push({ path, kind, refused: !['in-scope', 'new', 'generated', 'companion', 'matches-base', 'already-absent'].includes(kind), detail });
-  for (const file of files) {
-    const movedFrom = file.previousPath && file.previousPath !== file.path ? file.previousPath : undefined;
-    // A rename is judged at both ends: the old path leaves the head, the new path appears on it.
-    if (movedFrom && file.status === 'renamed' && !inPlannedScope(plannedFiles, movedFrom)) {
-      if (file.previousBaseSha === undefined) add(movedFrom, 'unverified', 'not compared against the base branch tip');
-      else if (file.previousBaseSha !== null) add(movedFrom, 'renamed', `renamed to ${file.path}; the base branch still holds it at this path`);
-    }
-    if (inPlannedScope(plannedFiles, file.path)) { add(file.path, 'in-scope', 'inside the planned files'); continue; }
-    if (file.status !== 'removed' && isGeneratedFile(generated, file.path)) { add(file.path, 'generated', 'generated file; regenerated from its sources and verified by CI, owned by no work item'); continue; }
-    // The timing baseline written only for this change's own test files is implied by them (GY-1023).
-    if (file.status !== 'removed' && file.companion?.allowed && file.baseSha) { add(file.path, 'companion', file.companion.detail); continue; }
-    if (file.status === 'removed') {
-      if (file.baseSha === undefined) add(file.path, 'unverified', 'not compared against the base branch tip');
-      else if (file.baseSha === null) add(file.path, 'already-absent', 'the base branch does not hold this file either');
-      else add(file.path, 'deleted', 'deleted; the base branch still holds it');
-      continue;
-    }
-    if (file.baseSha === undefined) add(file.path, 'unverified', 'not compared against the base branch tip');
-    else if (file.baseSha === null) {
-      if (['added', 'copied', 'renamed'].includes(file.status)) add(file.path, 'new', 'new file; the base branch has no file at this path');
-      else add(file.path, 'reverted', 'restores a file the base branch removed');
-    } else if (file.baseSha === (file.mergeSha ?? file.sha)) add(file.path, 'matches-base', file.mergeSha ? 'the three-way merge result is identical to the base branch tip' : 'identical to the base branch tip');
-    else if (file.binary) add(file.path, 'binary', 'binary or oversized content differs from the base branch tip');
-    else if (file.additions === 0 && file.deletions > 0) add(file.path, 'reverted', `removes ${file.deletions} line${file.deletions === 1 ? '' : 's'} that the base branch holds and adds nothing`);
-    else add(file.path, 'rewritten', `differs from the base branch tip (+${file.additions} −${file.deletions})${file.companion ? `; ${file.companion.detail}` : ''}`);
-  }
-  return findings;
 }
 
 /**
@@ -178,16 +124,11 @@ export function threeWayMerge(base: Buffer, ours: Buffer, theirs: Buffer): Three
 }
 
 /**
- * Delivered work items whose planned scope or observed diff covers the path. A pull request the
- * provider reports merged shipped its files whether or not its delivery is recorded yet.
+ * Delivered work items whose observed diff covers the path. A pull request the provider reports
+ * merged shipped its files whether or not its delivery is recorded yet.
  */
 export function shippedBy(path: string, all: Work[]): string[] {
-  return all.filter(item => ((item.stage === 'done' && !item.closure) || !!item.observation?.merged) && (inPlannedScope(item.plannedFiles ?? [], path) || (item.observation?.files ?? []).includes(path))).map(item => item.key);
-}
-
-export function describeRefusal(finding: ScopeFinding, all: Work[]) {
-  const shipped = shippedBy(finding.path, all);
-  return `${finding.path}: ${finding.detail} (${shipped.length ? `shipped by ${shipped.join(', ')}` : 'no delivered work item claims this path'})`;
+  return all.filter(item => ((item.stage === 'done' && !item.closure) || !!item.observation?.merged) && (item.observation?.files ?? []).includes(path)).map(item => item.key);
 }
 
 /**
@@ -203,60 +144,4 @@ declare module './merge-queue.js' {
     /** The open candidates in this head's history that git shows already on the base branch tip (GY-744). */
     landed?: LandedCandidate[];
   }
-}
-/** Items git showed already on the base branch tip (GY-744), whatever their records say: never unlanded. */
-const landedKeys = (observation: Pick<Observation, 'landing'>) => new Set((observation.landing?.landed ?? []).map(entry => entry.key));
-
-/**
- * The landing re-check (GY-97; see merge-queue.ts LandingCheck): what the candidate would revert
- * on the commit it would actually land on, as opposed to the base it is bound to. One entry per
- * file, naming the item that owns it. `adverse` is false for a file the observation could not
- * compare: that refuses the build gate like any uncompared file.
- */
-export interface LandingRegression { base: string; path: string; owners: string[]; adverse: boolean; text: string }
-export function landingRegressions(work: Pick<Work, 'plannedFiles'> & { id?: string }, observation: Pick<Observation, 'scopeFiles' | 'landing'>, all: Work[], generated: readonly string[] = generatedFiles): LandingRegression[] {
-  const landing = observation.landing;
-  if (!landing) return [];
-  const planned = work.plannedFiles ?? [], found: LandingRegression[] = [], landed = landedKeys(observation);
-  // A file the bound-base comparison already refuses is reported there, once.
-  const reported = new Set(classifyScope(planned, observation.scopeFiles ?? [], generated).filter(finding => finding.refused).map(finding => finding.path));
-  for (const finding of classifyScope(planned, landing.files ?? [], generated)) {
-    if (!finding.refused || reported.has(finding.path)) continue;
-    // The file belongs to an unlanded candidate whose planned scope or observed diff covers it,
-    // when no delivery does.
-    const shipped = shippedBy(finding.path, all.map(item => landed.has(item.key) && item.observation ? { ...item, observation: { ...item.observation, merged: true } } : item));
-    const ahead = shipped.length ? [] : all.filter(item => item.id !== work.id && item.stage !== 'done' && !landed.has(item.key) && !!item.candidate
-      && (inPlannedScope(item.plannedFiles ?? [], finding.path) || (item.observation?.files ?? []).includes(finding.path))).map(item => item.key);
-    found.push({ base: landing.base, path: finding.path, owners: [...shipped, ...ahead], adverse: finding.kind !== 'unverified',
-      text: `${finding.path}: ${finding.detail.replaceAll('the base branch tip', 'that commit').replaceAll('the base branch', 'that commit')} (${shipped.length ? `shipped by ${shipped.join(', ')}` : ahead.length ? `owned by ${ahead.join(', ')}, ahead of it and not yet landed` : 'no delivered work item claims this path'})` });
-  }
-  for (const carried of landing.carried ?? []) {
-    if (landed.has(carried.key)) continue;
-    const owner = `${carried.key}, unlanded pull request #${carried.pr} at ${carried.head.slice(0, 12)}`;
-    for (const file of carried.dropped) found.push({ base: landing.base, path: file.path, owners: [carried.key], adverse: true,
-      text: `${file.path}: this head carries ${carried.key}'s commits but not this change — ${file.detail}; merging it would record ${carried.key} merged without it (owned by ${owner})` });
-    if (carried.unverified) found.push({ base: landing.base, path: '*', owners: [carried.key], adverse: false,
-      text: `this head carries ${carried.key}'s commits and not every file of theirs could be compared (owned by ${owner})` });
-  }
-  return found;
-}
-
-/**
- * Build-gate reasons for the observed candidate. An observation that never compared the diff
- * against the base branch tip proves nothing about scope and is refused until a fresh one does.
- * The control plane's own observation (GY-1523) is refused nothing on plannedFiles (GY-1528): the
- * merge writer's trial on the exact merge commit is the gate, and `landingRegressions` still
- * reports what landing would revert for status.
- */
-export function regressionRefusals(work: Pick<Work, 'key' | 'plannedFiles'> & { id?: string }, observation: Pick<Observation, 'scopeFiles' | 'landing'> & { source?: 'control-plane' }, all: Work[], generated: readonly string[] = generatedFiles): string[] {
-  if (observation.source === 'control-plane') return [];
-  if (!observation.scopeFiles) return ['Candidate diff has not been compared against the base branch tip; a fresh GitHub observation is required'];
-  const refused = classifyScope(work.plannedFiles ?? [], observation.scopeFiles, generated).filter(finding => finding.refused);
-  // The same judgement where the candidate would land: the base it is bound to is held while its
-  // head is unchanged, so what the base gained since is only visible against the landing commit.
-  const landing = landingRegressions({ id: work.id ?? '', plannedFiles: work.plannedFiles }, observation, all, generated);
-  return [...(refused.length ? [`Candidate changes ${refused.length} file${refused.length === 1 ? '' : 's'} outside its planned files that must match the base branch byte-for-byte; run graphyard sync ${work.key}, restore each file from origin/<base>, and push again`,
-    ...refused.map(finding => `Out-of-scope regression: ${describeRefusal(finding, all)}`)] : []),
-  ...(landing.length ? [`Landing the candidate on ${landing[0].base.slice(0, 12)}, the commit it would merge onto, would revert ${landing.length} file${landing.length === 1 ? '' : 's'} outside its planned files; run graphyard sync ${work.key}, restore each file as its owner shipped it, and push again`,
-    ...landing.map(entry => `Landing regression: ${entry.text}`)] : [])];
 }

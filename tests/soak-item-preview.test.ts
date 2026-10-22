@@ -91,7 +91,7 @@ class World {
       const candidate = current ? { sha: current, baseSha: sha('base'), pr: n, branch: `graphyard/gy-${n}-1`, author: 'worker' } : null;
       work.push({
         ...doc, title: `Item ${n}`, description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'The home shows the change', proofs: ['e2e:site-home'] }],
-        policy: { checks: ['test'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, createdAt: iso(arrives(n)), updatedAt: iso(now), stageEnteredAt: iso(arrives(n)),
+        policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(arrives(n)), updatedAt: iso(now), stageEnteredAt: iso(arrives(n)),
         ready: true, epoch: 1, lease: null, workspaces: [], submission: current ? { epoch: 1, pr: n } : null, candidate, scenarioRequirements: [], evidence: [], blocker: null, violations: [],
         gates: ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: name !== 'test' && name !== 'merge', reasons: [] })),
         ...(ended ? closed(n) ? { stage: 'done', closure: { kind: 'obsolete', reason: 'Not needed', ref: null, by: 'operator', at: iso(now), from: 'build' } } : { stage: 'done', delivery: { mergedAt: iso(now), mergeSha: current!, authorizationRevision: 1 } } : { stage: 'build' }),

@@ -8,83 +8,16 @@ import { hostDoableAsk, hostDoableRefusal, parkRefusal, type HostDoableAsk, type
 import { configHome, installDirectory, readInstallRecord, readToken } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { repositoryFromRemote } from '../onboarding.js';
-import { scopeBlockedBudgetMs, scopeRequestOutcome } from '../model/scope.js';
 import type { CliContext } from './context.js';
 import { workMutation, type CliCommand } from './registry.js';
 import { parkCommand, parkInput } from './park-command.js';
 export { parkArgs, parkCommand } from './park-command.js';
 
 /**
- * The commands a session runs about its own item, rather than about the fleet: the retired
- * scope-request no-op, and the two halves of a human-only wait — the worker parks the item, the
+ * The commands a session runs about its own item, rather than about the fleet: the two halves of a human-only wait — the worker parks the item, the
  * human lists what waits and answers it. `master status` reports on them; none of them is a master
  * command, so they live beside it rather than in it.
  */
-
-/** The one line `scope-request` prints (GY-1991): the plan is not a lock, so there is nothing to request. */
-export const scopeRequestPlanLine = 'plannedFiles is a plan, not a lock: edit the file you need and submit; nothing needs requesting.';
-
-/** The worker half of live scope negotiation, retired (GY-1991): the command posts nothing and returns at once, `--wait` included. */
-export const scopeRequestCommand: CliCommand = {
-  name: 'scope-request',
-  readsConnection: () => false,
-  help: [
-    '  scope-request GY-N EPOCH [PATH... -- REASON]',
-    '                                plannedFiles is a plan, not a lock: edit the file you need and',
-    '                                submit; nothing needs requesting. The command files nothing with',
-    '                                the control plane and returns at once, `--wait` included.',
-  ],
-  async run(context) {
-    context.print(scopeRequestPlanLine);
-  },
-};
-
-/**
- * GY-1484. How long `scope-request --wait` waited by default: the whole bound the loop settles a scope
- * ask in, so a refusal the rule defers to the independent approver — routed, judged within the
- * approver's ten-minute bound and applied — is read in the one wait instead of reported pending
- * while the approval is still on its way, which led workers to give the ask up before it landed.
- * The command no longer waits (GY-1991); the bound remains the one old requests' outcomes are read under.
- */
-export const scopeRequestWaitMs = scopeBlockedBudgetMs;
-/**
- * The outcome of this attempt's open scope request, read from the item as the control plane holds
- * it (GY-176): the worker's own command reads durable state, so nothing is pasted into its session.
- * Polls until the request is decided or no longer open, or the wait (`scopeRequestWaitMs`, the whole
- * bound the loop settles an ask in, approver included: GY-1484) runs out, and reports it pending
- * then. Every read carries the control plane's own time, which is what the lease deadline is
- * measured against. An approval clears the request, so one decided before the worker waits is read
- * from the decision this attempt's request received.
- */
-export async function awaitScopeOutcome(context: Pick<CliContext, 'api'>, work: Work, epoch: number, options: { waitMs?: number; everyMs?: number; cli?: string } = {}) {
-  const decided = decisionOfAttempt(work, epoch);
-  const request = work.scopeRequest?.epoch === epoch ? work.scopeRequest : decided && { at: decided.requestedAt, paths: decided.paths };
-  if (!request) throw new Error(`${work.key} has no scope request for epoch ${epoch}; ask with scope-request ${work.key} ${epoch} PATH... -- REASON`);
-  const ask = { epoch, at: request.at, paths: request.paths }, cli = options.cli ?? 'graphyard';
-  const deadline = Date.now() + (options.waitMs ?? scopeRequestWaitMs);
-  for (;;) {
-    // Liveness is judged on the control plane's clock, from the same read as the item: the lease
-    // deadline it issued is compared with its own `now`, never this host's.
-    const snapshot = await context.api('work-snapshot') as { work: Work[]; now: string };
-    const item = snapshot.work.find(entry => entry.id === work.id) ?? work;
-    const outcome = scopeRequestOutcome(item, ask, Date.parse(snapshot.now), cli);
-    if (outcome.state !== 'pending' || Date.now() >= deadline) return { key: work.key, epoch, paths: ask.paths, ...outcome, ...(outcome.state === 'pending' ? { next: `Run scope-request ${work.key} ${epoch} --wait again` } : {}) };
-    await new Promise(resolve => setTimeout(resolve, Math.min(options.everyMs ?? 10_000, Math.max(0, deadline - Date.now()))));
-  }
-}
-
-/**
- * The decision this attempt's request received. One recorded before decisions carried their epoch
- * has none, so it is this attempt's only when the live lease is this epoch's, its holder asked,
- * and it was asked after this epoch's claim: a legacy outcome of an earlier attempt never is.
- */
-function decisionOfAttempt(work: Work, epoch: number) {
-  const decision = work.scopeDecision;
-  if (!decision) return null;
-  if (decision.epoch !== undefined) return decision.epoch === epoch ? decision : null;
-  const claim = work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : undefined;
-  return work.lease?.epoch === epoch && decision.requestedBy === work.lease.owner && !!claim && Date.parse(decision.requestedAt) >= Date.parse(claim) ? decision : null;
-}
 
 /**
  * This host's sealing key: an RSA key pair kept under the Graphyard configuration home, mode 0600;
@@ -296,4 +229,4 @@ export const routedParkCommand: CliCommand = {
 };
 
 /** The session commands the CLI registers beside the master's, in the order the help prints them. */
-export const sessionCommands: CliCommand[] = [scopeRequestCommand, routedParkCommand, humanRequestsCommand, answerHumanCommand, unsealCommand, loginCommand];
+export const sessionCommands: CliCommand[] = [routedParkCommand, humanRequestsCommand, answerHumanCommand, unsealCommand, loginCommand];

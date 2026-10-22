@@ -19,7 +19,7 @@ function plane() {
   const work: Work[] = [];
   const create = (title: string, createdBy: string) => {
     const item = { id: `work-${work.length + 1}`, key: `GY-${work.length + 1}`, title, description: '', type: 'feature', priority: 2, dependencies: [], createdBy,
-      criteria: [{ id: 'AC-1', text: 'The fixture site\'s home shows this change', proofs: ['e2e:fixture-home'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+      criteria: [{ id: 'AC-1', text: 'The fixture site\'s home shows this change', proofs: ['e2e:fixture-home'] }], policy: { checks: ['test'], review: true }, 
       stage: 'backlog', revision: 1, policyRevision: 1, createdAt: iso(), updatedAt: iso(), stageEnteredAt: iso(), ready: false, epoch: 0, lease: null, workspaces: [], candidate: null,
       submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [] } as unknown as Work;
     work.push(item);

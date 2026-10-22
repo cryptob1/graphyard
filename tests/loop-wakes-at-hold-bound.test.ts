@@ -43,7 +43,7 @@ function gy1619(observedAt: number, systemDriven = true, { key = 'GY-1619', id =
   return {
     id, key, title: 'A docs-page conflict', description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:up'] }], policy: { checks: ['test'], review: true },
-    plannedFiles: ['src/up.ts', ...paths], stage: 'build', revision: 20, policyRevision: 3, createdAt: iso(at('00:00:00')), updatedAt: iso(observedAt),
+    stage: 'build', revision: 20, policyRevision: 3, createdAt: iso(at('00:00:00')), updatedAt: iso(observedAt),
     stageEnteredAt: conflictSince, ready: true, epoch: 3, lease: null, workspaces: [], submission: { epoch: 3, pr: 1080 }, systemDriven,
     candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation, baseRefresh, blocker: null, violations: [],
     gates: [{ name: 'build', passed: false, reasons: [conflict] }, { name: 'merge', passed: false, reasons: ['Pull request is not mergeable against the current base'] }],

@@ -211,7 +211,7 @@ test('unit:planner-waits-for-acceptance — the planner never plans a goal whose
   const runs: string[] = [];
   let goals: Goal[] = [recorded, drafted, accepted];
   const item = { ref: 'play', title: 'Start the game', plain: 'Players can start the game.', description: 'The page starts the game', outcomes: ['play'], cases: ['play'],
-    criteria: [{ id: 'AC-1', text: 'The game starts', proofs: ['unit:game-starts'] }], plannedFiles: ['src/game.ts'], dependsOn: [] };
+    criteria: [{ id: 'AC-1', text: 'The game starts', proofs: ['unit:game-starts'] }], dependsOn: [] };
   const planner: PlannerEffects = {
     settings: diagnosticianSettings({}), cwd: fixture, goals: async () => goals,
     runner: async (_role, attempt) => ({ runtime: 'stub', model: attempt, runner: stubRuntime(() => ({ goal: 'GOAL-9', summary: 'Players can play. A static page starts the game. One item ships it.', note: 'A static page.', items: [item] }), runs) }),

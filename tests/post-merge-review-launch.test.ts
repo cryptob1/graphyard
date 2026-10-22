@@ -37,7 +37,7 @@ const at = (offsetMs = 0) => new Date(base.getTime() + offsetMs).toISOString();
 function deliveredPrLess(key: string): Work {
   const candidate = { sha: H, baseSha: B, branch: `graphyard/${key.toLowerCase()}-1`, author: 'graphyard-opencode-1' };
   return { id: randomUUID(), key, title: `Item ${key}`, description: '', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/feature.ts'],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, 
     stage: 'done', revision: 9, policyRevision: 1, createdAt: at(), updatedAt: at(), stageEnteredAt: at(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: candidate.branch, epoch: 1, owner: candidate.author }], candidate, submission: { epoch: 1 }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: [candidate.author], postMergeReview: 'owed', systemDriven: true,

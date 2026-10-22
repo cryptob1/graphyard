@@ -56,7 +56,7 @@ async function ledgerDelivery(suffix: string, mergedHoursAgo: number, prHoursBef
   const base = {
     id, key, title: `Delivery ${suffix}`, description: '', type: 'feature', priority: 1, stage: 'done', ready: true, epoch: 1,
     revision: AUTHORIZED_REVISION, policyRevision: 1, policy: { checks: [], review: false }, criteria, evidence: [evidence],
-    dependencies: [], plannedFiles: [], workspaces: [], implementers: ['worker'], gates: [], violations: [], queueHistory: [],
+    dependencies: [], workspaces: [], implementers: ['worker'], gates: [], violations: [], queueHistory: [],
     scenarioRequirements: [], lease: null, candidate, submission: { epoch: 1, pr: Number(suffix) }, observation, blocker: null,
     reworkRequested: false, createdAt: createdAt.toISOString(), updatedAt: mergedAt.toISOString(), stageEnteredAt: mergedAt.toISOString(),
   };

@@ -130,7 +130,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const checks = checkStates(item, release.ciAppIds);
   // The review gate's own verdict, whichever provider gave it (GitHub, Codex or an agent reviewer).
   const reviewGate = item.gates.find(g => g.name === 'review');
-  // What merging it would reach and what could take it back (GY-972), from its scope and gates.
+  // What merging it would reach and what could take it back (GY-972), from its changed files and gates.
   const radius = blastRadius(item);
   // The risk class of the delta the merge would apply, beside the path-glob lane (GY-1521), judged by the repository
   // policy the control plane serves on /api/status, the one its gates use (GY-1843).
@@ -233,7 +233,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         <ul>{requests.map(r => <li key={r.id}>{r.requestedBy} recorded a {r.type} {age(r.at)} ago and released its lease: {shortShas(r.reason)} — decided by {r.decider.who}{r.decider.command ? <> (<code>{r.decider.command}</code>)</> : ''}</li>)}</ul></div>}
       {(item.agentRequests ?? []).length === 0 && <p className="muted">No agent has recorded a typed request on this item.</p>}
       {(item.agentRequests ?? []).map(request => <div className="criterion" key={request.id}><strong>{request.state === 'open' ? '○' : '✓'} {request.type} · {request.requestedBy}</strong>
-        <p>{shortShas(request.reason)}{request.paths?.length ? ` · ${request.paths.join(', ')}` : ''}</p>
+        <p>{shortShas(request.reason)}</p>
         <p>Decided by {request.decider.who}{request.decider.command ? ` · ${request.decider.command}` : ''} · recorded {age(request.at)} ago{request.releasedLease ? ' and the attempt released its lease' : ''}{request.state === 'resolved' ? ` · resolved: ${shortShas(request.resolution ?? 'no reason recorded')}` : ''}</p></div>)}
       <h3>Acceptance criteria and required proof</h3>{item.criteria.map(ac => <div className="criterion" key={ac.id}><strong>{ac.id} · {ac.text}{ac.bootstrap ? ' · bootstrap mode' : ''}</strong>{ac.bootstrap && <p className="amber">Proof deferred by {ac.bootstrap.declaredBy} on {new Date(ac.bootstrap.declaredAt).toLocaleString()} at policy v{ac.bootstrap.policyRevision}: {shortShas(ac.bootstrap.reason)}. Review, CI and every other criterion still gate this item. The proof is not dropped — it stays owed on {ac.bootstrap.contractPaths.join(', ')} and the next change touching that contract must produce it.</p>}</div>)}
       {proofs.map(p => <div className="criterion" key={`${p.criterion}:${p.proof}`}><strong>{p.criterion} · {p.proof} · {p.status}</strong><p>{p.status === 'deferred' ? `Deferred in bootstrap mode; recorded as an obligation on ${p.bootstrap?.contractPaths.join(', ')}` : p.scenario ? `Scenario v${p.scenario.revision} in ${p.scenario.environment}` : 'Requires an authorized producer or manual operator evidence'} · current candidate and policy v{item.policyRevision}</p>{p.status !== 'deferred' && p.bootstrap && <p className="amber">Inherited from {p.bootstrap.key} {p.bootstrap.criterionId} because this item plans to touch {p.bootstrap.contractPaths.join(', ')}. A bootstrap deferral cannot be renewed by the change that inherits it.</p>}{item.proofGaps?.includes(p.proof) && <p className="amber">No principal was authorized to produce {p.proof} when this intent was recorded. Open Proof authority and grant it before dispatch.</p>}</div>)}

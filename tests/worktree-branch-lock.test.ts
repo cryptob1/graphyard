@@ -188,7 +188,7 @@ test('unit:workspace-failure-spares-profile — the engine keeps the preserved-a
   const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
   const worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' };
   const id = () => randomUUID();
-  const input = (title: string) => ({ title, plannedFiles: [`src/${title}.ts`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+  const input = (title: string) => ({ title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
   const claimed = async (actor: Principal = worker) => {
     let work = await engine.execute(operator, 'create', null, input(randomUUID()), id());
     work = await engine.execute(operator, 'ready', work.id, {}, id());
@@ -256,7 +256,7 @@ test('unit:workspace-failure-spares-profile — the loop cools off no profile fo
   });
   const item = (epoch: number): Work => ({
     id: `id-gy-860-${epoch}`, key: `GY-86${epoch}`, title: `Item ${epoch}`, description: '', type: 'bug', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, 
     stage: 'build', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: new Date().toISOString(),
     ready: true, epoch, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],

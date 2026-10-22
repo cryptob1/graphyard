@@ -26,7 +26,7 @@ function item(): Work {
   const candidate = { sha: A, baseSha: M, pr: 289, branch: 'graphyard/gy-486-1', author: 'worker' };
   return {
     id: 'gy-486', key: 'GY-486', title: 'Attested item', description: '', type: 'bug', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Review converges', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'Review converges', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, 
     stage: 'acceptance', revision: 9, policyRevision: 2, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'machine', path: '/tmp/gy-486', branch: 'graphyard/gy-486-1', epoch: 1, owner: 'worker' }], implementers: ['worker'], candidate,
     submission: { epoch: 1, pr: 289 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],

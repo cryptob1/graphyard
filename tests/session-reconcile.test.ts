@@ -44,7 +44,7 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 }
 function work(): Work {
   const candidate = { sha: H, baseSha: B, pr: 127, branch: 'graphyard/gy-127-1', author: 'implementer' };
-  return { id: 'work-127', key: 'GY-127', title: 'Queue tip approval', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-127', key: 'GY-127', title: 'Queue tip approval', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['integration:absent-pane-resolves-request'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'review', revision: 7, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 127 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

@@ -104,7 +104,7 @@ async function dispatchFixture() {
   git(fixture.main, 'remote', 'set-url', 'origin', 'https://github.com/owner/project.git');
   await setupMaster(fixture.main, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
   const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
-  const item = { id: 'id-GY-7', key: 'GY-7', title: 'GY-7', description: '', type: 'feature', priority: 2, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'ready', revision: 1, policyRevision: 1,
+  const item = { id: 'id-GY-7', key: 'GY-7', title: 'GY-7', description: '', type: 'feature', priority: 2, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] } as unknown as Work;
   return { ...fixture, profile, item, cleanup: async () => { await rm(fixture.root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
@@ -239,7 +239,7 @@ async function fakeServer(item: () => any, blocked: any[]) {
 
 test('integration:environment-failure-attributed — a sync that fails on a read-only path records a blocker naming the sandbox and the path, and the item presents as the environment', async () => {
   const fixture = await linkedWorktree('GY-1-1');
-  const item = { id: 'w1', key: 'GY-1', stage: 'build', ready: true, plannedFiles: ['README.md'], dependencies: [], lease: { owner: 'worker-a', epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() },
+  const item = { id: 'w1', key: 'GY-1', stage: 'build', ready: true, dependencies: [], lease: { owner: 'worker-a', epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() },
     workspaces: [{ epoch: 1, host: 'h', path: fixture.worktree, branch: 'graphyard/gy-1-1' }], observation: null, submission: null, blocker: null };
   const blocked: any[] = [];
   const server = await fakeServer(() => item, blocked);

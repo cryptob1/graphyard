@@ -90,24 +90,24 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.
   assert.doesNotMatch(readFileSync(join(src, 'store/locked-read.ts'), 'utf8'), /settled IS NOT TRUE|NOT i\.settled/, 'the locked read does not read every open document whole');
 
-  // What a command reads whole, observed on its queries: the item, the open items overlapping it by
-  // planned files or an exclusive resource, and its dependency — never an unrelated open item, whose
+  // What a command reads whole, observed on its queries: the item, the open items sharing an exclusive
+  // resource with it, and its dependency — never an unrelated open item, whose
   // realistic history is read as the compact projection.
   await ensureTemplate();
-  const dependency = delivered(template, 9000), overlapping = open(template, 9001, ['src/scope-probe/']), sharing = open(template, 9002, ['src/elsewhere/'], ['probe-db']);
+  const dependency = delivered(template, 9000), sharing = open(template, 9002, ['probe-db']);
   const unrelated = Array.from({ length: 5 }, (_, n) => open(template, 9003 + n));
-  await insert([dependency, overlapping, sharing, ...unrelated]);
-  const focus = await engine.execute(operator, 'create', null, { title: 'Scope probe', plannedFiles: ['src/scope-probe/a.ts'], exclusiveResources: ['probe-db'], dependencies: [dependency.id], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  await insert([dependency, sharing, ...unrelated]);
+  const focus = await engine.execute(operator, 'create', null, { title: 'Scope probe', exclusiveResources: ['probe-db'], dependencies: [dependency.id], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
   timeTransactions();
   const { reads } = await held('scope', () => engine.execute(operator, 'ready', focus.id, {}, randomUUID()));
   const seen = new Set(reads.flatMap(entry => entry.keys));
-  assert.deepEqual([...seen].sort(), [focus.key, dependency.key, overlapping.key, sharing.key].sort(), 'the command read whole only its item, its overlapping open items and its dependency');
+  assert.deepEqual([...seen].sort(), [focus.key, dependency.key, sharing.key].sort(), 'the command read whole only its item, the open item sharing its resource and its dependency');
   const board = await lockedWork(store.pool, [focus.id]);
   const standIn = (key: string) => isStandIn(board.find(item => item.key === key)!);
-  assert.deepEqual([focus.key, dependency.key, overlapping.key, sharing.key].map(standIn), [false, false, false, false], 'the item, its overlaps and its dependency are documents');
+  assert.deepEqual([focus.key, dependency.key, sharing.key].map(standIn), [false, false, false], 'the item, the resource sharer and its dependency are documents');
   for (const item of unrelated) {
     const projection = board.find(entry => entry.key === item.key)!;
-    assert.ok(standIn(item.key) && !projection.pipeline && projection.plannedFiles.length && projection.stage === item.stage, `${item.key} is read as its compact projection`);
+    assert.ok(standIn(item.key) && !projection.pipeline && projection.stage === item.stage, `${item.key} is read as its compact projection`);
   }
   await assert.rejects(store.transaction(async (db, now) => save(db, board.find(entry => entry.key === unrelated[0].key)!, 'test', 'test', now)), /compact projection/);
 });
@@ -194,7 +194,7 @@ function delivered(template: Work, n: number): Work {
   const at = stamp(n);
   return {
     ...structuredClone(template), id, key, title: `Delivered change ${n}`, description: `Why change ${n} mattered. `.repeat(40),
-    stage: 'done', stageEnteredAt: at, ready: true, lease: null, nextAction: null, blocker: null, plannedFiles: paths(n, 6),
+    stage: 'done', stageEnteredAt: at, ready: true, lease: null, nextAction: null, blocker: null, 
     candidate: { sha: sha(n), baseSha: sha(n, 'b'), pr: 1000 + n } as Work['candidate'],
     submission: { epoch: 2, pr: 1000 + n } as Work['submission'],
     delivery: { mergedAt: at, mergeSha: sha(n, 'm'), authorizationRevision: 40,
@@ -205,9 +205,9 @@ function delivered(template: Work, n: number): Work {
     ...histories(n, at, 1),
   } as Work;
 }
-/** An open item: unassigned, with its own planned files and the histories of earlier attempts (reworked, re-dispatched). */
-function open(template: Work, n: number, plannedFiles = paths(n, 4), exclusiveResources: string[] = []): Work {
-  return { ...structuredClone(template), id: randomUUID(), key: `OPEN-${n}`, title: `Open change ${n}`, description: `What open change ${n} must do. `.repeat(30), plannedFiles, exclusiveResources, ready: n % 2 === 0, stage: 'backlog',
+/** An open item: unassigned, with the histories of earlier attempts (reworked, re-dispatched). */
+function open(template: Work, n: number, exclusiveResources: string[] = []): Work {
+  return { ...structuredClone(template), id: randomUUID(), key: `OPEN-${n}`, title: `Open change ${n}`, description: `What open change ${n} must do. `.repeat(30), exclusiveResources, ready: n % 2 === 0, stage: 'backlog',
     ...histories(n, stamp(n), 0.5) } as Work;
 }
 async function insert(documents: Work[]) {
@@ -219,7 +219,7 @@ async function insert(documents: Work[]) {
 
 let template: Work, opened = 0, closed = 0, prs = 0;
 async function ensureTemplate() {
-  template ??= await engine.execute(operator, 'create', null, { title: 'Template', plannedFiles: ['src/template/'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  template ??= await engine.execute(operator, 'create', null, { title: 'Template', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
 }
 async function seed(open_: number, closed_: number) {
   await insert([...Array.from({ length: open_ }, () => open(template, opened++)), ...Array.from({ length: closed_ }, () => delivered(template, closed++))]);
@@ -227,7 +227,7 @@ async function seed(open_: number, closed_: number) {
 
 /** One claim, renew, submit and registry select, each its own coordination transaction; their lock hold in ms. */
 async function lifecycle(round: string) {
-  let work = await engine.execute(operator, 'create', null, { title: `Bench ${round}`, plannedFiles: [`src/bench-${round}/`], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { title: `Bench ${round}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   const claim = await held('claim', () => engine.execute(worker, 'claim', work.id, {}, randomUUID()));
   work = claim.result;
@@ -298,7 +298,7 @@ test('unit:lock-hold-bounded-by-open-items — with 1000 items (600 delivered) c
   assert.equal(all.length, Number((await store.pool.query('SELECT count(*) FROM work_items')).rows[0].count));
   const summary = all.find(item => item.key === 'DONE-3')!;
   assert.ok(isSettledSummary(summary) && !summary.pipeline && (summary.sessions ?? []).length === 0, 'a settled delivery is read as its summary');
-  assert.deepEqual([summary.stage, summary.plannedFiles, summary.delivery, (summary.observation as any).files], [target.stage, target.plannedFiles, target.delivery, (target.observation as any).files], 'the summary keeps what decisions read');
+  assert.deepEqual([summary.stage, summary.delivery, (summary.observation as any).files], [target.stage, target.delivery, (target.observation as any).files], 'the summary keeps what decisions read');
   assert.ok(all.filter(item => item.stage !== 'done').every(item => !isSettledSummary(item) && isStandIn(item)), 'every open item is a compact projection when no decision names it');
   const bytesOpen = Number((await store.pool.query("SELECT avg(pg_column_size(document)) FROM work_items WHERE document->>'key' LIKE 'OPEN-%'")).rows[0].avg);
   assert.ok(bytesOpen > 4_000, `an open document stores ${Math.round(bytesOpen)} bytes compressed: it carries its attempts' histories`);

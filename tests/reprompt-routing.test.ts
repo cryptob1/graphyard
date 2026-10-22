@@ -56,7 +56,7 @@ function held(id: string, key: string, principal: string, epoch: number, overrid
   return {
     id, key, title: `Follow-ups for ${key}`, description: '', type: 'feature', priority: 1,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 3, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 3, policyRevision: 1,
     createdAt: iso(-minutes(600)), updatedAt: iso(0), stageEnteredAt: iso(-minutes(300)), ready: true, epoch,
     lease: { owner: principal, epoch, expiresAt: iso(minutes(600)) },
     lastAssignment: { owner: principal, epoch, claimedAt: iso(-minutes(20)) },
@@ -193,7 +193,7 @@ test('unit:reprompt-pane-gone — a recorded pane gone from the runtime ends the
     // Still its own pane, the re-prompt reaches it once.
     await runCycle(master, state, effects, () => clock + minutes(31));
     assert.deepEqual(log.targets, ['w1:pMine'], 'the idle re-prompt reaches the recorded pane');
-    assert.match(log.texts[0], /holds GY-252 \(epoch 1\) with no open blocker or scope request/);
+    assert.match(log.texts[0], /holds GY-252 \(epoch 1\) with no open blocker/);
 
     // The pane dies, and the profile's agent name is taken by another item's live session — the
     // shape the GY-589 incident delivered: the idle re-prompt resolved by name would paste there.

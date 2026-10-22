@@ -7,9 +7,7 @@ import { parseGeneratedManifest } from '../sync.js';
 /**
  * The generated-files deployment variable every installer sets beside GRAPHYARD_PRINCIPALS, next
  * to the capacity limits: the comma-separated exact repository-relative paths the managed
- * repository's generated-file manifest declares. Unset, the regression guard exempts nothing, so
- * a repository whose manifest declares generated pages hits the same out-of-scope refusal on
- * every docs-touching item until an installer derives and sets the value from that manifest.
+ * repository's generated-file manifest declares, derived from that manifest by every installer.
  */
 export const generatedFilesVariable = 'GRAPHYARD_GENERATED_FILES' as const;
 

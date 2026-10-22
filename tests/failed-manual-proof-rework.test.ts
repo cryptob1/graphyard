@@ -27,7 +27,7 @@ function item(evidence: Partial<Evidence>[] = [{}], extra: Partial<Work> = {}): 
   const candidate = { sha: head, baseSha: base, pr: 901, branch: 'graphyard/gy-901-1', author: 'worker' };
   return {
     id: 'gy-901', key: 'GY-901', title: 'Follow-up triage', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Review follow-ups are triaged', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: 'Review follow-ups are triaged', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, 
     stage: 'acceptance', revision: 4, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate,
     submission: { epoch: 1, pr: 901 }, reworkRequested: false, scenarioRequirements: [], blocker: null, gates: [], violations: [],
     producerProofs: [PROOF],

@@ -63,7 +63,7 @@ export const cycleStepsSchema = z.object({
   observe: stepCostSchema,
   /** Closing finished sessions, failing over exhausted ones, stopping orphaned supervisors, and reclaiming worktrees and quarantines. */
   close: stepCostSchema,
-  /** Deciding scope requests and requesting, supervising and retiring the routine decisions an approver applies. */
+  /** Requesting, supervising and retiring the routine decisions an approver applies. */
   decisions: stepCostSchema,
   /** Dispatching claimable work and shepherding the review and proof requests. */
   dispatch: stepCostSchema,
@@ -110,11 +110,8 @@ export const cycleMetricsSchema = z.object({
   production: percentileSchema.default(noMeasurement),
   postDeploy: percentileSchema.default(noMeasurement),
   postDeployFailures: z.number().int().min(0).default(0),
-  // How promptly the loop answers the workers waiting on it: request-to-decision over the
-  // retained scope decisions, and the longest request still undecided at this cycle.
-  // (Optional, so a cursor written before the loop decided scope keeps parsing as it is.)
-  scope: percentileSchema.optional(),
-  scopeOpenMs: z.number().int().min(0).optional(),
+  /** Retired (GY-1992): the scope-request latency; nothing writes it, and a cursor written before keeps parsing. */
+  scope: z.unknown().optional(), scopeOpenMs: z.unknown().optional(),
 }).strict();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 
@@ -192,12 +189,6 @@ export const hostMemoryStateSchema = z.object({
   consumers: z.array(z.object({ command: z.string().max(200), processes: z.number().int().min(0), rssBytes: z.number().min(0) }).strict()).max(10).default([]),
 }).strict();
 
-export const scopeMeasurementSchema = z.object({
-  work: z.string().max(200), epoch: z.number().int().min(0), at: z.string(),
-  waitedMs: z.number().int().min(0), state: z.enum(['approved', 'refused']),
-}).strict();
-export type ScopeMeasurement = z.infer<typeof scopeMeasurementSchema>;
-
 export { itemClockSchema, latencySampleSchema, type ItemClock, type LatencySample } from './latency-clock.js';
 
 /**
@@ -247,10 +238,8 @@ export const approvalWatchSchema = z.object({
   observation: z.object({ at: z.string(), sha: z.string() }).strict().nullable().default(null),
   /** The account and runtime the current session was launched on, so its exhaustion holds the right account (GY-182). */
   account: z.string().max(200).nullable().default(null), runtime: z.string().max(40).nullable().default(null),
-  /** The worker scope request a `requirements` decision answers (GY-176); GY-1701 `coveringAdopt` marks a foreign covering adopt (ask end must not withdraw it). */
-  scope: z.object({ epoch: z.number().int().min(1), at: z.string(), requestedBy: z.string().max(200), paths: z.array(z.string().max(500)).max(50) }).strict().nullable().default(null), coveringAdopt: z.boolean().default(false),
-  /** The failed decision whose request was given back because only its scope request closed (GY-1484): once per decision, never per cycle. */
-  givenBack: z.string().max(100).nullable().default(null),
+  /** Retired (GY-1992): the scope request a decision answered; a cursor written before keeps parsing. */
+  scope: z.unknown().optional(), coveringAdopt: z.unknown().optional(), givenBack: z.unknown().optional(),
   /** The agent-registry session the current approver runs on (GY-190), ended once the decision is judged or its quota is spent (GY-182). */
   session: z.string().max(200).nullable().default(null),
   /** Why the last launch waits for a slot: the registry refused it only because the role was full (GY-190). */
@@ -329,7 +318,8 @@ export const doctorFiledSchema = z.object({
   faultClass: z.enum(faultClasses), title: doctorLine(200), description: doctorLine(20000),
   priority: z.number().int().min(0).max(1),
   criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: doctorLine(4000), proofs: z.array(doctorLine(200)).min(1).max(10) }).strict()).min(1).max(20),
-  plannedFiles: z.array(doctorLine(500)).min(1).max(100),
+  /** Retired (GY-1992): items carry no planned files; a run or cursor that still names them keeps parsing. */
+  plannedFiles: z.unknown().optional(),
 }).strict();
 /** A filing the control plane did not accept when its run applied, kept for the later cycles that file it again. */
 export const doctorPendingFileSchema = z.object({
@@ -498,8 +488,8 @@ export const daemonStateSchema = z.object({
   latency: z.array(latencySampleSchema).default([]),
   /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and src/daemon/doctor.ts still names it until it drops its `silenceReport` argument. */
   silence: z.unknown().optional(),
-  /** One entry per scope request this loop has decided, for the latency budget it must keep. */
-  scope: z.array(scopeMeasurementSchema).default([]),
+  /** Retired (GY-1992): the scope requests this loop decided; a cursor written before keeps parsing. */
+  scope: z.unknown().optional(),
   /** Per work item, what the loop last saw of an assignment whose Herdr session is gone. */
   orphans: z.record(z.string(), orphanObservationSchema).default({}),
   /** Per decision action key, the request this loop put to an approver and what became of it. */
@@ -592,5 +582,5 @@ export async function archiveDaemonCursor(config: Pick<MasterConfig, 'credential
 // The cursor's persistence, bounds and single-writer lock live in ./state-cursor.ts; these
 // re-export it, so every existing import keeps working.
 import { daemonStatePath, clampCount } from './state-cursor.js';
-export { standingTmpKey, retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, retainedScopeDecisions, retainedSamples, retainedClocks, retainedBaseFailures, retainedDispatchFailureRuns, reclaimIntervalMs, gigabytes, emptyDaemonState, daemonStatePath, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, faultActionKey, boundDaemonState, boundDeployment, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
+export { standingTmpKey, retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, retainedSamples, retainedClocks, retainedBaseFailures, retainedDispatchFailureRuns, reclaimIntervalMs, gigabytes, emptyDaemonState, daemonStatePath, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, faultActionKey, boundDaemonState, boundDeployment, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
 

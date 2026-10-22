@@ -34,7 +34,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 119, branch: 'graphyard/gy-114-1', author: 'implementer' };
-  return { id: 'work-114', key: 'GY-114', title: 'Supervisor install', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-114', key: 'GY-114', title: 'Supervisor install', description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 3,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w/gy-114', branch: 'graphyard/gy-114-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 119 }, reworkRequested: false,
@@ -240,7 +240,7 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
 test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUESTED on one head for one request is a conflict: both recorded, attention raised, neither acted on, and a fresh review resolves it', async () => {
-  let item = await engine.execute(operator, 'create', null, { title: 'Two verdicts on one head', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { title: 'Two verdicts on one head', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(implementer, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(implementer, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());
@@ -301,7 +301,7 @@ test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUES
 
   // A person is not the reviewer identity: approving and then requesting changes on one head is
   // their latest word, and that change request still blocks — no conflict, nothing withheld.
-  let human = await engine.execute(operator, 'create', null, { title: 'A person changes their mind', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
+  let human = await engine.execute(operator, 'create', null, { title: 'A person changes their mind', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
   human = await engine.execute(operator, 'ready', human.id, {}, randomUUID());
   human = await engine.execute(implementer, 'claim', human.id, {}, randomUUID());
   human = await engine.execute(implementer, 'workspace', human.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${human.id}`, branch: `graphyard/${human.key.toLowerCase()}-1` }, randomUUID());

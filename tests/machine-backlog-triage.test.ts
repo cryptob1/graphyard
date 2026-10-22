@@ -17,7 +17,7 @@ import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../src/runner
 const NOW = Date.parse('2026-09-26T12:00:00Z');
 const hours = (count: number) => new Date(NOW - count * 3_600_000).toISOString();
 function item(key: string, title: string, createdAt: string, overrides: Partial<Work> = {}): Work {
-  return { id: `id-${key}`, key, title, description: '1. Finding with no thread: src/a.ts — the retry is unbounded', type: 'chore', priority: 2, dependencies: [], plannedFiles: [], criteria: [{ id: 'AC-1', text: 'Addressed', proofs: ['manual:review-followups-triaged'] }],
+  return { id: `id-${key}`, key, title, description: '1. Finding with no thread: src/a.ts — the retry is unbounded', type: 'chore', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Addressed', proofs: ['manual:review-followups-triaged'] }],
     policy: { checks: ['test'], review: true }, stage: 'backlog', ready: false, revision: 1, policyRevision: 1, createdAt, updatedAt: createdAt, stageEnteredAt: createdAt, epoch: 0, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides } as unknown as Work;
 }

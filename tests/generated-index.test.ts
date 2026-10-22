@@ -6,12 +6,11 @@ import { copyFile, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { classifyScope, regressionRefusals } from '../src/regression-guard.js';
 import { parseGeneratedFiles } from '../src/generated-files.js';
 import { attributeConflicts, hasConflictMarkers, parseGeneratedManifest, regenerateManagedBlocks } from '../src/sync.js';
 import { managedInstructions } from '../src/repository-setup.js';
 import { withoutMasterInstructions } from '../src/master.js';
-import type { ScopeFile, Work } from '../src/model.js';
+import type { Work } from '../src/model.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -20,17 +19,8 @@ const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 const launcher = join(repositoryRoot, 'bin/graphyard.mjs');
 const legacyMasterBlock = '<!-- graphyard-master -->\n## Graphyard master agent\n\nRules every session loaded.\n<!-- /graphyard-master -->';
 const checkDocs = join(repositoryRoot, 'scripts/check-docs.mjs');
-const file = (path: string, status: ScopeFile['status'] = 'modified', overrides: Partial<ScopeFile> = {}): ScopeFile => ({ path, status, sha: 'new', additions: 3, deletions: 2, binary: false, baseSha: 'old', ...overrides });
 
-test('integration:generated-index-no-conflict — the regression guard classifies a regenerated index as generated only when the deployment declares it, and still refuses its deletion', () => {
-  const generated = ['docs/README.md', 'docs/protocol.md'];
-  const findings = classifyScope(['src/cli/'], [file('docs/README.md'), file('docs/protocol.md', 'added', { baseSha: null }), file('docs/protocol.md', 'removed', { sha: null }), file('docs/coordination.md')], generated);
-  assert.deepEqual(findings.map(finding => [finding.path, finding.kind, finding.refused]), [
-    ['docs/README.md', 'generated', false], ['docs/protocol.md', 'generated', false], ['docs/protocol.md', 'deleted', true], ['docs/coordination.md', 'rewritten', true]]);
-  assert.deepEqual(classifyScope(['src/cli/'], [file('docs/README.md')], []).map(finding => finding.kind), ['rewritten'], 'without a declaration the out-of-scope rule is unchanged');
-  const work = { key: 'GY-1', plannedFiles: ['src/cli/'] } as Work;
-  assert.deepEqual(regressionRefusals(work, { scopeFiles: [file('docs/README.md')] }, [], generated), []);
-  assert.match(regressionRefusals(work, { scopeFiles: [file('docs/README.md')] }, [], [])[0], /outside its planned files/);
+test('integration:generated-index-no-conflict — the deployment declares its generated files and how to regenerate them, as exact repository-relative paths', () => {
   assert.deepEqual(parseGeneratedFiles(' docs/README.md, docs/protocol.md ,docs/README.md'), ['docs/README.md', 'docs/protocol.md']);
   assert.deepEqual(parseGeneratedFiles(undefined), []);
   for (const bad of ['/docs/README.md', 'docs/', 'docs/*.md', '../README.md', 'docs\\README.md']) assert.throws(() => parseGeneratedFiles(bad), /exact repository-relative files/, bad);
@@ -110,8 +100,8 @@ const sync = (cwd: string, env: NodeJS.ProcessEnv) => exec(process.execPath, [la
 
 test('integration:generated-index-no-conflict — two branches that each add a page merge without anyone hand-resolving the docs index: sync regenerates it, commits the merge, and the guard passes', async () => {
   const { root, main, branch, git, page } = await fixtureRepository();
-  const item = { id: 'w1', key: 'GY-1', stage: 'build', ready: true, plannedFiles: ['docs/quickstart.md'], dependencies: [], workspaces: [{ epoch: 1, host: 'h', path: branch, branch: 'graphyard/gy-1-1' }], observation: null, submission: null } as unknown as Work;
-  const shipped = { id: 'w9', key: 'GY-9', stage: 'done', plannedFiles: ['docs/glossary.md'], workspaces: [], delivery: { mergeSha: '', mergedAt: '' } } as unknown as Work;
+  const item = { id: 'w1', key: 'GY-1', stage: 'build', ready: true, dependencies: [], workspaces: [{ epoch: 1, host: 'h', path: branch, branch: 'graphyard/gy-1-1' }], observation: null, submission: null } as unknown as Work;
+  const shipped = { id: 'w9', key: 'GY-9', stage: 'done', observation: { files: ['docs/glossary.md'] }, workspaces: [], delivery: { mergeSha: '', mergedAt: '' } } as unknown as Work;
   const server = await fakeServer(() => [item, shipped]);
   try {
     // Both sides add a page to the same numbered section, so the generated index conflicts textually.
@@ -129,7 +119,7 @@ test('integration:generated-index-no-conflict — two branches that each add a p
     assert.equal(result.output.merged, true); assert.equal(result.output.ok, true);
     assert.deepEqual(result.output.regenerated, ['docs/README.md']);
     assert.deepEqual(result.output.generated, ['docs/protocol.md', 'docs/README.md']);
-    assert.equal(result.output.refused, undefined, 'the merge alone is judged; the regenerated index is never weighed against plannedFiles');
+    assert.equal(result.output.refused, undefined, 'the merge alone is judged; the regenerated index is never refused');
     assert.equal(git(branch, 'status', '--porcelain'), '', 'the merge is committed');
     assert.equal(git(branch, 'rev-list', '--merges', '--count', 'HEAD'), '1');
     const index = await readFile(join(branch, 'docs/README.md'), 'utf8');
@@ -143,9 +133,9 @@ test('integration:generated-index-no-conflict — two branches that each add a p
 
 test('integration:generated-index-no-conflict — sync regenerates the managed AGENTS.md blocks, names the shipped items behind every remaining conflict, and completes the merge once the worker resolves them', async () => {
   const { root, main, branch, git, page } = await fixtureRepository();
-  const item = { id: 'w1', key: 'GY-1', stage: 'build', ready: true, plannedFiles: ['docs/start.md', 'AGENTS.md'], dependencies: [], workspaces: [{ epoch: 1, host: 'h', path: branch, branch: 'graphyard/gy-1-1' }], observation: null, submission: null } as unknown as Work;
-  const shipped = { id: 'w9', key: 'GY-9', stage: 'done', plannedFiles: ['docs/'], workspaces: [], delivery: { mergeSha: '', mergedAt: '' } } as unknown as Work;
-  const older = { id: 'w8', key: 'GY-8', stage: 'done', plannedFiles: ['docs/start.md'], workspaces: [], delivery: { mergeSha: 'f'.repeat(40), mergedAt: '' } } as unknown as Work;
+  const item = { id: 'w1', key: 'GY-1', stage: 'build', ready: true, dependencies: [], workspaces: [{ epoch: 1, host: 'h', path: branch, branch: 'graphyard/gy-1-1' }], observation: null, submission: null } as unknown as Work;
+  const shipped = { id: 'w9', key: 'GY-9', stage: 'done', observation: { files: ['docs/start.md'] }, workspaces: [], delivery: { mergeSha: '', mergedAt: '' } } as unknown as Work;
+  const older = { id: 'w8', key: 'GY-8', stage: 'done', observation: { files: ['docs/start.md'] }, workspaces: [], delivery: { mergeSha: 'f'.repeat(40), mergedAt: '' } } as unknown as Work;
   const server = await fakeServer(() => [item, shipped, older]);
   try {
     // The branch's AGENTS.md block was rendered by an older CLI; main's by a newer one; both
@@ -176,7 +166,7 @@ test('integration:generated-index-no-conflict — sync regenerates the managed A
     const second = await sync(branch, server.env);
     assert.equal(second.code, 0, JSON.stringify(second.output)); assert.equal(second.output.merged, true); assert.equal(second.output.ok, true);
     assert.equal(git(branch, 'status', '--porcelain'), ''); assert.equal(git(branch, 'rev-list', '--merges', '--count', 'HEAD'), '1');
-    assert.equal(second.output.refused, undefined, 'the merge alone is judged; nothing is classified against plannedFiles');
+    assert.equal(second.output.refused, undefined, 'the merge alone is judged; nothing is refused');
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
@@ -190,9 +180,9 @@ test('integration:generated-index-no-conflict — the pure helpers behind sync: 
   assert.ok(hasConflictMarkers('a\n=======\nb') && !hasConflictMarkers('a\n====\n<<<<<<<x'));
   const landed = (sha: string) => sha === 'l'.repeat(40);
   const all = [
-    { id: 'a', key: 'GY-A', stage: 'done', plannedFiles: ['docs/'], delivery: { mergeSha: 'l'.repeat(40) } },
-    { id: 'b', key: 'GY-B', stage: 'done', plannedFiles: ['src/x.ts'], observation: { files: ['src/x.ts'], mergeSha: 'o'.repeat(40) } },
-    { id: 'c', key: 'GY-C', stage: 'review', plannedFiles: ['src/x.ts'] },
+    { id: 'a', key: 'GY-A', stage: 'done', observation: { files: ['docs/a.md', 'docs/README.md'] }, delivery: { mergeSha: 'l'.repeat(40) } },
+    { id: 'b', key: 'GY-B', stage: 'done', observation: { files: ['src/x.ts'], mergeSha: 'o'.repeat(40) } },
+    { id: 'c', key: 'GY-C', stage: 'review', observation: { files: ['src/x.ts'] } },
   ] as unknown as Work[];
   assert.deepEqual(attributeConflicts(['docs/a.md', 'src/x.ts', 'docs/README.md'], all, landed, ['docs/README.md']), [
     { path: 'docs/a.md', generated: false, shippedBy: ['GY-A'], landedSince: true },
@@ -209,11 +199,11 @@ test('integration:generated-index-no-conflict — AGENTS.md carries exactly the 
   assert.equal(withoutMasterInstructions(agents), agents);
 });
 
-test('manual:overlap-docs — the guides describe optimistic dispatch, smallest-scope-first dispatch, conflict sets, generated files and sync regeneration', async () => {
+test('manual:overlap-docs — the guides describe optimistic dispatch, conflict sets, generated files and sync regeneration', async () => {
   const read = (path: string) => readFile(join(repositoryRoot, path), 'utf8');
   const coordination = await read('docs/coordination.md'), master = await readMasterGuide(), development = await read('docs/development.md');
-  for (const fragment of ['optimistic', 'smallest', 'highConflict', 'GRAPHYARD_GENERATED_FILES', 'generated', 'merge-tree', 'regenerate']) assert.ok(coordination.includes(fragment), `docs/coordination.md must mention ${fragment}`);
-  for (const fragment of ['optimistic', 'smallest', 'merge-tree', 'conflicts', 'overlap']) assert.ok(master.includes(fragment), `docs/master-agent.md must mention ${fragment}`);
+  for (const fragment of ['optimistic', 'GRAPHYARD_GENERATED_FILES', 'generated', 'merge-tree', 'regenerate']) assert.ok(coordination.includes(fragment), `docs/coordination.md must mention ${fragment}`);
+  for (const fragment of ['optimistic', 'merge-tree', 'conflicts', 'overlap']) assert.ok(master.includes(fragment), `docs/master-agent.md must mention ${fragment}`);
   for (const fragment of ['generated in full', 'docs:check', 'GRAPHYARD_GENERATED_FILES', 'AGENTS.md']) assert.ok(development.includes(fragment), `docs/development.md must mention ${fragment}`);
   const help = execFileSync(process.execPath, [launcher, 'help'], { encoding: 'utf8', env: { ...process.env, GRAPHYARD_URL: 'http://127.0.0.1:9', GRAPHYARD_TOKEN: 'x' } });
   assert.match(help, /master dispatch GY-N PROFILE +Invite a worker/); assert.doesNotMatch(help, /--allow-overlap/); assert.match(help, /sync GY-N[^\n]*regenerate generated files/);

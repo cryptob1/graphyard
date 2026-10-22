@@ -1,7 +1,5 @@
 // Concern: cursor action keys, and reconciling pending actions against Graphyard after a restart.
 import type { Work } from '../model.js';
-import { type ScopeRequestState, unplannedPaths } from '../model/scope.js';
-import { askIdentity, widenedPlannedFiles } from '../model/scope-collapse.js';
 import type { WorkerProfile } from '../master.js';
 import { storeAction, type DaemonAction, type DaemonActionKind, type DaemonState } from './state.js';
 import type { RoutineDecision } from './decisions.js';
@@ -43,13 +41,10 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       // restart that interrupted it is a retry, never a merge fault (GY-1087: GY-999 counted at a
       // restart and merged on the retry twelve minutes later).
       if (next.state === 'failed') { resumed.push(storeAction(state, key, next, null)); continue; }
-    } else if (action.kind === 'scope' && action.work) {
-      // The decision lives on the item: either the control plane recorded one for the open
-      // request or it did not, and an undecided request is simply asked again next cycle.
-      const pending = item?.scopeRequest && !item.scopeRequest.decision;
-      next.state = pending ? 'failed' : 'done';
-      next.detail = pending ? 'Resumed: the scope request is still undecided and will be decided again'
-        : `Resumed: Graphyard holds the decision (${item?.scopeRequest?.decision?.state ?? 'the request was withdrawn or superseded'})`;
+    } else if (action.kind === 'scope') {
+      // Scope requests are retired (GY-1992): nothing decides or retries one now.
+      next.state = 'done';
+      next.detail = 'Resumed: scope requests are retired; nothing is left to decide';
     } else if (action.kind === 'failover') {
       // A worker failover took effect exactly when the attempt's lease ended on the record. An
       // interrupted one is tried again: the control plane writes an exhaustion once, and a
@@ -89,48 +84,3 @@ export const candidateKey = (kind: DaemonActionKind, work: Work) => `${kind}:${w
 export const closeKey = (profile: WorkerProfile, pane: string) => `close:${profile.name}:${pane}`;
 /** One routine decision per action, item, binding (the head, or the quarantined epoch) and policy revision. */
 export const decisionKey = (work: Work, decision: Pick<RoutineDecision, 'action' | 'binding'>) => `decision:${decision.action}:${work.id}:${decision.binding}:${work.policyRevision}`;
-/** One decision per request: the instant the worker recorded it identifies the ask. */
-export const scopeKey = (work: Work, request: ScopeRequestState) => `scope:${work.id}:${askIdentity(request).epoch}:${request.at}`;
-/**
- * The requirements revision that widens `work` by `paths` in answer to `request`, or null when no
- * fold represents the widening within the plannedFiles cap: the loop refuses before posting rather
- * than send a revision the schema would reject on every retry (GY-630). It names the request it
- * answers and the head its findings were read for, so the control plane refuses it once a claim or
- * a lease end has cleared that request, or a push has replaced that head, while the loop was still
- * reading the findings it is grounded on.
- */
-export const answeringWidening = (work: Work, request: ScopeRequestState, paths: string[], reason: string) => {
-  const wide = widenedPlannedFiles(work, paths);
-  return !wide.representable ? null : {
-    expectedPolicyRevision: work.policyRevision, criteria: work.criteria, dependencies: work.dependencies,
-    plannedFiles: wide.plannedFiles, exclusiveResources: work.exclusiveResources ?? [], producerProofs: work.producerProofs ?? [],
-    reason, answers: { epoch: request.epoch, at: request.at, sha: work.candidate?.sha ?? null } };
-};
-
-/**
- * When the control plane recorded the answer to a routed scope request (GY-176): the approval or
- * refusal event's own time, else the item's `scopeDecision` for that same request, written in the
- * same transaction. Null when neither is known; the caller then falls back to its observation.
- */
-export function scopeAnsweredAt(work: Work, request: { epoch: number; at: string }, eventAt: string | null | undefined): string | null {
-  if (eventAt && Number.isFinite(Date.parse(eventAt))) return eventAt;
-  const decision = work.scopeDecision;
-  return decision && decision.requestedAt === request.at && (decision.epoch === undefined || decision.epoch === request.epoch) ? decision.at : null;
-}
-
-/**
- * Whether an approver's settled judgement answered the routed request it names (GY-176), read from
- * the item as observed at `clock`. The control plane attaches a refusal only to the open request of
- * a live attempt under the revision it was asked against; a stale one leaves the request as it stood,
- * which is no outcome: neither measured nor reported to the worker. An applied widening answers once
- * the item holds its outcome or plans the paths. `pending` when the judgement was recorded after the
- * observation, which cannot say yet.
- */
-export function scopeOutcomeAnswered(work: Work, request: { epoch: number; at: string; paths: string[] }, judged: { state: string; approvedAt?: string | null; refusal?: { at?: string } | null }, clock: number): 'answered' | 'unanswered' | 'pending' {
-  const approved = judged.state === 'applied', decision = work.scopeDecision;
-  if (decision && decision.requestedAt === request.at && (decision.epoch === undefined || decision.epoch === request.epoch)
-    && decision.state === (approved ? 'approved' : 'refused') && (approved || decision.decidedBy !== 'graphyard')) return 'answered';
-  if (approved && !unplannedPaths(work.plannedFiles, request.paths).length) return 'answered';
-  const at = Date.parse((approved ? judged.approvedAt : judged.refusal?.at) ?? '');
-  return Number.isFinite(at) && at >= clock ? 'pending' : 'unanswered';
-}

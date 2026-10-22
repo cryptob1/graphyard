@@ -1,4 +1,4 @@
-import { pathScopesOverlap } from './scope.js';
+import { pathScopesOverlap } from './documentation-glob.js';
 import type { Evidence } from './evidence.js';
 import { exactApproval, reviewerProfileFor, type ReviewProvider } from './review.js';
 import type { Work } from './work.js';

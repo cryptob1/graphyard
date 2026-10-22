@@ -32,6 +32,7 @@ import { findingClassificationSection, freshReadFor, freshReadRecordSchema, fres
 import type { InterventionRecordInput } from './model/interventions.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from './verification-maps.js';
+import { namedPaths } from './model/documentation-glob.js';
 import { readProjectMemory } from './project-memory.js';
 import { conflictingVerdictStates } from './model/review-conflict.js';
 import type { ControlPlaneReviewLaunch } from './model/post-merge-review.js';
@@ -765,7 +766,7 @@ export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
     + 'Judge each on this head\'s pre-merge evidence — the change that should produce the outcome, and what the head shows before merge — and never request changes or hold the merge because the live install or deployed release has not shown it yet; '
     + 'it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. ';
 }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification, cappedRefusal);
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
@@ -778,7 +779,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
-    + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
+    + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
     + reviewRoundSection(binding.sha, history, rounds)
     + cappedRefusalSection(cappedRefusal)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
@@ -819,11 +820,11 @@ export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:L
  * request stays byte-identical whatever a session's history and memory hold; a self-review passes
  * none, and judges the diff by the shared standard alone.
  */
-export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
+export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
   const judged = documentation ? [...(criteria ?? []), { id: documentation.obligation.id, text: documentation.obligation.text }] : criteria;
   return `Read the change with: git diff ${binding.base} ${binding.head} (both commits are in this session's object store; git show --stat ${binding.head} lists its files). `
     + (context?.memory ?? '')
-    + verificationMapDigest(verification?.maps, verification?.plannedFiles, 'reviewer')
+    + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
     + (context?.round ?? '')
     + criteriaRuleSection(binding.key, binding.head, judged)
     + postDeployReviewSection(judged)
@@ -833,7 +834,7 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + repetitionReviewSection(documentation?.files);
 }
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
-function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; plannedFiles: readonly string[] } | null, cappedRefusal?: CappedRefusalContext | null) {
+function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, cappedRefusal?: CappedRefusalContext | null) {
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') rounds = roundsOrMemory;
   else if (roundsOrMemory && !memory) memory = roundsOrMemory as ProjectMemory;
@@ -1243,7 +1244,7 @@ export async function launchReview(root: string, work: Work, profileName: string
           : await (dependencies.cappedRefusal ?? (dependencies.mint ? async () => null : readCappedRefusal(config)))(work, binding.sha);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, plannedFiles: work.plannedFiles ?? [] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null, refusal), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null, refusal), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();

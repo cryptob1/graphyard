@@ -39,7 +39,7 @@ function failing(key: string, reason: string, count: number): ActionRow {
     { at: stamp(index * 3), event: 'claimed', requester: 'graphyard', executor: 'executor-a', result: null, reason: 'claimed' },
     { at: stamp(index * 3 + 1), event: 'failed', requester: 'graphyard', executor: 'executor-a', result: 'failed', reason },
   ]).flat();
-  return { id: `dispatch-${key}`, kind: 'dispatch', work: `id-${key}`, key, inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 2, plannedFiles: [] },
+  return { id: `dispatch-${key}`, kind: 'dispatch', work: `id-${key}`, key, inputs: { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 2 },
     gate: 'build', refusal: reason, reason, binding: 'dispatch:0', requestedBy: 'graphyard', requestedAt: stamp(0), state: 'pending', claim: null, attempts: count, history } as unknown as ActionRow;
 }
 

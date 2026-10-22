@@ -47,7 +47,7 @@ function item(outcomes: Record<string, Outcome>, options: { producerProofs?: str
   const work = {
     id: '11111111-2222-4333-8444-555555555555', key: 'GY-900', title: 'Planner fixture', description: '', type: 'bug', priority: 2, dependencies: [],
     criteria: proofs.map((proof, index) => ({ id: `AC-${index + 1}`, text: `Criterion ${index + 1}`, proofs: [proof] })),
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/'], producerProofs: options.producerProofs ?? [],
+    policy: { checks: ['test', 'typecheck'], review: true }, producerProofs: options.producerProofs ?? [],
     stage: 'build', revision: 5, policyRevision: 1, createdAt: at(120), updatedAt: at(5), stageEnteredAt: at(60), ready: true,
     epoch: 1, lease: null, workspaces: [{ host: 'machine-a', path: '/tmp/gy-900', branch: 'graphyard/gy-188-1', epoch: 1, owner: 'agent-a' }],
     implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 },
@@ -150,24 +150,24 @@ const refusal = async (command: 'create' | 'requirements', input: unknown) => {
   catch (error) { return error instanceof Error ? error.message : String(error); }
   assert.fail(`${command} accepted a pre-merge post-merge proof`);
 };
-const requirements = (criteria: unknown) => ({ expectedPolicyRevision: 1, reason: 'Tighten the proof', criteria, dependencies: [], plannedFiles: ['src/'], exclusiveResources: [] });
+const requirements = (criteria: unknown) => ({ expectedPolicyRevision: 1, reason: 'Tighten the proof', criteria, dependencies: [], exclusiveResources: [] });
 
 test('unit:postmerge-proof-refused-premerge — create and requirements refuse a pre-merge *-postmerge proof and name the delivery or deploy-smoke obligation to use instead', async () => {
   const postmerge = [{ id: 'AC-1', text: 'The speed target is met on trunk', proofs: ['manual:speed-target-met-postmerge'] }];
-  for (const message of [await refusal('create', { title: 'Speed', plannedFiles: ['src/'], criteria: postmerge }), await refusal('requirements', requirements(postmerge))]) {
+  for (const message of [await refusal('create', { title: 'Speed', criteria: postmerge }), await refusal('requirements', requirements(postmerge))]) {
     assert.match(message, /AC-1: manual:speed-target-met-postmerge is a post-merge proof/);
     assert.match(message, /can never pass before the merge it gates/);
     assert.match(message, /Require it as a delivery obligation instead: policy\.deploySmoke for e2e:deploy-smoke/);
     assert.match(message, /declare it a post-deploy verification of this item \(manual:post-deploy\/NAME\)/);
   }
   // A post-deploy name, and a criterion that declares itself post-merge, are refused alike.
-  assert.match(await refusal('create', { title: 'Live', plannedFiles: ['src/'], criteria: [{ id: 'AC-2', text: 'Live', proofs: ['integration:checkout/post-deploy'] }] }), /integration:checkout\/post-deploy is a post-merge proof/);
+  assert.match(await refusal('create', { title: 'Live', criteria: [{ id: 'AC-2', text: 'Live', proofs: ['integration:checkout/post-deploy'] }] }), /integration:checkout\/post-deploy is a post-merge proof/);
   assert.match(await refusal('requirements', requirements([{ id: 'AC-3', text: 'Post-merge: the dashboard shows the release', proofs: ['manual:dashboard-release'] }])),
     /AC-3 is a post-merge criterion, so manual:dashboard-release can only pass after merge.*policy\.deploySmoke/);
 
   // An ordinary criterion that merely mentions merging is not one: it reaches the store, which this
   // engine does not have, rather than being refused at parse.
   const ordinary = [{ id: 'AC-1', text: 'A post-merge proof is never a pre-merge gate', proofs: ['unit:postmerge-proof-refused-premerge'] }];
-  const reached = await engine.execute(operator, 'create', null, { title: 'Ordinary', plannedFiles: ['src/'], criteria: ordinary }, 'gy-188-ordinary').then(() => 'accepted', (error: Error) => error.message);
+  const reached = await engine.execute(operator, 'create', null, { title: 'Ordinary', criteria: ordinary }, 'gy-188-ordinary').then(() => 'accepted', (error: Error) => error.message);
   assert.doesNotMatch(reached, /post-merge proof|post-merge criterion/);
 });

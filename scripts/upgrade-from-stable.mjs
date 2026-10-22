@@ -32,7 +32,7 @@ const installId = 'upgrade-gate-fixture';
 const pinPattern = /github:cryptob1\/graphyard#([0-9a-f]{40})/g;
 // Lifecycle and decision state are compared too: an upgrade that drops the lease or settles the
 // decision corrupts the work as surely as one that rewrites its title.
-const itemFields = ['id', 'key', 'title', 'type', 'criteria', 'plannedFiles', 'createdAt', 'lease', 'epoch', 'ready', 'stage'];
+const itemFields = ['id', 'key', 'title', 'type', 'criteria', 'createdAt', 'lease', 'epoch', 'ready', 'stage'];
 const decisionFields = ['id', 'action', 'input', 'reason', 'requestedBy', 'requestedAt', 'createdAt', 'precedent', 'context', 'state', 'approvedBy', 'approvedAt', 'approvalReason', 'outcome', 'refusal'];
 
 const pick = (value, fields) => Object.fromEntries(fields.filter(field => value?.[field] !== undefined).map(field => [field, value[field]]));
@@ -191,7 +191,7 @@ export async function provisionMaster({ cli, plane }) {
 export async function seedThroughCli({ cli, plane, repoRoot }) {
   await provisionMaster({ cli, plane });
   const file = join(repoRoot, '..', 'upgrade-item.json');
-  await writeFile(file, JSON.stringify({ title: 'Upgrade gate: this item survives the upgrade', plannedFiles: ['README.md'], criteria: [{ id: 'AC-1', text: 'The item reads back after the upgrade', proofs: ['unit:upgrade-gate-fixture'] }] }));
+  await writeFile(file, JSON.stringify({ title: 'Upgrade gate: this item survives the upgrade', criteria: [{ id: 'AC-1', text: 'The item reads back after the upgrade', proofs: ['unit:upgrade-gate-fixture'] }] }));
   const created = await cli(['create', file]);
   const key = created?.key;
   if (!key) throw new Error(`create returned no key: ${JSON.stringify(created)}`);

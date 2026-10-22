@@ -44,11 +44,11 @@ async function submit(w: Work, pr: number) {
 }
 /** An item submitted as `first`, whose requirements were revised after an approval of that pull request. */
 async function revisedOnFirstPullRequest(first: number) {
-  let w = await engine.execute(operator, 'create', null, { title: `baseline-${first}`, plannedFiles: ['src/claims.ts'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title: `baseline-${first}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   w = await submit(w, first);
   w = await engine.observe(w.id, w.revision, observation(w, first, [approval(100)]));
-  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Revise intent', criteria: [{ ...w.criteria[0], text: 'Behaves as revised' }], dependencies: [], plannedFiles: w.plannedFiles, exclusiveResources: [] }, randomUUID());
+  w = await engine.execute(operator, 'requirements', w.id, { expectedPolicyRevision: w.policyRevision, reason: 'Revise intent', criteria: [{ ...w.criteria[0], text: 'Behaves as revised' }], dependencies: [], exclusiveResources: [] }, randomUUID());
   assert.equal(w.formalReviewResetRequired, true); assert.equal(w.formalReviewBaseline, undefined);
   w = await engine.observe(w.id, w.revision, observation(w, first, [approval(100)], [100, 101]));
   assert.deepEqual(w.formalReviewBaseline, { pr: first, policyRevision: w.policyRevision, reviewIds: [100, 101] });

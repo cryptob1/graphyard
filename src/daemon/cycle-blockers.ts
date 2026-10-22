@@ -1,13 +1,12 @@
 // Concern: cycle step 2d — every standing blocker re-checked each cycle (GY-1008): environmental causes probed and cleared, a needs-decision blocker's approver launched.
 import { deferBoundMs, servingReleaseProof, type Work } from '../model.js';
 import { notBeforeInstants } from '../model/plain-status.js';
-import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, itemSpecificPlaneError, maxAutomaticClears, needsSomeone, uncoveredBlockerPaths, unrepresentableScope, type BlockerClassification } from '../model/blocker-class.js';
+import { blockerClassMeaning, environmentalBlockerClasses, itemBlockerClass, itemSpecificPlaneError, maxAutomaticClears, needsSomeone, type BlockerClassification } from '../model/blocker-class.js';
 import { loopHeldBlocker } from '../model/loop-owned.js';
-import { scopeRefusalBlocker } from '../model/scope.js';
 import { approvalWatchSchema, message, type DaemonAction } from './state.js';
 import { handWatchPrefix } from './cycle-decisions.js';
 import { profileHealth, readyToRetry } from './sessions.js';
-import { boundDetail, detailChanged, namePaths } from './decisions.js';
+import { boundDetail, detailChanged } from './decisions.js';
 import { record } from './effects.js';
 import { workerHandle } from './cycle-resume.js';
 import { carriedRow, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
@@ -59,14 +58,11 @@ export function timeBoundHold(item: Work, now: number): number | null {
  *   credential and write probes inside the confinement the worker's launch describes — once per
  *   cause per cycle, and the probe is written on the item; a passing probe clears the blocker in
  *   the same write, which the control plane allows only after classifying the blocker itself;
- * - a planned-file-scope blocker is put to the approver as an additive widening by the decision
- *   step (`blockerScopeDecision`), and cleared here once plannedFiles cover every file it names;
  * - a needs-decision blocker gets the approver of its standing decision launched when no session
  *   judges it yet — watched from launch as a hand-launched approver is, so the decision step closes
  *   it once the decision is judged — and is cleared once no decision on the item stands requested;
- * - a genuine or human-only blocker, a planned-file-scope one no fold represents under the
- *   plannedFiles cap, or one this loop has cleared `maxAutomaticClears` times in a row, is left to
- *   the master (or the human), which is all `master status` counts as needing someone.
+ * - a genuine or human-only blocker, or one this loop has cleared `maxAutomaticClears` times in a
+ *   row, is left to the master (or the human), which is all `master status` counts as needing someone.
  * - a time-bound post-deploy follow-up (`timeBoundHold`) is held on its instant and its blocker
  *   cleared in one write (`window`, GY-1740), so it waits out of Blocked without a worker launch;
  * The per-episode cursor rows (the base tip, the approver launch) are retired once the blocker is
@@ -130,7 +126,7 @@ async function blockerStepWithin(cycle: Cycle) {
     if (held.has(item.id)) continue;
     const classification = itemBlockerClass(item);
     if (!classification || !item.blocker || !environmentalBlockerClasses.includes(classification.class) || launchableClass(classification)) continue;
-    if ((item.blockerProbe?.clears ?? 0) >= maxAutomaticClears || item.blocker.startsWith(scopeRefusalBlocker)) continue;
+    if ((item.blockerProbe?.clears ?? 0) >= maxAutomaticClears) continue;
     if (classification.class === 'control-plane-error' && itemSpecificPlaneError(item.blocker)) continue;
     void probe(item, classification);
   }
@@ -152,12 +148,6 @@ async function blockerStepWithin(cycle: Cycle) {
     // the loop clears it rather than leave an escalation open for a master's hand; any actionable fault on the same item keeps its blocker.
     const loopHeld = loopHeldBlocker(item, blocker, classification.class, clock);
     if (needsSomeone(classification.class) && !loopHeld) { await handOver(`${item.key} is blocked (${classification.class}: ${blockerClassMeaning[classification.class]}); it needs someone: ${blocker}`); return; }
-    // A refused scope request is the scope step's to put to the approver; its answer clears it.
-    if (blocker.startsWith(scopeRefusalBlocker)) return;
-    if (unrepresentableScope(item, classification)) {
-      await handOver(`${item.key} is blocked (planned-file-scope) on files no widening can represent under the plannedFiles cap, so it needs the master: ${blocker}`);
-      return;
-    }
     const clears = item.blockerProbe?.clears ?? 0;
     if (clears >= maxAutomaticClears) {
       await handOver(`${item.key} is blocked (${classification.class}) again after the loop cleared its blocker ${clears} times in a row without a submission, so it is left to the master: ${blocker}`);
@@ -191,10 +181,6 @@ async function blockerStepWithin(cycle: Cycle) {
         if (!state.actions[baseKey(item, blocker)]) await note(baseKey(item, blocker), item, 'done', seen ?? result.baseTip);
         if (seen && seen !== result.baseTip) result = { ...result, passed: true, detail: `the base tip moved from ${seen.slice(0, 12)} to ${result.baseTip.slice(0, 12)}` };
       }
-    } else if (classification.class === 'planned-file-scope') {
-      const missing = uncoveredBlockerPaths(item, classification);
-      result = missing.length ? { probe: 'plannedFiles cover the named files', passed: false, detail: `awaiting the additive widening decision for ${namePaths(missing)} (commit ${classification.commit!.slice(0, 12)}) from the independent approver` }
-        : { probe: 'plannedFiles cover the named files', passed: true, detail: `plannedFiles now cover ${namePaths(classification.paths)}` };
     } else if (classification.class === 'needs-decision') {
       if (!effects.decisions) return;
       const decisions = (await effects.decisions(item)).decisions;

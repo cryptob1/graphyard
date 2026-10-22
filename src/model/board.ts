@@ -2,8 +2,6 @@ import { loopObservation, observationWindowHold, type Work } from './work.js';
 import { isClosed } from './closure.js';
 import { answerCommand, parkedOnHuman, type HumanRequestRow } from './human-request.js';
 import { humanAsk } from './human-ask.js';
-import { scopeRefusalBlocker } from './scope.js';
-import { scopeAskCommand, type RoutedScopeDecision } from './scope-provenance.js';
 import { shortShas } from './format.js';
 import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { blockerSummary, phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
@@ -152,7 +150,7 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
 }
 
 /** Why an Up next item waits for no worker (GY-172): an unshipped dependency, a future observation window (GY-1740), or an exclusive resource
- * another claimed item holds, as the dispatcher's own `resourceConflicts` applies it; planned-file overlap holds nothing. Null: a free builder takes it. */
+ * another claimed item holds, as the dispatcher's own `resourceConflicts` applies it. Null: a free builder takes it. */
 export function upNextHold(work: Work, all: Work[], now: number): { kind: 'dependency' | 'resource' | 'window' | 'observation'; text: string } | null {
   const dependency = work.gates.find(gate => gate.name === 'ready')?.reasons.find(reason => reason.startsWith('Dependency '));
   if (dependency) return { kind: 'dependency', text: plainReason(dependency, 'ready').text };
@@ -190,14 +188,11 @@ export const roleOf: Readonly<Record<string, ActorRole>> = {
 };
 
 /**
- * The role acting next. A worker's open scope request that the widening rule has not refused is
- * the approver's to judge, whatever step the item shows; everything else is the role `nextActor`
- * names on the card, and `held` for a label `roleOf` does not list.
+ * The role acting next: the role `nextActor` names on the card, and `held` for a label `roleOf`
+ * does not list.
  */
 export function actorRole(work: Work, group: Group | null, who: string): ActorRole {
   if (group === 'needs-you') return 'human-only';
-  const request = work.scopeRequest;
-  if (group === 'moving' && request && request.decision?.state !== 'refused' && work.lease?.epoch === request.epoch) return 'approver';
   // An unknown label is no evidence the control plane acts: report it as held (GY-371).
   return Object.hasOwn(roleOf, who) ? roleOf[who]! : 'held';
 }
@@ -205,14 +200,13 @@ export function actorRole(work: Work, group: Group | null, who: string): ActorRo
 const escalation = /^Unresolved \S+ escalation requires operator resolution/;
 const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.name === gate && !entry.passed)?.reasons ?? [];
 
-/** The exact command that takes the next step, when there is one to run: a scope refusal is the approver's decision while it holds the ask (GY-1388), else `master scope` — or `master requirements` where no fold represents the ask under the cap, which the plain union `master scope` posts cannot carry (GY-936) — a recorded blocker `master unblock`, an escalation `master decide … resolve`, a review `master review`, backlog `master release`, and a human-only decision the answer its row names. Null where the next step is a session already running or a turn nobody can take early. */
-export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow, now = Date.now(), scopeDecisions?: readonly RoutedScopeDecision[]): string | null {
+/** The exact command that takes the next step, when there is one to run: a recorded blocker `master unblock`, an escalation `master decide … resolve`, a review `master review`, backlog `master release`, and a human-only decision the answer its row names. Null where the next step is a session already running or a turn nobody can take early. */
+export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow): string | null {
   const key = work.key;
   if (actor === 'human-only') return humanRow?.answer.cli ?? (work.humanRequest ? answerCommand(key, work.humanRequest) : null);
   if (actor === 'approver') return `graphyard master decisions ${key}`;
   if (actor === 'reviewer') return `graphyard master review ${key}`;
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
-  if (work.scopeRequest && work.blocker?.startsWith(scopeRefusalBlocker)) return scopeAskCommand(work, now, scopeDecisions);
   if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
   if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
   return null;
@@ -244,7 +238,7 @@ export interface Board {
 }
 
 /** Every open item into its group with its next actor, command, since and overdue. */
-export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRow[] | null, release: ReleaseView = noRelease, scopeDecisions?: ReadonlyMap<string, readonly RoutedScopeDecision[]>): Board {
+export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRow[] | null, release: ReleaseView = noRelease): Board {
   const { byGroup, open } = classify(work, now, humanRows, release);
   const stalls = new Map(stalledCards(work.filter(item => item.stage !== 'done' && !isClosed(item)), now).map(card => [card.item.id, card]));
   const rows = new Map((humanRows ?? []).map(row => [row.id, row]));
@@ -258,7 +252,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
     const view = blockerView(entry), wait = view && blockerSummary(entry.blocker!, now, entry, 'UTC'), blocker = view && wait && { ...view, summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
     return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
-      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id), now, scopeDecisions?.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
+      actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
   return { now: new Date(now).toISOString(), overdueAfterMs: OVERDUE_MINUTES * 60_000, groups: board,
@@ -270,7 +264,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
  * `production`, `ciAppIds`): what `GET /api/board` serves, and what `master status` builds for
  * itself when the server it talks to predates the route.
  */
-export const boardFromStatus = (work: Work[], now: number, status: any) => buildBoard(work, now, status?.humanOnly, releaseView(status), status?.scopeDecisions);
+export const boardFromStatus = (work: Work[], now: number, status: any) => buildBoard(work, now, status?.humanOnly, releaseView(status));
 
 /** True for a response shaped as a board. */
 export const isBoard = (value: any): value is Board => !!value && typeof value === 'object' && !!value.groups && groups.every(group => Array.isArray(value.groups[group]));
@@ -280,7 +274,7 @@ export const boardRouteMissing = (error: unknown) => (error as { status?: unknow
 
 /**
  * The `board` section of `master status`: every item whose next step is the master's, first and
- * with its command — blocked on scope, a decision no approver answered, a stranded merge — then
+ * with its command — a decision no approver answered, a stranded merge — then
  * every other open item, with the group counts. Read from `GET /api/board`; built from the same
  * module over the snapshot and status already in hand only when the server predates the route
  * (404). Any other failure — a 500, an auth refusal, a timeout, a body that is not a board — is

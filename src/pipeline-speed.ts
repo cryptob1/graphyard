@@ -169,7 +169,7 @@ export interface ReplayState {
  *
  * A lease that vanished between two consecutive documents lapsed at its own deadline, exactly as
  * reconciliation would have recorded it. A requirements revision that kept the lease was a live
- * scope widening, which is not a hand-off.
+ * scope widening (retired in GY-1992), which is not a hand-off.
  */
 export function timelineReplay(resume?: ReplayState | null) {
   const from = resume ? structuredClone(resume) : null;
@@ -204,8 +204,8 @@ export function timelineReplay(resume?: ReplayState | null) {
       // that kept the lease, which its document still shows.
       if (details.reason && held && snapshot && !snapshot.lease) { endAttempt(shadow, details.epoch ?? held.epoch, 'released', at); shadow.lease = null; }
     } else if (event.kind === 'requirements') {
-      // The revision that kept its lease widened planned files for the attempt under way: it
-      // hands nothing to anybody. Every other revision ends the attempt and is a hand-off.
+      // A revision recorded before GY-1992 that kept its lease widened planned files for the attempt
+      // under way: it handed nothing to anybody. Every other revision ends the attempt and is a hand-off.
       const widening = !!(held && snapshot?.lease && snapshot.lease.epoch === held.epoch);
       if (!widening) {
         if (held) endLapsedAttempt(shadow, held, at);

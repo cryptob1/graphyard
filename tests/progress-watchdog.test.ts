@@ -34,7 +34,7 @@ function item(key: string, overrides: Partial<Work> = {}): Work {
   return {
     id: randomUUID(), key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Behaviour holds.', proofs: ['unit:behaviour'] }],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/a.ts'], stage: 'build', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 1, policyRevision: 1,
     createdAt: at(-8 * 60), updatedAt: at(-30), stageEnteredAt: at(-30), ready: false, epoch: 1,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides,

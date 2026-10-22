@@ -261,8 +261,8 @@ test('integration:index-matches-documents — the index equals the documents aft
   const check = (label: string) => assertIndexMatches(store, label);
 
   // One item through its whole life, the index checked after each write.
-  let w = await engine.execute(operator, 'create', null, { title: 'Indexed', plannedFiles: ['src/indexed.ts'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
-  const other = await engine.execute(operator, 'create', null, { title: 'Bystander', priority: 3, plannedFiles: ['src/other.ts'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title: 'Indexed', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  const other = await engine.execute(operator, 'create', null, { title: 'Bystander', priority: 3, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
   await check('created');
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); await check('released');
   assert.ok((await store.pool.query('SELECT due_at FROM work_index WHERE id=$1', [w.id])).rows[0].due_at, 'a pending dispatch row is due');
@@ -384,12 +384,12 @@ function boardItem(index: number, now: Date, kind: 'settled' | 'active' | 'fresh
   if (kind === 'fresh') return {
     id, key, title: `Board item ${key}`, description: 'An item released and waiting for its implementation. '.repeat(10), type: 'feature', priority: index % 3,
     dependencies: [], criteria: proofs.map((proof, n) => ({ id: `AC-${n + 1}`, text: `Criterion ${n + 1} of ${key}`, proofs: [proof] })),
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/server/', 'tests/'], stage: 'ready', revision: 3, policyRevision: 1,
+    policy: { checks: ['test', 'typecheck'], review: true }, stage: 'ready', revision: 3, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 0, lease: null, workspaces: [], implementers: [], submission: null, candidate: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [],
     gates: ['ready', 'build', 'review', 'test', 'acceptance', 'merge'].map(name => ({ name, passed: name === 'ready', reasons: name === 'ready' ? [] : [`${name} is still owed`] })),
-    nextAction: { kind: 'dispatch', work: id, key, gate: 'build', refusal: null, reason: `${key} is ready and unassigned`, inputs: { kind: 'dispatch', epoch: 0, target: 'implementation', priority: index % 3, plannedFiles: ['src/server/', 'tests/'] }, llmRole: 'implement', binding: 'dispatch:0' },
-    actionQueue: { actions: [{ id: `${key}-dispatch`, kind: 'dispatch', work: id, key, gate: 'build', refusal: null, reason: `${key} is ready and unassigned`, binding: 'dispatch:0', inputs: { kind: 'dispatch', epoch: 0, target: 'implementation', priority: index % 3, plannedFiles: ['src/server/', 'tests/'] }, requestedBy: 'graphyard', requestedAt: at, state: 'pending', claim: null, attempts: 0, history: [{ at, event: 'requested', requester: 'graphyard', executor: null, result: null, reason: 'released' }] }], history: [] },
+    nextAction: { kind: 'dispatch', work: id, key, gate: 'build', refusal: null, reason: `${key} is ready and unassigned`, inputs: { kind: 'dispatch', epoch: 0, target: 'implementation', priority: index % 3 }, llmRole: 'implement', binding: 'dispatch:0' },
+    actionQueue: { actions: [{ id: `${key}-dispatch`, kind: 'dispatch', work: id, key, gate: 'build', refusal: null, reason: `${key} is ready and unassigned`, binding: 'dispatch:0', inputs: { kind: 'dispatch', epoch: 0, target: 'implementation', priority: index % 3 }, requestedBy: 'graphyard', requestedAt: at, state: 'pending', claim: null, attempts: 0, history: [{ at, event: 'requested', requester: 'graphyard', executor: null, result: null, reason: 'released' }] }], history: [] },
     autoDispatch: { review: null, producers: [], history: [] },
   } as unknown as Work;
   const evidence: Evidence[] = [];
@@ -406,7 +406,7 @@ function boardItem(index: number, now: Date, kind: 'settled' | 'active' | 'fresh
   return {
     id, key, title: `Board item ${key}`, description: 'An item with the history a long-lived ledger accumulates. '.repeat(10), type: 'feature', priority: index % 3,
     dependencies: [], criteria: proofs.map((proof, n) => ({ id: `AC-${n + 1}`, text: `Criterion ${n + 1} of ${key}`, proofs: [proof] })),
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/server/', 'tests/'], stage, revision: 400, policyRevision: 1,
+    policy: { checks: ['test', 'typecheck'], review: true }, stage, revision: 400, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 2, lease: null, workspaces: [], implementers: ['worker-a'], submission: { epoch: 2, pr: index + 1 },
     candidate: { sha: current, baseSha: base, pr: index + 1, branch: `graphyard/gy-${index + 1}-2`, author: 'worker-a' },
     reworkRequested: false, scenarioRequirements: [], evidence, blocker: null, violations: [],

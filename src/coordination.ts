@@ -1,5 +1,4 @@
-import { bootstrapObligations, currentEvidence, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, observationWindowHold, loopObservationProofs, pathScope, pathScopeContains, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
-import { namedPaths } from './model/scope.js';
+import { bootstrapObligations, currentEvidence, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, observationWindowHold, loopObservationProofs, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
 import { loopOwned } from './model/loop-owned.js';
 import { behindBaseHold } from './model/behind-base.js';
 import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './merge-queue.js';
@@ -11,8 +10,8 @@ export function resourceConflicts(work: Work, all: Work[], now: number) {
     .flatMap(w => (work.exclusiveResources ?? []).filter(r => w.exclusiveResources?.includes(r)).map(resource => ({ resource, key: w.key })));
 }
 
-/** The paths an item is known to touch: its planned scope plus the files its PR was observed to change. */
-const touchedPaths = (work: Work) => [...new Set([...work.plannedFiles, ...(work.observation?.files ?? [])])];
+/** The paths an item is known to touch: the files its candidate was observed to change. */
+const touchedPaths = (work: Work) => [...new Set(work.observation?.files ?? [])];
 
 export function fileConflicts(work: Work, all: Work[]) {
   if (work.stage === 'done') return [];
@@ -34,25 +33,17 @@ const claimedNow = (work: Work, now: number) => !!work.containmentQuarantine || 
  * worker, ordered by `dispatchOrder`, like a ready item.
  */
 export const inFlight = (work: Work, now: number) => work.stage !== 'done' && (claimedNow(work, now) || !!work.submission && !work.reworkRequested);
-/**
- * The paths an item is judged on for overlap reporting. Once the item has a candidate, they are the
- * files that candidate actually changes — its observed diff — and not the scope it declared: a
- * declared scope says where a worker may write, a candidate says where it did. The declared scope
- * stands in only until a candidate is observed. `fileConflicts` deliberately differs: it is an
- * advisory "might touch the same area" warning and reads both.
- */
+/** The paths an item is judged on for overlap reporting: the files its candidate was observed to change. */
 export function exclusionPaths(work: Work): string[] {
-  const observed = work.observation?.files ?? [];
-  return work.candidate && observed.length ? [...new Set(observed)] : [...new Set(work.plannedFiles)];
+  return work.candidate ? [...new Set(work.observation?.files ?? [])] : [];
 }
 /**
  * The in-flight items `work` runs beside on the same files, for the record only: dispatch is
- * optimistic and planned-file overlap holds nothing. Serialising on overlap idled most of the
+ * optimistic and overlap holds nothing. Serialising on overlap idled most of the
  * fleet (2026-09-24/25: ten workers idle behind items changing the same large files) to avoid a
  * conflict the merge queue and a sync round resolve anyway: whichever of two overlapping items
  * lands second is re-integrated by base refresh, or sent back for a sync on a real conflict.
- * `plannedFiles` stays the submission-time change-scope contract; only exclusive resources hold
- * dispatch (`resourceConflicts`).
+ * Only exclusive resources hold dispatch (`resourceConflicts`).
  */
 export function concurrentOverlap(work: Work, all: Work[], now: number): OverlapAhead[] {
   if (work.stage === 'done') return [];
@@ -69,59 +60,25 @@ export function concurrentOverlap(work: Work, all: Work[], now: number): Overlap
 export const dispatchable = (work: Work, now: number) => work.stage !== 'done' && work.ready && !work.blocker && !claimedNow(work, now) && (!work.submission || !!work.reworkRequested)
   && !observationWindowHold(work, new Date(now)) && !loopObservationProofs(work) && !loopOwned(work);
 
-/** A directory scope at the repository root (`src/`, `docs/`, `tests/`, `/`): it overlaps almost everything. */
-export const broadScope = (scope: string) => { const { path, prefix } = pathScope(scope); return prefix && path.split('/').filter(Boolean).length <= 1; };
-export interface ScopeBreadth { files: number; directories: number; broad: string[]; highConflict: boolean }
-/**
- * How much of the repository a planned scope can reach, without a tree to count files in: exact
- * files, directory scopes, and the root-level directories that touch nearly every other item.
- */
-export function scopeBreadth(plannedFiles: string[]): ScopeBreadth {
-  const broad = plannedFiles.filter(broadScope);
-  const directories = plannedFiles.filter(scope => pathScope(scope).prefix).length;
-  return { files: plannedFiles.length - directories, directories, broad, highConflict: broad.length > 0 };
-}
-export interface BroadScopeRefusal { scope: string; narrower: string[]; reason: string }
-/**
- * Why a planned scope is refused where planned files are set, one entry per root-level directory
- * claim, with the narrower paths it should name: the paths under that directory the item's own
- * text (title, description, criteria) names. `plannedFiles` is the change-scope contract a
- * submission is checked against: a root-level directory claim lets the item rewrite almost anything
- * under that root unchecked, and dispatch it ahead of smaller items less often. An exception is
- * recorded explicitly, never introduced unnoticed.
- */
-export function broadScopeRefusals(plannedFiles: string[], text: string[] = []): BroadScopeRefusal[] {
-  const named = [...new Set(text.flatMap(namedPaths))];
-  return scopeBreadth(plannedFiles).broad.map(scope => {
-    const narrower = named.filter(path => path !== scope && !broadScope(path) && pathScopeContains(scope, path) && !plannedFiles.includes(path));
-    const instead = narrower.length ? `name ${narrower.join(', ')} instead` : `name the files under ${scope} this item changes instead`;
-    return { scope, narrower, reason: `${scope} is a root-level directory scope: the change-scope check then admits any file under ${scope}, so a submission is held to almost nothing there — ${instead}` };
-  });
-}
-/** True when the item plans a hot file: one two or more live attempts are already changing (`hotspots`, GY-882). */
+/** True when the item's observed candidate changes a hot file: one two or more live attempts are already changing (`hotspots`, GY-882). */
 const touchesHot = (item: Work, hot: ReadonlySet<string>) => {
   if (!hot.size) return false;
-  for (const path of item.plannedFiles) for (const file of hot) if (pathScopesOverlap(path, file)) return true;
+  for (const path of touchedPaths(item)) for (const file of hot) if (pathScopesOverlap(path, file)) return true;
   return false;
 };
 
 /**
- * Smallest scope first among ready items of the same operator priority: fewest root-level
- * directories, then fewest directories, then fewest files, then the older item. A small item that
- * lands early is one fewer re-integration for everything it would otherwise have waited behind.
- * Given a hot set (`hotFileSet`, GY-882), an item of the same priority that touches no file two or
- * more live attempts are already changing is offered before one that does; the order above then
- * decides within each group. This stays a pure reordering — overlap still holds nothing, and a hot
+ * Older item first among ready items of the same operator priority. Given a hot set
+ * (`hotFileSet`, GY-882), an item of the same priority that touches no file two or more live
+ * attempts are already changing is offered before one that does; age then decides within each group. This stays a pure reordering — overlap still holds nothing, and a hot
  * item still dispatches beside its peers rather than waiting for them. The hot set is computed once
  * per cycle from one snapshot and passed in: heat is a property of the whole set, and a comparator
  * driven only by (a, b) must not derive it mid-sort. The default empty set is the cold order, so
  * every existing `.sort(dispatchOrder)` call site is unchanged.
  *
  * Given `now`, an item of the same priority that has waited `dispatchStarvationMs` or longer in its
- * stage is offered before every item that has not, whatever its scope or heat (among such items the
- * order below still decides):
- * the smallest-scope and cold-first preferences alone starved a broad item for hours while smaller
- * items kept arriving ahead of it (GY-1023, ready from 00:40 to past 04:00 on 2026-10-01).
+ * stage is offered before every item that has not, whatever its heat (GY-1023: the scope and
+ * cold-first preferences alone once starved a broad item for hours).
  * `dispatchSort` reads each item's wait once per sort; prefer it over `.sort(dispatchOrder)` when
  * ordering a whole set with a clock.
  */
@@ -150,12 +107,11 @@ const starving = (item: Work, now: number | undefined) => now !== undefined && s
  */
 const attempted = (work: Work & { reworkRounds?: number }) => !!work.submission || !!work.pipeline?.submittedAt || (work.pipeline?.reworkRounds ?? work.reworkRounds ?? 0) > 0;
 function dispatchRank(a: Work, b: Work, hot: ReadonlySet<string>, starvingA: boolean, starvingB: boolean) {
-  const left = scopeBreadth(a.plannedFiles), right = scopeBreadth(b.plannedFiles);
   const hotA = touchesHot(a, hot), hotB = touchesHot(b, hot);
   return a.priority - b.priority
     || (starvingA !== starvingB ? (starvingA ? -1 : 1) : 0)
     || (hotA !== hotB ? (hotA ? 1 : -1) : 0)
-    || left.broad.length - right.broad.length || left.directories - right.directories || left.files - right.files || (Date.parse(a.createdAt) - Date.parse(b.createdAt) || 0);
+    || (Date.parse(a.createdAt) - Date.parse(b.createdAt) || 0);
 }
 export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new Set(), now?: number) {
   return dispatchRank(a, b, hot, starving(a, now), starving(b, now));
@@ -163,11 +119,11 @@ export function dispatchOrder(a: Work, b: Work, hot: ReadonlySet<string> = new S
 /**
  * `items` in dispatch order, each item's starvation read once rather than on every comparison.
  * Within one priority, an item that already carries a submitted attempt is offered before an item
- * without one (GY-1891), ahead of the starvation, hot-file and scope keys `dispatchRank` decides: a returned
+ * without one (GY-1891), ahead of the starvation, hot-file and age keys `dispatchRank` decides: a returned
  * rework has been built and reviewed once and is the nearest thing to a merge, so holding it while
  * fresh work starts only raises work in progress. Within each group the existing order stands
- * unchanged, and priority still decides first. The pairwise `dispatchOrder` keeps the scope/heat/wait
- * order it has always had; whole-set ordering goes through here, as the loop's dispatch step and
+ * unchanged, and priority still decides first. The pairwise `dispatchOrder` keeps the heat/wait
+ * order; whole-set ordering goes through here, as the loop's dispatch step and
  * master status's schedule already do.
  */
 export function dispatchSort(items: readonly Work[], hot: ReadonlySet<string> = new Set(), now?: number) {
@@ -209,7 +165,7 @@ export function diagnose(work: Work, all: Work[], now: number, jobs: Integration
   if (work.submission && job && !job.error && Date.parse(job.available_at) < now - 120000 && (!job.locked_until || Date.parse(job.locked_until) <= now)) add('reconciliation-stalled', 'Integration work is overdue and has no active processor', 'Check that the Graphyard server and its reconciliation loop are running.');
   for (const ac of work.criteria) if (ac.bootstrap) add('bootstrap-deferred', `${ac.id} runs in bootstrap mode: ${ac.proofs.join(' + ')} is deferred because this change introduces the harness (${ac.bootstrap.reason})`,
     `Declared by ${ac.bootstrap.declaredBy} at ${ac.bootstrap.declaredAt}. Review, CI and every other criterion still gate this item; the deferred proof stays owed on ${ac.bootstrap.contractPaths.join(', ')}.`);
-  for (const obligation of inheritedObligations(work, all)) add('bootstrap-obligation', `${obligation.proof} is inherited from ${obligation.key} ${obligation.criterionId} because this item plans to touch ${obligation.contractPaths.join(', ')}`,
+  for (const obligation of inheritedObligations(work, all)) add('bootstrap-obligation', `${obligation.proof} is inherited from ${obligation.key} ${obligation.criterionId} because this item's candidate touches ${obligation.contractPaths.join(', ')}`,
     'Produce trusted passing evidence for this proof; a bootstrap deferral cannot be renewed by the change that inherits it.');
   for (const proof of work.proofGaps ?? []) add('proof-authority-gap', `No principal is authorized to produce ${proof}`, 'Grant the proof name to a producer principal with `graphyard grants grant`; the acceptance gate cannot be satisfied until someone can produce it.');
   const refreshing = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);

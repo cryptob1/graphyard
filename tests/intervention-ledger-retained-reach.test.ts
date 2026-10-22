@@ -28,7 +28,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('intervention-ledger-retained-reach'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('intervention_ledger_retained_reach_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/intervention_ledger_retained_reach_test`); await store.init();
-  await store.pool.query('INSERT INTO work_items(id, document) VALUES($1, $2)', [workId, JSON.stringify({ id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2, plannedFiles: [] })]);
+  await store.pool.query('INSERT INTO work_items(id, document) VALUES($1, $2)', [workId, JSON.stringify({ id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2 })]);
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
@@ -43,19 +43,19 @@ test('manual:intervention-pattern-within-threshold — a truncated read names th
   await write('decision.requested', iso(opened - 2 * day), { id: 'decision-settled-inside', action: 'rework' });
   // Inside the decisions' reach before the window: a withdrawal the window neither holds nor settles. Retained by the read, dropped by the window (windowOutcomes), still the oldest row the read retained.
   const withdrawnBefore = iso(opened - interventionDecisionReachMs + hour / 2);
-  await write('decision.withdrawn', withdrawnBefore, { id: 'decision-withdrawn-before', action: 'scope' });
+  await write('decision.withdrawn', withdrawnBefore, { id: 'decision-withdrawn-before', action: 'requirements' });
   // Inside the decisions' reach before the window: the request of a decision the window declines. Retained by the read, kept by the window for the decision it settles.
   const earlyRequest = iso(opened - interventionDecisionReachMs + hour);
-  await write('decision.requested', earlyRequest, { id: 'decision-declined-inside', action: 'scope' });
+  await write('decision.requested', earlyRequest, { id: 'decision-declined-inside', action: 'requirements' });
   // The window's own rows, oldest first.
   const inside = [
-    ['scope', iso(opened + 12 * hour), { details: { epoch: 2 } }],
-    ['decision.requested', iso(opened + day), { id: 'decision-approved-inside', action: 'scope' }],
-    ['decision.approved', iso(opened + day + hour), { id: 'decision-approved-inside', action: 'scope' }],
-    ['scope', iso(opened + 2 * day), { details: { epoch: 2 } }],
+    ['blocked', iso(opened + 12 * hour), { details: { epoch: 2 } }],
+    ['decision.requested', iso(opened + day), { id: 'decision-approved-inside', action: 'requirements' }],
+    ['decision.approved', iso(opened + day + hour), { id: 'decision-approved-inside', action: 'requirements' }],
+    ['blocked', iso(opened + 2 * day), { details: { epoch: 2 } }],
     ['decision.applied', iso(opened + 3 * day), { id: 'decision-settled-inside', action: 'rework' }],
     ['rework', iso(opened + 4 * day), { details: { epoch: 2 } }],
-    ['decision.declined', iso(opened + 5 * day), { id: 'decision-declined-inside', action: 'scope' }],
+    ['decision.declined', iso(opened + 5 * day), { id: 'decision-declined-inside', action: 'requirements' }],
   ] as const;
   for (const [kind, at, payload] of inside) await write(kind, at, payload);
   const at = (index: number) => inside[index][1];
@@ -67,10 +67,10 @@ test('manual:intervention-pattern-within-threshold — a truncated read names th
   assert.equal(whole.retainedFrom, withdrawnBefore, 'the oldest retained row is the withdrawal before the window, retained by the read though the window drops it');
   assert.equal(ledgerReach(whole.retainedFrom, whole.truncated, since, iso(now)), since);
 
-  // Cut to the newest six: the oldest retained row is the window's `decision.requested`, written inside it. The reading begins there, not at the later `scope` row.
+  // Cut to the newest six: the oldest retained row is the window's `decision.requested`, written inside it. The reading begins there, not at the later `blocked` row.
   const six = await readInterventionLedger(store.pool, { since, limit: 6 });
   assert.equal(six.truncated, true);
-  assert.deepEqual(six.rows.map(row => [row.kind, row.at]), [['decision.requested', iso(opened - 2 * day)], ['decision.requested', earlyRequest], ...inside.slice(1).map(([kind, at]) => [kind, at])], 'the requests of both decisions the retained rows settle are read from beyond the retained rows — the early request now among them, cut with the first `scope` row');
+  assert.deepEqual(six.rows.map(row => [row.kind, row.at]), [['decision.requested', iso(opened - 2 * day)], ['decision.requested', earlyRequest], ...inside.slice(1).map(([kind, at]) => [kind, at])], 'the requests of both decisions the retained rows settle are read from beyond the retained rows — the early request now among them, cut with the first `blocked` row');
   assert.equal(six.retainedFrom, at(1));
   assert.equal(ledgerReach(six.retainedFrom, six.truncated, since, iso(now)), at(1));
 
@@ -90,7 +90,7 @@ test('manual:intervention-pattern-within-threshold — a truncated read names th
   assert.equal(three.retainedFrom, at(4));
   assert.equal(ledgerReach(three.retainedFrom, three.truncated, since, iso(now)), at(4));
 
-  // Cut to the newest seven: the oldest retained row is the first `scope` row; the early request, cut, is read back only for the decision the window declines.
+  // Cut to the newest seven: the oldest retained row is the first `blocked` row; the early request, cut, is read back only for the decision the window declines.
   const seven = await readInterventionLedger(store.pool, { since, limit: 7 });
   assert.equal(seven.truncated, true);
   assert.deepEqual(seven.rows.map(row => row.kind), ['decision.requested', 'decision.requested', ...inside.map(([kind]) => kind)]);
@@ -128,11 +128,11 @@ test('manual:intervention-pattern-within-threshold — the reach is the cutoff r
   const now = Date.now(), since = iso(now - 7 * day);
   // A row written with its document, whose `updatedAt` precedes the insertion by five seconds: the row's own instant.
   const documented = iso(now - hour), documentedAt = iso(now - hour - 5_000);
-  await write('scope', documented, { work: { id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2, plannedFiles: [], updatedAt: documentedAt } });
+  await write('blocked', documented, { work: { id: workId, key: 'GY-1675', title: 'GY-1675', stage: 'build', epoch: 2, updatedAt: documentedAt } });
   // Two rows inserted in one instant, as one transaction's writes share `created_at`.
   const shared = iso(now - hour / 2);
-  await write('scope', shared, { details: { epoch: 2 } });
-  await write('scope', shared, { details: { epoch: 2 } });
+  await write('blocked', shared, { details: { epoch: 2 } });
+  await write('blocked', shared, { details: { epoch: 2 } });
   // Cut between the two: the retained one's instant is the omitted one's too, and no retained row follows it — the read names no instant, and the reading begins now.
   const between = await readInterventionLedger(store.pool, { since, limit: 1 });
   assert.equal(between.truncated, true); assert.deepEqual(between.rows.map(row => row.at), [shared]);

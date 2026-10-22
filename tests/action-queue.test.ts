@@ -82,7 +82,7 @@ const expireLease = (item: Work) => store.pool.query("UPDATE work_items SET docu
 
 let sequence = 0;
 async function created(overrides: Record<string, unknown> = {}) {
-  const item = await engine.execute(operator, 'create', null, { title: `Inverted loop ${++sequence}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, randomUUID());
+  const item = await engine.execute(operator, 'create', null, { title: `Inverted loop ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, randomUUID());
   return item;
 }
 const release = async (item: Work) => engine.execute(operator, 'ready', item.id, {}, randomUUID());
@@ -116,7 +116,7 @@ test('integration:typed-next-action — the control plane names one typed action
   // Ready and unassigned: a dispatch, carrying what a launcher needs to choose a profile.
   item = await release(item);
   assert.equal(item.nextAction!.kind, 'dispatch');
-  assert.deepEqual(inputs(item), { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 2, plannedFiles: ['src/'] });
+  assert.deepEqual(inputs(item), { kind: 'dispatch', target: 'implementation', epoch: 0, priority: 2 });
   assert.equal(item.nextAction!.llmRole, 'implement');
   assert.equal(item.nextAction!.work, item.id); assert.equal(item.nextAction!.key, item.key);
 
@@ -240,14 +240,6 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(merging.wait?.kind, 'session'); assert.equal(merging.wait?.on, 'merge-writer');
   assert.match(merging.wait!.detail, new RegExp(`queued for the merge writer, which trials and pushes it: merge writer has not trialled ${head.slice(0, 12)}`));
 
-  // A live scope request outranks the gates: the worker holding the item is idle until it is answered.
-  const blocked = await submitted();
-  const claimedAgain = await engine.execute(operator, 'rework', blocked.id, { reason: 'reopen for the scope ask', previousWorkerStopped: true }, randomUUID());
-  let scoped = await engine.execute(worker, 'claim', claimedAgain.id, {}, randomUUID());
-  scoped = await engine.execute(worker, 'scope', scoped.id, { epoch: scoped.epoch, paths: ['docs/'], reason: 'the guide describes this contract' }, randomUUID());
-  assert.equal(scoped.nextAction!.kind, 'approve-scope');
-  assert.deepEqual(inputs(scoped), { kind: 'approve-scope', epoch: scoped.epoch, paths: ['docs/'], requestedBy: worker.id, detail: 'the guide describes this contract' });
-
   // The API exposes both the per-item action and the whole queue.
   const response = await fetch(`${url}/api/actions`, { headers: { Authorization: `Bearer ${'x'.repeat(32)}` } });
   const body = await response.json();
@@ -255,7 +247,6 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.deepEqual(body.kinds, [...nextActionKinds]);
   assert.deepEqual(body.mechanical, [...mechanicalActionKinds]);
   assert.equal(body.nextActions.some((entry: any) => entry.key === item.key), false, 'a candidate GitHub merges names no action');
-  assert.ok(body.actions.some((entry: ActionRow) => entry.key === scoped.key && entry.kind === 'approve-scope'));
   const snapshot = await (await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${'x'.repeat(32)}` } })).json();
   assert.ok((snapshot.work as Work[]).every(entry => 'nextAction' in entry), 'every item carries its computed action');
 
@@ -264,7 +255,9 @@ test('integration:typed-next-action — the control plane names one typed action
   const probes: Work[] = [
     ...all,
     { ...all[0], blocker: 'The staging database is unreachable', gates: [{ name: 'ready', passed: false, reasons: ['The staging database is unreachable'] }] } as Work,
-    { ...all[0], gates: [{ name: 'build', passed: false, reasons: ['Candidate changes 2 files outside its planned files that must match the base branch byte-for-byte; run graphyard sync GY-1, restore each file from origin/<base>, and push again', 'Out-of-scope regression: src/other.ts reverts GY-2'] }] } as Work,
+    { ...all[0], gates: [{ name: 'ready', passed: false, reasons: ['Dependency GY-3 is unfinished'] }] } as Work,
+    { ...all[0], gates: [{ name: 'build', passed: false, reasons: ['Candidate conflicts with the base branch', 'Mechanical proof unit:priority failed on this head', 'Worker has not submitted implementation for this attempt'] }] } as Work,
+    { ...all[0], gates: [{ name: 'test', passed: false, reasons: ['Required check typecheck has not passed on this head'] }] } as Work,
     { ...all[0], gates: [{ name: 'review', passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] }] } as Work,
     { ...all[0], gates: [{ name: 'merge', passed: false, reasons: ['Required Graphyard check and merge-queue branch protection have not been verified'] }] } as Work,
     { ...all[0], gates: [{ name: 'acceptance', passed: false, reasons: [`Trusted ${PROOF} evidence from agent-a is no longer independent: agent-a has since held an assignment on GY-1`] }] } as Work,
@@ -370,7 +363,7 @@ const fleetConfig = masterConfigSchema.parse({
 
 test('integration:worker-pull-model — a free worker asks the control plane for its next assignment, p90 ready-to-claim stays inside two minutes, and nothing tracks runtime health', async () => {
   const offered: Work[] = [];
-  for (let index = 0; index < 4; index++) offered.push(await release(await engine.execute(operator, 'create', null, { title: `Pull ${index}`, priority: index === 0 ? 0 : 3, plannedFiles: [`src/pull-${index}/`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID())));
+  for (let index = 0; index < 4; index++) offered.push(await release(await engine.execute(operator, 'create', null, { title: `Pull ${index}`, priority: index === 0 ? 0 : 3, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID())));
 
   // The pull: one call, one credential, no configuration. `agent-b` appears in no master profile
   // and no Herdr inventory; the control plane still hands it the work it is entitled to claim.
@@ -382,15 +375,14 @@ test('integration:worker-pull-model — a free worker asks the control plane for
     assert.equal(pulled.assigned!.lease!.owner, actor.id, 'the worker claims under its own identity');
   }
   assert.equal(new Set(assigned.map(item => item.id)).size, assigned.length, 'no item was handed to two workers');
-  // The offer order is the dispatch order the control plane already uses: priority, then the
-  // narrowest planned scope, then age. Nothing about worker liveness enters into it.
-  // Earlier tests leave dispatchable items of their own (planned-file overlap no longer holds them);
-  // among this test's items, the highest priority is offered first.
+  // The offer order is the dispatch order the control plane already uses: priority first.
+  // Nothing about worker liveness enters into it. Earlier tests leave dispatchable items of their
+  // own; among this test's items, the highest priority is offered first.
   assert.equal(assigned.filter(item => offered.some(entry => entry.id === item.id))[0].priority, 0, 'the highest priority item is offered first');
   for (const item of assigned) await engine.execute(item.lease!.owner === worker.id ? worker : otherWorker, 'release', item.id, { epoch: item.lease!.epoch }, randomUUID());
 
   // An item another worker already holds is never offered twice: a racing pull skips it.
-  const contested = await release(await engine.execute(operator, 'create', null, { title: 'Contested', plannedFiles: ['src/contested/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const contested = await release(await engine.execute(operator, 'create', null, { title: 'Contested', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
   const [first, second] = await Promise.all([engine.pullAssignment(worker, { work: contested.id }, randomUUID()), engine.pullAssignment(otherWorker, { work: contested.id }, randomUUID())]);
   const winners = [first, second].filter(result => result.assigned);
   assert.equal(winners.length, 1, 'the coordination lock decides the race; the loser is told nothing was left');
@@ -400,8 +392,8 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   // A pull that timed out after its claim committed is retried with the same key: it replays the
   // claim it already made. Without that the retry would take a second item and the worker would
   // hold a lease it was never told about, until it lapsed into a reclaim.
-  const replayable = await release(await engine.execute(operator, 'create', null, { title: 'Replayed pull', plannedFiles: ['src/replay/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
-  const alsoOffered = await release(await engine.execute(operator, 'create', null, { title: 'Second offer', plannedFiles: ['src/replay-2/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const replayable = await release(await engine.execute(operator, 'create', null, { title: 'Replayed pull', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const alsoOffered = await release(await engine.execute(operator, 'create', null, { title: 'Second offer', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
   const retryKey = randomUUID();
   const won = await engine.pullAssignment(worker, {}, retryKey);
   assert.ok(won.assigned, 'the pull claimed an item');
@@ -420,8 +412,8 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   // One key can only ever claim one item, including when the retry races the call it is retrying:
   // the claim and its receipt are written in one transaction, so whichever reaches an offer first
   // wins and the other replays that assignment instead of taking a second.
-  const raced = await release(await engine.execute(operator, 'create', null, { title: 'Raced pull', plannedFiles: ['src/raced/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
-  const alsoRaced = await release(await engine.execute(operator, 'create', null, { title: 'Raced pull 2', plannedFiles: ['src/raced-2/'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const raced = await release(await engine.execute(operator, 'create', null, { title: 'Raced pull', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const alsoRaced = await release(await engine.execute(operator, 'create', null, { title: 'Raced pull 2', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
   const racedKey = randomUUID();
   const [one, two] = await Promise.all([engine.pullAssignment(worker, { work: raced.id }, racedKey), engine.pullAssignment(worker, { work: alsoRaced.id }, racedKey)]);
   const assignments = [one, two].filter(result => result.assigned);
@@ -459,7 +451,7 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   const latencies: number[] = [];
   for (let index = 0; index < 10; index++) {
     const actor = index % 2 ? worker : otherWorker;
-    const item = await engine.execute(operator, 'create', null, { title: `Polled ${index}`, plannedFiles: [`src/polled-${index}/`], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
+    const item = await engine.execute(operator, 'create', null, { title: `Polled ${index}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
     // The loop is already polling when the item is released, exactly as an idle session is.
     const loop = runWorkerPull(() => engine.pullAssignment(actor, { work: item.id }, randomUUID()), { intervalMs: pollMs, maxPolls: 300 });
     await release(item);
@@ -492,17 +484,17 @@ test('integration:worker-pull-model — a free worker asks the control plane for
 
 test('integration:no-llm-in-critical-path — every judgment has one action that starts it, the mechanical kinds need no language model, and an escalation waits for a judgment', async () => {
   // The roles are declared per kind: judgment happens inside what an action starts, never in the
-  // step that starts it. Four kinds name a judgment; the other four are mechanical.
+  // step that starts it. Four kinds name a judgment; the other three are mechanical.
   assert.deepEqual(Object.entries(nextActionLlmRoles).filter(([, role]) => role !== null).map(([kind]) => kind).sort(),
     ['dispatch', 'escalate', 'request-review', 'request-rework'].sort());
-  assert.deepEqual([...mechanicalActionKinds].sort(), ['approve-scope', 'merge', 'reclaim', 'resync'].sort());
+  assert.deepEqual([...mechanicalActionKinds].sort(), ['merge', 'reclaim', 'resync'].sort());
   assert.deepEqual([...llmRoles].sort(), ['approve-decision', 'implement', 'produce-evidence', 'resolve-escalation', 'review']);
   // Every judgment the project names has exactly one action that starts it, and nothing else does.
   assert.deepEqual([...new Set(Object.values(nextActionLlmRoles))].filter(Boolean).sort(), ['approve-decision', 'implement', 'resolve-escalation', 'review'],
     'produce-evidence is the dispatch of a producer session, which the computed action names on the row');
 
   // A kind whose judgment happens in the step itself is never mechanical.
-  assert.deepEqual([...executorRunnableKinds].sort(), ['approve-scope', 'dispatch', 'merge', 'reclaim', 'request-review', 'resync'].sort());
+  assert.deepEqual([...executorRunnableKinds].sort(), ['dispatch', 'merge', 'reclaim', 'request-review', 'resync'].sort());
   assert.equal(actionJudgment.escalate, 'in-step');
   assert.equal(actionJudgment['request-rework'], 'in-step');
 
@@ -518,9 +510,9 @@ test('integration:no-llm-in-critical-path — every judgment has one action that
 // ---- AC-7: typed agent requests ---------------------------------------------------------------
 
 test('integration:typed-agent-requests — an agent that needs something records a typed request, names its decider and exits without holding its lease, and master status shows it with how long it has waited', async () => {
-  // Every type names exactly one decider, from the four the project allows.
-  assert.deepEqual([...agentRequestTypes], ['scope-request', 'decision', 'blocker', 'note', 'escalation']);
-  assert.deepEqual(agentRequestTypes.map(type => deciderFor('GY-9', { type, action: 'rework' }).kind), ['rule', 'approver', 'follow-up', 'rule', 'approver']);
+  // Every type names exactly one decider, from those the project allows.
+  assert.deepEqual([...agentRequestTypes], ['decision', 'blocker', 'note', 'escalation']);
+  assert.deepEqual(agentRequestTypes.map(type => deciderFor('GY-9', { type, action: 'rework' }).kind), ['approver', 'follow-up', 'rule', 'approver']);
   for (const type of agentRequestTypes) {
     const decider = deciderFor('GY-9', { type, action: 'rework' });
     assert.ok(decider.who.length > 0, `${type} names who decides it`);
@@ -528,35 +520,6 @@ test('integration:typed-agent-requests — an agent that needs something records
   }
   // Only one of the three human-only decisions reaches a person, whatever the type.
   for (const humanDecision of humanDecisions) assert.equal(deciderFor('GY-9', { type: 'decision', humanDecision }).kind, 'human');
-
-  // A worker that needs files outside plannedFiles records the ask and gives the item back. Its
-  // decider is a deterministic rule, so the control plane applies it in the same transaction:
-  // the ask is answered before the session has finished exiting.
-  let item = await engine.execute(worker, 'claim', (await release(await created({ plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Update the architecture guide for the new contract', proofs: [PROOF] }] }))).id, {}, randomUUID());
-  const epoch = item.epoch;
-  item = await engine.execute(worker, 'request', item.id, { type: 'scope-request', epoch, paths: ['docs/architecture.md'], reason: 'the contract this item changes is described in the architecture guide' }, randomUUID());
-  assert.equal(item.lease, null, 'the attempt ended in the same transaction; nothing waits at a prompt');
-  assert.equal(item.pipeline!.attempts.at(-1)!.end, 'released');
-  const scope = item.agentRequests!.at(-1)!;
-  assert.equal(scope.type, 'scope-request');
-  assert.equal(scope.releasedLease, true);
-  assert.deepEqual(scope.decider, { kind: 'rule', who: 'the additive planned-files widening rule', command: `graphyard master scope ${item.key}` });
-  assert.equal(scope.state, 'resolved', 'the rule that decides it ran here, so nothing is left waiting');
-  assert.equal(item.scopeDecision!.state, 'approved');
-  assert.match(scope.resolution!, /^approved: additive scope the item already implies/);
-  assert.ok(item.plannedFiles.includes('docs/architecture.md'), 'the widening the item already implied was applied');
-  assert.equal(item.scopeRequest, null);
-
-  // A request the rule cannot approve keeps the refusal as the item's blocker, so the ready gate
-  // holds it and the control plane names an escalation rather than leaving it silently open.
-  let wider = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  wider = await engine.execute(worker, 'request', wider.id, { type: 'scope-request', epoch: wider.epoch, paths: ['deploy/helm/'], reason: 'the chart needs the same value' }, randomUUID());
-  assert.equal(wider.scopeDecision!.state, 'refused');
-  assert.match(wider.blocker!, /outside what this item's own criteria and the repository's documentation rule imply/);
-  assert.equal(wider.nextAction!.kind, 'escalate');
-  assert.equal(wider.agentRequests!.at(-1)!.state, 'resolved');
-  assert.ok(!wider.plannedFiles.includes('deploy/helm/'));
-  await engine.execute(operator, 'unblock', wider.id, { reason: 'Operator decided the chart is out of scope for this item' }, randomUUID());
 
   // A decision request names the action an independent approver must approve.
   let decided = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
@@ -629,11 +592,10 @@ test('integration:typed-agent-requests — an agent that needs something records
   // authority: the live lease of the attempt that is asking. Without this rule any worker or
   // producer credential with no assignment could set the blocker that holds the ready gate, or
   // raise the escalation that fences every in-flight merge, on any item in the graph.
-  assert.deepEqual([...leaseHeldRequestTypes].sort(), ['blocker', 'decision', 'escalation', 'scope-request']);
+  assert.deepEqual([...leaseHeldRequestTypes].sort(), ['blocker', 'decision', 'escalation']);
   const unrelated = await release(await created());
   for (const type of leaseHeldRequestTypes) {
     const body: Record<string, unknown> = { type, reason: 'no lease on this item' };
-    if (type === 'scope-request') body.paths = ['deploy/'];
     if (type === 'decision') body.action = 'rework';
     if (type === 'escalation') body.trigger = 'security-concern';
     for (const actor of [otherWorker, producer]) {
@@ -679,7 +641,7 @@ test('integration:typed-agent-requests — an agent that needs something records
   assert.ok(failure, `the cycle recorded a session failure for ${waiting.key}; it recorded ${JSON.stringify(cycle.actions.map(action => [action.kind, action.work, action.state]))}`);
   assert.equal(failure!.state, 'failed');
   assert.match(failure!.detail, /is waiting on input \(Herdr reports it blocked\)/);
-  assert.match(failure!.detail, /records a typed request and exits — POST \/api\/work\/GY-\d+\/request with a type of scope-request, decision, blocker, note or escalation — which names its decider and frees the item/);
+  assert.match(failure!.detail, /records a typed request and exits — POST \/api\/work\/GY-\d+\/request with a type of decision, blocker, note or escalation — which names its decider and frees the item/);
   await engine.execute(worker, 'release', waiting.id, { epoch: waiting.epoch }, randomUUID());
 });
 
@@ -919,7 +881,7 @@ test('integration:session-handles-visible — the reviewer launcher records a ha
 test('integration:typed-next-action — the queue is pure over the snapshot: the same state reconciles to the same rows, and a changed state retires the row that no longer applies', () => {
   const at = '2026-09-20T12:00:00.000Z', clock = Date.parse(at);
   const item = {
-    id: 'work-1', key: 'GY-1', title: 'Pure', description: '', type: 'feature', priority: 1, dependencies: [], plannedFiles: ['src/'],
+    id: 'work-1', key: 'GY-1', title: 'Pure', description: '', type: 'feature', priority: 1, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [],
@@ -965,7 +927,7 @@ test('integration:typed-next-action — the queue is pure over the snapshot: the
 test('integration:typed-next-action — the gate evaluator and the action computation agree on every stage of one item', () => {
   const at = '2026-09-20T12:00:00.000Z';
   const base_: Work = {
-    id: 'work-2', key: 'GY-2', title: 'Agreement', description: '', type: 'feature', priority: 2, dependencies: [], plannedFiles: ['src/'],
+    id: 'work-2', key: 'GY-2', title: 'Agreement', description: '', type: 'feature', priority: 2, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, stage: 'backlog', revision: 1, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [],

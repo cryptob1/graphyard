@@ -16,7 +16,7 @@ const reviewer = 'graphyard-reviewer[bot]';
 
 function candidateAt(observation: Partial<Observation> = {}): Work {
   const candidate = { sha: TIP, baseSha: P, pr: PR, branch: 'graphyard/gy-100-1', author: 'implementer' };
-  return { id: 'work-100', key: 'GY-100', title: 'Candidate head', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-100', key: 'GY-100', title: 'Candidate head', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'merge', revision: 9, policyRevision: 4, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
     workspaces: [], candidate, submission: { epoch: 1, pr: PR }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, violations: [],

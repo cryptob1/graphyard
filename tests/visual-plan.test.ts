@@ -41,7 +41,7 @@ after(async () => { if (http) await new Promise<void>(resolve => http.close(() =
 const criteria = (text: string) => [{ id: 'AC-1', text, proofs: ['unit:visual-plan'] }];
 const item = (ref: string, dependsOn: string[] = []) => ({
   ref, title: `Build ${ref}`, plain: `People get the ${ref} piece.`, description: `The ${ref} work`, type: 'feature' as const, priority: 2,
-  outcomes: ['signup'], cases: ['signup-case'], criteria: criteria(`${ref} works`), plannedFiles: [`src/${ref}.ts`], dependsOn,
+  outcomes: ['signup'], cases: ['signup-case'], criteria: criteria(`${ref} works`), dependsOn,
 });
 const note = 'Node and TypeScript under src/, Postgres for data, deployed by the release pipeline.';
 const summary = 'Customers can sign up. The build lands the API before the page. Each piece is one worker change.';
@@ -80,12 +80,12 @@ test('unit:item-plain-summary — planItemInput copies plain onto summary; maste
   const planned = plan().items[1];
   const input = planItemInput({ ...goal, plan: { ...plan(), author: 'planner', draftedAt: new Date().toISOString() }, planApproval: { by: 'approver' } }, planned, new Map());
   assert.equal(input.summary, planned.plain);
-  const parsed = createSchema.parse({ title: 'Hand-filed item', description: 'detail', summary: 'A plain sentence for readers.', criteria: criteria('It works'), plannedFiles: ['src/x.ts'] });
+  const parsed = createSchema.parse({ title: 'Hand-filed item', description: 'detail', summary: 'A plain sentence for readers.', criteria: criteria('It works') });
   assert.equal(parsed.summary, 'A plain sentence for readers.');
   // master create / POST create: the optional summary is stored on the work document.
   const created = await engine.execute(admin, 'create', null, {
     title: 'Visual plan summary item', description: 'Full detail lives under Details.', summary: 'People read this sentence first.',
-    criteria: criteria('The summary is stored'), plannedFiles: ['src/visual-plan.ts'],
+    criteria: criteria('The summary is stored'), 
   }, randomUUID());
   assert.equal(created.summary, 'People read this sentence first.');
 });test('integration:goal-visual-plan — a four-item plan lays boxes in dependency order with an arrow per dependsOn and Todo/Doing/Checking/Done colours; browser-tests/visual-plan.spec.ts loads the goal page and checks Play and the Details fold', async () => {

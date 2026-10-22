@@ -181,7 +181,7 @@ function verdictItem(key: string, reviewer: string): Work {
   const head = headOf(key);
   return {
     id: `work-${key}`, key, title: 'Approver capacity', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:approver-relaunch-on-capacity'] }], policy: { checks: ['test'], review: true }, plannedFiles: [],
+    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:approver-relaunch-on-capacity'] }], policy: { checks: ['test'], review: true }, 
     stage: 'test', revision: 4, policyRevision: 1, createdAt: iso(-7_200_000), updatedAt: iso(), stageEnteredAt: iso(-3_600_000), ready: true, epoch: 1,
     lease: null, workspaces: [], candidate: { sha: head, baseSha: baseOf, pr: 7, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' },
     submission: { epoch: 1, pr: 7 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],

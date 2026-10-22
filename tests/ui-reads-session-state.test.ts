@@ -122,9 +122,9 @@ test('unit:ui-reads-session-state — Up next says what an item waits on: the de
   const item = (key: string) => work.find(w => w.key === key)!;
   // GY-13 waits on GY-17 to ship; GY-17 itself is ready but needs staging-db, which GY-14 holds under its claim.
   Object.assign(item('GY-13'), { dependencies: [item('GY-17').id], gates: item('GY-13').gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons: ['Dependency GY-17 is unfinished'] } : gate) });
-  Object.assign(item('GY-17'), { plannedFiles: ['web/groups.ts'], exclusiveResources: ['staging-db'], blocker: null, gates: item('GY-17').gates.map(gate => gate.name === 'ready' ? { ...gate, passed: true, reasons: [] } : gate) });
+  Object.assign(item('GY-17'), { exclusiveResources: ['staging-db'], blocker: null, gates: item('GY-17').gates.map(gate => gate.name === 'ready' ? { ...gate, passed: true, reasons: [] } : gate) });
   // Claimed ten minutes ago with a live lease: its resource is held.
-  Object.assign(item('GY-14'), { plannedFiles: ['web/groups.ts', 'web/pages/'], exclusiveResources: ['staging-db'], priority: item('GY-17').priority, lease: { ...item('GY-14').lease!, expiresAt: at(30 * minute) },
+  Object.assign(item('GY-14'), { exclusiveResources: ['staging-db'], priority: item('GY-17').priority, lease: { ...item('GY-14').lease!, expiresAt: at(30 * minute) },
     lastAssignment: { ...item('GY-14').lastAssignment!, claimedAt: at(-10 * minute) }, pipeline: undefined });
 
   const { byGroup } = classify(work, NOW);

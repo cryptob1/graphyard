@@ -116,7 +116,7 @@ const gy1401Criteria = [
 ];
 const gy1401 = (criteria: typeof gy1401Criteria) => ({ subject: 'GY-1401', cause: 'The /tmp reclaim pass removes a tree once and fails ENOTEMPTY when it gains files meanwhile',
   evidence: { logLines: ['reclaim: ENOTEMPTY: directory not empty, rmdir /tmp/graphyard-x'], commands: [] }, faultClass: 'resources',
-  fix: { title: 'Retry a /tmp removal that meets a transient ENOTEMPTY', description: 'The reclaim pass fails a tree that gains files while it is removed.', type: 'bug', priority: 1, criteria, plannedFiles: ['src/daemon/reclaim.ts', 'tests/tmp-reclaim.test.ts'] } });
+  fix: { title: 'Retry a /tmp removal that meets a transient ENOTEMPTY', description: 'The reclaim pass fails a tree that gains files while it is removed.', type: 'bug', priority: 1, criteria } });
 const wellFormed = gy1401Criteria.map((criterion, index) => ({ ...criterion, proofs: [`unit:tmp-reclaim-${['retry', 'isolation', 'visible'][index]}`] }));
 
 // GY-1402, 2026-10-06: three unclassified faults in 24 hours, each a failed maintenance action the loop
@@ -133,7 +133,7 @@ const doctorRun = (at: string): DoctorRunRecord => ({ at, state: 'reported', run
 const kinds = (state: DaemonState) => state.faults.instances.map(entry => [entry.kind, entry.faultClass]);
 
 function backlog(key: string, overrides: Partial<Work> = {}): Work {
-  return { id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, plannedFiles: ['src/x.ts'],
+  return { id: `work-${key}`, key, title: `Item ${key}`, description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
     stage: 'backlog', revision: 1, policyRevision: 1, createdAt: iso(-60 * 60_000), updatedAt: iso(0), stageEnteredAt: iso(-60 * 60_000), ready: false, epoch: 0, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], ...overrides } as unknown as Work;
 }

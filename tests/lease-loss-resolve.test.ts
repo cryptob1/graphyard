@@ -24,7 +24,7 @@ function config(): MasterConfig {
 function item(overrides: Partial<Work> = {}): Work {
   return {
     id: 'work-161', key: 'GY-161', title: 'Dashboard', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['web/'], stage: 'build', revision: 51, policyRevision: 3,
+    policy: { checks: ['test'], review: true }, stage: 'build', revision: 51, policyRevision: 3,
     createdAt: iso(-60 * 60_000), updatedAt: iso(0), stageEnteredAt: iso(-5 * 60_000), ready: true, epoch: 2,
     lease: { owner: 'graphyard-opencode-1', epoch: 2, expiresAt: iso(5 * 60_000) }, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],

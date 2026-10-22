@@ -56,7 +56,7 @@ function item(index: number, now: string): Work {
   const key = `GY-${index}`;
   return {
     id: `00000000-0000-4000-8000-${String(index).padStart(12, '0')}`, key, title: `Item ${key}`, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [],
-    policy: { checks: ['test'], review: true }, plannedFiles: ['src/'], stage: 'backlog', revision: 1, policyRevision: 1,
+    policy: { checks: ['test'], review: true }, stage: 'backlog', revision: 1, policyRevision: 1,
     createdAt: now, updatedAt: now, stageEnteredAt: now, ready: false, epoch: 0, lease: null, workspaces: [],
     candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: `${key} waits on a vendor`,
     gates: [], violations: [],
@@ -151,7 +151,7 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     const timings = state.metrics.at(-1)!.timings!;
     assert.ok(timings, 'the cycle recorded its timings on the cursor');
     const steps = timings.steps.map(step => step.step);
-    for (const step of ['snapshot', 'observe', 'credentials', 'close', 'scope', 'reclaim', 'dispatch', 'launches', 'decisions', 'reviews and proofs', 'merges', 'deployment verification', 'faults', 'measure'])
+    for (const step of ['snapshot', 'observe', 'credentials', 'close', 'reclaim', 'dispatch', 'launches', 'decisions', 'reviews and proofs', 'merges', 'deployment verification', 'faults', 'measure'])
       assert.ok(steps.includes(step), `the cycle records its ${step} step: ${steps.join(', ')}`);
     const slowest = [...timings.steps].sort((a, b) => b.ms - a.ms);
     assert.equal(slowest[0].step, 'deployment verification');
@@ -224,7 +224,7 @@ test('unit:cycle-latency-budget — with 170 open items and 1,100 worktrees at t
     // The launcher beside the cycle runs `run.launchConcurrency` of them at once (GY-616, default 3), set here to the four profiles.
     const profiles = ['a', 'b', 'c', 'd'].map(name => ({ name: `worker-${name}`, principal: `graphyard-${name}`, agentName: `agent-${name}`, mode: 'launch', kind: 'claude', credentialFile: join(root, `${name}.token`) }));
     const launching = { ...master, workers: profiles, run: { ...master.run, launchConcurrency: 4 } } as unknown as MasterConfig;
-    const ready = Array.from({ length: 6 }, (_, index) => ({ ...item(500 + index, new Date().toISOString()), stage: 'build', ready: true, blocker: null, plannedFiles: [`src/file-${index}.ts`] }) as unknown as Work);
+    const ready = Array.from({ length: 6 }, (_, index) => ({ ...item(500 + index, new Date().toISOString()), stage: 'build', ready: true, blocker: null }) as unknown as Work);
     let inFlight = 0, peak = 0;
     const dispatched: string[] = [];
     const launchState = emptyDaemonState(launching);

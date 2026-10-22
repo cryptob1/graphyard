@@ -51,13 +51,11 @@ export function masterHandover(input: HandoverInput) {
   const open = input.work.filter(item => item.stage !== 'done');
   const unjudged = (input.approvals ?? []).filter(watch => !watch.settledAt);
   const parks = open.flatMap(item => item.humanRequest && !item.humanRequest.answer ? [`${item.key} (${item.humanRequest.kind}: ${item.humanRequest.needed})`] : []);
-  const scope = open.filter(item => item.scopeRequest && !item.scopeRequest.decision).map(item => item.key);
   return [
     `Durable handover from the launcher that started this session: it relaunches the master when the session exits, spends its account or passes its session budget, so continue from this record and from node ${input.cliPath} master status; there is no earlier memory to inherit.`,
     line(`- Material subjects standing (master status judges each): ${input.subjects?.length ? input.subjects.map(subject => subject.key).slice(0, 20).join(', ') : 'none'}`),
     line(`- Decisions requested and still unjudged: ${unjudged.length ? unjudged.map(watch => `${watch.work} ${watch.action} decision ${watch.decision.slice(0, 12)} with approver session ${watch.agentName ?? '(not launched)'}`).join('; ') : 'none'}`),
     line(`- Needs-you parks (human-only decisions): ${parks.length ? parks.join('; ') : 'none'}`),
-    line(`- Open scope requests: ${scope.length ? scope.join(', ') : 'none'}`),
     `Continue the operating loop from node ${input.cliPath} master status until both stopping conditions hold; the launcher wakes this session as these change.`,
   ].join('\n');
 }

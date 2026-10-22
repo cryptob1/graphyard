@@ -28,7 +28,7 @@ function conflicted(key: string, head: string, observedAt: number): Work {
   const observation = { clockOffset: { min: 0, max: 0 }, candidate, baseTip: tip, baseTipContained: false, conflicting: true, checks: [], reviews: [], protected: true, mergeable: false,
     merged: false, mergeSha: null, files: paths, scopeFiles: [], at: iso(observedAt), prState: 'open', draft: false } as unknown as Observation;
   return { id: `${key}-id`, key, title: 't', description: '', type: 'bug', priority: 1, dependencies: [], criteria: [], policy: { checks: ['test'], review: true },
-    plannedFiles: paths, stage: 'build', revision: 1, policyRevision: 3, createdAt: iso(at('05:00:00')), updatedAt: iso(observedAt), stageEnteredAt: iso(at('05:51:01')), ready: true, epoch: 3,
+    stage: 'build', revision: 1, policyRevision: 3, createdAt: iso(at('05:00:00')), updatedAt: iso(observedAt), stageEnteredAt: iso(at('05:51:01')), ready: true, epoch: 3,
     lease: null, workspaces: [], submission: { epoch: 3, pr: 99 }, systemDriven: true, candidate, reworkRequested: false, scenarioRequirements: [], evidence: [], observation,
     baseRefresh: { from: { sha: head, baseSha: base0 }, base: tip, baseTree: 'e'.repeat(40), policyRevision: 3, at: '2026-10-08T05:51:01.988Z', head: null, conflict: 'conflict', merge: null, carry: null,
       trigger: 'conflict confirmed', conflictPaths: paths, conflictSince: '2026-10-08T05:51:01.988Z' }, blocker: null, violations: [],

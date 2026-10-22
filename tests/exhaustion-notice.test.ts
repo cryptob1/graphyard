@@ -181,7 +181,7 @@ test('integration:exhaustion-only-provider-notice — a stopped session narratin
   }) as MasterConfig;
   const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
   const { calls, cycle } = loop(config, herdr, clock);
-  let work = await ok(operator, 'POST', 'work', { title: 'exhaustion notice', plannedFiles: ['src/exhaustion.ts'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
+  let work = await ok(operator, 'POST', 'work', { title: 'exhaustion notice', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
   work = await ok(operator, 'POST', `work/${work.id}/ready`, {}) as Work;
 
   const state = emptyDaemonState(config);

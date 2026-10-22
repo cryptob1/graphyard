@@ -1,5 +1,5 @@
 import type { Work } from '../model.js';
-import { pathScope } from '../model/scope.js';
+import { pathScope } from '../model/documentation-glob.js';
 import { coordinationDocumentSql, coordinationRecords, coordinationRelevance, coordinationSessions, coordinationTail, detoasted } from './coordination-sql.js';
 
 /**
@@ -157,8 +157,8 @@ async function readWhole(db: Queryable, numbers: number[], forUpdate: boolean, i
 }
 
 /**
- * Whether an open item's answer can turn on `other`: they name an overlapping file (planned or
- * observed on the candidate), or share an exclusive resource.
+ * Whether an open item's answer can turn on `other`: they name an overlapping file (observed on
+ * the candidate), or share an exclusive resource.
  */
 function overlaps(work: Work, other: Work) {
   if (work.id === other.id) return true;
@@ -171,7 +171,7 @@ function overlaps(work: Work, other: Work) {
 const scopes = new WeakMap<Work, { path: string; prefix: boolean }[]>();
 function scopesOf(work: Work) {
   let known = scopes.get(work);
-  if (!known) scopes.set(work, known = [...(work.plannedFiles ?? []), ...(work.observation?.files ?? [])].map(pathScope));
+  if (!known) scopes.set(work, known = (work.observation?.files ?? []).map(pathScope));
   return known;
 }
 

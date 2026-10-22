@@ -93,7 +93,7 @@ test('unit:module-budgets — the original paths re-export the split modules, so
     for (const line of code) assert.match(line, /^export (type )?\{[^}]*\} from '\.[^']+';$/, `${original} only re-exports: ${line.slice(0, 120)}`);
   }
   const daemon = await import('../src/master-daemon.js');
-  for (const name of ['runCycle', 'runDaemon', 'daemonEffects', 'emptyDaemonState', 'readDaemonState', 'retriedSnapshot', 'observeDeployment', 'approvalStep', 'loopLiveness', 'scopeBudget'])
+  for (const name of ['runCycle', 'runDaemon', 'daemonEffects', 'emptyDaemonState', 'readDaemonState', 'retriedSnapshot', 'observeDeployment', 'approvalStep', 'loopLiveness'])
     assert.equal(typeof (daemon as Record<string, unknown>)[name], 'function', `src/master-daemon.ts still exports ${name}`);
   const master = await import('../src/master.js');
   for (const name of ['loadMasterConfig', 'dispatchWork', 'buildMasterStatus', 'launchApprover', 'runAutonomyCommand', 'selectAccount', 'startAgentSession', 'reclaimWorktrees', 'verifyContainmentDeath', 'listHerdrAgents', 'workerHarnessPlan'])

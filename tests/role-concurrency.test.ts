@@ -51,7 +51,7 @@ const fixedRequestId = (n: number, slot: string) => `${fixedTag(n, slot)}${creat
 /** A submitted, observed candidate for item N, with its review request recorded under a fixed id. */
 function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): Work {
   const candidate = { sha: sha40(`a${n}`), baseSha: B, pr: 200 + n, branch: `graphyard/gy-${200 + n}-1`, author: 'implementer' };
-  const item = { id: `work-${200 + n}`, key: `GY-${200 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  const item = { id: `work-${200 + n}`, key: `GY-${200 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:concurrency'] }, { id: 'AC-2', text: 'Integration', proofs: ['integration:concurrency'] }, { id: 'AC-3', text: 'Manual', proofs: ['manual:concurrency'] }],
     policy: { checks: ['test', 'typecheck'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: `/w/gy-${200 + n}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -178,7 +178,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 test('integration:concurrent-producers — the control plane refuses evidence for an item from the principal that held an assignment on it, and trusts the same principal on an item it never touched', async () => {
   const H = sha40('c1');
   const submitted = async (title: string, claimant: Principal, pr: number) => {
-    let item = await engine.execute(operator, 'create', null, { title, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:concurrency'] }] }, randomUUID());
+    let item = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:concurrency'] }] }, randomUUID());
     item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
     item = await engine.execute(claimant, 'claim', item.id, {}, randomUUID());
     item = await engine.execute(claimant, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/concurrency/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());

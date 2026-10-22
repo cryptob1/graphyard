@@ -8,7 +8,6 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { openHumanOnly } from '../src/model/human-request.js';
-import { scopeRefusalBlocker } from '../src/model/scope.js';
 import { maxAutomaticClears } from '../src/model/blocker-class.js';
 import { actorRole, groups, roleOf, type Board, type OpenGroup } from '../src/model/board.js';
 import { statusRoutes } from '../src/server/routes/status.js';
@@ -27,8 +26,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-200: one board. The dashboard derived its groups in the browser (web/groups.ts) while master
- * status spoke another vocabulary, so the operator saw three items Blocked on refused scope
- * requests, overdue, next actor the master — and the master reported nothing stuck. The groups now
+ * status spoke another vocabulary, so the operator saw three items Blocked, overdue, next actor
+ * the master — and the master reported nothing stuck. The groups now
  * come from src/model/board.ts, served at GET /api/board, rendered by the Work page and read by
  * master status. Each test is named for the proof it produces.
  */
@@ -40,8 +39,8 @@ const passed = () => ['ready', 'build', 'review', 'test', 'acceptance', 'merge']
 const refusing = (reasons: Record<string, string[]>) => passed().map(gate => reasons[gate.name] ? { ...gate, passed: false, reasons: reasons[gate.name] } : gate);
 
 /**
- * The fixture board plus the shapes the incident had: a worker's scope request the widening rule
- * refused and the approver refused after it (GY-172, blocked 90 minutes), a merge held by an escalation nobody resolved (GY-174), and
+ * The fixture board plus the shapes the incident had: an item blocked mid-attempt (GY-172, blocked
+ * 90 minutes), a merge held by an escalation nobody resolved (GY-174), and
  * an item held behind the one it depends on (GY-175). GY-20 is parked on a human-only decision and
  * GY-21 has passed every gate but the merge.
  */
@@ -49,33 +48,21 @@ function scenario(): Work[] {
   const work = boardWork() as unknown as Work[];
   const template = work.find(item => item.key === 'GY-13')!;
   const make = (key: string, title: string, fields: Partial<Work>) => ({ ...template, id: `00000000-0000-4000-8000-${key.slice(3).padStart(12, '0')}`, key, title, ...fields }) as Work;
-  const refused = `${scopeRefusalBlocker}: docs/board.md is outside the widening rule`;
-  const scope = make('GY-172', 'Scope-refused item', { stage: 'build', stageEnteredAt: at(-90 * minute), blocker: refused,
+  const blocker = 'needs a staging database the item cannot provision';
+  const stuck = make('GY-172', 'Blocked item', { stage: 'build', stageEnteredAt: at(-90 * minute), blocker,
     lease: { owner: 'worker-a', epoch: 2, expiresAt: at(20 * minute) }, lastAssignment: { owner: 'worker-a', epoch: 2, displayName: 'Cedar', runtime: 'Claude', claimedAt: at(-90 * minute) } as Work['lastAssignment'],
-    scopeRequest: { epoch: 2, paths: ['docs/board.md'], reason: 'The board endpoint needs its page', requestedBy: 'worker-a', at: at(-80 * minute),
-      decision: { state: 'refused', reason: 'outside the widening rule', at: at(-79 * minute), decidedBy: 'graphyard-approver', waitedMs: minute, paths: ['docs/board.md'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
-    gates: refusing({ ready: [refused], build: ['Worker has not submitted implementation for this attempt'] }) });
-  // The over-cap refusal GY-906 made terminal: no fold represents the ask, so the card names
-  // `master requirements`, which can fold or split it, not the plain union `master scope` posts
-  // past the same bound (GY-936).
-  const overCap = `${scopeRefusalBlocker}: no fold represents the ask within the 100 entries plannedFiles holds (101 after folding)`;
-  const capped = make('GY-173', 'Over-cap refused item', { stage: 'build', stageEnteredAt: at(-90 * minute), blocker: overCap,
-    plannedFiles: Array.from({ length: 100 }, (_, index) => `tests/bulk/case-${index}.ts`),
-    lease: { owner: 'worker-a', epoch: 2, expiresAt: at(20 * minute) },
-    scopeRequest: { epoch: 2, paths: ['src/other/next.ts'], reason: 'The new path moves onto the shared helper too', requestedBy: 'worker-a', at: at(-80 * minute),
-      decision: { state: 'refused', reason: 'no fold represents the ask within the 100 entries plannedFiles holds (101 after folding)', at: at(-79 * minute), decidedBy: 'graphyard', treeRead: true, waitedMs: minute, paths: ['src/other/next.ts'], requestedBy: 'worker-a', requestedAt: at(-80 * minute), epoch: 2 } },
-    gates: refusing({ ready: [overCap], build: ['Worker has not submitted implementation for this attempt'] }) });
+    gates: refusing({ ready: [blocker], build: ['Worker has not submitted implementation for this attempt'] }) });
   const held = make('GY-174', 'Held item', { stage: 'merge', stageEnteredAt: at(-45 * minute), submission: { epoch: 1, pr: 74 } as Work['submission'],
     candidate: { sha: sha('h'), baseSha: sha('b'), pr: 74, branch: 'graphyard/gy-174-1', author: 'worker', createdAt: at(-2 * 60 * minute) } as Work['candidate'],
     gates: refusing({ merge: ['Unresolved lease-loss escalation requires operator resolution: the builder lost contact'] }) });
   const waiting = make('GY-175', 'Held behind its dependency', { stage: 'ready', gates: refusing({ ready: ['Dependency GY-172 is unfinished'], build: ['Worker has not submitted implementation for this attempt'] }) });
-  return [...work, scope, capped, held, waiting];
+  return [...work, stuck, held, waiting];
 }
 
 /** GET /api/board, through the route the server registers, over a store holding `work`. */
 const boardRoute = statusRoutes.routes.find(route => route.method === 'GET' && route.path === '/api/board')!;
-async function served(work: Work[], decisions: unknown[] = []): Promise<Board> {
-  const pool = { query: async (sql: string) => sql.includes('clock_timestamp') ? { rows: [{ now: new Date(NOW) }] } : sql.includes('decision.requested') ? { rows: decisions } : { rows: [] } };
+async function served(work: Work[]): Promise<Board> {
+  const pool = { query: async (sql: string) => sql.includes('clock_timestamp') ? { rows: [{ now: new Date(NOW) }] } : { rows: [] } };
   const services = { engine: { store: { pool, fleet: async () => work }, ciAppIds: [1] }, production: null };
   return boardRoute.handle({ actor: { id: 'operator', role: 'admin' }, services, operatorVisible: (items: unknown[]) => items } as any, []) as Promise<Board>;
 }
@@ -91,17 +78,7 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
     assert.ok(item, `${key} is on the board`);
     assert.deepEqual({ group: item.group, actor: item.actor, command: item.command }, { group, actor, command }, key);
   };
-  expect('GY-172', 'blocked', 'master', 'graphyard master scope GY-172');
-  // GY-1388: refused by the rule alone, the ask is the approver's while its routed decision is
-  // pending in the ledger, so the card names that decision, never `master scope`, which the engine
-  // refuses. Once that decision ends, or none came within the bound, the ask is the master's again.
-  const routed = work.map(item => item.key === 'GY-172' ? { ...item, scopeRequest: { ...item.scopeRequest!, decision: { ...item.scopeRequest!.decision!, decidedBy: 'graphyard', treeRead: true } } } : item);
-  const ask = routed.find(item => item.key === 'GY-172')!;
-  const ledger = (ended: boolean) => [{ work_id: ask.id, id: 'd-172', at: ask.scopeRequest!.at, epoch: 2, ended }];
-  assert.equal(entry(await served(routed, ledger(false)), 'GY-172').command, 'graphyard master decisions GY-172');
-  assert.equal(entry(await served(routed, ledger(true)), 'GY-172').command, 'graphyard master scope GY-172');
-  assert.equal(entry(await served(routed), 'GY-172').command, 'graphyard master scope GY-172', 'none within the bound: no approver serves');
-  expect('GY-173', 'blocked', 'master', 'graphyard master requirements GY-173 FILE REASON');
+  expect('GY-172', 'blocked', 'master', 'graphyard master unblock GY-172 REASON');
   expect('GY-174', 'blocked', 'master', 'graphyard master decide GY-174 resolve REASON');
   expect('GY-175', 'up-next', 'held', null);
   // GitHub merges a candidate every gate passes (GY-1235): there is no command to run for it.
@@ -147,7 +124,7 @@ async function masterFixture() {
   return { root, master, dispose: () => rm(root, { recursive: true, force: true }) };
 }
 
-test('unit:master-status-board-owed — master status lists what the master owes from the board, first and with its command: a refused scope request reads master scope GY-N', async () => {
+test('unit:master-status-board-owed — master status lists what the master owes from the board, first and with its command: a blocked item reads master unblock GY-N', async () => {
   const work = scenario();
   const { root, master, dispose } = await masterFixture();
   try {
@@ -162,10 +139,10 @@ test('unit:master-status-board-owed — master status lists what the master owes
     const shown = status.board;
     if ('error' in shown) assert.fail(shown.error);
     const owed = shown.owed;
-    const scope = owed.find(item => item.key === 'GY-172');
-    assert.ok(scope, `the refused scope request is owed by the master: ${JSON.stringify(owed.map(item => item.key))}`);
-    assert.equal(scope.command, 'graphyard master scope GY-172');
-    assert.equal(scope.group, 'blocked'); assert.equal(scope.overdue, true);
+    const stuck = owed.find(item => item.key === 'GY-172');
+    assert.ok(stuck, `the blocked item is owed by the master: ${JSON.stringify(owed.map(item => item.key))}`);
+    assert.equal(stuck.command, 'graphyard master unblock GY-172 REASON');
+    assert.equal(stuck.group, 'blocked'); assert.equal(stuck.overdue, true);
     assert.equal(owed.find(item => item.key === 'GY-174')?.command, 'graphyard master decide GY-174 resolve REASON', 'the unresolved escalation is owed too');
     // Only the master's items are in the owed list; everything else follows it, and nothing is dropped.
     assert.ok(owed.every(item => item.actor === 'master'));
@@ -483,7 +460,7 @@ test('manual:review-followups-triaged GY-469.2 (actor-role-covers-every-label): 
   for (const label of ['Nobody yet', 'Automated checks', 'Nobody — it was closed', 'Nobody — it is live', 'Nobody — it has merged'])
     assert.ok(labels.has(label), `the scan finds ${label} among ${[...labels].join(', ')}`);
   assert.deepEqual([...labels].filter(label => !Object.hasOwn(roleOf, label)), [], 'roleOf lists every label nextActor, prSteps and waitsOn write');
-  const work = { scopeRequest: null, lease: null } as unknown as Work;
+  const work = { lease: null } as unknown as Work;
   assert.equal(actorRole(work, 'moving', 'Nobody yet'), 'held');
   assert.equal(actorRole(work, 'moving', 'Automated checks'), 'executor');
   for (const label of ['Nobody — it was closed', 'Nobody — it is live', 'Nobody — it has merged'])

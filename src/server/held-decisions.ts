@@ -48,25 +48,11 @@ export async function applyApprovedDecision<T>(services: Services, work: Work, d
       return { value: await settle(db, outcome.kind, outcome.details) };
     });
     if (!settled) continue;
-    if (outcome.kind === 'decision.held') await groundHeldScope(services, work, decision, (outcome.details as { attempt?: HeldAttempt | null }).attempt ?? null);
     return settled.value;
   }
 }
 
-/**
- * GY-1726: once a requirements decision is held, the criteria it carries ground the holding attempt's
- * scope ask — GY-1700's worker asked for the test file a pending AC-0 named, the loop refused it before
- * the decision was approved, and the refusal held the item until an operator cleared it by hand, though
- * the approved criterion implied the file. The control plane decides that ask again at once on the held
- * criteria (the engine's `autoscope` reads them); an ask they do not ground stays as it was.
- */
-async function groundHeldScope(services: Services, work: Work, decision: Pick<DecisionRecord, 'id'>, attempt: HeldAttempt | null) {
-  if (attempt?.kind !== 'lease') return;
-  try { await services.engine.execute({ id: 'graphyard', role: 'coordinator', sessionKind: 'ai' }, 'autoscope', work.id, { epoch: attempt.epoch }, `held-scope:${decision.id}`); }
-  catch (error) { if (!(error instanceof Refusal)) throw error; }
-}
-
-/** Whether the item holds a live attempt a non-widening requirements revision must wait for: a live lease or an unverified containment fence. */
+/** Whether the item holds a live attempt a requirements revision must wait for: a live lease or an unverified containment fence. */
 export const attemptHolds = (work: Pick<Work, 'lease' | 'containmentQuarantine'>, now: Date) => !!holdingAttempt(work, now);
 /** The live lease epoch or unverified containment fence that holds the item, or null when none does. */
 export function holdingAttempt(work: Pick<Work, 'lease' | 'containmentQuarantine'>, now: Date): HeldAttempt | null {

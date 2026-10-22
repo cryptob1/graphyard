@@ -50,7 +50,7 @@ function ledgerItem(index: number, now: Date): Work {
   const work = {
     id, key, title: `Ledger item ${key}`, description: 'An item with the history a long-lived ledger accumulates. '.repeat(20), type: 'feature', priority: index % 3,
     dependencies: [], criteria: proofs.map((proof, n) => ({ id: `AC-${n + 1}`, text: `Criterion ${n + 1} of ${key}`, proofs: [proof] })),
-    policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: ['src/server/', 'tests/'], stage, revision: 400, policyRevision: 1,
+    policy: { checks: ['test', 'typecheck'], review: true }, stage, revision: 400, policyRevision: 1,
     createdAt: new Date(now.getTime() - 86_400_000).toISOString(), updatedAt: now.toISOString(), stageEnteredAt: now.toISOString(), ready: true, epoch: 2,
     lease: null, workspaces: [], implementers: ['worker-a'], submission: { epoch: 2, pr: index + 1 },
     candidate: { sha: head, baseSha: base, pr: index + 1, branch: `graphyard/gy-${index + 1}-2`, author: 'worker-a' },

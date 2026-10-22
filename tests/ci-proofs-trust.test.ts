@@ -48,7 +48,7 @@ async function call(path: string, actor: Principal, data?: unknown) {
 }
 /** A submitted item whose candidate the control plane has observed at `head`. */
 async function candidate(proofs = ['integration:claim-safety', 'unit:ci-proofs-enumeration', 'manual:ci-proofs-docs']) {
-  let work = await engine.execute(operator, 'create', null, { title: 'CI proofs fixture', plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'CI certifies the automatable proofs', proofs }] }, randomUUID()) as Work;
+  let work = await engine.execute(operator, 'create', null, { title: 'CI proofs fixture', criteria: [{ id: 'AC-1', text: 'CI certifies the automatable proofs', proofs }] }, randomUUID()) as Work;
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/tmp/${work.id}`, branch: `graphyard/${work.key.toLowerCase()}` }, randomUUID());

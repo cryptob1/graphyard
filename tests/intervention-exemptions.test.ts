@@ -4,8 +4,6 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import { computeInterventionReport, foldInterventions, type InterventionLedgerRow } from '../src/interventions.js';
 import { exemption, interventionExemptions, type ExemptionMoment } from '../src/intervention-exemptions.js';
-import { groundedWideningReason } from '../src/model/scope-provenance.js';
-import { scopeDecisionReason } from '../src/model/scope.js';
 import { laneApprover } from '../src/model/rework-ground.js';
 import { leaseLossReason } from '../src/model/escalation.js';
 import type { Work } from '../src/model.js';
@@ -21,7 +19,7 @@ const policy = { threshold: 3, windowDays: 7 };
 /**
  * The fold and its 7- and 30-day reports, as one digest. The pattern rows' `unlinked`, `accounted`,
  * `causes`, `reworkRounds`, `instances` and `underThreshold` fields (GY-1682) are left out, so the digests taken before them still
- * pin the fold and the rest of the report; tests/intervention-pattern-scope-widening-build.test.ts pins those.
+ * pin the fold and the rest of the report.
  */
 const digest = (rows: InterventionLedgerRow[], work: Work[], now: string) => {
   const folded = foldInterventions(rows, work, now);
@@ -65,18 +63,16 @@ const operator = 'graphyard-master-graphyard-operator', worker = 'graphyard-open
 
 /**
  * One ledger that reaches every exemption rule, and the case beside each that the rule leaves a
- * signal: the loop's autosettle inside the bound and one by hand, an approved and a refused
- * autoscope, a successor re-plan, the loop's audited widening, a routed one, an unstarted re-plan
- * and a started one, a direct-merge window and an operator-authorized merge, a lane-grounded
- * rework, a failed-check round, an open loop round and an open hand request, an undecided scope
- * ask, and a lease-loss inside its settle bound and past it.
+ * signal: the loop's autosettle inside the bound and one by hand, a direct-merge window and an
+ * operator-authorized merge, a lane-grounded rework, a failed-check round, an open loop round and
+ * an open hand request, and a lease-loss inside its settle bound and past it.
  */
 function everyRule() {
   let seq = 0;
   const rows: InterventionLedgerRow[] = [], work: Work[] = [];
-  const item = (key: string, fields: Record<string, unknown> = {}) => { const entry = { id: uuid(key), key, title: key, stage: 'build', epoch: 1, plannedFiles: ['src/a.ts'], blocker: null, ...fields } as unknown as Work; work.push(entry); return entry; };
+  const item = (key: string, fields: Record<string, unknown> = {}) => { const entry = { id: uuid(key), key, title: key, stage: 'build', epoch: 1, blocker: null, ...fields } as unknown as Work; work.push(entry); return entry; };
   const row = (owner: Work, kind: string, minute: number, actor: string, details: unknown, fields: Partial<InterventionLedgerRow> = {}) =>
-    rows.push({ seq: ++seq, workId: owner.id, actor, kind, at: at(minute), details, stageBefore: owner.stage, work: { key: owner.key, stage: owner.stage, title: owner.title, epoch: owner.epoch, plannedFiles: owner.plannedFiles, blocker: owner.blocker ?? null }, ...fields });
+    rows.push({ seq: ++seq, workId: owner.id, actor, kind, at: at(minute), details, stageBefore: owner.stage, work: { key: owner.key, stage: owner.stage, title: owner.title, epoch: owner.epoch, blocker: owner.blocker ?? null }, ...fields });
 
   for (const [key, details] of [['GY-1', { origin: 'loop', lapsedAt: at(1), reason: 'verified dead' }], ['GY-2', { reason: 'settled by hand' }], ['GY-3', { origin: 'loop', lapsedAt: at(1), reason: 'late' }]] as const) {
     const fenced = item(key);
@@ -84,26 +80,6 @@ function everyRule() {
     row(fenced, 'lease.expired', 1, 'graphyard', { epoch: 1, cause: 'expired' });
     row(fenced, 'autosettle', key === 'GY-3' ? 40 : 4, 'graphyard', details);
   }
-  for (const state of ['approved', 'refused']) {
-    const asked = item(`GY-autoscope-${state}`, { blocker: 'SCOPE NEEDED', scopeRequest: { paths: ['src/b.ts'] } });
-    row(asked, 'scope', 0, worker, { epoch: 1, paths: ['src/b.ts'], reason: 'the change needs it' });
-    row(asked, 'autoscope', 1, 'graphyard', { epoch: 1, decision: { state } });
-  }
-  const widen = (key: string, details: (before: string[], after: string[]) => Record<string, unknown>, fields: Record<string, unknown> = {}) => {
-    const owner = item(key, fields), before = owner.plannedFiles, after = [...before, 'src/b.ts'];
-    if (owner.stage === 'build') { row(owner, 'scope', 0, worker, { epoch: 1, paths: ['src/b.ts'], reason: 'the change needs it' }); row(owner, 'autoscope', 1, 'graphyard', { epoch: 1, decision: { state: 'refused' } }); }
-    return { owner, before, after, details: details(before, after) };
-  };
-  const successor = widen('GY-successor', (before, after) => ({ before: { plannedFiles: before }, intent: { rule: 'successor', reason: 'Re-planned GY-successor onto the successors of the files it plans', plannedFiles: after }, reason: 'Re-planned GY-successor onto the successors of the files it plans', liveScopeWidening: true }));
-  const audited = widen('GY-audited', (before, after) => { const reason = `${groundedWideningReason('GY-audited')}a review finding names it: src/b.ts`; return { before: { plannedFiles: before }, intent: { reason, plannedFiles: after }, reason, liveScopeWidening: true }; });
-  const authored = widen('GY-authored', (before, after) => ({ before: { plannedFiles: before }, intent: { reason: 'Approve the scope request', plannedFiles: after }, reason: 'Approve the scope request', liveScopeWidening: true }));
-  const unstarted = widen('GY-unstarted', (before, after) => ({ before: { epoch: 0, plannedFiles: before }, intent: { reason: 'plan it', plannedFiles: after }, reason: 'plan it' }), { stage: 'ready', epoch: 0 });
-  const started = widen('GY-started', (before, after) => ({ before: { epoch: 1, plannedFiles: before, submission: { epoch: 1, pr: 7 }, pipeline: { attempts: [{ end: 'submitted' }] } }, intent: { reason: 'plan it', plannedFiles: after }, reason: 'plan it' }), { stage: 'ready' });
-  for (const { owner, after, details } of [successor, audited, authored, unstarted, started]) row(owner, 'requirements', 5, operator, details, { work: { key: owner.key, stage: owner.stage, title: owner.title, epoch: owner.epoch, plannedFiles: after, blocker: null } });
-  const routed = widen('GY-routed', () => ({}));
-  const routedReason = scopeDecisionReason('GY-routed', { requestedBy: worker, reason: 'the change needs it', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(0) } }, [{ id: 'AC-1', text: 'It works' }], ['src/b.ts'], null);
-  row(routed.owner, 'decision.requested', 2, operator, undefined, { payload: { id: uuid('routed'), action: 'requirements', input: { plannedFiles: routed.after }, reason: routedReason } });
-  row(routed.owner, 'requirements', 4, operator, { reason: `${routedReason} [decision approved]`.slice(0, 2000), plannedFiles: routed.after, liveScopeWidening: true, before: { plannedFiles: routed.before } }, { work: { key: 'GY-routed', stage: 'build', title: 'GY-routed', plannedFiles: routed.after, blocker: null } });
 
   const merged = item('GY-merged', { stage: 'done' });
   row(merged, 'merge.reconciled', 3, 'graphyard', { directMerge: true, mergeSha: sha, mergedAt: at(3) });
@@ -127,9 +103,6 @@ function everyRule() {
   decide(item('GY-open-loop', { candidate: { sha: 'b'.repeat(40), pr: 3 } }), 'open-loop', 2, 'operator-agent', `${'c'.repeat(40)}:verdict:graphyard-reviewer[bot]`);
   decide(item('GY-open-hand', { candidate: { sha: 'b'.repeat(40), pr: 4 } }), 'open-hand', 2, 'coordinator', null);
 
-  const undecided = item('GY-undecided', { blocker: 'SCOPE NEEDED', scopeRequest: { paths: ['src/c.ts'] } });
-  row(undecided, 'scope', 3, worker, { epoch: 1, paths: ['src/c.ts'], reason: 'needs it' });
-  row(undecided, 'blocked', 4, worker, { reason: 'cannot continue' });
   for (const [key, minute] of [['GY-lease-fresh', 58], ['GY-lease-stale', 30]] as const) {
     const lost = item(key, { epoch: 2, lease: null, escalations: [{ trigger: 'lease-loss', reason: leaseLossReason({ owner: worker, epoch: 2 }), at: at(minute), actor: 'graphyard' }] });
     row(lost, 'lease.expired', minute, 'graphyard', { epoch: 2, cause: 'expired' }, { work: { key, stage: 'build', title: key, epoch: 2, escalations: (lost as any).escalations } });
@@ -140,7 +113,7 @@ function everyRule() {
 const digests = {
   reworkRounds: '02b6250c6e0d0cfa0725d5c828e32d2bf16ebb6c68cbffbdde099aa2a7c1fce8',
   reworkInstances: '4b473d0fe00a81835f6a808081b66db0acf7f9926a864becf0802569255be281',
-  everyRule: 'ad9a1d5d0d57fa11212408b8eb5063b51fb42d4ab63a2851811c5fd0259c5c17',
+  everyRule: 'c516d7e187f278b7529537441119e6ecc23bc8b2e835d856524205cb88c99521', // GY-1992: the ledger without its scope rows
 };
 
 test('unit:intervention-exemptions-fold-unchanged — the report over the intervention fixtures and over a ledger reaching every exemption rule is the one the unsplit fold produced', () => {
@@ -151,36 +124,23 @@ test('unit:intervention-exemptions-fold-unchanged — the report over the interv
 
 test('unit:intervention-exemptions-module — the fold consults one ordered list of named exemption predicates from src/intervention-exemptions.ts, and src/interventions.ts is at least 150 lines shorter', () => {
   assert.deepEqual(interventionExemptions.map(entry => entry.name), [
-    'approved-autoscope', 'successor-replan', 'audited-scope-widening', 'routed-scope-widening', 'unstarted-replan', 'criteria-implied-widening',
     'routine-rework-ground', 'lane-rework-ground', 'failed-check-round', 'loop-rework-round',
-    'direct-merge-window', 'merge-writer-reconcile', 'loop-autosettle-in-bound', 'answered-off-ledger', 'undecided-scope-request', 'approver-holds-scope-request', 'scope-refusal-within-bound', 'lease-loss-resolve', 'approved-decision-weakening',
+    'direct-merge-window', 'merge-writer-reconcile', 'loop-autosettle-in-bound', 'answered-off-ledger', 'lease-loss-resolve', 'approved-decision-weakening',
   ]);
   assert.ok(interventionExemptions.every(entry => typeof entry.exempts === 'function'), 'one predicate per rule');
   const fold = source('src/interventions.ts');
   // 770 lines on main (eac0fe0b29) before the split.
   assert.ok(fold.split('\n').length - 1 <= 770 - 150, `src/interventions.ts has ${fold.split('\n').length - 1} lines`);
   assert.match(fold, /from '\.\/intervention-exemptions\.js'/);
-  for (const inline of ['loopSettledInBound(', 'routineReworkGround(', 'failedCheckRound(', 'loopRound(', 'wideningSettlement(', 'unstarted(', 'endedLeaseLoss(', 'details.directMerge', "intent.rule === 'successor'", "decision.state === 'approved'", 'laneApprover'])
+  for (const inline of ['loopSettledInBound(', 'routineReworkGround(', 'failedCheckRound(', 'loopRound(', 'endedLeaseLoss(', 'details.directMerge', 'laneApprover'])
     assert.ok(!fold.includes(inline), `the fold no longer judges ${inline} inline`);
 
   // Each rule exempts its own moment and nothing else; the first that holds names it.
   const candidate = { sha: 'a'.repeat(40) };
   const decision = { seq: 1, at: at(0), id: 'd', stage: 'review' as const, binding: null, loopRequested: true, approvedBy: null };
-  const item = { id: uuid('item'), key: 'GY-1', stage: 'build', epoch: 2, lease: null, blocker: 'SCOPE NEEDED', scopeRequest: null } as unknown as Work;
-  // GY-1682: a live attempt's additive ask the rule refused ten minutes ago, which the record shows the loop put to the approver (`routed`), still inside the 15-minute bound.
-  const refusedAsk = { seq: 1, at: at(50), stage: 'build' as const, kind: 'scope-request' as const, blocked: 'x', paths: ['src/b.ts'], trigger: 'refused-by-loop', epoch: 2, routed: { seq: 2, at: at(51), decision: 'd-scope' }, sources: [] };
-  const refusal = { state: 'refused' as const, reason: 'outside the rule', at: at(51), decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(50), epoch: 2 };
-  const routable = { ...item, plannedFiles: ['src/a.ts'], criteria: [], lease: { owner: worker, epoch: 2, expiresAt: at(90) }, scopeRequest: { epoch: 2, paths: ['src/b.ts'], reason: 'needs it', requestedBy: worker, at: at(50), decision: refusal } } as unknown as Work;
+  const item = { id: uuid('item'), key: 'GY-1', stage: 'build', epoch: 2, lease: null, blocker: 'cannot continue' } as unknown as Work;
   const lost = { trigger: 'lease-loss' as const, reason: leaseLossReason({ owner: worker, epoch: 2 }), at: at(58), actor: 'graphyard' };
-  const requirements = { at: 'requirements', details: {}, reason: 'revised', widened: true, asked: false, routed: [], stage: 'build', work: { epoch: 1, blocker: null }, blockerBefore: null } as const;
   const cases: [ExemptionMoment, string | null][] = [
-    [{ at: 'autoscope', decision: { state: 'approved' } }, 'approved-autoscope'],
-    [{ at: 'autoscope', decision: { state: 'refused' } }, null],
-    [{ ...requirements, details: { intent: { rule: 'successor' } } }, 'successor-replan'],
-    [{ ...requirements, details: { intent: { reason: `${groundedWideningReason('GY-1')}a review finding names it` } } }, 'audited-scope-widening'],
-    [{ ...requirements, stage: 'ready', details: { before: { epoch: 0 } }, work: { epoch: 0, blocker: null } }, 'unstarted-replan'],
-    [{ ...requirements, stage: 'ready', asked: true, details: { before: { epoch: 0 } }, work: { epoch: 0, blocker: null } }, null],
-    [requirements, null],
     [{ at: 'rework', decision: { ...decision, binding: `${candidate.sha}:verdict:graphyard-reviewer[bot]` }, asked: true, grounds: { candidate } as ReworkGrounds, candidate }, 'routine-rework-ground'],
     [{ at: 'rework', decision: { ...decision, self: true }, asked: false, grounds: null, candidate }, 'lane-rework-ground'],
     [{ at: 'rework', decision: { ...decision, self: true }, asked: true, grounds: null, candidate }, null],
@@ -195,18 +155,7 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
     [{ at: 'merge', kind: 'merge.reconciled', details: {} }, 'merge-writer-reconcile'],
     [{ at: 'settlement', kind: 'autosettle', details: { origin: 'loop', lapsedAt: at(0) }, when: at(5) }, 'loop-autosettle-in-bound'],
     [{ at: 'settlement', kind: 'recover', details: { origin: 'loop', lapsedAt: at(0) }, when: at(5) }, null],
-    [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'blocked-report', blocked: 'x', paths: [], sources: [] }, item: { ...item, blocker: null } as Work, now: at(60) }, 'answered-off-ledger'],
-    [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'scope-request', blocked: 'x', paths: ['a'], sources: [] }, item, now: at(60) }, 'undecided-scope-request'],
-    [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'scope-request', blocked: 'x', paths: ['a'], trigger: 'refused-by-loop', sources: [] }, item, now: at(60) }, null],
-    [{ at: 'open-ask', ask: refusedAsk, item: routable, now: at(60) }, 'approver-holds-scope-request'],
-    // No route on the record yet is the loop's own within its bound (GY-1755), and so is a multi-path additive ask the approver declined: both leave the live attempt something to settle inside the bound, which the fault pass does not stand (standingScopeRequest). Past the bound the loop promises, a one-path or non-additive ask the approver declined, or an ask an ended attempt left: the ask is somebody's to decide.
-    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null }, item: routable, now: at(60) }, 'scope-refusal-within-bound'],
-    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null }, item: routable, now: at(70) }, null],
-    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null }, item: { ...routable, lease: null } as Work, now: at(60) }, null],
-    [{ at: 'open-ask', ask: refusedAsk, item: routable, now: at(70) }, null],
-    [{ at: 'open-ask', ask: { ...refusedAsk, routed: null, paths: ['src/b.ts', 'src/c.ts'] }, item: { ...routable, scopeRequest: { ...(routable.scopeRequest as object), paths: ['src/b.ts', 'src/c.ts'], decision: { ...refusal, decidedBy: 'graphyard-approver-graphyard' } } } as Work, now: at(60) }, 'scope-refusal-within-bound'],
-    [{ at: 'open-ask', ask: refusedAsk, item: { ...routable, scopeRequest: { ...(routable.scopeRequest as object), decision: { ...refusal, decidedBy: 'graphyard-approver-graphyard' } } } as Work, now: at(60) }, null],
-    [{ at: 'open-ask', ask: refusedAsk, item: { ...routable, lease: null } as Work, now: at(60) }, null],
+    [{ at: 'open-ask', ask: { seq: 1, at: at(0), stage: 'build', kind: 'blocked-report', blocked: 'x', sources: [] }, item: { ...item, blocker: null } as Work, now: at(60) }, 'answered-off-ledger'],
     [{ at: 'open-escalation', item, escalation: lost, now: at(60) }, 'lease-loss-resolve'],
     [{ at: 'open-escalation', item, escalation: { ...lost, at: at(30) }, now: at(60) }, null],
     [{ at: 'escalation-resolved', details: { trigger: 'requirement-weakening', decision: 'd', escalation: { trigger: 'requirement-weakening', at: at(0), decision: 'd' } } }, 'approved-decision-weakening'],
@@ -214,6 +163,4 @@ test('unit:intervention-exemptions-module — the fold consults one ordered list
     [{ at: 'escalation-resolved', details: { trigger: 'requirement-weakening', decision: 'd', escalation: { trigger: 'requirement-weakening', at: at(0) } } }, null],
   ];
   for (const [moment, expected] of cases) assert.equal(exemption(moment), expected, JSON.stringify(moment));
-  const routed = scopeDecisionReason('GY-1', { requestedBy: worker, reason: 'needs it', decision: { state: 'refused', reason: 'outside the rule', at: at(1), decidedBy: 'graphyard', treeRead: true, waitedMs: 0, paths: ['src/b.ts'], requestedBy: worker, requestedAt: at(0) } }, [{ id: 'AC-1', text: 'It works' }], ['src/b.ts'], null);
-  assert.equal(exemption({ ...requirements, details: { reason: routed }, reason: routed, routed: [routed] }), 'routed-scope-widening');
 });

@@ -22,7 +22,7 @@ export const stepBudgetMs = (intervalMs: number) => Math.max(actionableIntervalM
 /** How long one external call may take before the step returns and carries the call's work to the next cycle (GY-1766, GY-1774). */
 export const stepCallBoundMs = 10_000;
 /** The steps bounded this way, by the name their carried calls record (GY-1774); `decisions` keeps GY-1766's wording. */
-export type BoundedStep = 'decisions' | 'approvers' | 'blockers' | 'dispatch' | 'review-cap' | 'scope' | 'sessions' | 'resume' | 'reclaim' | 'triage' | 'master';
+export type BoundedStep = 'decisions' | 'approvers' | 'blockers' | 'dispatch' | 'review-cap' | 'sessions' | 'resume' | 'reclaim' | 'triage' | 'master';
 
 /**
  * A step's clock. `left()` is the budget still unspent, which caps every call's bound while the
@@ -88,8 +88,6 @@ export function callIdentity(arg: unknown): unknown {
   if (typeof value.id === 'string' && typeof value.key === 'string' && 'epoch' in value) { const item = value as unknown as Work; return [item.id, item.candidate?.sha ?? null, item.candidate?.baseSha ?? null, item.policyRevision, item.epoch]; }
   if ('pane_id' in value || 'agent_status' in value) return { name: value.name ?? null, pane: value.pane_id ?? null };
   if (typeof value.record === 'string' && typeof value.agentName === 'string') return { record: value.record, agentName: value.agentName, request: value.requestId ?? null };
-  // A scope ask: the attempt that asked and when, so a withdrawn and re-asked request never joins the earlier ask's call.
-  if (typeof value.requestedBy === 'string' && typeof value.at === 'string' && Array.isArray(value.paths)) return { epoch: value.epoch ?? null, at: value.at };
   // An escalation handler's launch, named by what it handles and when it launched; its idle mark and wait change between cycles.
   if (typeof value.trigger === 'string' && typeof value.launchedAt === 'string' && 'work' in value) return { work: value.work, trigger: value.trigger, launchedAt: value.launchedAt };
   // A fenced attempt's supervisor: the attempt and the process, never the lease expiry the cycle read.
@@ -100,9 +98,9 @@ export function callIdentity(arg: unknown): unknown {
 }
 /** The arguments that name a call's identity: free text — a reason, a prompt, a message, an outcome — is left out, so a re-worded retry still joins its call; a call that takes none, or only this cycle's reading of the world (an inventory, a snapshot), is one call however the reading moved. */
 const identityArguments: Partial<Record<keyof DaemonEffects, number[]>> = {
-  promptSession: [0], withdraw: [0, 1], widenScope: [0, 1, 2], withdrawReview: [0, 1], endRegistrySession: [0], endSession: [0], decide: [0, 1, 3], replan: [0, 1], withdrawTriage: [0, 1],
+  promptSession: [0], withdraw: [0, 1], withdrawReview: [0, 1], endRegistrySession: [0], endSession: [0], decide: [0, 1, 3], withdrawTriage: [0, 1],
   blockDispatch: [0], holdAccount: [0], endEscalation: [0], markEscalation: [0], relaunchEscalation: [0], stopSupervisor: [0, 1], recordSession: [], reportCapacity: [0], settleContainment: [0], containment: [0],
-  reclaim: [], reclaimResources: [], panes: [], herdr: [], roleHealth: [], escalationSessions: [], launchedSessions: [], approverLaunches: [], planeHealth: [], hostMemory: [], repositoryFiles: [], reconcileSessions: [],
+  reclaim: [], reclaimResources: [], panes: [], herdr: [], roleHealth: [], escalationSessions: [], launchedSessions: [], approverLaunches: [], planeHealth: [], hostMemory: [], reconcileSessions: [],
 };
 /**
  * The intent of a prompt's text: the instruction it gives, with what the clock moves between one cycle's wording
@@ -111,11 +109,10 @@ const identityArguments: Partial<Record<keyof DaemonEffects, number[]>> = {
  * the resume or idle re-prompt, or a wake naming other subjects — is its own call and is never left unsent.
  */
 export const promptIntent = (text: unknown) => String(text).replace(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z/g, 'T').replace(/\b\d+ (?:more )?minutes?\b/g, 'N minutes');
-/** What a call's key carries beside its arguments: a prompt is keyed by its intent, a scope decision by the ask it decides (the item's `scopeRequest`), a session record by the handle and state it writes, a capacity report by the event it reports, a settlement by the fence's epoch. */
+/** What a call's key carries beside its arguments: a prompt is keyed by its intent, a session record by the handle and state it writes, a capacity report by the event it reports, a settlement by the fence's epoch. */
 const keyedBeside = (call: string, args: unknown[]): unknown[] => {
   const second = args[1] as Record<string, unknown> | undefined;
   if (call === 'promptSession') return [promptIntent(args[1])];
-  if (call === 'decideScope') return [callIdentity((args[0] as Work | undefined)?.scopeRequest ?? null)];
   // A handle record is keyed by the item's id, never its revision or head: the item advancing between the running and the finished record must not part them.
   if (call === 'recordSession') return [(args[0] as Work | undefined)?.id ?? null, second?.id ?? null, second?.state ?? null];
   if (call === 'reportCapacity') return [second?.event ?? null, second?.role ?? null, second?.epoch ?? null, second?.requestId ?? null, second?.cause ?? null];

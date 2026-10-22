@@ -34,7 +34,7 @@ const age = (actor: string, key: string, ms: number) => store.pool.query("UPDATE
 
 async function claimed() {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Receipts ${n}`, description: 'x'.repeat(4000), plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title: `Receipts ${n}`, description: 'x'.repeat(4000), criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   return engine.execute(worker, 'claim', w.id, {}, randomUUID());
 }

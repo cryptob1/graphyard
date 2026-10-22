@@ -26,7 +26,7 @@ function observation(candidate: { sha: string; baseSha: string }, at: string, ov
 /** One submitted, observed candidate whose only proof is manual: the review request stands alone. */
 function work(overrides: Partial<Work> = {}, at = iso(0)): Work {
   const candidate = { sha: H, baseSha: B, pr: PR, branch: 'graphyard/gy-100-1', author: 'implementer' };
-  return { id: 'work-100', key: 'GY-100', title: 'Dismissed review is every session\'s verdict', description: '', type: 'bug', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-100', key: 'GY-100', title: 'Dismissed review is every session\'s verdict', description: '', type: 'bug', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Never matched', proofs: ['manual:stale-dismissal'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 9, policyRevision: 4, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-100', branch: 'graphyard/gy-100-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: PR }, reworkRequested: false, scenarioRequirements: [], evidence: [],

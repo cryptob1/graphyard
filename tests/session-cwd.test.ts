@@ -48,7 +48,7 @@ function observation(candidate: { sha: string; baseSha: string }): Work['observa
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 866, branch: 'graphyard/gy-866-7', author: 'implementer' };
-  return { id: 'work-866', key: 'GY-866', title: 'Sessions start in their own checkout', description: '', type: 'feature', priority: 0, dependencies: [], plannedFiles: ['src/'],
+  return { id: 'work-866', key: 'GY-866', title: 'Sessions start in their own checkout', description: '', type: 'feature', priority: 0, dependencies: [], 
     criteria: [{ id: 'AC-1', text: 'Own checkout', proofs: ['unit:session-cwd-own-checkout'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-866', branch: 'graphyard/gy-866-7', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 866 }, reworkRequested: false, scenarioRequirements: [], evidence: [],

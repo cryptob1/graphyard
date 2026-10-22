@@ -39,7 +39,7 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
 const gates = (passed: Record<string, boolean>) => ['ready', 'build', 'review', 'test', 'merge'].map(name => ({ name, passed: passed[name] ?? false, reasons: passed[name] ?? false ? [] : [`${name} refused`] }));
 const item = (fields: Record<string, unknown>) => ({
   description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works', 'integration:item-holds', 'manual:item-looks'] }],
-  policy: { checks: ['test', 'typecheck'], review: true }, plannedFiles: [], revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
+  policy: { checks: ['test', 'typecheck'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start),
   stageEnteredAt: iso(start), ready: true, epoch: 1, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false,
   scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: gates({ ready: true, build: true, review: true, test: true }), stage: 'build', ...fields,
 }) as unknown as Work;
@@ -487,7 +487,7 @@ async function request(credential: string, path: string, body?: unknown, key: st
 }
 /** An item the worker claimed, registered on its branch and submitted with `complete --head`, as GY-1523 submits it. */
 async function submittedItem(n: number) {
-  let w = await engine.execute(admin, 'create', null, { title: `Executor fixture ${n}`, plannedFiles: ['src/'], criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
+  let w = await engine.execute(admin, 'create', null, { title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
   w = await engine.execute(admin, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;

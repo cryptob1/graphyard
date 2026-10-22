@@ -117,7 +117,6 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
     }
     case 'validate': {
       const first = reasons[0] ?? '';
-      if (/^(Candidate changes \d+ files? outside|Out-of-scope regression)/.test(first)) return { detail: 'it changes files outside its plan', who: 'Builder agent' };
       if (/^No workspace registered$/.test(first)) return { detail: 'waiting for the builder to say where the code lives', who: 'Builder agent' };
       if (/^Pull request has not been independently observed$/.test(first)) return { detail: 'waiting to see the pull request on GitHub', who: 'Graphyard (automatic)' };
       return { detail: 'checking which files it changes', who: 'Graphyard (automatic)' };

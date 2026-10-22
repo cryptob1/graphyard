@@ -19,7 +19,7 @@ function item(checks: Check[], requiredChecks: { name: string; appId: number | n
   const candidate = { sha: head, baseSha: base, pr: 221, branch: 'graphyard/gy-402-1', author: 'worker' };
   return {
     id: 'gy-402', key: 'GY-402', title: 'Required checks', description: '', type: 'bug', priority: 0, dependencies: [],
-    criteria: [], policy: { checks: ['test', 'typecheck'], review: false }, plannedFiles: ['src/'], stage: 'test', revision: 4, policyRevision: 2,
+    criteria: [], policy: { checks: ['test', 'typecheck'], review: false }, stage: 'test', revision: 4, policyRevision: 2,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: '/w', epoch: 1, owner: 'worker', branch: candidate.branch }], candidate,
     submission: { epoch: 1, pr: 221 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { candidate, checks: checks.map((check, index) => ({ appId: 15368, id: index + 1, ...check })), reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,

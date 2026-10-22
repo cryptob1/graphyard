@@ -63,7 +63,7 @@ function document(index: number, settled: boolean, now: number): Work {
   const candidate = { sha: sha(index, 'c'), baseSha: sha(index, 'b'), pr: 1000 + index };
   const base = {
     id: uuid(index), key, title: `Item ${key} of the seeded history`, description: `What ${key} was for. `.repeat(20), type: 'feature', priority: 2, dependencies: index > 2 ? [uuid(index - 1)] : [],
-    criteria: [{ id: 'AC-1', text: `The behaviour ${key} asked for holds`, proofs: ['unit:proof-1'] }], policy: { checks: ['test'], review: true }, plannedFiles: ['src/'],
+    criteria: [{ id: 'AC-1', text: `The behaviour ${key} asked for holds`, proofs: ['unit:proof-1'] }], policy: { checks: ['test'], review: true }, 
     revision: 40, policyRevision: 1, createdAt: iso(created), updatedAt: iso(created + 5 * hour), stageEnteredAt: iso(created + 5 * hour), ready: true, epoch: SESSIONS_PER_SETTLED,
     workspaces: Array.from({ length: 2 }, (_, w) => ({ host: 'machine-a', path: `/srv/worktrees/${key}-${w + 1}`, epoch: w + 1, owner: 'graphyard-worker-1', branch: `graphyard/${key.toLowerCase()}-${w + 1}` })),
     candidate, submission: { epoch: SESSIONS_PER_SETTLED, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], blocker: null, gates: [], violations: [],
