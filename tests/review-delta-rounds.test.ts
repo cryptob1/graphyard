@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { readFile, rm } from 'node:fs/promises';
+import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupMaster } from '../src/master.js';
@@ -197,6 +197,30 @@ test('unit:first-round-review-unchanged — a first-round control-plane review g
   assert.deepEqual(blockingFindings(verdict), ['src/a.ts:3 — the flag is unread']);
   const kept = observedReviewBody(verdict);
   assert.deepEqual([kept.body.includes('Nit: src/unchanged.ts:50 — a typo'), kept.blocking], [true, ['src/a.ts:3 — the flag is unread']]);
+});
+
+test('unit:review-binding-roundtrip — the binding a control-plane launch writes, round one and a re-review alike, is the one review post accepts in that session to post APPROVE; a field an older release still writes is ignored, not refused (GY-2933)', async () => {
+  const master = await planeMaster();
+  try {
+    for (const reviews of [[], [earlierReview]]) {
+      const calls: string[][] = [];
+      const run = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
+      await rm(join(master.root, '.graphyard', 'reviews.json'), { force: true });
+      await launchReview(master.root, item(reviews), 'delta-reviewer', [], at, { run, registerLaunch: async () => ({ launch: 'launch-1' }) });
+      const tab = calls.filter(args => args[0] === 'tab' && args[1] === 'create').at(-1)!;
+      const environment = Object.fromEntries(['GH_CONFIG_DIR', 'GRAPHYARD_REVIEW', 'GRAPHYARD_URL'].map(name => [name, tab.find(value => value.startsWith(`${name}=`))?.slice(name.length + 1)]));
+      const directory = environment.GH_CONFIG_DIR!;
+      assert.equal(!!(await readReviewBinding(directory)).previousHead, reviews.length > 0, 'the re-review binding carries previousHead');
+      // The loop's release before GY-2010 wrote threadsListed on every binding; the checkout's CLI reads it all the same.
+      const written = JSON.parse(await readFile(join(directory, reviewBindingFile), 'utf8')) as ReviewPostBinding;
+      await rm(join(directory, reviewBindingFile));
+      await writeFile(join(directory, reviewBindingFile), JSON.stringify({ ...written, threadsListed: [] }), { mode: 0o600 });
+      const posted: unknown[] = [];
+      const fetcher = (async (_url: string | URL | Request, init?: RequestInit) => { posted.push(JSON.parse(String(init!.body))); return new Response(JSON.stringify({ recorded: true, reviewId: 51 }), { status: 200 }); }) as unknown as typeof fetch;
+      const result = await postReview({ event: 'APPROVE', body: 'AC-1 met.', cliPath: launcher, environment: { ...environment, GRAPHYARD_URL: environment.GRAPHYARD_URL ?? 'https://graphyard.example' } }, { run: async () => '', fetch: fetcher });
+      assert.deepEqual([result.reviewId, result.event, (posted[0] as { sha: string }).sha], [51, 'APPROVE', H2]);
+    }
+  } finally { await master.cleanup(); }
 });
 
 /** A master root with one reviewer profile and no reviewer App: control-plane launches run without GitHub. */

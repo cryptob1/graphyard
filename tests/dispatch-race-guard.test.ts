@@ -307,12 +307,9 @@ test('unit:system-driven-items master review stays open only as the recovery of 
     assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), [], refused, now), null, `a ${label} request-review row`);
   // Once the item no longer needs the action its row is retired, and the recovery is the master's again.
   assert.match(reviewRecovery(underReview({ actionQueue: { actions: [], history: [{ ...stalledRow(reviewRow), resolvedAt: iso(-1_000), resolution: 'retired' }] } }), [], refused, now)!, /refused 12 time\(s\)/);
-  // A settled or exhausted request under a retained row is still the loop's: the executor's launchReview refuses only while a session holds the request, never for a settled or exhausted one, so the row relaunches the review and a hand launch would be the second of two.
-  const exhausted = [1, 2, 3, 4].map(n => session('failed', -n * 3_600_000));
-  for (const [label, row] of Object.entries(launchRows(reviewRow))) {
+  // A settled request under a retained row is still the loop's: the executor relaunches it from the row, so a hand launch would be the second of two.
+  for (const [label, row] of Object.entries(launchRows(reviewRow)))
     assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), [session('completed', -120_000)], undefined, now), null, `a settled request under a ${label} row`);
-    assert.equal(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), exhausted, undefined, now), null, `an exhausted request under a ${label} row`);
-  }
   const master = await masterHarness({ work: [underReview()] });
   try {
     assert.match(await master.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/);
@@ -322,19 +319,20 @@ test('unit:system-driven-items master review stays open only as the recovery of 
     // The launch reads its review request from the snapshot the guard judged, never from a later one a new head could change.
     assert.equal(master.reads.filter(url => url.startsWith('/api/work-snapshot')).length - before, 1, 'master review reads one work snapshot');
   } finally { await master.close(); }
-  // The executor's request-review row still queued after the request's sessions are exhausted holds master review: the executor relaunches the review from it.
-  const retained = await masterHarness({ work: [underReview({ actionQueue: { actions: [stalledRow(reviewRow)], history: [] } })] });
-  try {
-    await retained.reviewSessions([1, 2, 3, 4].map(n => reviewSession('failed', -n * 3_600_000, 5 - n)));
-    assert.match(await retained.refusal(['review', 'GY-7']), /GY-7 is system-driven: master review is a hand action the loop owns/, 'an exhausted request under a retained row is still the executor\'s');
-  } finally { await retained.close(); }
-  // Once that row is retired the exhausted request is the master's to recover.
-  const retired = await masterHarness({ work: [underReview({ actionQueue: { actions: [], history: [{ ...stalledRow(reviewRow), resolvedAt: iso(-1_000), resolution: 'retired' }] } })] });
-  try {
-    await retired.reviewSessions([1, 2, 3, 4].map(n => reviewSession('failed', -n * 3_600_000, 5 - n)));
-    // Past the guard the launch itself runs; what it then refuses on depends on the host (no reviewer App, no herdr), never on the guard.
-    assert.doesNotMatch(await retired.refusal(['review', 'GY-7']), /is system-driven/, 'an exhausted request whose row was retired reaches the launch');
-  } finally { await retired.close(); }
+});
+
+test('unit:exhausted-review-recovery once a review request exhausts its automatic sessions, master review launches its next attempt on a system-driven item even while its request-review row is still queued (GY-2933)', async () => {
+  const exhausted = [1, 2, 3, 4].map(n => reviewSession('failed', -n * 3_600_000, 5 - n));
+  for (const [label, row] of Object.entries(launchRows(reviewRow)))
+    assert.match(reviewRecovery(underReview({ actionQueue: { actions: [row], history: [] } }), [1, 2, 3, 4].map(n => session('failed', -n * 3_600_000)), undefined, Date.now())!, /exhausted its 4 automatic sessions/, `an exhausted request under a ${label} row`);
+  for (const actions of [[stalledRow(reviewRow)], [reviewRow()]]) {
+    const master = await masterHarness({ work: [underReview({ actionQueue: { actions, history: [] } })] });
+    try {
+      await master.reviewSessions(exhausted);
+      // Past the guard the launch itself runs; what it then refuses on depends on the host (no reviewer App, no herdr), never on the guard.
+      assert.doesNotMatch(await master.refusal(['review', 'GY-7']), /is system-driven/, 'an exhausted request under a queued row reaches the launch');
+    } finally { await master.close(); }
+  }
 });
 
 test('unit:system-driven-items master decide attest reopens for a produced manual proof once the loop stops relaunching its producer request', async () => {
