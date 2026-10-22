@@ -442,7 +442,7 @@ test('unit:registry-visibility — master status and the dashboard show each acc
   assert.deepEqual([byName['claude-b'].quota, byName['claude-b'].resetsAt, byName['claude-b'].usage[0].percent, byName['claude-b'].loggedIn], ['exhausted', resetsAt, 100, true]);
   assert.match(view.roles.find(role => role.role === 'worker')!.blocked!, /no eligible account for worker: claude-a is at its session limit.*claude-b quota is exhausted.*codex-a is placed on build-host-2/);
   assert.match(view.roles.find(role => role.role === 'producer')!.blocked!, /role producer is paused \(concurrency 0\)/);
-  assert.ok(view.attention.some(line => /idle serves no role/.test(line)) && view.attention.some(line => /role approver is not configured/.test(line)));
+  assert.ok(view.attention.some(line => /idle serves no role/.test(line)) && view.attention.some(line => /role master is not configured/.test(line)));
   // Past its reset an exhausted account is spendable again without anyone touching it, and a freed session frees its account.
   assert.equal(fleetView(registry, Date.parse(resetsAt) + 1, HOST).accounts.find(account => account.name === 'claude-b')!.eligible, true);
   assert.equal(chooseSession(registry, { role: 'worker', host: 'build-host-2' }, now).account?.name, 'codex-a', 'placement is judged for the executor asking');
