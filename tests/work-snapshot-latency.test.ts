@@ -86,7 +86,7 @@ before(async () => {
   // the row, so the tables carry the churn a live ledger does.
   await store.pool.query(`INSERT INTO events(work_id,actor,kind,payload) SELECT id,'github','github.observed',jsonb_build_object('work',document,'details',jsonb_build_object('observation',n)) FROM work_items, generate_series(1,$1::int) AS n`, [OBSERVATIONS_PER_ITEM]);
   for (let round = 0; round < 5; round++) await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{revision}',to_jsonb((document->>'revision')::int+1))");
-  http = server(new Engine(store, [15368], 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }]);
+  http = server(new Engine(store, 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   origin = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
   directory = await temporaryDirectory('snapshot-master');
@@ -290,9 +290,9 @@ test('integration:cycle-within-interval — a coordination cycle over the 100-it
     agents: () => [],
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot,
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     persist: async () => {},
   };
   const result = await runDaemon(config, state, effects, { once: true, intervalMs, identity: { pid: process.pid, host: 'machine-a' }, signals: [], log: () => {} });
@@ -358,7 +358,7 @@ const hotPaths = () => seeded ??= (async () => {
     await hotStore.pool.query('INSERT INTO work_items(id,document) VALUES($1,$2)', [item.id, JSON.stringify(item)]);
     await hotStore.pool.query('INSERT INTO jobs(work_id) VALUES($1)', [item.id]);
   }
-  hotHttp = server(new Engine(hotStore, [15368], 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }]);
+  hotHttp = server(new Engine(hotStore, 120, 'owner/project'), [{ id: 'coordinator', role: 'coordinator', token: coordinatorToken }]);
   await new Promise<void>(resolve => hotHttp.listen(0, '127.0.0.1', resolve));
   hotOrigin = `http://127.0.0.1:${(hotHttp.address() as AddressInfo).port}`;
 })();

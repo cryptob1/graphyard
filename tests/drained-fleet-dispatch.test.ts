@@ -139,7 +139,7 @@ test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a f
     agents: async () => drained(), herdr: () => ({ agents: drained(), available: true }), stopSupervisor: () => {},
     credentials: async configured => available(configured), snapshot: async () => ({ work: items, now: observedAt }),
     closeSession: () => {}, dispatch: async (item, chosen) => { dispatched.push(`${item.key}:${chosen.name}`); return {}; },
-    requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+ recordDeployment: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
   };
   const state: DaemonState = emptyDaemonState(config(fleet));
@@ -184,7 +184,7 @@ test('unit:dispatch-blocker-clears-on-fleet-recovery — fleet-idle failures nev
   const effects: DaemonEffects = {
     agents: async () => agents, herdr: () => ({ agents, available: true }), stopSupervisor: () => {},
     credentials: async configured => available(configured), snapshot: async () => ({ work: [blocked], now: new Date(clock + elapsed).toISOString() }),
-    closeSession: () => {}, dispatch: async () => ({}), requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    closeSession: () => {}, dispatch: async () => ({}), recordDeployment: async () => {}, persist: async () => {},
     recordBlockerProbe: async (item, probe) => { probes.push(probe); return item; },
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
   };

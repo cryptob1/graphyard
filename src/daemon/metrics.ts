@@ -1,6 +1,6 @@
 // Concern: measurement — stage percentiles, actionable subjects and item latency.
 import { type Work, currentEvidence } from '../model.js';
-import { pendingBaseRefresh } from '../merge-queue.js';
+import { pendingBaseRefresh } from '../model/base-refresh.js';
 import { standingCapacity } from '../model/capacity.js';
 import { stalledItems } from '../model/action-account.js';
 import { type MasterConfig, type ContainmentAssessment, assertDispatchable, containmentPhase } from '../master.js';

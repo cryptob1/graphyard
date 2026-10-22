@@ -87,7 +87,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('done-at-merge'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('done_at_merge_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/done_at_merge_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/done-at-merge'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/done-at-merge'); engine.submissionObserver = null;
   engine.principals = [operator, coordinator];
 });
 after(async () => { await store?.close(); await database?.stop(); });

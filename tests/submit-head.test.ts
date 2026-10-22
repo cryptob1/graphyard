@@ -64,7 +64,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('submit-head-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('submit_head_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/submit_head_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
@@ -191,7 +191,7 @@ function submittedWork(source: 'control-plane' | undefined, ledger: Work['mergeL
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [{ host: 'h', path: '/w', branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 41 }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation, blocker: null, gates: [], violations: [], ...(ledger === undefined ? {} : { mergeLedger: ledger }) } as unknown as Work;
 }
-const reasonsOf = (work: Work) => Object.fromEntries(evaluate(work, [work], new Date('2026-10-08T12:30:00.000Z'), [15368]).gates.map(gate => [gate.name, gate.reasons]));
+const reasonsOf = (work: Work) => Object.fromEntries(evaluate(work, [work], new Date('2026-10-08T12:30:00.000Z')).gates.map(gate => [gate.name, gate.reasons]));
 
 test('unit:gates-control-plane-ledger — with observation.source control-plane the test gate waits on the merge ledger\'s trial of exactly this head on exactly this base tip and the merge gate on both its pushed event and its reconciled state; no GitHub check or mergeability reason stands', () => {
   const sha = 'a'.repeat(40), base = 'b'.repeat(40);
@@ -230,7 +230,7 @@ test('unit:gates-github-snapshot — with source undefined a pull-request-era ob
   assert.deepEqual(reasonsOf(submittedWork(undefined, delivered)), { ...snapshot, test: [], merge: [] });
   // GitHub's checks and mergeability, stored on an old record, change nothing.
   assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: true, checks: [{ name: 'test', result: 'success', appId: 15368 }] })), snapshot);
-  assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: false, mergeabilityUnknown: true, checks: [{ name: 'test', result: 'failure', appId: 15368 }] })), snapshot);
+  assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: false, checks: [{ name: 'test', result: 'failure', appId: 15368 }] })), snapshot);
 });
 
 test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, head} with the SHA defaulting to the worktree HEAD, complete GY-N EPOCH PR sends the body it always did, and the command still reports self-verification beside the control plane\'s answer', async () => {

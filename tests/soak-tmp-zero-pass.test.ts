@@ -39,7 +39,7 @@ test('unit:tmp-reclaim-zero-escalates — over three days of standing zero-remov
   };
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }), closeSession: () => {},
-    dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    dispatch: async () => {}, recordDeployment: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     reclaimResources,
   } as unknown as DaemonEffects;
@@ -97,7 +97,7 @@ test('unit:tmp-reclaim-zero-escalates — a busy cycle that records more newer a
   let now = start;
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }), closeSession: () => {},
-    dispatch: async () => {}, requestProof: () => {}, recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    dispatch: async () => {}, recordDeployment: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     reclaimResources: async () => ({ at: new Date(now).toISOString(), reaped: { review: 0, producer: 0 }, closed: [], released: [], tmp: { removed: 0, bytes: 0 }, errors: [],
       tmpPass: { roots: ['/tmp'], scanned: 3, kept: 3, boundStands: true, consumers: [{ path: '/tmp/leaker', entries: 90_000, owner: 'someone' }] } }),

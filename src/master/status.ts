@@ -8,7 +8,7 @@ import { parkedOnHuman, humanDecisionLabel, answerCommand, openHumanRequests } f
 import { observationPass } from '../model/loop-observation.js';
 import { type Work, carriedBindings, describeGround, observationWindowHold, loopObservation, loopObservationProofs, reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles, implementerIdentities, isClosed, closedHistory } from '../model.js';
 import { containmentAttestation, containmentGraceMs } from '../quarantine.js';
-import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry, restoredApproval, refusedReconciliation, blockedPastProbe } from '../merge-queue.js';
+import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry } from '../model/base-refresh.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
 import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
@@ -24,7 +24,7 @@ import { launchFailedBeforeStart } from '../model/escalation.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import { maxInFlight, requestRemedy } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
-import { mergeAuthorized, mergedWithoutAuthorization, unauthorizedMergeViolation } from '../merge-queue.js';
+import { mergeAuthorized, mergedWithoutAuthorization, refusedReconciliation, unauthorizedMergeViolation } from '../model/merge-authorization.js';
 import { splitRelation, splitReport } from '../decomposition.js';
 import type { ProjectMemory } from '../model/project-memory.js';
 import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
@@ -235,11 +235,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const baseRefresh = pendingBaseRefresh(work), baseConflict = baseRefreshConflict(work);
     const owedRework = baseConflict ? conflictReworkDue(work, now) : null, overdueRework = owedRework?.overdueMs ? owedRework : null;
     const refreshCarry = currentBaseRefreshCarry(work);
-    // An approval GitHub dismissed for a merge-base change on an unchanged head that the control
-    // plane restored rather than re-requesting.
-    const restored = restoredApproval(work), baseDismissal = mergeBaseDismissal(work);
-    const approvalRestored = restored ? { reviewer: restored.reviewer, reviewId: restored.reviewId ?? null, sha: restored.sha, dismissal: restored.dismissal, at: restored.at,
-      line: `${restored.reviewer}'s approval of ${restored.sha.slice(0, 12)} was dismissed by GitHub for a merge-base change while the head was unchanged (${restored.dismissal.reason ?? 'reason unread'}${restored.dismissal.at ? ` at ${restored.dismissal.at}` : ''}); the control plane restored it as the binding approval, requested no review and spent no attempt` } : null;
+    const baseDismissal = mergeBaseDismissal(work);
     // A role with no account left is one line for the whole repository (`capacity` below), never a
     // launch refusal or a session retry repeated on every item that waits for it.
     const paused = new Set(standingCapacity(work).map(entry => entry.role));
@@ -257,17 +253,12 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       refusal: refusedReconciliation(work)?.violation ?? null,
       ...(reverted ? { reverted: { base: reverted.base, files: reverted.files, removedBy: reverted.removedBy, partial: !!reverted.partial } } : {}) } : null;
     const parked = parkedOnHuman(work) ? work.humanRequest! : null;
-    const queueRefusal = work.observation?.merged ? null : work.observation?.githubQueue?.refused ?? null;
-    // A refusal on a head BLOCKED with every gate passing past its bound is named once, by master
-    // status's merge-blocked item with GitHub's answer in it (GY-1112), not a second time here.
-    const pastProbe = work.observation?.githubQueue && work.candidate ? blockedPastProbe(work, work.observation.githubQueue, now) : null;
-    const mergeRefusal = queueRefusal && queueRefusal.head === work.candidate?.sha && !pastProbe ? queueRefusal : null;
     const [attention, cause]: [string | null, WorkAttentionCause | null] = containmentAttention ? containmentAttention
       : parked ? [`${work.key} is parked on a human-only decision (${humanDecisionLabel[parked.kind]}) since ${parked.at}: ${parked.needed} — ${parked.reason}. It holds no lease and delays nothing else`, 'human-request']
-      : merged?.reverted ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
+      : merged?.reverted ? [`${work.key} was merged (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) and its content is not on the base branch: ${merged.reverted.files.length}${merged.reverted.partial ? ' or more' : ''} file${merged.reverted.files.length === 1 && !merged.reverted.partial ? '' : 's'} missing from base ${merged.reverted.base.slice(0, 12)} — ${merged.reverted.files.map(file => `${file.path} (${file.detail})`).join(', ')} — ${merged.reverted.removedBy
         ? `removed by merge ${merged.reverted.removedBy.mergeSha?.slice(0, 12) ?? 'commit unknown'} of ${merged.reverted.removedBy.key ? `${merged.reverted.removedBy.key}, ` : ''}pull request #${merged.reverted.removedBy.pr}${merged.reverted.removedBy.commit ? ` (commit ${merged.reverted.removedBy.commit.slice(0, 12)})` : ', whose head carried this item\'s commits without their content'}`
         : 'and the merge that removed them could not be identified from the branch history'}. This is a reverted delivery, not an unreconciled merge: nothing is delivered until the content is restored${merged.refusal ? `; the last reconciliation was refused — ${merged.refusal}` : ''}`, 'merged-reverted']
-      : merged ? [`${work.key} was merged on GitHub (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) though its gates had not passed on that head: ${merged.violation}. It is held at the merge stage; ${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : 'a two-party merge decision requested now reconciles it if every gate passed for the merged head at the merge cutoff'}`, 'merged-unauthorized']
+      : merged ? [`${work.key} was merged (${merged.sha?.slice(0, 12) ?? 'merge commit unknown'} at ${merged.at ?? 'an unrecorded time'}) though its gates had not passed on that head: ${merged.violation}. It is held at the merge stage; ${merged.refusal ? `the last reconciliation was refused — ${merged.refusal}; an operator may deliver it as operator-authorized by a decision citing that refusal` : 'a two-party merge decision requested now reconciles it if every gate passed for the merged head at the merge cutoff'}`, 'merged-unauthorized']
       // A launch that failed before its runtime started is its dispatch's failure, recorded there; the
       // moment the attempt's lease outlives it is not a second, session fault of the item's (GY-1561).
       : active && !launchFailedBeforeStart(handle) && !['working', 'idle', 'launching'].includes(sessionState) ? [`Assigned worker session is ${sessionState}`, 'session']
@@ -286,7 +277,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // merge — and answering it cost a rework round for a change that was a clean fast-forward.
       // GitHub refused the control plane's merge request for this head: named with GitHub's reason,
       // never left as a silent wait (every merge once stalled on a refused auto-merge).
-      : mergeRefusal ? [`GitHub refused the merge request for ${work.key} at ${mergeRefusal.head.slice(0, 12)} since ${mergeRefusal.at}: ${mergeRefusal.reason}`, 'merge-refused']
       : baseRefresh && !work.blocker ? [null, null]
       // A follow-up held on its observation window (GY-1698) is waiting for the instant, not stalled at its gate.
       // GY-1779: a due reading is the loop's own, listed under `pendingReadings` with the loop's last record of it, never a stalled gate.
@@ -315,8 +305,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
         refreshed: refreshCarry ? { from: refreshCarry.from.sha, head: refreshCarry.to.sha, base: refreshCarry.to.baseSha, ground: describeGround(refreshCarry.ground),
           approval: { carried: refreshCarry.approval.carried, reason: refreshCarry.approval.reason },
           evidence: refreshCarry.evidence.map(entry => ({ proof: entry.proof, carried: entry.carried, reason: entry.reason })) } : null } : null,
-      // An approval GitHub dismissed for a merge-base change that the control plane restored.
-      restoredApproval: approvalRestored,
       // The standing blocker's class, the loop's last probe of it and when it runs next (GY-1008).
       blocker: blockerView(work),
       overlap: { concurrent }, conflicts,
@@ -371,7 +359,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       quarantined: rows.filter(row => row.containment && row.containment.phase !== 'live').length, settleableQuarantines: rows.filter(row => row.containment?.settleable).length,
       reconciledDeliveries: deliveries.reconciled.length, operatorAuthorizedDeliveries: deliveries.operatorAuthorized.length,
       humanRequests: humanRequests.length, capacityExhausted: capacity.length, concurrencyStarved: concurrency.filter(report => report.starved).length, unrunnableRemedies: remedies.length, effectiveConcurrency: fleet.effective, idleWorkers: idle.length,
-      restoredApprovals: rows.filter(row => row.restoredApproval).length,
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
       closed: snapshot.work.filter(isClosed).length },
     // Every attention item with the role that resolves it and the next command, work items first.
@@ -394,16 +381,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     projectMemory: loop && 'projectMemory' in loop ? loop.projectMemory ?? null : null };
 }
 
-/**
- * Every approval GitHub dismissed for a merge-base change on an unchanged head that the control
- * plane restored instead of asking the reviewer again (GY-127): the list a master reads before it
- * wonders why a reviewer approved the same commit twice. The rows carry the same facts under
- * `restoredApproval`.
- */
-export function branchReport(rows: ReturnType<typeof buildMasterStatus>['work']) {
-  const restoredApprovals = rows.flatMap(row => row.restoredApproval ? [{ key: row.key, reviewer: row.restoredApproval.reviewer, sha: row.restoredApproval.sha, reason: row.restoredApproval.dismissal.reason, at: row.restoredApproval.at, line: `${row.key}: ${row.restoredApproval.line}` }] : []);
-  return { restoredApprovals };
-}
 /**
  * The dispatch plan the durable loop and `master dispatch` follow: ready items in the order they
  * would be offered (within a priority: starving first, then cold before hot, then oldest, by the

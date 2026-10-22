@@ -214,7 +214,7 @@ test('unit:approver-idle-stall-relaunch — an approver idle past its start boun
       state.approvals[`${handWatchPrefix}${decision}`] = approvalWatchSchema.parse({ work: work.key, action: 'requirements', decision, requestedAt: new Date(Date.now() - 600_000).toISOString(), launches: 1 });
       const loop: DaemonEffects = {
         agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: new Date().toISOString() }),
-        closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, persist: async () => {},
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
         decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', input: {}, approvedBy: null, requestedAt: new Date(Date.now() - 600_000).toISOString() }] }),
         approverLaunches: () => autonomy.readApproverLaunches(root),
@@ -346,7 +346,7 @@ test('unit:approver-stall-followup — stall checks date a session only by its o
       const state = emptyDaemonState(config);
       const loop = (at: number): DaemonEffects => ({
         agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: new Date(at).toISOString() }),
-        closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+        closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, persist: async () => {},
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
         decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', input: {}, approvedBy: null, requestedAt: requested }] }),
         approverLaunches: () => autonomy.readApproverLaunches(root),

@@ -191,9 +191,9 @@ function loopEffects(work: Work[], dispatch: DaemonEffects['dispatch']) {
   const effects: DaemonEffects = {
     agents: () => [], credentials: async items => Object.fromEntries(items.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: structuredClone(work), now: new Date(Date.now() + offsetMs).toISOString() }),
-    closeSession: () => {}, dispatch, requestProof: () => {},
+    closeSession: () => {}, dispatch,
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     blockDispatch: async (target, reason) => { blocked.push(reason); work.find(entry => entry.id === target.id)!.blocker = reason; },
   };
   return { effects, blocked, clock: () => Date.now() + offsetMs, advance: (ms: number) => { offsetMs += ms; } };
@@ -385,7 +385,7 @@ test('dispatchblock is refused off a dispatchable stage, over a standing blocker
   try {
     await store.init();
     const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' }, worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' }, loop: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
-    const engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [human, worker, loop];
+    const engine = new Engine(store, 120, 'owner/project'); engine.principals = [human, worker, loop];
     const refused = (work: Work, pattern: RegExp) => assert.rejects(engine.execute(loop, 'dispatchblock', work.id, { reason: 'fatal: held' }, randomUUID()), pattern);
     let work = await engine.execute(human, 'create', null, { title: 'held', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
     await refused(work, /not awaiting a dispatch/);

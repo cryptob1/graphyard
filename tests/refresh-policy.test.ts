@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { baseRefreshNeeded, pendingBaseRefresh } from '../src/merge-queue.js';
+import { baseRefreshNeeded, pendingBaseRefresh } from '../src/model/base-refresh.js';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { refusalAction } from '../src/model/next-action.js';
 import { checkStates, prSteps } from '../src/model/pr-steps.js';
@@ -9,7 +9,6 @@ import { checkStates, prSteps } from '../src/model/pr-steps.js';
 // new base is brought onto it; the rest keep their head, CI, review, proofs and stage. Each test is
 // named for the proof it produces.
 
-const ciAppIds = [15368];
 const commit = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const now = new Date('2026-09-25T09:00:00.000Z');
 const main = commit('a0'), moved = commit('a1');
@@ -47,7 +46,7 @@ function work(key: string, head: string, overrides: Partial<Observation> = {}, l
 }
 /** The evaluation the engine stores after every observation. */
 function evaluated(item: Work, all: Work[]): Work {
-  const result = evaluate(item, all, now, ciAppIds);
+  const result = evaluate(item, all, now);
   return { ...item, stage: result.stage, gates: result.gates };
 }
 const gate = (item: Work, name: string) => item.gates.find(entry => entry.name === name)!;
@@ -97,7 +96,7 @@ test('unit:queue-validation-is-merge-substate — a candidate the merge writer h
   assert.equal(running.stage, 'test', 'stage comes from the candidate\'s own gates');
   assert.equal(prSteps(running, now.getTime()).current, 'checking');
   assert.equal(prSteps(running, now.getTime()).label, 'Checking · 0 of 1 checks done');
-  assert.deepEqual(checkStates(running, ciAppIds), [{ name: 'test', state: 'running' }]);
+  assert.deepEqual(checkStates(running), [{ name: 'test', state: 'running' }]);
 
   const passed = evaluated(work('GY-1', commit('c1'), {}, 'reconciled'), []);
   assert.deepEqual([passed.stage, gate(passed, 'merge').passed, gate(passed, 'merge').reasons], ['merge', true, []]);

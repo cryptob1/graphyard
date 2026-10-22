@@ -104,9 +104,9 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
   const scopeSpy = (name: string) => async () => { world.scopeCalls.push(name); throw new Error(`${name} must not run under the control plane`); };
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: world.ports(),
     decide: scopeSpy('decide') } as unknown as DaemonEffects;
   let state: DaemonState = emptyDaemonState(config);

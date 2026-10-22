@@ -212,10 +212,8 @@ test('unit:approver-relaunch-on-capacity — a refused launch is persisted uncou
     snapshot: async () => ({ work: cycleNo === 1 ? [older] : [older, newer], now: iso(cycleNo * 20_000) }),
     closeSession: () => {},
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(cycleNo * 20_000), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async current => {
       persistLog.push({
         capacityA: !!current.approvals[keyOf['GY-301']]?.capacity,
@@ -309,10 +307,8 @@ test('unit:approver-relaunch-on-capacity — a request landing on spent accounts
     snapshot: async () => ({ work: [older, newer], now: iso(cycleNo * 20_000) }),
     closeSession: () => {},
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(cycleNo * 20_000), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     reportCapacity: (async () => null) as unknown as DaemonEffects['reportCapacity'],
     roleHealth: async () => ({ approver: { profiles: [{ name: 'approver-p' }], health: { 'approver-p': spent
@@ -386,10 +382,8 @@ test('unit:approver-relaunch-on-capacity — a re-keyed capacity wait keeps its 
     snapshot: async () => ({ work: [older, newer], now: iso(cycleNo * 20_000) }),
     closeSession: () => {},
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(cycleNo * 20_000), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     decisions: async item => ({ decisions: requested.includes(decisionOf[item.key]) ? [{ id: decisionOf[item.key], action: 'rework', state: 'requested', input: {}, approvedBy: null }] : [] }),
     decide: async (item, action) => { assert.equal(action, 'rework'); requested.push(decisionOf[item.key]); return { id: decisionOf[item.key] }; },

@@ -40,9 +40,9 @@ test('unit:repair-lane-removed — the module is gone and unimported, repair-mer
     blocker: null, gates: [], violations: [] });
   const loaded = JSON.parse(stored) as Work;
   assert.equal(loaded.repair, 'merge-path');
-  const evaluated = evaluate(loaded, [loaded], new Date('2026-09-25T00:02:00.000Z'), [1]);
+  const evaluated = evaluate(loaded, [loaded], new Date('2026-09-25T00:02:00.000Z'));
   assert.deepEqual(evaluated.gates.map(gate => gate.name).slice(0, 2), ['ready', 'build']);
   assert.equal(evaluated.gates.find(gate => gate.name === 'test')?.passed, false, 'judged by its gates like any other item');
   const plain = JSON.parse(stored) as Work; delete plain.repair;
-  assert.deepEqual(evaluated, evaluate(plain, [plain], new Date('2026-09-25T00:02:00.000Z'), [1]), 'the retired field changes nothing');
+  assert.deepEqual(evaluated, evaluate(plain, [plain], new Date('2026-09-25T00:02:00.000Z')), 'the retired field changes nothing');
 });

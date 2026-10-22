@@ -43,7 +43,7 @@ before(async () => {
     };
   });
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker];
   // Only the clock-driven catch-up is full here; each test says when it wants one.
   engine.reconcileFullEvaluationMs = 300_000;

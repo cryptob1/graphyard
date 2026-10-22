@@ -187,10 +187,8 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
       snapshot: async () => ({ work, now: new Date(at.value).toISOString() }),
       closeSession: pane => { state.master.closed.push(pane); state.master.agents = state.master.agents.filter(agent => agent.pane_id !== pane); },
       dispatch: async () => {},
-      requestProof: () => {},
       observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at.value).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
       recordDeployment: async () => {},
-      requestSmoke: () => {},
       sessionOutput: async (agent: HerdrAgent) => state.master.outputs[agent.name ?? ''] ?? '',
       promptSession: async (agent: HerdrAgent, text: string) => { state.master.wakes.push(text); },
       endRegistrySession: async (session: string, reason: string) => {

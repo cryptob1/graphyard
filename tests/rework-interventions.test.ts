@@ -34,7 +34,7 @@ const rowsOf = (instance: Instance, grounds = instance.rework.grounds): Interven
 const itemsOf = (instances: Instance[]) => [...new Map(instances.map(instance => [instance.workId, { id: instance.workId, key: instance.key, title: instance.key, stage: 'build' } as unknown as Work])).values()];
 
 test('unit:rework-instances-replayed — every listed instance is read from its own rows: a round answering a ground the loop acts on by itself is no intervention, and only the coordinator judgements remain', () => {
-  assert.equal(fixture.instances.length, 493);
+  assert.equal(fixture.instances.length, 481);
   const remaining = new Set<string>();
   for (const instance of fixture.instances) {
     const ground = routineReworkGround(instance.rework.grounds, instance.decision?.binding);
@@ -61,7 +61,7 @@ test('unit:rework-instances-replayed — the grounds are read from the record, n
   const bound = fixture.instances.filter(instance => routineReworkGround(instance.rework.grounds, instance.decision?.binding) && bindingAlone(instance));
   assert.equal(bound.length, 377, 'rounds the loop requested under its own situated binding');
   const byHand = fixture.instances.filter(instance => !bindingAlone(instance) && routineReworkGround(instance.rework.grounds));
-  assert.equal(byHand.length, 109, 'rounds requested without one, on a ground the record shows');
+  assert.equal(byHand.length, 97, 'rounds requested without one, on a ground the record shows');
   const conflicted = byHand.find(instance => routineReworkGround(instance.rework.grounds) === 'conflict')!;
   const clean = structuredClone(conflicted.rework.grounds);
   clean.baseRefresh = null; clean.mergeRefusal = null; clean.observation.conflicting = false; clean.observation.reviews = [];
@@ -110,7 +110,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('rework-grounds'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('rework_grounds_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/rework_grounds_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/grounds'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/grounds'); engine.submissionObserver = null;
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 

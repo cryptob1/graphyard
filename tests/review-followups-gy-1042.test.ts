@@ -75,7 +75,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('followups-1042'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('followups_1042');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/followups_1042`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/followups');
+  engine = new Engine(store, 120, 'owner/followups');
   engine.principals = [operator, worker];
 });
 after(async () => { boundLockedCache(); if (store) await store.close(); if (database) await database.stop(); });

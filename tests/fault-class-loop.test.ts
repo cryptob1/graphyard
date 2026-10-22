@@ -64,10 +64,8 @@ const effectsOver = (work: Work[], agents: HerdrAgent[], clock: number, credenti
   snapshot: async () => ({ work, now: iso(clock) }),
   closeSession: () => {},
   dispatch: async () => {},
-  requestProof: () => {},
   observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(clock), reason: 'not configured', deployed: [], pending: [] }),
   recordDeployment: async () => {},
-  requestSmoke: () => {},
   persist: async () => {},
 });
 const capacityRecords = (state: DaemonState) => Object.entries(state.actions).filter(([key]) => key.startsWith('capacity:work-'));

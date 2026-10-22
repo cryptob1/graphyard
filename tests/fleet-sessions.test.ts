@@ -99,9 +99,9 @@ function wiring(cfg: MasterConfig, fleet: ReturnType<typeof memoryRegistry>, her
     credentials: async () => ({}),
     snapshot: async () => ({ work: [verdictItem('GY-42', new Date(now() - 30_000).toISOString())], now: new Date(now()).toISOString(), jobs: [] }),
     closeSession: pane => { const at = herdr.findIndex(agent => agent.pane_id === pane); if (at >= 0) herdr.splice(at, 1); },
-    dispatch: async () => {}, requestProof: () => {},
+    dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now()).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async () => ({ id: decisionId }),
     decisions: async () => { const judged = decision(); return { decisions: judged ? [{ id: decisionId, action: 'rework', state: judged.state, input: {}, approvedBy: judged.state === 'applied' ? 'approver-agent' : null }] : [] }; },
     approver: async (work, id) => {

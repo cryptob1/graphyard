@@ -27,7 +27,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('ledger-compaction'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('ledger_compaction_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ledger_compaction_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null;
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
@@ -81,7 +81,7 @@ test('unit:routine-events-store-no-snapshot — a routine save stores only what 
   await push('action.failed', () => { work.actionQueue.actions[0].state = 'failed'; delete work.blocker; });
   // A routine save that moves the stage, or an observation that first records a delivery, is a lifecycle row and stays whole.
   await push('reconciled', () => { work.stage = 'review'; });
-  await push('github.queue', () => { work.queue = { sequence: 4 }; });
+  await push('session', () => { work.queue = { sequence: 4 }; });
   await push('github.observed', () => { work.delivery = { mergedAt: new Date().toISOString(), mergeSha: 'a'.repeat(40), authorizationRevision: work.revision }; });
   await push('github.observed', () => { work.observation = { at: new Date().toISOString(), merged: true }; });
   await push('session', () => { work.sessions = [{ name: 'worker', state: 'done' }]; });
@@ -137,7 +137,7 @@ test('unit:ledger-compaction-preserves-reconstruction — compaction removes onl
   await legacyWhole(open, 'heartbeat');                                     // whole routine row nothing references
   await legacyWhole(open, 'heartbeat');
   open.stage = 'review'; await legacyWhole(open, 'reconciled');             // whole routine row that moved the stage
-  await legacyWhole(open, 'github.queue');
+  await legacyWhole(open, 'session');
   for (let n = 0; n < 5; n++) { open.lease.expiresAt = new Date(Date.now() + n).toISOString(); await write(open, 'action.claimed'); }
 
   const delivered: any = await seeded();

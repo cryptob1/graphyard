@@ -154,8 +154,8 @@ async function replayBurst(cycles: number) {
   const snapshot = () => ({ work: heads.map(head => reworkHead(head.key, landing.has(head.key) && landing.get(head.key)! <= now ? landing.get(head.key)! : head.observedAt)), now: iso(now), jobs: [] });
   const effects: DaemonEffects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => snapshot(),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     // The wake goes through the loop's own effects, to a server that serves a prioritized wake ahead
     // of the polled backlog; the burst's backlog served no other wake inside the replay (GY-612's,
     // sent unprioritized at 06:23, had still not landed at 06:44).
@@ -207,14 +207,11 @@ test(`manual:fault-class-loop — ${gy1266Instances[0].id}: GitHub delivery bein
   const master = burstConfig({ proofWorkflow: 'acceptance.yml' });
   const subjects = actionableSubjects(master, [gy1132], at).map(subject => subject.key);
   assert.ok(!subjects.includes('proof:GY-1132'), subjects.join(', '));
-  // Nor does the shepherd step ask the proof workflow for it.
-  const asked: string[] = [];
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [gy1132], now: iso(at), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: async (work: Work) => { asked.push(work.key); },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {} } as unknown as DaemonEffects;
   await runCycle(master, emptyDaemonState(master), effects, () => at);
-  assert.deepEqual(asked, []);
 });
 
 // ---- GY-1286: three more loop faults on 2026-10-05 ----------------------------------------------
@@ -257,8 +254,8 @@ async function replaySlowServer(cycles: number, attesting = 0) {
   const snapshot = () => ({ work: [...stale.map(key => reworkHead(key, burstClock - 3 * minute)), ...fresh.map(key => reworkHead(key, now - 30_000)), ...attested.map(key => attestHead(key, now - 30_000))], now: iso(now), jobs: [] });
   const effects: DaemonEffects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => snapshot(),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     wakeObservation: async work => {
       const body = await sent(live => live.wakeObservation!(work));
       woken.push({ key: work.key, cycle, body });
@@ -451,8 +448,8 @@ test(`unit:plane-wide-dispatch-tick-not-counted — ${gy1345Instances[0].id}: an
   const cycleWith = async (failure: string) => {
     const state = emptyDaemonState(master);
     const effects = { agents: () => [], credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
-      snapshot: async () => ({ work: [work], now: iso(at) }), closeSession: () => {}, dispatch: async () => { throw new Error(failure); }, requestProof: () => {},
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {} } as unknown as DaemonEffects;
+      snapshot: async () => ({ work: [work], now: iso(at) }), closeSession: () => {}, dispatch: async () => { throw new Error(failure); },
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, persist: async () => {} } as unknown as DaemonEffects;
     await runCycle(master, state, effects, () => at);
     return state;
   };
@@ -493,8 +490,8 @@ type PlaneReads = { attention: number; inFlight?: number; maxInFlight?: number }
 function slowPlane(reads: PlaneReads, attentionMs = () => slowAttentionMs) {
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [item('GY-9', Date.now(), { stage: 'build', ready: true })], now: iso(Date.now()), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(Date.now()), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(Date.now()), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     controlPlane: () => new Promise(resolve => setTimeout(() => resolve({}), slowStatusMs)),
     reportedAttention: () => {
       reads.attention += 1; reads.inFlight = (reads.inFlight ?? 0) + 1; reads.maxInFlight = Math.max(reads.maxInFlight ?? 0, reads.inFlight);
@@ -600,8 +597,8 @@ const timedOut = () => new DOMException('The operation was aborted due to timeou
 /** A loop's effects with nothing to do but what each replay adds. */
 function quietEffects(at: () => number, work: () => Work[], extra: Partial<DaemonEffects> = {}): DaemonEffects {
   return { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: work(), now: iso(at()), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at()), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at()), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {}, ...extra } as DaemonEffects;
 }
 

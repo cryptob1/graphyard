@@ -61,8 +61,8 @@ test('unit:soak-harness-remedy-invariants — over a simulated day the loop heal
     const effects = {
       agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
       snapshot: async () => ({ work: [], now: iso(now) }),
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
-      observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+      closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
+      observeDeployment: async () => ({ source: 'endpoint', sha: 'd'.repeat(40), at: iso(now), reason: null, deployed: [], pending: [] }), recordDeployment: async () => {},
       research: { cwd: root }, doctor, // as the real loop wires them: research names its checkout on every loop, the doctor reads the same one
     } as unknown as DaemonEffects;
 

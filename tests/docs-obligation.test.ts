@@ -33,7 +33,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: dataDirectory, user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('docs_obligation_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/docs_obligation_test`); await store.init();
-  engine = new Engine(store, [15368], 300, 'owner/site-repository'); engine.submissionObserver = null;
+  engine = new Engine(store, 300, 'owner/site-repository'); engine.submissionObserver = null;
 });
 after(async () => {
   await store?.close();

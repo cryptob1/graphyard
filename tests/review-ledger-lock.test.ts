@@ -94,7 +94,7 @@ test('unit:review-ledger-lock-erofs-degrades — a read-only ledger lock locatio
     assert.equal(existsSync(join(root, '.graphyard', 'reviews.json.lock')), false, 'nothing is ever written beside the ledger');
 
     // A reconcile pass that records a verdict saves it although its lock location is read-only.
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint, threads: async () => [] });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun, mint });
     const config = await loadMasterConfig(root);
     const reasons: string[] = [];
     const ledgerLock = { environment: { GRAPHYARD_DATA_HOME: dataHome }, fs: await readOnlyLockFs('open'), onLockless: (reason: string) => reasons.push(reason) };

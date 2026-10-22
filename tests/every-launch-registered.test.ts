@@ -37,7 +37,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('every-launch'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [1234], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, coordinator];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

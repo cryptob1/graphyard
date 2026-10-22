@@ -75,8 +75,8 @@ test('unit:soak-worktree-inventory-unreadable — over simulated cycles a worktr
         trees: { at: iso(now), limit: 2, removed: [], kept: [], backlog: 0, held: [], errors: [] } };
     };
     const effects = {
-      agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {},
+      recordDeployment: async () => {}, persist: async () => {},
       snapshot: async () => ({ work: [item], now: iso(now) }),
       observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
       controlPlane: async () => ({ build: { commit: null } }),

@@ -44,7 +44,7 @@ function reworkRounds() {
   return { rows, work: [] as Work[], now: fixture.window.to };
 }
 
-/** GY-1386's 493 build-stage rework instances, replayed as rework-interventions.test.ts replays them. */
+/** GY-1386's 481 build-stage rework instances, replayed as rework-interventions.test.ts replays them. */
 function reworkInstances() {
   const fixture = JSON.parse(source('tests/fixtures/gy-1386-rework-instances.json')) as { window: { to: string }; instances: { key: string; workId: string; stage: string; decision: { seq: string; at: string; id: string; binding: string | null } | null; rework: { seq: string; at: string; actor: string; submission: { pr: number; epoch: number } | null; grounds: any } }[] };
   const rows = fixture.instances.flatMap((instance): InterventionLedgerRow[] => [

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { wakeFromWebhook, wakeJob, wakeJobs } from '../src/store/store.js';
+import { wakeJob, wakeJobs } from '../src/store/store.js';
 import { commitLockWaitMs, reconcileCommitBlockingSql } from '../src/store/coordination-sql.js';
 import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
@@ -42,7 +42,6 @@ async function traffic(stop: Promise<void>, errors: unknown[], { rawMoves = true
     loop(async () => { const { work, actor } = pick(leased); await engine.execute(actor, 'heartbeat', work.id, { epoch: work.epoch }, randomUUID()); }),
     loop(async () => { const { work, actor } = pick(leased); await engine.execute(actor, 'heartbeat', work.id, { epoch: work.epoch }, randomUUID()); }),
     loop(async () => { await engine.resyncWork(operator, pick(items).id, {}); }),
-    loop(async () => { await store.transaction(async db => wakeFromWebhook(db, { all: Math.random() < 0.5, prs: [4000 + Math.floor(Math.random() * 100)], shas: [], branches: [] }, true)); }),
     loop(async () => { await store.transaction(async db => { for (const work of shuffled(items).slice(0, 8)) await wakeJob(db, work.id); }); }),
     loop(async () => { await wakeJobs(store.pool, shuffled(items).slice(0, 12).map(work => work.id)); }),
     // A move another item's evaluation reads, on a share of the fleet: what keeps contending batches.
@@ -57,7 +56,7 @@ before(async () => {
   // A small pool, so a tick that took more than its share would starve requests at once.
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`, { max: 6 });
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, ...workers];
   engine.submissionObserver = null;
   for (let n = 0; n < 100; n++) {

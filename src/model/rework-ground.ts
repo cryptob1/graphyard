@@ -2,7 +2,7 @@ import type { Work } from './work.js';
 import type {} from './merge-ledger.js'; // Work.mergeLedger
 import type { Decision } from './approval.js';
 import { mechanicalVerdicts, producerManualFailures } from './mechanical-proofs.js';
-import { baseRefreshConflict } from '../merge-queue.js';
+import { baseRefreshConflict } from './base-refresh.js';
 
 /** The ledger's approver of a rework the control plane applied itself: by its risk lane (GY-883) or on its recorded ground. */
 export const laneApprover = 'graphyard-risk-lane';

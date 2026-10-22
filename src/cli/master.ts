@@ -37,7 +37,7 @@ export const masterCommands = defineCommands([
       '  master review GY-N [PROFILE]  Launch the bound reviewer on the exact current candidate as the',
       '                                open request\'s next attempt; master run does this on its own,',
       '                                so it is the recovery path for a request nothing else answers',
-      '  master setup [--apply] [--provider P --service NAME --link-dir DIR]',
+      '  master setup [--apply]',
       '                                Plan, or set, each deployment variable derived from credentials',
       '                                saved on this host that the deployment lacks (the revert approver',
       '                                from the reviewer App); secrets piped, audited by fingerprint',

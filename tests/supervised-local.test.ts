@@ -158,7 +158,7 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   const { selectReviewerProfile } = await import('../src/auto-dispatch.js');
   const { daemonEffects } = await import('../src/master-daemon.js');
   const { buildMasterStatus } = await import('../src/master/status.js');
-  const reviewGate = (item: Work) => evaluate(item, [item], new Date('2026-10-08T00:05:00.000Z'), [15368]).gates.find(gate => gate.name === 'review')!;
+  const reviewGate = (item: Work) => evaluate(item, [item], new Date('2026-10-08T00:05:00.000Z')).gates.find(gate => gate.name === 'review')!;
 
   // Items keep policy review true and the GitHub review provider: an unreviewed candidate never merges.
   const unreviewed = work([]);

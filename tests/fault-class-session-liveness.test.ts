@@ -258,7 +258,7 @@ test('manual:fault-class-session-liveness — the deploy the tick records explai
 
 /** A fresh engine per use: each process records the release it serves on its first moving tick. */
 function engine(): Engine {
-  const created = new Engine(store, [15368], 120, 'owner/project');
+  const created = new Engine(store, 120, 'owner/project');
   created.principals = [human, worker];
   return created;
 }

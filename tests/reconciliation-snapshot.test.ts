@@ -41,7 +41,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reconciliation-snapshot'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('reconciliation_snapshot_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reconciliation_snapshot_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

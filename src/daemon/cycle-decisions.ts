@@ -7,7 +7,7 @@ import { recordSettledDecision } from '../model/project-memory.js';
 import { type ApprovalWatch, approvalWatchSchema, carriedSession, type DaemonActionKind, type DaemonState, latencySampleSchema, message } from './state.js';
 import { decisionKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
-import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, githubPause, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
+import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { approvedResumePendingDetail, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail } from './metrics.js';
 import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
@@ -15,7 +15,7 @@ import { type DaemonEffects, record } from './effects.js'; import { type HeldRew
 import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
 import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
-import { baseRefreshConflict } from '../merge-queue.js'; import { docsSyncRoute } from './docs-sync-route.js';
+import { baseRefreshConflict } from '../model/base-refresh.js'; import { docsSyncRoute } from './docs-sync-route.js';
 import { createApproverSupervisor } from './cycle-approvers.js'; import { boundWakes, observationWakes, retireDepartedWakes } from './cycle-wakes.js';
 import { boundedDecisions, decisionBudget, decisionCallCarried, deferredFirst, settleDeferred } from './decision-budget.js'; import { boundedCalls, recordCarried, stepCallCarried } from './step-budget.js';
 import { staleReleaseStep } from './stale-releases.js';
@@ -246,7 +246,6 @@ export async function decisionStep(cycle: Cycle, assessments: Record<string, Con
     await request(item, decision, key, watch);
   };
   const needed = new Set<string>(), unattestable = new Set<string>(), budgetStartedAt = now(), budget = decisionBudget(state, now, (config.run.intervalSeconds ?? 20) * 1000); budgetLeft = () => Math.max(0, budget.budgetMs - (now() - budgetStartedAt)); // GY-1766 review: the budget bounds every approver call below as well as the items this step reaches
-  const pause = githubPause(snapshot.jobs, clock);
   // GY-566: a docs-only conflict routes to a docs-sync session instead of a rework decision. The
   // route — classification, session watch, hotspot log — lives in docs-sync-route.ts; the step
   // runs its sweep here and consults `holds` where a conflict rework decision would be requested.
@@ -278,7 +277,7 @@ export async function decisionStep(cycle: Cycle, assessments: Record<string, Con
     const detail = `${item.key} needs a${decision.action === 'attest' ? 'n' : ''} ${decision.action} decision: ${decision.reason} This loop runs without the decision effects, so it cannot request one: graphyard master decide ${item.key} ${decision.action}${input} REASON, then graphyard master approver ${item.key} DECISION`;
     if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   };
-  const { wake, wakeJob, wakeCarried, retireMootWake } = observationWakes(cycle, effects, pause); // GY-1865: the step's wakes, carried past the bound and retired once moot (cycle-wakes.ts)
+  const { wake, wakeJob, wakeCarried, retireMootWake } = observationWakes(cycle, effects); // GY-1865: the step's wakes, carried past the bound and retired once moot (cycle-wakes.ts)
   const noteWait = async (item: Work, detail: string) => { const waitKey = `wait:rework:${item.id}`; if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
   // GY-1436: one stable wait per held item, naming the docs-sync session, head, base and the end of its bound; that bound, reached or still ahead, ends the loop's idle wait (GY-1622), kept at the latest local time the control plane can reach it (the read's upper clock offset): the cycle it wakes finds the hold ended, at most one round trip late.
   const noteHold = async (item: Work, { wait: detail, deadline }: { wait: string; deadline: string }) => { const bound = Date.parse(deadline); const waitKey = `wait:docs-sync:${item.id}`; if (bound >= clock) bounds.set(item.id, bound + clockOffset.max); if (detailChanged(state.actions[waitKey], detail)) await note(waitKey, item, 'decision', 'done', detail); };
@@ -329,13 +328,13 @@ export async function decisionStep(cycle: Cycle, assessments: Record<string, Con
     if (hold?.held) return noteHold(item, hold); released.at = true;
     if (synced.work && synced.work.candidate?.sha === item.candidate?.sha && synced.work.policyRevision === item.policyRevision) item = synced.work;
     needed.add(key);
-    // Rework waits for an observation that still describes the item (GY-144); the step wakes it unless paused (GY-793) and re-decides.
+    // Rework waits for an observation that still describes the item (GY-144); the step wakes it and re-decides.
     // The loop's own landed wake of the submitted head counts as that observation, whatever its age (GY-1266, GY-1257).
     const woken = state.actions[`wake:observation:${item.id}`];
     const endedWait = (subject: Work, at: string) => `${subject.key}: its docs-sync hold ended at ${at}; rework waits for an observation since then showing the head unmoved`;
     let wait = conflictReworkOverdue(item, decision, clock) ? null : hold?.awaiting ? endedWait(item, hold.awaiting)
-      : decision.action === 'rework' ? reworkObservationWait(item, clock, pause, woken?.state === 'done' ? woken.at : null) : null;
-    const fresh = wait && !pause && wake && !state.approvals[key] && !wakeCarried(item) /* GY-1865 review: a carried wakeObservation is the item's one resync in flight; wakeJob joins or consumes it */ ? await wake(item, clock) : null;
+      : decision.action === 'rework' ? reworkObservationWait(item, clock, woken?.state === 'done' ? woken.at : null) : null;
+    const fresh = wait && wake && !state.approvals[key] && !wakeCarried(item) /* GY-1865 review: a carried wakeObservation is the item's one resync in flight; wakeJob joins or consumes it */ ? await wake(item, clock) : null;
     const again = fresh && routineDecision(fresh, config, now(), assessment, fresh.candidate?.sha === item.candidate?.sha ? cycle.baseFailed.get(item.id) : undefined, [], [], refused);
     if (fresh && again?.action !== 'rework') { await retireMootWake(item, `the reading its wake fetched (at ${fresh.observation?.at ?? 'unknown'}) no longer calls for one`); return noteWait(item, `${item.key}: woke its observation for a rework decision; the reading at ${fresh.observation?.at ?? 'unknown'} no longer calls for one`); }
     if (fresh && again) {
@@ -343,7 +342,7 @@ export async function decisionStep(cycle: Cycle, assessments: Record<string, Con
       // The fresh reading settles an ended docs-sync hold in the cycle it ended (GY-1436).
       const settled = hold?.awaiting && docsConflict(item, decision) ? await docsSync.hold(item) : null;
       if (settled?.held) return noteHold(item, settled);
-      wait = conflictReworkOverdue(item, decision, now()) ? null : settled?.awaiting ? endedWait(item, settled.awaiting) : reworkObservationWait(item, now(), pause);
+      wait = conflictReworkOverdue(item, decision, now()) ? null : settled?.awaiting ? endedWait(item, settled.awaiting) : reworkObservationWait(item, now());
     }
     const watch = state.approvals[key];
     if (wait) {

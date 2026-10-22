@@ -1,5 +1,4 @@
 import { isClosed, type Gate, type Work } from '../model.js';
-import { latestCheck } from '../merge-queue.js';
 import { noRelease, servedFor, type ReleaseView } from './release.js';
 import type { PipelineTimeline } from '../pipeline-speed.js';
 import { assignment } from './assignment.js';
@@ -52,39 +51,25 @@ export interface PrSteps {
   who: string;
 }
 
-const pendingCheck = new Set(['', 'pending', 'queued', 'in_progress', 'waiting', 'requested', 'expected']);
-
 /** True while the review gate refuses on a reviewer's request for changes. */
 export const changesRequested = (work: Work) => !!work.gates.find(gate => gate.name === 'review')?.reasons.some(reason => reason.startsWith('Outstanding change requests'));
 
 export type CheckState = 'passed' | 'failed' | 'running';
 /**
- * Each required CI check as the test gate reads it. The gate's own reasons decide which checks
- * have not passed: a check it does not name has passed, and no run from another App with the same
- * name can make a named one read passed. A named check reads failed only on evidence that a
- * trusted CI App (status `ciAppIds`, the Apps the gate counts) failed it: the latest run of it
- * across every trusted App, the one run the test gate reads (src/model/gates.ts `latestCheck`),
- * finished without succeeding. An untrusted App's failure, no trusted run at all, or not being
- * told which Apps are trusted leaves it running — the gate says only that the trusted check has
- * not passed. A re-run replaces an old failure or success, whichever App ran it. The Checking
+ * Each policy check as the test gate reads it. The merge writer's trial builds and tests the merge
+ * commit (GY-2010): until it records a passing trial of this head every check is running, a refused
+ * trial of this head failed them, and a check the gate no longer names has passed. The Checking
  * state's label and the item page's Checks line both read this.
  */
-export function checkStates(work: Work, ciAppIds: readonly number[] | null = null): { name: string; state: CheckState }[] {
+export function checkStates(work: Work): { name: string; state: CheckState }[] {
   const gate = work.gates.find(entry => entry.name === 'test');
   const reasons = gate?.reasons ?? [];
   const named = (name: string) => !gate || reasons.some(reason => ciCheckName(reason) === name);
-  // GY-2010: the merge writer's trial builds and tests the merge commit; until it records a passing
-  // trial of this head every check is running, and a refused trial of this head failed them.
   if (reasons.some(reason => mergeWriterTrialPattern.test(reason))) {
     const refused = work.mergeLedger?.state === 'refused' && !!work.candidate && work.mergeLedger.head === work.candidate.sha;
     return (work.policy.checks ?? []).map(name => ({ name, state: refused ? 'failed' : 'running' }));
   }
-  return (work.policy.checks ?? []).map(name => {
-    if (!named(name)) return { name, state: 'passed' };
-    const runs = (work.observation?.checks ?? []).filter(check => check.name === name && !!ciAppIds?.includes(check.appId));
-    const latest = latestCheck(runs)?.result;
-    return { name, state: latest !== undefined && !pendingCheck.has(latest) && latest !== 'success' ? 'failed' : 'running' };
-  });
+  return (work.policy.checks ?? []).map(name => ({ name, state: named(name) ? 'running' : 'passed' }));
 }
 
 /** The review refusal no reviewer can answer: every configured reviewer profile is exhausted. */
@@ -118,11 +103,11 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
     case 'validate': {
       const first = reasons[0] ?? '';
       if (/^No workspace registered$/.test(first)) return { detail: 'waiting for the builder to say where the code lives', who: 'Builder agent' };
-      if (/^Pull request has not been independently observed$/.test(first)) return { detail: 'waiting to see the pull request on GitHub', who: 'Graphyard (automatic)' };
+      if (/^Pull request has not been independently observed$/.test(first)) return { detail: 'waiting for the control plane to read the candidate', who: 'Graphyard (automatic)' };
       return { detail: 'checking which files it changes', who: 'Graphyard (automatic)' };
     }
     case 'test': {
-      const checks = checkStates(work, release.ciAppIds);
+      const checks = checkStates(work);
       const failed = checks.filter(check => check.state === 'failed').map(check => check.name);
       if (failed.length) return { detail: `the check ${failed.join(', ')} failed`, who: 'Builder agent' };
       return { detail: `${checks.filter(check => check.state === 'passed').length} of ${checks.length} checks done`, who: 'Automated checks' };

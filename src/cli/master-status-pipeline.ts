@@ -3,11 +3,10 @@ import { dataDirectory } from '../install/worktree-root.js';
 import { probeCandidateConflictsWithBudget } from '../conflicts.js';
 import { agentOwner, buildMasterStatus, type MasterConfig } from '../master.js';
 import { nameOrphanSupervisors } from './status-attention.js';
-import { nameUnresolvedThreads } from '../merge-queue.js';
-import { reviewRoundCapOf, withReviewRounds } from '../review-cap.js';
 import { leadTimeReport, speedSections } from '../flow-analytics.js';
 import { timedStep } from '../master/timings.js';
 import { withPipelineTimelines } from '../pipeline-speed.js';
+import { reviewRoundCapOf, withReviewRounds } from '../review-cap.js';
 import type { ReportSections } from '../master/sections.js';
 import { readReviewLedger, reconcileReviews, summarizeReviews } from '../reviewer.js';
 import { readProducerLedger, reconcileProducers, sessionRetries, summarizeProducers } from '../producer.js';
@@ -45,7 +44,7 @@ export async function buildPipelineStatus(
   // on their own and attach them first; a failed read marks the section and leaves speed unmeasured.
   await timedStep('timelines', () => withPipelineTimelines(snapshot.work, masterApi)).catch(error => sections.mark('speed', 'GET /api/pipeline-timelines', error));
   const probe = await timedStep('conflicts', () => probeCandidateConflictsWithBudget(root, snapshot.work, dataDirectory()));
-  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(nameUnresolvedThreads(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState, { mode: master.supervision, operatorLogin: master.operatorLogin }), snapshot.work, agentOwner),
+  const sessions = await timedStep('build status', async () => nameOrphanSupervisors(buildMasterStatus(snapshot, master.workers, runtime.agents, credentials, containment, reviews, master.baseBranch, coordinator, { producers, failures, retries }, probe, { reviewers: master.reviewers, producers: master.producers }, master.cliPath, daemonState, { mode: master.supervision, operatorLogin: master.operatorLogin }),
     snapshot.work, master.workers, runtime, Date.parse(snapshot.now), daemonState && 'orphans' in daemonState ? daemonState : null));
   // Each item's review round against the configured cap (GY-1118). No check-run annotation is read back (GY-2010).
   const status = { ...sessions, work: withReviewRounds(sessions.work, snapshot.work, reviewRoundCapOf(master)) };

@@ -33,7 +33,7 @@ import { DELIVERY_EVENT_PREDICATE } from './tables/production.js';
 export const snapshotEvery = 50;
 export const deltaSizeFraction = 0.25;
 /** The save kinds that store only what changed, never a whole document (GY-979). */
-export const routineSaveKinds = ['github.observed', 'heartbeat', 'reconciled', 'action.claimed', 'action.failed', 'github.queue', 'session'] as const;
+export const routineSaveKinds = ['github.observed', 'heartbeat', 'reconciled', 'action.claimed', 'action.failed', 'session'] as const;
 const routineSave: ReadonlySet<string> = new Set(routineSaveKinds);
 
 export type DeltaPath = (string | number)[];

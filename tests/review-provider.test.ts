@@ -35,7 +35,7 @@ function work(overrides: Partial<Work> = {}): Work {
     ...overrides,
   } as Work;
 }
-const reviewGate = (item: Work) => evaluate(item, [item], new Date(), [15368]).gates.find(gate => gate.name === 'review')!;
+const reviewGate = (item: Work) => evaluate(item, [item], new Date()).gates.find(gate => gate.name === 'review')!;
 
 test('policy validation binds agent review to registered, distinct reviewer identities', () => {
   const agent = policySchema.parse({ checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer' }] });

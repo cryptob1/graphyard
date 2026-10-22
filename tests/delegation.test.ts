@@ -425,7 +425,7 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   // Watch supervision is what keeps an assignment alive: an assignment whose
   // supervisor stops renewing loses ownership on the server's clock, the loss is
   // recorded as an escalation no worker can clear, and the item is reassignable.
-  const brief = new Engine(store, [15368], 0); brief.principals = roster;
+  const brief = new Engine(store, 0); brief.principals = roster;
   let unattended = await engine.execute(admin, 'create', null, input('ownership-unattended', 'infrastructure'), id());
   unattended = await engine.execute(admin, 'ready', unattended.id, {}, id());
   unattended = await brief.execute(workerA, 'claim', unattended.id, {}, id());
@@ -599,7 +599,7 @@ test('integration:intake-authority-routing — routine intake is autonomous, hum
 
   // Scoped operator agents: a second control plane bound to a repository, so
   // operator-agent scope is live on the delegation and intake routes.
-  const scopedEngine = new Engine(store, [15368], 120, 'owner/delegation'); scopedEngine.principals = roster;
+  const scopedEngine = new Engine(store, 120, 'owner/delegation'); scopedEngine.principals = roster;
   const scopedHttp = server(scopedEngine, credentials);
   await new Promise<void>(resolve => scopedHttp.listen(0, '127.0.0.1', resolve));
   const scopedUrl = `http://127.0.0.1:${(scopedHttp.address() as { port: number }).port}`;
@@ -730,7 +730,7 @@ test('unit:dynamic-merge-ordering — order follows dependencies and current con
 
 test('integration:automatic-escalation — every trigger escalates and no lead can suppress it', async () => {
   // Lease loss.
-  const brief = new Engine(store, [15368], 0); brief.principals = roster;
+  const brief = new Engine(store, 0); brief.principals = roster;
   let lost = await engine.execute(admin, 'create', null, input('escalation-lease', 'product'), id());
   lost = await engine.execute(admin, 'ready', lost.id, {}, id());
   lost = await brief.execute(workerA, 'claim', lost.id, {}, id());
@@ -786,7 +786,7 @@ test('integration:automatic-escalation — every trigger escalates and no lead c
   assert.ok(product.bottlenecks.every(bottleneck => !!bottleneck.reason));
   // A replacement claim is itself the proof of lease loss, so the escalation is
   // recorded in the same transaction that overwrites the expired lease.
-  const expiring = new Engine(store, [15368], 0); expiring.principals = roster;
+  const expiring = new Engine(store, 0); expiring.principals = roster;
   let replaced = await engine.execute(admin, 'create', null, input('escalation-replacement', 'infrastructure'), id());
   replaced = await engine.execute(admin, 'ready', replaced.id, {}, id());
   replaced = await expiring.execute(workerA, 'claim', replaced.id, {}, id());

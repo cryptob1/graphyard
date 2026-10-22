@@ -101,7 +101,7 @@ const diff = ['diff --git a/src/b.ts b/src/b.ts', 'index 1111111..2222222 100644
   'diff --git a/src/gone.ts b/src/gone.ts', 'deleted file mode 100644', '--- a/src/gone.ts', '+++ /dev/null', '@@ -1,2 +0,0 @@', '-gone one', '-gone two',
   'diff --git a/src/with space.ts b/src/with space.ts', 'index 5555555..6666666 100644', '--- a/src/with space.ts', '+++ b/src/with space.ts', '@@ -3 +3 @@', '-old line', '+new line'].join('\n');
 const threads = 'Resolved threads: none\nFollow-up threads: none\nOverridden threads: none';
-const deltaBinding = (fields: Partial<ReviewPostBinding> = {}): ReviewPostBinding => ({ repository: 'owner/project', key: 'GY-1988', pr: 7, sha: H2, baseSha: B, policyRevision: 1, criteriaOnly: true, threadsListed: [],
+const deltaBinding = (fields: Partial<ReviewPostBinding> = {}): ReviewPostBinding => ({ repository: 'owner/project', key: 'GY-1988', pr: 7, sha: H2, baseSha: B, policyRevision: 1, criteriaOnly: true,
   mode: 'control-plane', head: H2, baseTip: B, verdictToken: TOKEN, ...fields });
 
 test('unit:review-post-refuses-blocking-on-unchanged-code — a control-plane re-review\u2019s REQUEST_CHANGES is refused when a BLOCKING: line names a PATH:LINE no hunk since the previous head changes, no earlier finding\u2019s path and no AC-N; the same body is accepted inside a hunk, on an earlier path, or naming a criterion', async () => {

@@ -1,18 +1,14 @@
-// `graphyard review post` (GY-1492): the reviewer session's one way to post its verdict. The
-// procedure the reviewer prompt used to carry as prose — a head guard, waiting out GitHub's lazy
-// mergeability recompute, the closing thread lines — is checked here against the launch's own
-// binding before exactly one review is posted with the session's own GH_CONFIG_DIR credential.
-// The command needs no Graphyard credential and the reviewer token is not widened.
-// In control-plane mode (GY-1525) there is no pull request: the launch binds a one-time verdict
-// token, and the same command sends the verdict to `POST /api/work/:id/review-verdict` as that
-// token, never running `gh`; the server records it on the item's observation (server/review-verdict.ts).
+// `graphyard review post` (GY-1492): the reviewer session's one way to post its verdict. The head
+// guard is checked here against the launch's own binding before exactly one verdict is posted. The
+// command needs no Graphyard credential: the launch binds a one-time verdict token (GY-1525), and
+// the command sends the verdict to `POST /api/work/:id/review-verdict` as that token; the server
+// records it on the item's observation (server/review-verdict.ts).
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { z } from 'zod';
 import type { ChildRun } from './child-runner.js';
 import { blockingFindings, findingLocation } from './review-cap.js';
-import { canonicalThreadIds, listedThreadLimit, parseFollowUpThreads, parseOverriddenThreads, parseResolvedThreads, threadAliasLimit, unaccountedThreads } from './review-threads.js';
 
 /** The file, in the session's GH_CONFIG_DIR, that binds a reviewer session to its launch. */
 export const reviewBindingFile = 'review-binding.json';
@@ -21,22 +17,17 @@ export type ReviewEvent = typeof reviewEvents[number];
 const sha = z.string().regex(/^[0-9a-f]{40}$/);
 /** The verdict token a control-plane launch binds: 32 random bytes, hex; only its sha256 is kept anywhere but the binding. */
 export const verdictTokenSchema = z.string().regex(/^[0-9a-f]{64}$/);
-export const reviewBindingModes = ['github', 'control-plane'] as const;
 export const reviewBindingSchema = z.object({
   repository: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/),
   key: z.string().min(1).max(100), pr: z.number().int().positive(), sha, baseSha: sha, policyRevision: z.number().int().nonnegative(),
   criteriaOnly: z.boolean(),
-  threadsListed: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
-  threadAliases: z.record(z.string().min(1).max(200), z.array(z.string().min(1).max(200)).max(threadAliasLimit * 2)).optional(),
-  threadReadFailure: z.string().min(1).max(500).optional(),
-  /** Absent on a github-mode binding (unchanged since GY-1492); `control-plane` posts to the API with the token (GY-1525). */
-  mode: z.enum(reviewBindingModes).optional(),
+  /** `control-plane` posts to the API with the token (GY-1525); absent on a pull-request-era binding, which posts nothing. */
+  mode: z.literal('control-plane').optional(),
   /** Control-plane mode: the head and base tip the session judges (the item's candidate, or a delivered merge commit and its first parent) and the one-time verdict token. */
   head: sha.optional(), baseTip: sha.optional(), verdictToken: verdictTokenSchema.optional(),
   /** A control-plane re-review (GY-1988): the earlier head this round deltas from, and the paths its findings named — the session's own launch context for the unchanged-code check. */
   previousHead: sha.optional(), earlierPaths: z.array(z.string().min(1).max(1000)).max(10).optional(),
-}).strict().refine(binding => !(binding.threadReadFailure && binding.threadsListed), 'A binding records either the listed threads or the failed read, never both')
-  .refine(binding => binding.mode !== 'control-plane' || (!!binding.head && !!binding.baseTip && !!binding.verdictToken), 'A control-plane binding carries head, baseTip and verdictToken')
+}).strict().refine(binding => binding.mode !== 'control-plane' || (!!binding.head && !!binding.baseTip && !!binding.verdictToken), 'A control-plane binding carries head, baseTip and verdictToken')
   .refine(binding => binding.mode === 'control-plane' || (binding.head === undefined && binding.baseTip === undefined && binding.verdictToken === undefined), 'Only a control-plane binding carries head, baseTip or verdictToken')
   .refine(binding => binding.mode === 'control-plane' || (binding.previousHead === undefined && binding.earlierPaths === undefined), 'Only a control-plane binding carries previousHead or earlierPaths');
 export type ReviewPostBinding = z.infer<typeof reviewBindingSchema>;
@@ -58,35 +49,6 @@ export async function readReviewBinding(directory: string): Promise<ReviewPostBi
 }
 
 export class ReviewPostRefusal extends Error {}
-
-const lineLabels = ['Resolved threads', 'Follow-up threads', 'Overridden threads'] as const;
-const hasLine = (body: string, label: string) => body.split(/\r?\n/).some(entry => entry.trim().toLowerCase().startsWith(`${label.toLowerCase()}:`));
-
-/**
- * Why the body's closing thread lines refuse this verdict, or none. Any event is refused for naming
- * an ID that is no listed thread (a comment ID of a listed thread maps to it); an approval of a
- * launch that listed threads must also carry all three lines and account for every listed thread;
- * a launch whose thread read failed accepts no ID on the Resolved threads line.
- */
-export function threadLineRefusals(event: ReviewEvent, body: string, binding: Pick<ReviewPostBinding, 'threadsListed' | 'threadAliases' | 'threadReadFailure'>): string[] {
-  const refusals: string[] = [];
-  const resolved = parseResolvedThreads(body), followUp = parseFollowUpThreads(body), overridden = parseOverriddenThreads(body);
-  if (binding.threadReadFailure) {
-    if (resolved.length) refusals.push(`this launch could not read the review threads (${binding.threadReadFailure}), so no thread can be claimed resolved; remove ${resolved.join(' ')} from the Resolved threads line`);
-    return refusals;
-  }
-  const listed = binding.threadsListed ?? [];
-  const shown = new Set(listed);
-  const unlisted = [...new Set([...resolved, ...followUp, ...overridden])].filter(id => !shown.has(canonicalThreadIds([id], listed, binding.threadAliases)[0]!));
-  if (unlisted.length) refusals.push(`the thread lines name ${unlisted.join(' ')}, which ${unlisted.length === 1 ? 'is' : 'are'} not a thread this launch listed${listed.length ? ` (listed: ${listed.join(' ')})` : ' (it listed none)'}`);
-  if (event === 'APPROVE' && listed.length) {
-    const missing = lineLabels.filter(label => !hasLine(body, label));
-    if (missing.length) refusals.push(`an approval of a head with listed threads ends with all three thread lines; the body lacks ${missing.map(label => `"${label}:"`).join(', ')}`);
-    const unaccounted = unaccountedThreads(body, listed, true, binding.threadAliases);
-    if (unaccounted.length) refusals.push(`the approval leaves ${unaccounted.join(' ')} on none of the three thread lines; name each listed thread on exactly one`);
-  }
-  return refusals;
-}
 
 /** The path a `+++` header names, C-unquoted when git quoted it for special characters. */
 const unquoted = (path: string): string => /^".*"$/.test(path) ? (() => { try { return JSON.parse(path) as string; } catch { return path; } })() : path;
@@ -130,12 +92,8 @@ export function unchangedCodeFindings(body: string, binding: Pick<ReviewPostBind
 }
 
 /** A correct invocation for this session, printed after every refusal. */
-export function reviewPostExample(cliPath: string, event: ReviewEvent, binding?: Pick<ReviewPostBinding, 'threadsListed'> | null) {
-  const listed = binding?.threadsListed ?? [];
-  return [`node ${cliPath} review post --event ${event} <<'EOF'`,
-    'YOUR JUDGEMENT OF EACH ACCEPTANCE CRITERION, AND EACH FINDING WITH ITS CLASSIFICATION',
-    ...(listed.length ? [`Name each listed thread (${listed.join(' ')}) on exactly the one line your judgement puts it on.`] : []),
-    'Resolved threads: none', `Follow-up threads: ${listed.length ? listed.join(' ') : 'none'}`, 'Overridden threads: none', 'EOF'].join('\n');
+export function reviewPostExample(cliPath: string, event: ReviewEvent) {
+  return [`node ${cliPath} review post --event ${event} <<'EOF'`, 'YOUR JUDGEMENT OF EACH ACCEPTANCE CRITERION, AND EACH FINDING WITH ITS CLASSIFICATION', 'EOF'].join('\n');
 }
 
 export interface ReviewPostDependencies {
@@ -146,7 +104,7 @@ export interface ReviewPostDependencies {
   fetch?: typeof fetch;
 }
 
-/** The GitHub review state a verdict event records as (the form `exactApproval` and the review gate read). */
+/** The review state a verdict event records as (the form `exactApproval` and the review gate read). */
 export const verdictStateOf = (event: ReviewEvent) => event === 'APPROVE' ? 'APPROVED' : event === 'REQUEST_CHANGES' ? 'CHANGES_REQUESTED' : 'COMMENTED';
 
 /**
@@ -157,7 +115,7 @@ export const verdictStateOf = (event: ReviewEvent) => event === 'APPROVE' ? 'APP
 export async function postReview(input: { event: string | undefined; body: string; cliPath: string; environment: NodeJS.ProcessEnv }, dependencies: ReviewPostDependencies) {
   const event = reviewEvents.find(entry => entry === input.event?.toUpperCase());
   let binding: ReviewPostBinding | null = null;
-  const refuse = (reason: string): never => { throw new ReviewPostRefusal(`Review not posted: ${reason}.\nPost it like this:\n${reviewPostExample(input.cliPath, event ?? 'APPROVE', binding)}`); };
+  const refuse = (reason: string): never => { throw new ReviewPostRefusal(`Review not posted: ${reason}.\nPost it like this:\n${reviewPostExample(input.cliPath, event ?? 'APPROVE')}`); };
   const directory = input.environment.GH_CONFIG_DIR;
   if (!directory) refuse('GH_CONFIG_DIR is unset; review post runs only in a reviewer session Graphyard launched');
   try { binding = await readReviewBinding(directory!); } catch (error) { refuse((error as Error).message); }
@@ -166,8 +124,6 @@ export async function postReview(input: { event: string | undefined; body: strin
   if (input.environment.GRAPHYARD_REVIEW !== `${bound.key}@${bound.sha}`) refuse(`GRAPHYARD_REVIEW is ${input.environment.GRAPHYARD_REVIEW ? `"${input.environment.GRAPHYARD_REVIEW}"` : 'unset'}, not this launch's ${bound.key}@${bound.sha}`);
   const body = input.body.trim();
   if (!body) refuse('the review body is empty');
-  const lines = threadLineRefusals(event!, body, bound);
-  if (lines.length) refuse(lines.join('; '));
   // Control-plane mode (GY-1525): the verdict goes to the API as the launch's one-time token, bound
   // to the registered head; nothing here runs gh, and the server judges the rest.
   if (bound.mode === 'control-plane') {
@@ -192,6 +148,6 @@ export async function postReview(input: { event: string | undefined; body: strin
     if (!response.ok) refuse(`the control plane refused the verdict (${response.status}): ${answer?.error ?? 'no reason given'}`);
     return { reviewId: answer.reviewId ?? null, event: event!, key: bound.key, pr: bound.pr, sha: bound.head!, recorded: 'control-plane' as const };
   }
-  // A github-mode binding (pull-request era) posts nothing: Graphyard reads and writes no GitHub review.
+  // A pull-request-era binding (no mode) posts nothing: Graphyard reads and writes no remote review.
   return refuse('this binding is a pull-request-era GitHub binding, and Graphyard no longer posts GitHub reviews; the loop launches the review again against the control plane');
 }

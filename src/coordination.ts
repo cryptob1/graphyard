@@ -1,7 +1,7 @@
 import { bootstrapObligations, currentEvidence, evidenceBindsCandidate, grantsAuthorize, inheritedObligations, observationWindowHold, loopObservationProofs, pathScopesOverlap, type BootstrapObligation, type ProofAuthority, type Stage, type Work } from './model.js';
 import { loopOwned } from './model/loop-owned.js';
 import { behindBaseHold } from './model/behind-base.js';
-import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './merge-queue.js';
+import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from './model/base-refresh.js';
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; held_until?: string | null; deferred_reason?: string | null; unobserved?: number }
 export interface Diagnostic { kind: string; message: string; next: string }

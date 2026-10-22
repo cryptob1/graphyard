@@ -131,9 +131,9 @@ test('unit:soak-merge-record-retry — a simulated day of lost record replies, a
   const reads = world.ports();
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     decide: async (item: Work, kind: string) => { assert.equal(kind, 'rework'); const n = Number(item.key.slice(3)); world.reworked.set(n, (world.reworked.get(n) ?? 0) + 1); return { id: `decision-${n}` }; },
     github: githubDouble, merge: githubDouble, mergeWriter: reads } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);

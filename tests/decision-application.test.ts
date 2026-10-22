@@ -121,7 +121,7 @@ async function start() {
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-application'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('decisions_test');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/decisions_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -346,9 +346,9 @@ test('unit:approved-decision-applies-on-cycle — GY-949\'s stranded session app
   const effects: DaemonEffects = {
     agents: () => [], herdr: async () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [await current(work)], now: new Date(clock).toISOString() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     decisions: target => operatorAgent('GET', `work/${target.id}/decisions`),
     decide: (target, action, reason, input) => operatorAgent('POST', `work/${target.id}/decide`, { action, reason, input }),
     withdraw: (target, id, reason) => operatorAgent('POST', `work/${target.id}/decide`, { action: 'withdraw', decision: id, reason }),
@@ -436,9 +436,9 @@ function loop(decision: ReturnType<typeof approvedRework>, options: { withdraw?:
     agents: () => [], herdr: () => ({ agents: [], available: true }), stopSupervisor: () => {},
     credentials: async (configured: WorkerProfile[]) => Object.fromEntries(configured.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [item], now: iso(clock), jobs: [] }),
-    closeSession: () => {}, requestProof: () => {}, merge: async () => ({}),
+    closeSession: () => {}, merge: async () => ({}),
     dispatch: async (work: Work) => { dispatched.push(work.key); return {}; },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(clock), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(clock), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     decide: async (_work: Work, action: string) => {
       settle();
       if (decision.state === 'applied' && action === decision.action) return decision;
@@ -561,7 +561,7 @@ async function controlPlane() {
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-application'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('application_test');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/application_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   settlementTeardown = async () => { http.close(); await store.close(); await database.stop(); };
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

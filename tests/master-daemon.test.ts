@@ -56,10 +56,8 @@ function effects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): Da
     snapshot: async () => ({ work: [], now: iso(0) }),
     closeSession: pane => { log.push(`close:${pane}`); },
     dispatch: async item => { log.push(`dispatch:${item.key}`); },
-    requestProof: item => { log.push(`proof:${item.key}`); },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async (item, observation) => { log.push(`record:${item.key}:${observation.sha.slice(0, 4)}`); },
-    requestSmoke: item => { log.push(`smoke:${item.key}`); },
     persist: async () => {},
     ...overrides,
   };

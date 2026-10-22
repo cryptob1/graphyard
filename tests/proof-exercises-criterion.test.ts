@@ -37,7 +37,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('exercise'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('exercise_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/exercise_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
@@ -157,7 +157,7 @@ function unexercisedItem(options: { finding?: boolean } = {}): Work {
     workspaces: [{ host: 'machine-a', path: '/tmp/gy-421', branch: 'graphyard/gy-421-1', epoch: 1, owner: 'agent-a' }], implementers: ['agent-a'], lastAssignment: { owner: 'agent-a', epoch: 1 },
     candidate: observation.candidate, submission: { epoch: 1, pr: 421 }, evidence: options.finding === false ? [] : [record], observation,
     gates: [], violations: [], blocker: null, queue: null, queueSequence: 0, queueHistory: [] } as unknown as Work;
-  const graded = evaluate(work, [work], clock, [CI_APP]);
+  const graded = evaluate(work, [work], clock);
   const copy = structuredClone({ ...work, stage: graded.stage, gates: graded.gates, violations: graded.violations });
   // The unit request GY-421 held. Since GY-1235 the reconciler opens none (proofs gate nothing), so
   // it is the one a record raised before then still holds, and the reconciler keeps it.

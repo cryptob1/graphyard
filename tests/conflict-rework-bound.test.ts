@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
-import type { BaseRefresh } from '../src/merge-queue.js';
+import type { BaseRefresh } from '../src/model/base-refresh.js';
 import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
 import { routineDecision } from '../src/daemon/decisions.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
@@ -150,9 +150,9 @@ test('integration:conflict-rework-decision-cycle — replaying GY-1419 through t
     agents: () => [], herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
     credentials: async () => ({}),
     snapshot: async () => ({ work: [item], now: iso(now), jobs: [] }),
-    closeSession: () => { record.agents.length = 0; }, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => { record.agents.length = 0; }, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async (_work, action, _reason, input) => { decided.push({ action, binding: (input as { binding?: unknown } | undefined)?.binding, at: now }); return { id: '5d8a8b9e-0000-4000-8000-000000001419' }; },
     decisions: async () => ({ decisions: [] }),
     approver: async () => ({ agentName: 'gy-approver-gy-1419', pane: 'pane-a' }),

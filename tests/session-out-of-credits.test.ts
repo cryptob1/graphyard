@@ -231,7 +231,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('out-of-credits-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('out_of_credits_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/out_of_credits_test`); await store.init();
-  engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
+  engine = new Engine(store, 300, repository); engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -283,10 +283,8 @@ function loop(overrides: Partial<DaemonEffects> = {}) {
     snapshot: async () => { const snapshot = await ok(coordinator, 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: new Date(Date.parse(snapshot.now) + clock.skewMs).toISOString() }; },
     closeSession: pane => { calls.closed.push(pane); herdr.agents = herdr.agents.filter(agent => agent.pane_id !== pane); },
     dispatch: async () => {},
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
     sessionOutput: agent => herdr.output[agent.name!] ?? '',
     reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,

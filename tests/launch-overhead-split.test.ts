@@ -27,7 +27,7 @@ test('unit:assignment-started-at — the first lease renewal of an epoch stamps 
   await database.initialise(); await database.start(); await database.createDatabase('launch_split');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/launch_split`); await store.init();
   teardown = async () => { await store.close(); await database.stop(); };
-  const engine = new Engine(store, [15368], 120, 'owner/launch-split'); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, 'owner/launch-split'); engine.submissionObserver = null;
   const operator: Principal = { id: 'split-operator', role: 'admin', sessionKind: 'human' };
   const worker: Principal = { id: 'split-worker', role: 'worker', sessionKind: 'ai' };
   const run = (actor: Principal, command: string, id: string | null, input: unknown) => engine.execute(actor, command as any, id, input, randomUUID()) as Promise<Work>;

@@ -15,10 +15,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-2344: a deploy of main runs off the cycle. The loop used to hold every cycle — heartbeat,
- * dispatch, the merge writer — behind the deploy's end-to-end run, for as long as it took; the
- * deploy now proceeds beside the cycles, its result is recorded when it settles, and no second
- * deploy starts meanwhile. The coordinator checkout guard reads the deploy's own checkout moves as
- * the loop's own, never as drift.
+ * dispatch, the merge writer — behind the deploy, for as long as it took; the deploy now proceeds
+ * beside the cycles, its result is recorded when it settles, and no second deploy starts meanwhile.
+ * The coordinator checkout guard reads the deploy's own checkout moves as the loop's own, never as
+ * drift.
  */
 
 const full = (prefix: string) => prefix.padEnd(40, '0');
@@ -46,12 +46,12 @@ class FakeGit {
 /** Ports whose deploy step records its start at once and then waits on `gate` (when set), keeping the deploy in flight; `fails` names the step that throws. */
 function fakePorts(options: { gate?: Promise<void>; fails?: Record<string, string> } = {}) {
   const started: string[] = [], calls: string[] = [], pins: string[] = [];
-  const step = (name: 'deploy' | 'health' | 'e2e') => async (commit: string) => {
+  const step = (name: 'deploy' | 'health') => async (commit: string) => {
     if (name === 'deploy') { started.push(commit.slice(0, 12)); if (options.gate) await options.gate; }
     calls.push(`${name}:${commit.slice(0, 12)}`);
     if (options.fails?.[commit] === name) throw new Error(`${name} refused ${commit.slice(0, 12)}`);
   };
-  const ports: DeployPorts = { deploy: step('deploy'), health: step('health'), e2e: step('e2e'),
+  const ports: DeployPorts = { deploy: step('deploy'), health: step('health'),
     schemas: async () => ({ target: 7, database: 7 }), pin: async commit => { pins.push(commit); } };
   return { ports, started, calls, pins };
 }
@@ -83,7 +83,7 @@ function loopEffects(root: string, master: MasterConfig, deps: SelfUpgradeDeps):
   return Object.assign(effects, {
     agents: async () => [], herdr: async () => ({ agents: [], available: true }), credentials: async () => ({}), roleHealth: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(Date.now()), reason: 'not configured', deployed: [], pending: [] }),
-    requestProof: async () => {}, requestSmoke: async () => {}, closeSession: async () => {},
+ closeSession: async () => {},
     masterSession: undefined,
     loadedRelease: { commit: released, dirty: false },
     selfUpgrade: (state: DaemonState) => performSelfUpgrade(master, state, deps),
@@ -109,7 +109,7 @@ async function startLoop(root: string, master: MasterConfig, state: DaemonState,
   return { lines, stop: () => handlers.SIGTERM?.(), done: started };
 }
 
-test('unit:continuous-deploy-off-cycle — with an end-to-end run that outlasts several cycle intervals, the loop completes cycles while the deploy runs, records its success once it settles and starts no second deploy meanwhile, then restarts onto the deployed tip', async t => {
+test('unit:continuous-deploy-off-cycle — with a deploy that outlasts several cycle intervals, the loop completes cycles while the deploy runs, records its success once it settles and starts no second deploy meanwhile, then restarts onto the deployed tip', async t => {
   const { root, master } = await config();
   const fake = new FakeGit(released, tip);
   let release = () => {};
@@ -124,7 +124,7 @@ test('unit:continuous-deploy-off-cycle — with an end-to-end run that outlasts 
   const loop = await startLoop(root, master, state, effects, fake);
   t.after(() => loop.stop());
   // The pass starts the deploy of the base tip; its deploy step waits on the gate, the way a long
-  // end-to-end run outlasts several cycle intervals.
+  // build outlasts several cycle intervals.
   await waitFor(() => started.length >= 1, 'the deploy of the base tip never started');
   const whileRunning = { cycle: state.cycle, heartbeat: state.lock?.heartbeatAt };
   // Cycles complete while the deploy runs: the heartbeat advances, and the dispatch and merge steps run.
@@ -140,7 +140,7 @@ test('unit:continuous-deploy-off-cycle — with an end-to-end run that outlasts 
   // The deploy settles: its success is recorded, and the loop restarts onto the tip it deployed.
   release();
   await waitFor(() => state.promotion?.promotedSha === tip, 'the deploy never settled onto the cursor');
-  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `e2e:${tip.slice(0, 12)}`]);
+  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`]);
   assert.deepEqual(pins, [tip], 'the deployed tip is pinned known good');
   assert.equal(state.actions['upgrade:deploy']?.state, 'done');
   assert.equal(state.promotion?.deployFailed, null);
@@ -155,10 +155,10 @@ test('unit:continuous-deploy-off-cycle — with an end-to-end run that outlasts 
   assert.deepEqual(result.failed, []);
 });
 
-test('unit:continuous-deploy-off-cycle-rollback — a deploy whose end-to-end run fails settles into the recorded rollback while the loop keeps cycling, and the SHA whose e2e failed is attempted no second time (GY-2518: deploying the same commit again changes nothing)', async t => {
+test('unit:continuous-deploy-off-cycle-rollback — a deploy whose health check fails settles into the recorded rollback while the loop keeps cycling, the second attempt runs off the cycle too, and the spent tip is attempted no third time', async t => {
   const { root, master } = await config();
   const fake = new FakeGit(released, tip);
-  const { ports, started, calls } = fakePorts({ fails: { [tip]: 'e2e' } });
+  const { ports, started, calls } = fakePorts({ fails: { [tip]: 'health' } });
   const fleet = { self: 0 };
   const state = emptyDaemonState(master);
   state.release = { commit: released, dirty: false };
@@ -168,26 +168,28 @@ test('unit:continuous-deploy-off-cycle-rollback — a deploy whose end-to-end ru
   const loop = await startLoop(root, master, state, effects, fake);
   t.after(() => loop.stop());
   const tipDeploys = () => started.filter(commit => commit === tip.slice(0, 12)).length;
-  // The first attempt runs off the cycle and fails end to end: the settle rolls the release back and records the failure.
+  // The first attempt runs off the cycle and fails health: the settle rolls the release back and records the failure.
   await waitFor(() => state.promotion?.deployFailed?.attempts === 1, 'the failed deploy never settled');
-  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `e2e:${tip.slice(0, 12)}`, `deploy:${released.slice(0, 12)}`, `health:${released.slice(0, 12)}`],
+  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `deploy:${released.slice(0, 12)}`, `health:${released.slice(0, 12)}`],
     'the recorded release was redeployed through the same sequence');
   assert.equal(fake.head, released, 'the checkout is back on the recorded release');
   assert.equal(state.promotion?.promotedSha, released);
   assert.equal(state.actions['upgrade:deploy']?.state, 'failed');
   assert.equal(fleet.self, 0, 'nothing restarted onto the failed tip');
   assert.equal(state.actions['escalation:dirty-checkout'], undefined, 'the rollback moving the checkout back is never the guard\'s drift');
-  // GY-2518: the SHA whose e2e failed is spent on its first failure — the two-attempt retry that
-  // spent a second identical E2E run is gone. Further cycles attempt it no more, and the failure
-  // line stands for master status.
+  // The second attempt starts off the cycle, fails the same way, and the settle records it.
+  await waitFor(() => tipDeploys() === 2, 'the second attempt never started');
+  await waitFor(() => state.promotion?.deployFailed?.attempts === 2, 'the second attempt never settled');
+  assert.equal(fake.head, released);
+  // The tip has failed twice: further cycles attempt it no more, and the failure line stands for master status.
   const spentAt = state.cycle;
   await waitFor(() => state.cycle >= spentAt + 3, 'the loop never kept cycling past the spent tip');
-  assert.equal(tipDeploys(), 1, 'the SHA whose e2e failed is never deployed again');
-  assert.match(deployLine(state.promotion?.deployFailed) ?? '', /failed at e2e/);
+  assert.equal(tipDeploys(), 2, 'a tip that failed twice is not attempted again');
+  assert.match(deployLine(state.promotion?.deployFailed) ?? '', /failed at health/);
   assert.equal(state.actions['escalation:dirty-checkout'], undefined);
   loop.stop();
   const result = await loop.done;
-  assert.ok(result.cycles.length >= 4, `the loop completed ${result.cycles.length} cycles across the spent tip`);
+  assert.ok(result.cycles.length >= 5, `the loop completed ${result.cycles.length} cycles across both attempts`);
 });
 
 test('unit:continuous-deploy-off-cycle-guard — the guard reads the deploy in flight and the promotion reading it records as the loop\'s own positions, and still refuses a foreign move', async t => {

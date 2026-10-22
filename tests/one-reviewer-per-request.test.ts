@@ -18,7 +18,7 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type Dispat
 import { routineDecision, standingVerdict } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-09-22 review submittedAt instants only order verdicts and already exceed threadResolutionGraceMs; items, requests and observations are stamped with new Date().
+// Time-bomb allowance (GY-1694): the 2026-09-22 review submittedAt instants only order verdicts; items, requests and observations are stamped with new Date().
 
 // GY-124: one review request yields one reviewer session and one verdict. Each test is named for
 // the proof it produces: unit:one-reviewer-per-request and integration:conflicting-verdicts-surfaced.
@@ -235,7 +235,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy124-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project'); engine.principals = [operator, implementer, producer];
+  engine = new Engine(store, 120, 'owner/project'); engine.principals = [operator, implementer, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 

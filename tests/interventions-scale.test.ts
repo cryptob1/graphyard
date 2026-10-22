@@ -115,7 +115,7 @@ before(async () => {
   databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/interventions_scale`;
   store = new Store(databaseUrl);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null;
   http = server(engine, [{ ...coordinator, token: tokens.coordinator }, { ...operator, token: tokens.operator }, { ...worker, token: tokens.worker }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;

@@ -5,7 +5,7 @@ import { demand, type Principal, type Work } from '../model.js';
 import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
 import { deliverSplitParent } from '../decomposition.js';
-import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from '../merge-queue.js';
+import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from '../model/merge-authorization.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';

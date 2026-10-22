@@ -43,7 +43,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('liveness'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('liveness_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/liveness_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   engine.principals = [operator, worker, coordinator, producer];
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });

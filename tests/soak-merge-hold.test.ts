@@ -135,9 +135,9 @@ test('unit:soak-merge-hold — three simulated days of the real loop with automa
   for (let n = 1; n <= items; n++) world.submit(n, 1, start + n * submitEveryMs);
   const effects = (): DaemonEffects => ({ agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), decide: async () => { throw new Error('no rework is owed in this soak'); } } as unknown as DaemonEffects);
   let state: DaemonState = emptyDaemonState(config), loopEffects = effects(), restarts = 0;
   const heldPassedThrough = new Set<string>(), replacements = new Set<number>();

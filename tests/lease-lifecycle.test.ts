@@ -27,7 +27,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('lease-lifecycle'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, replacement];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
@@ -127,7 +127,7 @@ test('integration:lease-release-on-submit: complete ends the lease with the cand
 
   // A lapsed unsubmitted lease is still an abandoned assignment: it escalates, refuses the merge
   // gate, and only a declared human session clears it.
-  const expiring = new Engine(store, [15368], 0, 'owner/project'); expiring.principals = engine.principals;
+  const expiring = new Engine(store, 0, 'owner/project'); expiring.principals = engine.principals;
   let abandoned = await engine.execute(operator, 'create', null, input('lease-lapse-before-submit'), id());
   abandoned = await engine.execute(operator, 'ready', abandoned.id, {}, id());
   abandoned = await expiring.execute(worker, 'claim', abandoned.id, {}, id());
@@ -229,7 +229,7 @@ test('integration:lease-loss-backlog-settlement: standing lease-loss escalations
   const submittedEpochOf = genuine.epoch;
   genuine = await engine.execute(worker, 'submit', genuine.id, { epoch: submittedEpochOf, pr: ++pr }, id());
   genuine = await engine.execute(operator, 'rework', genuine.id, { reason: 'Second pass', previousWorkerStopped: true }, id());
-  const expiring = new Engine(store, [15368], 0, 'owner/project'); expiring.principals = engine.principals;
+  const expiring = new Engine(store, 0, 'owner/project'); expiring.principals = engine.principals;
   genuine = await expiring.execute(replacement, 'claim', genuine.id, {}, id());
   const reopenedEpoch = genuine.epoch;
   assert.notEqual(reopenedEpoch, submittedEpochOf);

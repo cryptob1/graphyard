@@ -116,15 +116,6 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
   const refusal = emptyInvariantRecord(), stalled = mergeable('GY-10');
   checkInvariants(refusal, { work: [stalled], now: clock });
   assert.equal(verdict(checkInvariants(refusal, { work: [{ ...stalled, gates: [{ name: 'merge', passed: false, reasons: ['GitHub reports the pull request behind'] }] } as Work], now: clock + 40 * minute }), 'merge-stall').holds, true);
-  // Once GitHub was asked to merge, its own merge state decides: BLOCKED is GitHub not able to merge yet, and a
-  // refusal it answered the request with is recorded; CLEAN or UNSTABLE with nothing refusing is the stall (GY-344).
-  const asked = (status: string, refused = false) => ({ ...stalled, observation: { ...stalled.observation!, githubQueue: { pullRequestId: 'PR_1', head: stalled.candidate!.sha, queue: false, mergeStateStatus: status, mode: 'none', entryState: null, position: null, groupHead: null, at: iso(0),
-    refused: refused ? { reason: 'GitHub refused auto-merge', head: stalled.candidate!.sha, mode: 'none', at: iso(0) } : null } } } as Work);
-  for (const [status, refused, holds] of [['BLOCKED', false, true], ['CLEAN', true, true], ['CLEAN', false, false], ['UNSTABLE', false, false]] as const) {
-    const record = emptyInvariantRecord();
-    checkInvariants(record, { work: [asked(status, refused)], now: clock });
-    assert.equal(verdict(checkInvariants(record, { work: [asked(status, refused)], now: clock + 11 * minute }), 'merge-stall').holds, holds, `${status}${refused ? ', refused' : ''}`);
-  }
   // An approver the loop no longer watches (launched by hand, GY-403) is known by its name, which carries the item's key.
   const byName = checkInvariants(emptyInvariantRecord(), { work: [delivered('GY-5', 41 * minute)], now: clock, agents: [{ name: 'graphyard-approver-gy-5-0a1b2c3d' }, { name: 'graphyard-approver-gy-6-0a1b2c3d' }] });
   assert.equal(verdict(byName, 'lingering-sessions').holds, false);
@@ -146,9 +137,9 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
 });
 
 function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
-  return { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+  return { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: iso(0) }), closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {}, ...overrides };
+    recordDeployment: async () => {}, persist: async () => {}, ...overrides };
 }
 
 test('unit:system-invariants-checked — the loop checks every invariant each cycle, a violation is one standing fault of its class, and master status prints a line per invariant', async () => {
@@ -184,11 +175,11 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
   assert.equal(summary.invariants.violated, systemInvariants.length);
 });
 
-test('unit:reviewer-repeat-question — the review of a change to the loop, master, merge queue, GitHub adapter or review threads asks what repetition does and never requires soak coverage; docs/master-agent.md lists the invariants within the budget', async () => {
+test('unit:reviewer-repeat-question — the review of a change to the loop, master or merge writer asks what repetition does and never requires soak coverage; docs/master-agent.md lists the invariants within the budget', async () => {
   const binding = { key: 'GY-404', pr: 7, sha: sha('a'), baseSha: sha('b'), policyRevision: 1 };
   const obligation = { id: 'DOCS' as const, text: 'Documentation reflects this change', paths: ['docs/', 'AGENTS.md', 'README.md'], changelog: null };
   const prompt = (files: string[] | null) => reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, [{ id: 'AC-1', text: 'Behaves' }], undefined, { obligation, files });
-  for (const file of ['src/daemon/cycle.ts', 'src/master/status.ts', 'src/merge-queue.ts', 'src/github.ts', 'src/review-threads.ts']) {
+  for (const file of ['src/daemon/cycle.ts', 'src/master/status.ts', 'src/merge-writer/trial.ts']) {
     const text = prompt(['docs/master-agent.md', file]);
     assert.ok(text.includes(`This change touches ${file}`), `${file} is named: ${text}`);
     assert.match(text, /what it does when repeated across many cycles, heads and items/);
@@ -197,8 +188,8 @@ test('unit:reviewer-repeat-question — the review of a change to the loop, mast
   }
   for (const files of [['src/model/work.ts', 'docs/coordination.md'], ['src/github-cache.ts', 'src/masterful.ts', 'src/daemonic/x.ts']]) assert.doesNotMatch(prompt(files), /repeated across many cycles/, `${files.join(', ')} runs on no loop cycle`);
   // A head nobody has observed yet: the question is asked, conditioned on the paths it names.
-  assert.match(prompt(null), /If this change touches src\/daemon\/, src\/master\/, src\/merge-queue\.ts, src\/github\.ts, src\/review-threads\.ts, which run on every loop cycle, ask what it does when repeated/);
-  assert.deepEqual([...repeatingPaths], ['src/daemon/', 'src/master/', 'src/merge-queue.ts', 'src/github.ts', 'src/review-threads.ts']);
+  assert.match(prompt(null), /If this change touches src\/daemon\/, src\/master\/, src\/merge-writer\/, which run on every loop cycle, ask what it does when repeated/);
+  assert.deepEqual([...repeatingPaths], ['src/daemon/', 'src/master/', 'src/merge-writer/']);
   assert.equal(repetitionReviewSection(['README.md']), '');
 
   const guide = await readFile(new URL('../docs/master-agent.md', import.meta.url), 'utf8');

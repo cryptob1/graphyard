@@ -2,7 +2,7 @@
 import { directMergeLine, mergeWriterLine } from './status-attention.js';
 import { masterBoard } from '../model/board.js';
 import { humanOnlyStatusRow, type HumanRequestRow } from '../model/human-request.js';
-import { branchReport, mergeProtocolSkew, profileConcurrency, reclaimIdleMs, type AttentionItem, type MasterConfig } from '../master.js';
+import { mergeProtocolSkew, profileConcurrency, reclaimIdleMs, type AttentionItem, type MasterConfig } from '../master.js';
 import { launchStartMs, readSessionScreen } from '../master/launch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { stallScreenLines } from '../master/approver-stall.js';
@@ -106,7 +106,6 @@ export async function assembleStatusSections<
     loopDecisions: { attestations: loopAttestations(snapshot, approvals) },
     sessions: sessionReport(snapshot),
     releaseLag: lag.report,
-    branches: branchReport(status.work),
     requests: agentRequestReport(snapshot),
     disk: {
       ...disk,

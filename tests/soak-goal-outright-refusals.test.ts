@@ -139,8 +139,8 @@ test('unit:soak-invariants-hold — over two days goal steps GitHub or the contr
     deliver: async target => target,
   };
 
-  const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+  const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, persist: async () => {},
     acceptance, planner } as unknown as DaemonEffects;
   const state = emptyDaemonState(config), violations: string[] = [];
   try {

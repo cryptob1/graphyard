@@ -146,8 +146,8 @@ async function dispatchCycle(failure: string, at: number) {
   const master = config([{ name: 'claude-primary', principal: 'graphyard-claude-1', agentName: 'graphyard-claude-1', mode: 'launch', kind: 'claude', credentialFile: '/outside/claude.token' }]);
   const work = item('GY-1373', at, { stage: 'build', ready: true, epoch: 1 } as Partial<Work>), state = emptyDaemonState(master);
   const effects = { agents: () => [], credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
-    snapshot: async () => ({ work: [work], now: iso(at) }), closeSession: () => {}, dispatch: async () => { throw new Error(failure); }, requestProof: () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {} } as unknown as DaemonEffects;
+    snapshot: async () => ({ work: [work], now: iso(at) }), closeSession: () => {}, dispatch: async () => { throw new Error(failure); },
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, persist: async () => {} } as unknown as DaemonEffects;
   await runCycle(master, state, effects, () => at);
   return { state, key: `dispatch:${work.id}:1` };
 }

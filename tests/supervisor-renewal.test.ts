@@ -144,7 +144,7 @@ async function claimed(engine: Engine, title: string) {
 
 test('integration:renew-not-starved-by-reconcile renewals complete within 2 s throughout a long reconcile on a small, busy pool', async () => {
   const store = new Store(connection, { max: 4 });
-  const engine = new Engine(store, [15368], 120, 'owner/project');
+  const engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, engineer];
   const items: Work[] = [];
   for (let n = 0; n < 24; n++) items.push(await claimed(engine, `starve-${n}`));
@@ -188,7 +188,7 @@ test('integration:worker-survives-deploy a worker keeps running through a 60 s s
   const credentials = [operator, engineer].map(principal => ({ ...principal, token: tokens[principal.id] }));
   const boot = async (port = 0) => {
     const store = new Store(connection);
-    const engine = new Engine(store, [15368], 120, 'owner/project');
+    const engine = new Engine(store, 120, 'owner/project');
     engine.principals = [operator, engineer];
     const http: Server = server(engine, credentials);
     await new Promise<void>(resolve => http.listen(port, '127.0.0.1', resolve));
@@ -244,7 +244,7 @@ test('integration:renewal-unknown-work-definite a renewal for an item the server
   const dir = await scratch(); const marker = join(dir, 'never');
   const credentials = [operator, engineer].map(principal => ({ ...principal, token: tokens[principal.id] }));
   const store = new Store(connection);
-  const engine = new Engine(store, [15368], 120, 'owner/project');
+  const engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, engineer];
   const http: Server = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));

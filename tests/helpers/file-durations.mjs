@@ -2,8 +2,7 @@ import { relative, resolve } from 'node:path';
 
 // A node:test reporter (GY-499): one JSON line per test file with the wall time of its process,
 // `{ "file": "tests/x.test.ts", "durationMs": 1234, "passed": true }`. The runner adds it for
-// `--durations FILE`; `node scripts/ci-tests.mjs durations FILE...` merges the lines into
-// tests/helpers/timing-baseline.json, which is what CI balances its shards by.
+// `--durations FILE`; the merge writer's trial reads the lines for which files passed.
 export default async function* fileDurations(source) {
   // Every test:fail event in a file marks that file failed (GY-1887): a file whose own test failed
   // can still complete with details.passed true (run 39014555162 recorded a failing file as passing

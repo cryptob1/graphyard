@@ -73,9 +73,9 @@ async function world(root: string, initiallyBlocked: boolean, submittedMs: numbe
   const asks: { cycle: number; at: number; outcome: string }[] = [], violations: string[] = [], counts = { statusReads: 0 };
   const effects: DaemonEffects = {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-    snapshot: async () => ({ work: work.map(item => ({ ...item })), now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    snapshot: async () => ({ work: work.map(item => ({ ...item })), now: new Date(now).toISOString() }), closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async delivered => ({ source: 'endpoint', sha: serving, at: new Date(now).toISOString(), reason: null, deployed: delivered.map(item => item.key), pending: [], requests: 0 }) as never,
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     measureThroughput: async (snapshot, observedSha) => {
       const outcome = await loopThroughputMeasurement(root, { work: snapshot, observedSha, now: () => now, origin: 'https://graphyard.example', claimKey: claim.key,
         status: async () => { counts.statusReads++; return { now: new Date(now).toISOString(), release: { version: '0.9.1', revision: serving } }; },

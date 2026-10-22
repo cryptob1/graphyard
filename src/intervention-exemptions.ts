@@ -133,7 +133,7 @@ export async function withDecisionsBeyondReach(db: { query: pg.Pool['query'] }, 
  * rows a week cost no review bodies or threads.
  */
 export const reworkGroundsSql = (document: string) => `jsonb_build_object(${reworkGroundFields.filter(field => field !== 'observation').map(field => `'${field}', ${document}->'${field}'`).join(', ')},
-  'observation', CASE WHEN jsonb_typeof(${document}->'observation')='object' THEN jsonb_build_object(${['candidate', 'baseTip', 'conflicting', 'merged', 'checks', 'requiredChecks', 'agentReview'].map(field => `'${field}', ${document}->'observation'->'${field}'`).join(', ')},
+  'observation', CASE WHEN jsonb_typeof(${document}->'observation')='object' THEN jsonb_build_object(${['candidate', 'baseTip', 'conflicting', 'merged', 'agentReview'].map(field => `'${field}', ${document}->'observation'->'${field}'`).join(', ')},
     'reviews', COALESCE((SELECT jsonb_agg(jsonb_build_object('sha', review->'sha', 'state', review->'state')) FROM jsonb_array_elements(CASE WHEN jsonb_typeof(${document}->'observation'->'reviews')='array' THEN ${document}->'observation'->'reviews' ELSE '[]'::jsonb END) review), '[]'::jsonb)) END)`;
 /** A delta rework row's grounds: its base's projected grounds, extended by the delta's ops on those fields. */
 export function extendedGrounds(base: Record<string, any>, delta: { ops?: unknown }): Record<string, any> {

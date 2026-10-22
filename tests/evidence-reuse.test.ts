@@ -42,7 +42,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reuse'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('reuse_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reuse_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');
+  engine = new Engine(store, 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository');
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();

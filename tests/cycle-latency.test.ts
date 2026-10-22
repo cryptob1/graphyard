@@ -104,7 +104,7 @@ function loopEffects(root: string, master: MasterConfig, server: ReturnType<type
   return Object.assign(effects, {
     agents: async () => [], herdr: async () => ({ agents: [], available: true }), credentials: async () => ({}), roleHealth: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    requestProof: async () => {}, requestSmoke: async () => {}, closeSession: async () => {},
+ closeSession: async () => {},
   }, extra) as DaemonEffects;
 }
 

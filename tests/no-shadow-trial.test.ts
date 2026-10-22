@@ -53,9 +53,9 @@ test('unit:no-shadow-trial — the shadow gate is deleted: a cycle with submitte
   const github = new Proxy({}, { get: (_, name) => { throw new Error(`the cycle called GitHub (${String(name)})`); } });
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work, now: iso(start) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
     github, merge: github, shadow, mergeWriter,
   } as unknown as DaemonEffects;
   const state = emptyDaemonState(config), now = () => start;

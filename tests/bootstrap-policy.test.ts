@@ -27,7 +27,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('bootstrap'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('bootstrap_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/bootstrap_test`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.operatorAuthorizer = async (_db, _now, actor) => actor;
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
@@ -86,7 +86,7 @@ const trusted = (proof: string, extra: Record<string, unknown> = {}) => ({ id: r
 
 test('unit:bootstrap-policy-model defers only the marked criterion and keeps every other gate', () => {
   const work = fixture();
-  const deferred = evaluate(work, [work], new Date(), [15368]);
+  const deferred = evaluate(work, [work], new Date());
   assert.deepEqual(requiredProofs(work, [work]), ['unit:supervisor-stop'], 'the bootstrap criterion is deferred while every other criterion still demands proof');
   assert.equal(deferred.gates.find(gate => gate.name === 'review')!.passed, true);
   assert.equal(deferred.gates.find(gate => gate.name === 'test')!.passed, true);
@@ -94,7 +94,7 @@ test('unit:bootstrap-policy-model defers only the marked criterion and keeps eve
   // Review and the merge writer's trial are not weakened by the deferral.
   const unreviewed = fixture({ evidence: [trusted('unit:supervisor-stop')], observation: { ...fixture().observation!, reviews: [] },
     mergeLedger: { ...fixture().mergeLedger!, state: 'refused', refusal: { kind: 'merge', reason: 'trial failed: tests/supervisor.test.ts' } } });
-  const gates = evaluate(unreviewed, [unreviewed], new Date(), [15368]).gates;
+  const gates = evaluate(unreviewed, [unreviewed], new Date()).gates;
   assert.equal(gates.find(gate => gate.name === 'review')!.passed, false);
   assert.equal(gates.find(gate => gate.name === 'test')!.passed, false);
 });

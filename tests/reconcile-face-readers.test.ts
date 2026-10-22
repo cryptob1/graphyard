@@ -26,7 +26,7 @@ before(async () => {
   await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator];
   // Only the clock-driven catch-up is full here; each test says when it wants one.
   engine.reconcileFullEvaluationMs = 300_000;
@@ -153,14 +153,6 @@ test('unit:face-move-readers-match-full-evaluation — the view, the configurati
   assert.equal(view.evaluated, engine.lastReconcile.live, 'the view pass evaluated every live item');
   await settle();
 
-  // A merge-configuration change still makes the pass full.
-  const apps = engine.ciAppIds;
-  engine.ciAppIds = [...apps, 4242];
-  try {
-    await engine.reconcile();
-    assert.equal(engine.reconcileTicks.at(-1)!.full?.cause, 'configuration', JSON.stringify(engine.reconcileTicks.at(-1)!.full));
-  } finally { engine.ciAppIds = apps; }
-  await settle();
 
   // The interval safety net still evaluates every live item: the last full pass is backdated past
   // the interval rather than waited out.

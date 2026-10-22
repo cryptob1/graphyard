@@ -44,17 +44,47 @@ export function failingSummary(output: string): string | null {
 const exitOf = (error: unknown) => error as { status?: number | null; stdout?: unknown };
 
 /**
- * The exact merge commit of `head` onto `baseTip`, made without a worktree: `git merge-tree
- * --write-tree` computes the merged tree, `git commit-tree` (authored by graphyard-merge-writer)
- * makes the commit with parents baseTip and head, and the only ref written is
- * `refs/graphyard/trial/<head>`. Nothing under `refs/heads/*`, no remote and no checkout is
- * touched. A conflicting merge gives the conflicted paths and writes no commit. Retention: one
- * ref per tried head, overwritten by that head's next trial and never pruned here, so a recorded
- * verdict's mergeSha keeps resolving, and nothing deletes them.
+ * Whether `ref`'s first-parent history holds `sha`, exactly and unbounded: the first-parent walk
+ * from `ref` down to the first ancestor of `sha` (`git rev-list --first-parent REF ^SHA`) ends
+ * right above `sha` when, and only when, `sha` is on that chain — then the oldest commit listed
+ * has `sha` as its first parent, or nothing is listed because the tip is `sha` itself. A commit
+ * merged in as a second parent, or unknown to the checkout, is not held. The executor reconciles
+ * open intents with it (AC-5), and `trialMerge` reads a head's own chain with it.
  */
-export async function trialMerge(git: TrialGit, input: { head: string; baseTip: string }): Promise<TrialMergeResult> {
+export async function firstParentHolds(git: (args: string[]) => Promise<string>, ref: string, sha: string): Promise<boolean> {
+  const wanted = sha.toLowerCase();
+  let listed: string[];
+  try { listed = (await git(['rev-list', '--first-parent', ref, `^${wanted}`])).split('\n').map(line => line.trim().toLowerCase()).filter(Boolean); }
+  catch { return false; }
+  if (!listed.length) return (await git(['rev-parse', '--verify', '--quiet', `${ref}^{commit}`])).trim().toLowerCase() === wanted;
+  try { return (await git(['rev-parse', '--verify', '--quiet', `${listed[listed.length - 1]}^1`])).trim().toLowerCase() === wanted; }
+  catch { return false; }
+}
+
+/** The subject of a head's merge commit: `Merge GY-N: <title>`, or `Merge GY-N` for an item whose title is not at hand. */
+export const mergeSubject = (item: { key: string; title?: string | null }) => `Merge ${item.key}${item.title ? `: ${item.title}` : ''}`;
+
+/**
+ * The exact commit the trial tests and the push lands for `head` on `baseTip`, made without a
+ * worktree. A head whose own first-parent chain already holds the base tip (the worker merged
+ * nothing in, or merged origin/BASE in by fast-forward) is that commit itself: main fast-forwards
+ * to it, so every commit the base's first-parent history held stays on it, and no merge commit
+ * wraps a tree with no new change. Any other head gets the merge commit of head onto baseTip:
+ * `git merge-tree --write-tree` computes the merged tree, `git commit-tree` (authored by
+ * graphyard-merge-writer, subject `input.subject`) makes the commit with parents baseTip and head.
+ * Either way the only ref written is `refs/graphyard/trial/<head>`. Nothing under `refs/heads/*`,
+ * no remote and no checkout is touched. A conflicting merge gives the conflicted paths and writes
+ * no commit. Retention: one ref per tried head, overwritten by that head's next trial and never
+ * pruned here, so a recorded verdict's mergeSha keeps resolving, and nothing deletes them.
+ */
+export async function trialMerge(git: TrialGit, input: { head: string; baseTip: string; subject?: string }): Promise<TrialMergeResult> {
   const head = input.head.toLowerCase(), baseTip = input.baseTip.toLowerCase();
   if (!fullSha.test(head) || !fullSha.test(baseTip)) throw new Error('A trial merge names the head and the base tip by their full 40-hex shas');
+  if (await firstParentHolds(args => git(args), head, baseTip)) {
+    const tree = (await git(['rev-parse', `${head}^{tree}`])).trim().toLowerCase();
+    await git(['update-ref', trialRef(head), head]);
+    return { mergeSha: head, tree };
+  }
   let out: string;
   try { out = String(await git(['merge-tree', '--write-tree', '--name-only', '-z', baseTip, head])); }
   catch (error) {
@@ -68,7 +98,7 @@ export async function trialMerge(git: TrialGit, input: { head: string; baseTip: 
   if (!fullSha.test(tree)) throw new Error(`git merge-tree answered no tree for ${head} onto ${baseTip}`);
   const email = `${trialAuthor}@users.noreply.invalid`;
   // The environment names the author, so a caller's own GIT_AUTHOR_* never decides it.
-  const mergeSha = (await git(['commit-tree', tree, '-p', baseTip, '-p', head, '-m', `Trial merge of ${head} onto ${baseTip}`],
+  const mergeSha = (await git(['commit-tree', tree, '-p', baseTip, '-p', head, '-m', input.subject ?? `Merge ${head.slice(0, 12)}`],
     { GIT_AUTHOR_NAME: trialAuthor, GIT_AUTHOR_EMAIL: email, GIT_COMMITTER_NAME: trialAuthor, GIT_COMMITTER_EMAIL: email })).trim().toLowerCase();
   await git(['update-ref', trialRef(head), mergeSha]);
   return { mergeSha, tree };

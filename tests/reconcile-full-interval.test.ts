@@ -26,7 +26,7 @@ before(async () => {
   await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator];
   // Only a reset or the clock makes a pass full here; each test says when it wants the clock to.
   engine.reconcileFullEvaluationMs = 300_000;

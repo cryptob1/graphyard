@@ -8,9 +8,7 @@ import { fakeTransport, type Transport } from '../src/install/transport.js';
 import type { Provider } from '../src/install/types.js';
 import { allText, githubResponses, harness, providerResponses } from './install-harness.js';
 
-const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider,
-  ...(provider === 'railway' || provider === 'compose' ? {} : { sshHost: '203.0.113.10', sshUser: 'root', domain: 'graphyard.example.test' }),
-  ...(provider === 'hetzner' ? { sshKey: 'graphyard-key', maxMonthly: 50 } : {}) });
+const inputsFor = (provider: Provider) => ({ repository: 'owner/project', provider });
 
 /** Tracked files plus anything Git would add: exactly what a commit could carry. */
 function committableFiles(root: string) {
@@ -18,7 +16,7 @@ function committableFiles(root: string) {
 }
 
 test('no generated credential reaches stdout, a log line, plan output, a process argument, or the repository', async () => {
-  for (const provider of ['railway', 'hetzner', 'docker-host', 'compose'] as Provider[]) {
+  for (const provider of ['compose'] as Provider[]) {
     const fixture = await harness({ provider });
     const printed: string[] = [];
     try {

@@ -38,7 +38,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('e2e_case_proofs_fresh_registry');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/e2e_case_proofs_fresh_registry`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/fixture-project');
+  engine = new Engine(store, 120, 'owner/fixture-project');
   http = server(engine, [{ ...operator, token }], null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

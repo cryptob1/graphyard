@@ -50,7 +50,7 @@ async function start() {
   const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('decision-supersede'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('supersede_test');
   const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/supersede_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   const http = server(engine, credentials);
   teardown = async () => { http.close(); await store.close(); await database.stop(); };
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -210,8 +210,8 @@ test('unit:approved-decision-applied-or-named — an approved decision whose sit
   const loop: DaemonEffects = {
     agents: () => closed.includes(pane.pane_id) ? [] : [pane], credentials: async () => ({}),
     snapshot: async () => ({ work: (await store.list()).filter(item => item.id === third.work.id), now: new Date(loopNow).toISOString() }),
-    closeSession: closing => { closed.push(closing); }, dispatch: async () => {}, requestProof: () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    closeSession: closing => { closed.push(closing); }, dispatch: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, persist: async () => {},
     approverLaunches: async () => [], approver: async () => { throw new Error('no approver is launched here'); },
     decisions: work => get(`work/${encodeURIComponent(work.id)}/decisions`),
     withdraw: async (work, decision, reason) => { const result = await send(master.token, `work/${work.id}/decide`, { action: 'withdraw', decision, reason }); if (result.status !== 200) throw new Error(result.body.error); return result.body; },

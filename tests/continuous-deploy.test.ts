@@ -19,9 +19,9 @@ import { installIdFor } from '../src/install/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-1982: the loop deploys each new base tip between cycles through fake deploy, health and
- * end-to-end ports, records it on the cursor's release reading and restarts onto it; a failed tip
- * is rolled back to the recorded release, unless it migrated the database.
+ * GY-1982: the loop deploys each new base tip between cycles through fake deploy and health
+ * ports, records it on the cursor's release reading and restarts onto it; a failed tip is rolled
+ * back to the recorded release, unless it migrated the database.
  */
 
 const full = (prefix: string) => prefix.padEnd(40, '0');
@@ -52,15 +52,18 @@ class FakeGit {
 }
 
 /** Fake ports: every call is recorded as `step:commit-prefix`; `fails` names the step that throws for a commit; `holds` keeps the deploy step itself in flight, before anything is recorded, until it is released. */
-function fakePorts(options: { fails?: Record<string, string>; schemas?: { target: number | null; database: number | null }; holds?: Promise<void> } = {}) {
+function fakePorts(options: { fails?: Record<string, string>; target?: number; migrates?: string; holds?: Promise<void> } = {}) {
   const calls: string[] = [], pins: string[] = [];
-  const step = (name: 'deploy' | 'health' | 'e2e') => async (commit: string) => {
+  let database = 7;
+  const step = (name: 'deploy' | 'health') => async (commit: string) => {
     if (options.holds && name === 'deploy') await options.holds;
     calls.push(`${name}:${commit.slice(0, 12)}`);
     if (options.fails?.[commit] === name) throw new Error(`${name} refused ${commit.slice(0, 12)}`);
+    // `migrates` names the commit whose deploy step migrates the database to `target` once it completes.
+    if (name === 'deploy' && commit === options.migrates) database = options.target ?? database;
   };
-  const ports: DeployPorts = { deploy: step('deploy'), health: step('health'), e2e: step('e2e'),
-    schemas: async () => options.schemas ?? { target: 7, database: 7 }, pin: async commit => { pins.push(commit); } };
+  const ports: DeployPorts = { deploy: step('deploy'), health: step('health'),
+    schemas: async () => ({ target: options.target ?? 7, database }), pin: async commit => { pins.push(commit); } };
   return { ports, calls, pins };
 }
 
@@ -86,9 +89,9 @@ function releasedState(promotionReading: (...args: any[]) => any): DaemonState {
 test('unit:continuous-deploy-advances-release — a base tip that differs from the recorded release is deployed off the cycle while the loop keeps cycling, no second deploy starts meanwhile, the settled reading names it, and the pass after the settle restarts onto it', async t => {
   const { deployKey, deployLine, promotionReading } = await upgrade();
   const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
-  let holdE2e = () => {};
-  const held = new Promise<void>(resolve => { holdE2e = resolve; });
-  t.after(async () => { holdE2e(); await sleep(20); });
+  let holdDeploy = () => {};
+  const held = new Promise<void>(resolve => { holdDeploy = resolve; });
+  t.after(async () => { holdDeploy(); await sleep(20); });
   const { ports, calls, pins } = fakePorts({ holds: held }), fleet = { self: 0 };
   const guard = coordinatorCheckoutGuard({
     state: () => state, read: async () => ({ root: '/coordinator', commit: fake.head, modified: [], untracked: [] }),
@@ -113,9 +116,9 @@ test('unit:continuous-deploy-advances-release — a base tip that differs from t
   assert.deepEqual(calls, [], 'the running deploy is not started again');
   assert.equal(state.promotion?.promotedSha, released, 'the settled reading stands until the deploy ends');
   // The deploy ends: the settle records the release reading and its action.
-  holdE2e();
+  holdDeploy();
   await settled(() => state.promotion?.promotedSha === tip);
-  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `e2e:${tip.slice(0, 12)}`], 'the tip ran the upgrade sequence, then health, then end to end');
+  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`], 'the tip ran the upgrade sequence, then health');
   assert.equal(state.promotion?.mainSha, tip);
   assert.equal(state.promotion?.promotedAt, iso(start + 60_000), 'stamped with the clock as it stood when the settle landed');
   assert.equal(state.promotion?.deployFailed, null);
@@ -147,7 +150,7 @@ test('unit:continuous-deploy-advances-release — a base tip that differs from t
   assert.equal(fleet.self, 2, 'a docs-only deploy still restarts the loop onto it');
 });
 
-test('unit:continuous-deploy-rolls-back — a tip failing health or end to end is rolled back to the recorded release through the same sequence once the off-cycle deploy settles, recorded with its step and reason in one status line, and attempted at most twice until the base tip moves', async () => {
+test('unit:continuous-deploy-rolls-back — a tip failing health or the deploy itself is rolled back to the recorded release through the same sequence once the off-cycle deploy settles, recorded with its step and reason in one status line, and attempted at most twice until the base tip moves', async () => {
   const { deployKey, deployLine, promotionReading } = await upgrade();
   const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
   const fails: Record<string, string> = { [tip]: 'health' };
@@ -174,24 +177,23 @@ test('unit:continuous-deploy-rolls-back — a tip failing health or end to end i
   assert.equal(state.actions[deployKey]?.detail, line);
   assert.equal(fleet.self, 0, 'nothing restarts onto the failed tip');
 
-  // The second attempt fails end to end this time; the third pass deploys nothing.
-  fails[tip] = 'e2e';
+  // The second attempt fails at the deploy itself this time; the third pass deploys nothing.
+  fails[tip] = 'deploy';
   calls.length = 0;
   clock.now += 60_000;
   assert.equal((await upgradePass()).upgraded?.outcome, 'skipped', 'the second attempt starts off the cycle');
   await settled(() => state.promotion?.deployFailed?.attempts === 2);
-  assert.deepEqual(calls.slice(0, 3), [`deploy:${tip.slice(0, 12)}`, `health:${tip.slice(0, 12)}`, `e2e:${tip.slice(0, 12)}`]);
-  assert.deepEqual(calls.slice(3), [`deploy:${released.slice(0, 12)}`, `health:${released.slice(0, 12)}`], 'an end-to-end failure rolls back as well');
-  assert.equal(state.promotion?.deployFailed?.step, 'e2e');
+  assert.deepEqual(calls.slice(0, 1), [`deploy:${tip.slice(0, 12)}`]);
+  assert.deepEqual(calls.slice(1), [`deploy:${released.slice(0, 12)}`, `health:${released.slice(0, 12)}`], 'a deploy failure rolls back as well');
+  assert.equal(state.promotion?.deployFailed?.step, 'deploy');
   assert.equal(state.promotion?.deployFailed?.attempts, 2);
-  assert.equal(deployLine(state.promotion?.deployFailed), `deploy of ${tip.slice(0, 12)} failed at e2e: e2e refused ${tip.slice(0, 12)}; rolled back to ${released.slice(0, 12)}`,
-    'the end-to-end failure reads as rolled back, never as not rolled back');
+  assert.equal(deployLine(state.promotion?.deployFailed), `deploy of ${tip.slice(0, 12)} failed at deploy: deploy refused ${tip.slice(0, 12)}; rolled back to ${released.slice(0, 12)}`,
+    'the deploy failure reads as rolled back, never as not rolled back');
   calls.length = 0;
   clock.now += 60_000;
   const third = await upgradePass();
   assert.equal(third.upgraded?.outcome, 'skipped');
-  assert.match(third.upgraded?.outcome === 'skipped' ? third.upgraded.reason : '', /its end-to-end run already failed and deploying the same commit again changes nothing, so it waits for the base branch to move/,
-    'GY-2518: the second failure was the end-to-end step, so the tip is spent on it, not on the attempt count');
+  assert.match(third.upgraded?.outcome === 'skipped' ? third.upgraded.reason : '', /it failed twice, so it waits for the base branch to move/, 'a tip that failed twice is spent on the attempt count');
   assert.deepEqual(calls, [], 'a tip that failed twice is not attempted again');
   assert.equal(fake.head, released);
 
@@ -200,7 +202,7 @@ test('unit:continuous-deploy-rolls-back — a tip failing health or end to end i
   clock.now += 60_000;
   assert.equal((await upgradePass()).upgraded?.outcome, 'skipped', 'the new tip\'s deploy starts off the cycle');
   await settled(() => state.promotion?.promotedSha === next);
-  assert.deepEqual(calls, [`deploy:${next.slice(0, 12)}`, `health:${next.slice(0, 12)}`, `e2e:${next.slice(0, 12)}`]);
+  assert.deepEqual(calls, [`deploy:${next.slice(0, 12)}`, `health:${next.slice(0, 12)}`]);
   clock.now += 60_000;
   assert.equal((await upgradePass()).upgraded?.outcome, 'upgraded', 'the loop restarts onto the deployed tip');
   assert.equal(state.promotion?.promotedSha, next);
@@ -213,7 +215,7 @@ test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that 
   // Production is observed serving the recorded release, which does not contain the tip: the
   // release-lagged hold (GY-1585) would have held the restart onto it.
   state.deployment = { source: 'github', sha: released, at: iso(start), reason: null, deployed: ['GY-1'], pending: ['GY-2'] } as unknown as DaemonState['deployment'];
-  const { ports, calls } = fakePorts({ fails: { [tip]: 'health' }, schemas: { target: 8, database: 7 } }), fleet = { self: 0 };
+  const { ports, calls } = fakePorts({ fails: { [tip]: 'health' }, target: 8, migrates: tip }), fleet = { self: 0 };
   const upgradePass = () => performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
 
   assert.equal((await upgradePass()).outcome, 'skipped', 'the deploy starts off the cycle');
@@ -229,6 +231,28 @@ test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that 
   assert.equal(fleet.self, 1);
   assert.notEqual(state.upgrade.stalled?.cause, 'release-lagged', 'no restart is held for a served-release observation');
   assert.equal(state.actions['upgrade:held'], undefined);
+});
+
+test('unit:continuous-deploy-rolls-back-before-migration — a tip declaring a newer schema whose deploy fails before the database migrated is rolled back, never promoted, and retried', async () => {
+  const { deployLine, promotionReading } = await upgrade();
+  const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
+  const { ports, calls } = fakePorts({ fails: { [tip]: 'deploy' }, target: 8 }), fleet = { self: 0 };
+  const upgradePass = () => performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
+
+  assert.equal((await upgradePass()).outcome, 'skipped', 'the deploy starts off the cycle');
+  await settled(() => !!state.promotion?.deployFailed);
+  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `deploy:${released.slice(0, 12)}`, `health:${released.slice(0, 12)}`], 'the recorded release is redeployed');
+  assert.equal(state.promotion?.deployFailed?.kept, false);
+  assert.equal(state.promotion?.deployFailed?.rolledBackTo, released);
+  assert.equal(state.promotion?.promotedSha, released, 'the unserved tip is never promoted');
+  assert.equal(fake.head, released, 'the checkout is back on the recorded release');
+  assert.equal(deployLine(state.promotion?.deployFailed), `deploy of ${tip.slice(0, 12)} failed at deploy: deploy refused ${tip.slice(0, 12)}; rolled back to ${released.slice(0, 12)}`);
+  calls.length = 0;
+  clock.now += 60_000;
+  assert.equal((await upgradePass()).outcome, 'skipped', 'the tip is retried');
+  await settled(() => state.promotion?.deployFailed?.attempts === 2);
+  assert.deepEqual(calls.slice(0, 1), [`deploy:${tip.slice(0, 12)}`]);
+  assert.equal(fleet.self, 0, 'nothing restarts onto the failed tip');
 });
 
 /** A real Git checkout whose HEAD stands detached at `commit`: the tree a deploy builds from. */
@@ -292,52 +316,6 @@ async function composeInstall(config: string) {
   return directory;
 }
 
-test('unit:continuous-deploy-e2e-principal — the installer issues an e2e identity that may create items, and the deploy\u2019s end-to-end step authenticates with its credential, so a case\u2019s create step answers 200, not 403', async () => {
-  const { plannedPrincipals, e2ePrincipalId } = await import('../src/install/secrets.js') as Record<string, any>;
-  const { deployPorts } = await import('../src/cli/upgrade.js') as Record<string, any>;
-  const e2ePrincipal = plannedPrincipals('demo').find((principal: any) => principal.id === e2ePrincipalId('demo'));
-  assert.deepEqual(e2ePrincipal, { id: 'demo-e2e', role: 'admin', sessionKind: 'ai' },
-    'the roster carries an e2e identity, an admin \u2014 the roster role whose principal the create path admits \u2014 issued by the installer as the other loop identities are');
-
-  const config = await temporaryDirectory('deploy-e2e-config'), checkout = await temporaryDirectory('deploy-e2e-checkout');
-  const directory = await composeInstall(config);
-  const e2eToken = 'e2e'.padEnd(40, '0'), loopToken = 'loop'.padEnd(40, '0');
-  await mkdir(join(directory, 'tokens'), { recursive: true, mode: 0o700 });
-  await writeFile(join(directory, 'tokens', 'owner-repo-e2e.token'), `${e2eToken}\n`, { mode: 0o600 });
-  await writeFile(join(directory, 'tokens', 'owner-repo-master.token'), `${loopToken}\n`, { mode: 0o600 });
-  // The real create-work-item case, in a checkout of its own: its first step is the create the loop credential failed with 403.
-  await mkdir(join(checkout, 'e2e', 'cases'), { recursive: true });
-  await writeFile(join(checkout, 'e2e', 'cases', 'create-work-item.json'), await readFile(fileURLToPath(new URL('../e2e/cases/create-work-item.json', import.meta.url)), 'utf8'));
-
-  const seen: { path: string; method: string; authorization: string | null }[] = [];
-  const mockFetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    const path = new URL(String(input instanceof Request ? input.url : input)).pathname;
-    seen.push({ path, method: init?.method ?? 'GET', authorization: init?.headers ? new Headers(init.headers).get('authorization') : null });
-    if (path === '/healthz') return Response.json({ ok: true, healthy: true });
-    if (path === '/api/merger') return Response.json({ mode: 'control-plane' });
-    if (path === '/api/work' && init?.method === 'POST') {
-      const body = JSON.parse(String(init.body));
-      return Response.json({ id: 'work-1', key: 'GY-1', stage: 'backlog', title: body.title });
-    }
-    if (path === '/api/work') return Response.json([{ id: 'work-1', key: 'GY-1' }]);
-    return Response.json({});
-  }) as typeof fetch;
-  const savedHome = process.env.GRAPHYARD_CONFIG_HOME, savedFetch = global.fetch;
-  process.env.GRAPHYARD_CONFIG_HOME = config;
-  global.fetch = mockFetch;
-  try {
-    const ports = await deployPorts({ cliRoot: checkout, repoRoot: join(checkout, 'repo'), repository: 'owner/repo', url: 'http://127.0.0.1:4311', run: async () => '' });
-    assert.equal(typeof ports, 'object', 'a compose install has deploy ports');
-    await (ports as any).e2e(); // a failing case would throw: the create answered 200 and held its expects
-    const create = seen.find(entry => entry.path === '/api/work' && entry.method === 'POST');
-    assert.ok(create, 'the case\u2019s create-an-item step ran');
-    assert.equal(create!.authorization, `Bearer ${e2eToken}`, 'the end-to-end step authenticates as the install\u2019s e2e principal');
-    assert.ok(seen.every(entry => entry.authorization !== `Bearer ${loopToken}`), 'the loop\u2019s own coordinator credential authenticates nothing');
-  } finally {
-    if (savedHome === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = savedHome;
-    global.fetch = savedFetch;
-  }
-});
 
 test('unit:continuous-deploy-rollback-stamped \u2014 every redeploy builds with the stamp of the commit it deploys, so a failed deploy rolls back to a release /healthz can name', async () => {
   const { imageBuildArgs } = await import('../src/install/adapters.js') as Record<string, any>;

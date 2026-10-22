@@ -38,7 +38,7 @@ before(async () => {
   await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, executor];
   const realTransaction = store.transaction.bind(store);
   store.transaction = ((fn: (db: never, now: Date) => Promise<never>, options?: never) =>

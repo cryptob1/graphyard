@@ -6,7 +6,7 @@ import type { Store } from './store.js';
 import { save } from './store.js';
 import { settleDelivered } from './model/actions.js';
 import { deliverSplitParent } from './decomposition.js';
-import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './merge-queue.js';
+import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './model/merge-authorization.js';
 import type { OperatorAuthorizedDelivery } from './engine.js';
 import { isStandIn, lockedWork } from './store/locked-read.js';
 

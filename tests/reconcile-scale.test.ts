@@ -86,7 +86,7 @@ before(async () => {
     };
   });
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator];
   // These cases exercise the batches of a pass that visits every open item (GY-727); which items a
   // pass evaluates between full passes is tests/incremental-reconcile.test.ts's concern (GY-1124).

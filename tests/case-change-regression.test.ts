@@ -32,9 +32,9 @@ test('unit:gy-1800-case-change-reaches-approver — the real loop gives GY-1800\
   let now = start;
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [], now: new Date(now).toISOString() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'endpoint', sha: 'ba607f8a809ed20fea15387e1934425cacbfef9f', at: new Date(now).toISOString(), reason: null, deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, acceptance } as unknown as DaemonEffects;
+    recordDeployment: async () => {}, acceptance } as unknown as DaemonEffects;
   const state = emptyDaemonState(config());
   for (let cycle = 0; cycle < 60 && !posted.length; cycle++, now += 2 * minute) {
     await runCycle(config(), state, effects, () => now);

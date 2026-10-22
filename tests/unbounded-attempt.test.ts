@@ -246,9 +246,9 @@ test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past 
     agents, herdr: () => ({ agents: agents(), available: true }),
     credentials: async (profiles: WorkerProfile[]) => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot: async () => read(),
-    dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    dispatch: async () => {}, merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, closeSession: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, closeSession: () => {}, persist: async () => {},
     controlPlaneClock: async () => ({ clockOffset: { min: 0, max: 0 }, roundTripMs: 1, source: 'timed read' }),
     containment: (work: Work[], observed: { now: string; clockOffset: { min: number; max: number }; clockRoundTripMs?: number; clockSource?: string }) =>
       assessContainment(work, { hostId: host, observedAt: observed.now, clockOffset: observed.clockOffset, clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource as never, probe }),

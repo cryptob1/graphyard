@@ -62,8 +62,8 @@ test('unit:soak-invariants-hold â€” over three simulated days a high-lane itemâ€
 
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     decisions: async () => ({ decisions }),
     decide: async (item: Work, action: string, _reason: string, input?: Record<string, unknown>) => {
       const id = randomUUID(), sha = item.candidate!.sha;

@@ -114,9 +114,9 @@ function effects(now: () => number, persist: (state: DaemonState) => Promise<voi
     workerCredentials: async () => ({}), producerCredentials: async () => ({}),
     mutate: async () => ({}), dispatchWorker: async () => ({}), launchReview: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}),
     snapshot: async () => ({ work: [] as Work[], now: iso() }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist,
+    recordDeployment: async () => {}, persist,
   } as unknown as DaemonEffects;
 }
 

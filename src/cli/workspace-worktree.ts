@@ -46,7 +46,7 @@ export async function createWorktree(context: CliContext, work: any) {
   const epoch = Number(args[0]); const root = context.repositoryRoot();
   const status = await api('status');
   assertRepository((await discover(root)).repository, status.repository);
-  const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : work.prAdoption?.branch ?? `graphyard/${work.key.toLowerCase()}-${epoch}`;
+  const branch = work.submission ? work.workspaces.find((w: any) => w.epoch === work.submission.epoch)?.branch : `graphyard/${work.key.toLowerCase()}-${epoch}`;
   if (!branch) throw new Error('Submitted workspace branch is missing');
   const path = resolve(root, '.graphyard/worktrees', `${work.key}-${epoch}`);
   let startPoint = args[1] ?? 'HEAD';
@@ -62,16 +62,6 @@ export async function createWorktree(context: CliContext, work: any) {
       await releaseUnderFailure(mutate, epoch, refusal);
       throw new Error(`${refusal}. The claim was released as a workspace failure, so the attempt costs nothing.`);
     }
-  } else if (work.prAdoption) {
-    // GY-1849: an adopted item's attempt starts at the adopted head. Since GY-2010 it is read from
-    // the shared object store like a rework's: no fetch of the pull request's branch, and an
-    // adopted head the store does not hold is a workspace failure that costs no attempt.
-    try { startPoint = await registeredReworkHead(root, branch, work.prAdoption.head, runChild); }
-    catch (error) {
-      const failure = `Git worktree creation failed for the adopted pull request's head: ${failureText(error)}`;
-      await releaseUnderFailure(mutate, epoch, failure);
-      throw new Error(`${failure}. The claim was released as a workspace failure, so the attempt costs nothing.`);
-    }
   }
   // GY-860: an earlier attempt's hold is recorded with the reservation and released; the branch never moves.
   const now = Date.parse(status.now ?? '') || Date.now();
@@ -85,7 +75,7 @@ export async function createWorktree(context: CliContext, work: any) {
     if (exists) reclaimed = reclaimBranchHolders(root, branch, path, work, now, { checkouts: !!work.submission });
     for (const entry of reclaimed) console.error(`Reclaimed ${entry.path}, which held ${branch}${entry.epoch !== null ? ` for ${entry.key} epoch ${entry.epoch}` : ''}: ${entry.action}`);
     if (!released?.reused) gitOrThrow(exists ? ['worktree', 'add', path, branch] : ['worktree', 'add', '-b', branch, path, startPoint]);
-    if (work.submission || work.prAdoption) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
+    if (work.submission) gitOrThrow(['-C', path, 'reset', '--hard', startPoint]);
   }
   catch (error) { await workspaceFailure(mutate, epoch, error); } // GY-860: the host failed, not the attempt
   // A checkout whose lockfile the reachable install does not match gets its own install, under heartbeats

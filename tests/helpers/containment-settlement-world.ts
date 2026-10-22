@@ -107,9 +107,9 @@ export async function loop(effects: Partial<DaemonEffects>, snapshot: () => Work
     agents: () => [], herdr: () => ({ agents: [], available: true }),
     credentials: async (profiles: WorkerProfile[]) => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: snapshot(), now: iso(0) }),
-    dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}),
+    dispatch: async () => {}, merge: async () => ({}),
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     ...effects,
   } as unknown as DaemonEffects;
   return { config, state, run: () => runCycle(config, state, all), cleanup: () => rm(directory, { recursive: true, force: true }) };

@@ -77,9 +77,9 @@ test('unit:orphan-status-two-observations — soak: over three days the establis
       },
       credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
       snapshot: async () => ({ work: [current], now: new Date(now).toISOString() }),
-      closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+      closeSession: () => {}, dispatch: async () => {},
       observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      recordDeployment: async () => {}, persist: async () => {},
     };
 
     const state = emptyDaemonState(config), violations: string[] = [], mismatches: string[] = [];

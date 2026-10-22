@@ -53,7 +53,7 @@ test(`manual:fault-class-loop — stalled-step ${key}: past the 10-minute bound 
   // The rework request itself: stale observation, overdue conflict round. Loaded here so the base, which lacks the export, fails at the hold above.
   const { conflictReworkOverdue, reworkObservationWait } = await import('../src/daemon/decisions.js');
   const decision = { action: 'rework' as const, binding: `${head}:conflict` };
-  assert.equal(reworkObservationWait(stale, at('06:01:56'), null) !== null, true, 'the observation is stale');
+  assert.equal(reworkObservationWait(stale, at('06:01:56')) !== null, true, 'the observation is stale');
   assert.equal(conflictReworkOverdue(stale, decision, at('06:01:56')), true, 'and the round is overdue, so it does not wait');
   assert.equal(conflictReworkOverdue(stale, decision, at('05:59:00')), false, 'inside the bound the wait stands');
   assert.equal(conflictReworkOverdue(stale, { action: 'rework', binding: `${head}:checks` }, at('06:01:56')), false, 'other grounds keep the wait');

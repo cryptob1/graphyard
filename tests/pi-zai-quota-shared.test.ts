@@ -83,8 +83,8 @@ test('unit:pi-zai-quota-shared — a live worker pane ending on pi\'s 429 code 1
     const agents: HerdrAgent[] = [{ name: 'graphyard-opencode-1', pane_id: 'pane-1', agent: 'pi', agent_status: 'idle', cwd: '/repo/.graphyard/worktrees/GY-1-2' }];
     const held: { account: string; resetsAt: string | null }[] = [], prompted: string[] = [];
     const effects: DaemonEffects = {
-      agents: () => agents, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: iso() }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {}, persist: async () => {},
+      agents: () => agents, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: iso() }), closeSession: () => {}, dispatch: async () => {},
+      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, persist: async () => {},
       sessionOutput: () => `● Reading GY-1 before editing.\n\n${tail}\n`,
       selectedAccount: async () => ({ environment: 'pi-a', kind: 'pi' }),
       holdAccount: async (account, observed) => { held.push({ account, resetsAt: observed.resetsAt }); },

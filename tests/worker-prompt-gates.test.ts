@@ -1,11 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { workerPrompt } from '../src/master/dispatch.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { workerBeforePushSection, workerFastGates, workerFastGatesCommand, workerFastGatesPresent, workerFastGatesSentence, workerSyncSentence } from '../src/master/worker-fast-gates.js';
+import { workerBeforePushSection, workerFastGates, workerFastGatesCommand, workerFastGatesSentence, workerSyncSentence } from '../src/master/worker-fast-gates.js';
 
 // GY-1797: the fast mechanical gates — the module and docs budget tests, the docs growth and
 // glossary gates, the wall-clock bomb scan, the CI shard map and the docs page checker — each run
@@ -19,9 +17,8 @@ import { workerBeforePushSection, workerFastGates, workerFastGatesCommand, worke
 // the request as it was before GY-1797. The list is one exported constant in its own module
 // (src/master/worker-fast-gates.ts) beside the prompt — dispatch.ts sits within a few lines of its
 // 800-line budget, and the item's first attempt merged at 801 and was reverted by the very gate it
-// names — and the documentation (docs/coordination.md) reads the same list. One case per proof:
-// unit:worker-request-names-fast-gates proves AC-1, unit:fast-gates-exist proves AC-2; the soak
-// tests/soak-worker-fast-gates.test.ts drives the same request through the real loop over a day.
+// names. unit:worker-request-names-fast-gates proves the request renders the gates it is told of;
+// whether this checkout still carries them is the launcher's reading, not pinned here.
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const cli = '/bin/graphyard.mjs';
@@ -79,43 +76,6 @@ test('unit:worker-request-names-fast-gates — the request names the fast mechan
   assert.ok(other.includes('before editing. Work only in the current assigned worktree'), "another repository's request keeps the pre-edit instruction with its one space");
   assert.equal(render(), other, 'a request whose launcher said nothing of the gates renders as before');
   assert.equal(workerPrompt({ cliPath: cli, repository: 'owner/graphyard' }, { key: 'GY-1', title: 'Fast gates' }, { principal: 'graphyard-test-1' }, 1), other, 'the repository name alone adds nothing: the gates are an input the launcher reads from its checkout');
-});
-
-test('unit:fast-gates-exist — the gate list is one exported constant that names only test files and scripts present in the repository, and the docs read the same list', async () => {
-  // The constant is the one list: every entry is a test file or script the repository carries.
-  assert.ok(gates.length >= 2, 'the constant names the test gates and the docs checker');
-  for (const gate of gates) assert.ok(existsSync(`${root}${gate}`), `${gate} exists in the repository`);
-  for (const gate of workerFastGates.tests) assert.match(gate, /^tests\/[^/]+\.test\.ts$/, `${gate} is a test file of the suite`);
-  for (const gate of workerFastGates.scripts) assert.match(gate, /^scripts\/[^/]+\.mjs$/, `${gate} is a script of the repository`);
-  // The launcher's rule reads the same list: this checkout carries every gate; a checkout missing
-  // any one of them — an empty tree, or one with every gate but the last — carries none.
-  assert.ok(workerFastGatesPresent(root), 'this repository carries every gate');
-  const empty = await temporaryDirectory('fast-gates');
-  assert.ok(!workerFastGatesPresent(empty), 'an empty checkout carries no gate');
-  for (const gate of gates.slice(0, -1)) { mkdirSync(dirname(join(empty, gate)), { recursive: true }); writeFileSync(join(empty, gate), ''); }
-  assert.ok(!workerFastGatesPresent(empty), 'a checkout missing one gate names none');
-  mkdirSync(dirname(join(empty, gates.at(-1)!)), { recursive: true }); writeFileSync(join(empty, gates.at(-1)!), '');
-  assert.ok(workerFastGatesPresent(empty), 'a checkout carrying every gate names them');
-  // The command and the sentence are built from the constant, so neither can drift from this list.
-  assert.equal(workerFastGatesCommand, `node --import tsx tests/helpers/run-tests.ts ${workerFastGates.tests.join(' ')} && ${workerFastGates.scripts.map(script => `node ${script}`).join(' && ')}`, 'the command runs the constant\'s gates as one line');
-  // Through the suite's own harness, never a bare `node --test`: the harness reserves the port
-  // window every gate's Postgres and ci-shards's nested-run guard need, so the line passes in a
-  // bare worker session and a failure it names is one the worker can fix there.
-  assert.ok(workerFastGatesCommand.startsWith('node --import tsx tests/helpers/run-tests.ts '), 'the gates run through the reserving harness');
-  assert.ok(workerFastGatesSentence.includes(`\`${workerFastGatesCommand}\``), 'the sentence runs the gates as one command line');
-  // The constant lives in its own concern module under src/master, within the module budget the
-  // gates enforce, and dispatch.ts reads it from there: the list is defined exactly once.
-  const module = readFileSync(`${root}src/master/worker-fast-gates.ts`, 'utf8');
-  assert.match(module.split('\n')[0], /^\/\/ Concern: .*fast mechanical gates/, 'the module opens with its concern header');
-  assert.equal(module.match(/^export const workerFastGates = \{/mg)?.length, 1, 'the module exports the list once');
-  const dispatch = readFileSync(`${root}src/master/dispatch.ts`, 'utf8');
-  assert.ok(dispatch.includes("from './worker-fast-gates.js'"), 'dispatch.ts imports the gates from the module');
-  assert.ok(!dispatch.includes('tests/module-budgets.test.ts'), 'dispatch.ts carries no copy of the list');
-  assert.ok(dispatch.includes('fastGates: workerFastGatesPresent(root)'), 'the launcher reads the gates from its checkout once per launch and hands the answer to the prompt');
-  // The docs read the same list: docs/coordination.md names each gate where it states the
-  // worker's pre-push discipline.
-  const coordination = readFileSync(`${root}docs/coordination.md`, 'utf8');
-  for (const gate of gates) assert.ok(coordination.includes(gate), `docs/coordination.md names ${gate}`);
 });
 
 test('unit:worker-prompt-names-review-self — every worker request names review self with the item key and the configured CLI, before the autonomous-session line (GY-1987)', () => {

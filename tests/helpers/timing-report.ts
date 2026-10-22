@@ -1,6 +1,6 @@
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { describeTiming, failedTiming, parseTimingRecord, percentile, type TimingMeasurement } from './timing.js';
+import { describeTiming, failedTiming, parseTimingRecord, type TimingMeasurement } from './timing.js';
 import { timingAnnotationMarker, type TimingFailure } from '../../src/cli/timing-failures.js';
 import { failedTestsAnnotation, failedTestsFromLog } from '../../src/master/base-break-refresh.js';
 
@@ -38,34 +38,13 @@ export const timingAnnotationTitle = 'Timing-dependent assertion over budget';
 export const annotationMessage = (failure: TimingFailure) => `${describeTiming({ ...failure, passed: false })} in ${failure.test}. ${timingAnnotationMarker}${JSON.stringify(failure)}`;
 export const annotationCommand = (failure: TimingFailure) => `::error title=${escapeProperty(timingAnnotationTitle)}::${escapeData(annotationMessage(failure))}`;
 
-export interface TimingSpread { name: string; test: string; statistic: string; budgetMs: number; comparison: '<' | '<='; runs: number; failures: number; minMs: number; medianMs: number; maxMs: number; spreadMs: number; headroomMs: number }
-
-/** Run-to-run spread of every timing assertion over the runs' records, against its budget. */
-export function timingSpread(runs: TimingMeasurement[][]): TimingSpread[] {
-  const byName = new Map<string, TimingMeasurement[]>();
-  for (const entry of runs.flat()) byName.set(entry.name, [...(byName.get(entry.name) ?? []), entry]);
-  return [...byName.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([name, entries]) => {
-    const measured = entries.map(entry => entry.measuredMs), latest = entries.at(-1)!;
-    const minMs = Math.min(...measured), maxMs = Math.max(...measured);
-    return { name, test: latest.test, statistic: latest.statistic, budgetMs: latest.budgetMs, comparison: latest.comparison, runs: entries.length, failures: entries.filter(failedTiming).length,
-      minMs, medianMs: percentile(measured, 0.5), maxMs, spreadMs: Math.round((maxMs - minMs) * 1000) / 1000, headroomMs: Math.round((latest.budgetMs - maxMs) * 1000) / 1000 };
-  });
-}
-
-/** The recorded spread an unchanged tree produced, committed beside this file by the stability run. */
-export const baselineFile = fileURLToPath(new URL('./timing-baseline.json', import.meta.url));
-export function readBaseline(file = baselineFile): { spread: TimingSpread[] } | null {
-  return existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : null;
-}
-
-/** The step summary: every timing-dependent assertion of the run beside its recorded spread. */
-export function timingSummary(record: TimingMeasurement[], failures: TimingFailure[], baseline: { spread: TimingSpread[] } | null) {
+/** The step summary: every timing-dependent assertion of the run. */
+export function timingSummary(record: TimingMeasurement[], failures: TimingFailure[]) {
   const lines = ['### Timing-dependent assertions', ''];
   if (!record.length) return [...lines, 'The run recorded no timing-dependent assertion.', ''].join('\n');
-  lines.push('| Assertion | Test | Measured | Budget | Samples | Recorded spread on an unchanged tree | Verdict |', '| --- | --- | --- | --- | --- | --- | --- |');
+  lines.push('| Assertion | Test | Measured | Budget | Samples | Verdict |', '| --- | --- | --- | --- | --- | --- |');
   for (const entry of record) {
-    const known = baseline?.spread.find(spread => spread.name === entry.name);
-    lines.push(`| ${entry.name} | ${entry.test} | ${entry.statistic} ${entry.measuredMs}ms | ${entry.comparison} ${entry.budgetMs}ms | ${entry.samples} (${entry.warmupDiscarded} warmup discarded) | ${known ? `${known.minMs}–${known.maxMs}ms over ${known.runs} runs` : 'not recorded'} | ${entry.passed ? 'within budget' : entry.toleratedBySlack !== undefined ? `over budget, within its ${entry.toleratedBySlack}× slack` : '**over budget**'} |`);
+    lines.push(`| ${entry.name} | ${entry.test} | ${entry.statistic} ${entry.measuredMs}ms | ${entry.comparison} ${entry.budgetMs}ms | ${entry.samples} (${entry.warmupDiscarded} warmup discarded) | ${entry.passed ? 'within budget' : entry.toleratedBySlack !== undefined ? `over budget, within its ${entry.toleratedBySlack}× slack` : '**over budget**'} |`);
   }
   if (failures.length) lines.push('', failures[0].otherFailures === 0 ? 'Every failed test in this run failed on a timing-dependent assertion: the run measured the runner or a latency regression, not a behavioural defect.'
     : failures[0].otherFailures === null ? 'The run did not report how many tests failed, so other failures cannot be ruled out.'
@@ -91,6 +70,6 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
   const counts = logs.map(log => log === null ? null : failedTestCount(log));
   const failures = timingFailures(record, counts.length && counts.every(count => count !== null) ? counts.reduce<number>((sum, count) => sum + count!, 0) : null);
   for (const failure of failures) console.log(annotationCommand(failure));
-  const summary = timingSummary(record, failures, readBaseline());
+  const summary = timingSummary(record, failures);
   if (process.env.GITHUB_STEP_SUMMARY) appendFileSync(process.env.GITHUB_STEP_SUMMARY, summary); else console.log(summary);
 }

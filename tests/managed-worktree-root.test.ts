@@ -295,7 +295,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     await utimes(orphan.directory, old, old);
     const state = emptyDaemonState(config);
     const effects: DaemonEffects = { snapshot: async () => ({ work: [], now: new Date().toISOString() }), agents: () => [], credentials: async () => ({}), closePane: () => {}, dispatch: async () => ({}), observeDeployment: async () => null,
-      recordDeployment: async () => ({}), merge: async () => ({}), requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+      recordDeployment: async () => ({}), merge: async () => ({}), persist: async () => {},
       reclaim: async () => ({ root, at: new Date().toISOString(), applied: true, scanned: 0, idleMs: 0, removed: [], kept: [], freeBefore: 50e9, freeAfter: 50e9, freedBytes: 0, errors: [], checkouts: await reclaimCheckouts(root, config, { probe: free(1e9) }) }) } as unknown as DaemonEffects;
     const cycle = await runCycle(config, state, effects);
     gone(orphan.directory);
@@ -470,7 +470,7 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
       workers: [{ name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: token, agentArgs: [], approvals: 'auto', environment: {} }], reviewers: [], producers: [], run: masterRunSchema.parse({}) } as any;
     const ready = work('GY-88', { ready: true, stage: 'ready', epoch: 0, candidate: null, submission: null, observation: null, gates: [{ name: 'ready', passed: true, reasons: [] }] } as any);
     const base = { snapshot: async () => ({ work: [ready], now: new Date().toISOString() }), agents: () => [], credentials: async () => ({ launch: { available: true, reason: null } }), closePane: () => {}, observeDeployment: async () => null,
-      recordDeployment: async () => ({}), merge: async () => ({}), requestProof: () => {}, requestSmoke: () => {}, persist: async () => {} };
+      recordDeployment: async () => ({}), merge: async () => ({}), persist: async () => {} };
     const once = (detail: string) => assert.equal(detail.split(reclaimAdvice).length, 2, 'the explanation is given exactly once');
     const direct = await runCycle(config, emptyDaemonState(config), { ...base, dispatch: async () => { throw quota; } } as unknown as DaemonEffects);
     const failed = direct.actions.find(action => action.kind === 'dispatch' && action.state === 'failed')!;
@@ -624,7 +624,7 @@ function loopEffects(log: string[], memory: () => HostMemoryReading): DaemonEffe
   return {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [ready], now: iso(at) }), closeSession: () => {}, dispatch: async item => { log.push(`dispatch:${item.key}`); },
-    requestProof: () => {}, merge: async () => ({ result: 'merge requested' }), recordDeployment: async () => {}, requestSmoke: () => {},
+ merge: async () => ({ result: 'merge requested' }), recordDeployment: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }) as any,
     persist: async () => {}, hostMemory: async () => memory(),
   } as DaemonEffects;
@@ -713,7 +713,7 @@ test('the reclaim pass is stamped with the cycle snapshot clock, not a later wal
   const seen: Array<number | undefined> = [];
   const observed = '2026-01-02T03:04:05.000Z';
   const effects = { snapshot: async () => ({ work: [], now: observed }), agents: () => [], credentials: async () => ({}), closePane: () => {}, dispatch: async () => ({}), observeDeployment: async () => null,
-    recordDeployment: async () => ({}), merge: async () => ({}), requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+    recordDeployment: async () => ({}), merge: async () => ({}), persist: async () => {},
     reclaim: async (_work: unknown, now?: number) => { seen.push(now); return { root: '/x', at: observed, applied: true, scanned: 0, idleMs: 0, removed: [], kept: [], freeBefore: null, freeAfter: null, freedBytes: 0, errors: [] }; } } as unknown as DaemonEffects;
   await runCycle(config, emptyDaemonState(config), effects);
   assert.deepEqual(seen, [Date.parse(observed)]);

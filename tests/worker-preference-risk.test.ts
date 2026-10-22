@@ -28,7 +28,7 @@ const lanes = ['low', 'medium', 'high', null, undefined];
 /** One path per sensitive rule, so each rule is shown to hold the first attempts off Pi. */
 const sensitivePaths: Record<string, string> = {
   'persistence layer': 'src/store/work-store.ts', 'server auth, principals, API assembler, bootstrap or routes': 'src/server/auth.ts', 'operator agent': 'src/operator-agent.ts',
-  'proof grants': 'src/proof-grants.ts', installation: 'src/install/host.ts', deployment: 'deploy/compose.yml', Dockerfile: 'Dockerfile', 'compose file': 'compose.yaml',
+  'proof grants': 'src/proof-grants.ts', installation: 'src/install/index.ts', deployment: 'deploy/compose.yml', Dockerfile: 'Dockerfile', 'compose file': 'compose.yaml',
   'CI configuration': '.github/workflows/ci.yml', dependencies: 'package.json', 'merge path': 'src/main-guard.ts', 'merge writer': 'src/merge-writer/index.ts', migrations: 'migrations/0042_items.sql',
 };
 const normalFiles = ['src/master/dispatch.ts', 'src/model/worker-preference.ts', 'tests/worker-preference-risk.test.ts', 'docs/delegation.md'];

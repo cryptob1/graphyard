@@ -101,12 +101,10 @@ export async function rerunTrialFiles(root: string, files: readonly string[], ru
  * branch (or a detached HEAD) pushes nothing. A failed push is returned, never thrown: `complete`'s own
  * refusals still run, and then it refuses to submit a head the remote does not hold.
  */
-export function pushGraphyardBranch(root: string, git: typeof spawnSync = spawnSync, adoptedBranch: string | null = null): { pushed: string | null; failure?: string } {
+export function pushGraphyardBranch(root: string, git: typeof spawnSync = spawnSync): { pushed: string | null; failure?: string } {
   const branch = String(git('git', ['-C', root, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout ?? '').trim();
-  // GY-1849: an adopted item's attempt works the adopted pull request's own branch, which carries
-  // no graphyard/ prefix; it is pushed the same way, or complete would submit a head the worker
-  // never sent. Any other foreign branch is still left alone.
-  if (!branch.startsWith('graphyard/') && (adoptedBranch === null || branch !== adoptedBranch)) return { pushed: null };
+  // A foreign branch is left alone.
+  if (!branch.startsWith('graphyard/')) return { pushed: null };
   const pushed = git('git', ['-C', root, 'push', '--quiet', '-u', 'origin', branch], { encoding: 'utf8' });
   return pushed.status === 0 ? { pushed: branch } : { pushed: null, failure: String(pushed.stderr ?? pushed.error ?? '').trim() };
 }
@@ -151,9 +149,9 @@ export const completeCommand: CliCommand = {
     // only while GitHub is), so the form alone decides whether anything is pushed. The `--head` form
     // pushes nothing: the shared object store already holds the commit, so a sandbox that cannot
     // push (no SSH inside its user namespace) still completes. The PR form keeps its push of the
-    // graphyard/ (or adopted) branch and its refusal when that push fails.
+    // graphyard/ branch and its refusal when that push fails.
     let push: { pushed: string | null; failure?: string } = { pushed: null };
-    if (body.head === undefined) try { push = pushGraphyardBranch(context.repositoryRoot(), spawnSync, work.prAdoption?.branch ?? null); } catch { /* no readable worktree: nothing to push; the head the PR is observed at reports it */ }
+    if (body.head === undefined) try { push = pushGraphyardBranch(context.repositoryRoot(), spawnSync); } catch { /* no readable worktree: nothing to push; the head the PR is observed at reports it */ }
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
     // A failed push leaves the remote head at an earlier commit: nothing is submitted (and no lease ended) for it.

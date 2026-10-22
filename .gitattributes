@@ -1,2 +1,0 @@
-# Shard weights only: neighbouring edits merge instead of conflicting (see baselineSentinel in scripts/ci-tests.mjs).
-tests/helpers/timing-baseline.json merge=union

@@ -54,7 +54,7 @@
     "name": "merge",
     "passed": false,
     "reasons": [
-     "GitHub has not been observed at the current candidate",
+     "The merge writer has not observed the current candidate",
      "Pull request is not mergeable against the current base",
      "Unresolved requirement-weakening escalation requires operator resolution: Requirement revision retires AC-1, AC-3, AC-4, AC-6 and narrows proofs for no criterion"
     ]

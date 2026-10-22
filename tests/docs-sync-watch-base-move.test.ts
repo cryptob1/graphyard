@@ -4,7 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
-import type { BaseRefresh } from '../src/merge-queue.js';
+import type { BaseRefresh } from '../src/model/base-refresh.js';
 import * as docsSyncModel from '../src/model/docs-sync.js';
 import { docsSyncWatchSchema } from '../src/model/docs-sync.js';
 import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
@@ -112,9 +112,9 @@ test('integration:docs-sync-route-holds-across-base-move — through the loop\'s
     agents: () => [], herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
     credentials: async () => ({}),
     snapshot: async () => ({ work: [item], now: new Date(at).toISOString(), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async (_work, action) => { decided.push(action); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
     decisions: async () => ({ decisions: [] }),
     approver: async () => ({ agentName: 'graphyard-approver-gy-42', pane: 'pane-a' }),
@@ -162,9 +162,9 @@ function loop(id: string, options: { observe?: boolean } = {}) {
     agents: () => [], herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
     credentials: async () => ({}),
     snapshot: async () => ({ work: [harness.item], now: new Date(harness.at).toISOString(), jobs: [] }),
-    closeSession: () => { record.agents.length = 0; }, dispatch: async () => {}, requestProof: () => {},
+    closeSession: () => { record.agents.length = 0; }, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(harness.at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     decide: async (_work, action) => { decided.push(action); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
     decisions: async () => ({ decisions: [] }),
     approver: async () => ({ agentName: `graphyard-approver-${id}`, pane: 'pane-a' }),

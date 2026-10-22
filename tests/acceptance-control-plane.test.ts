@@ -58,7 +58,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('acceptance-cp-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('acceptance_cp_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/acceptance_cp_test`); await store.init();
-  engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = server(engine, credentials, null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -165,7 +165,7 @@ test('unit:acceptance-control-plane-change — in control-plane mode the accepta
   assert.equal(world.spied.pushes, 1, 'one push'); assert.equal(world.spied.landed, 1); assert.equal(world.spied.land, 0, 'the GitHub land path was never taken');
   const tip = git(origin, 'rev-parse', 'main');
   assert.equal(merged.merged!.pr, null); assert.equal(merged.merged!.mergeSha, tip);
-  assert.equal(git(origin, 'rev-parse', `${tip}^1`), baseTip); assert.equal(git(origin, 'rev-parse', `${tip}^2`), head, 'main\'s new first parent merges exactly the approved head');
+  assert.equal(tip, head, 'the approved head sat on the base tip, so main fast-forwarded to exactly it'); assert.equal(git(origin, 'rev-parse', `${tip}^1`), baseTip);
   assert.equal(JSON.parse(git(origin, 'show', `${tip}:e2e/contract.json`)).outcomes[0].cases[0], 'greeting');
   assert.equal(JSON.parse(git(origin, 'show', `${tip}:e2e/cases/greeting.json`)).required, true);
   assert.deepEqual(merged.protected, { cases: ['greeting'], outcomes: ['greeting'] });

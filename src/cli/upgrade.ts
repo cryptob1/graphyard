@@ -7,15 +7,13 @@ import { createBackup } from '../backup.js';
 import { Store } from '../store.js';
 import { checkoutRelease, compareDateVersions, datedVersionPattern, imageRepository, installationRoot, stableChannel, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
-import { installDirectory, readInstallRecord, readToken, type InstallRecord } from '../install/secrets.js';
-import { e2ePrincipalId } from '../install/secrets.js';
+import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
 import type { DeployPorts } from '../daemon/upgrade.js';
 import { pinKnownGood } from '../master/known-good.js';
-import { deployedE2e, e2eSuite } from '../e2e/runner.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -27,8 +25,6 @@ export interface UpgradeInputs {
   install: InstallRecord | null; url: string | null; backupFile: string;
   /** Tracked files modified in the CLI checkout: checkout keeps them, so the target would run mixed source. */
   cliChanges: string[];
-  /** The Railway workspace the redeploy names, for an account that belongs to several (--workspace). */
-  workspace: string | null;
   /** The image the redeploy names instead of the target's published one: a compose install's own build (GY-1982). */
   image?: string;
 }
@@ -59,7 +55,7 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
   // GY-2168: the redeploy builds the image from this checkout — the one the checkout step moved to
   // the target (or deployTip moved to the deployed commit) — never from whatever root the running
   // CLI's own code was loaded from, which a held pin may hold at another commit.
-  const install = inputs.install && redeployArguments(inputs.install, image, inputs.workspace, inputs.cliRoot);
+  const install = inputs.install && redeployArguments(inputs.install, image, inputs.cliRoot);
   const redeploy = install ? `${cli(cliRoot, 'install', ...install.slice(0, -1), '--plan')} && ${cli(cliRoot, 'install', ...install)}` : `no install record for this repository: redeploy ${image} by hand`;
   const url = inputs.url ? ['--url', inputs.url] : [];
   const steps: UpgradeStep[] = [
@@ -186,11 +182,9 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
 /**
  * GY-1982: the ports the loop's continuous deploy runs a commit through on this install, the checkout
  * already moved onto it: the upgrade sequence's npm ci, backup (with DATABASE_URL) and redeploy as
- * child processes, the health step until it passes or three minutes pass, and every end-to-end case;
- * or the one line naming why an install on neither compose nor local has none. `keepAlive` feeds the
- * loop's watchdog while a step runs. The end-to-end cases run as the install's e2e identity
- * (GY-2167), the roster principal whose credential may do what the cases do — a case's first step
- * creates an item — never as the loop's own coordinator, which may create none.
+ * child processes, and the health step until it passes or three minutes pass; or the one line naming
+ * why an install on neither compose nor local has none. `keepAlive` feeds the loop's watchdog while
+ * a step runs.
  */
 export async function deployPorts(input: { cliRoot: string; repoRoot: string; repository: string; url: string; run: ChildRun; keepAlive?: () => Promise<void> }): Promise<DeployPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
@@ -203,7 +197,7 @@ export async function deployPorts(input: { cliRoot: string; repoRoot: string; re
   };
   const inputsFor = (commit: string): UpgradeInputs => {
     const current = checkoutRelease(cliRoot);
-    return { cliRoot, repoRoot, current, target: { version: current.version, revision: commit, schema: null }, databaseSchema: null, install, url, workspace: null, cliChanges: [],
+    return { cliRoot, repoRoot, current, target: { version: current.version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
       image: install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
   };
   return {
@@ -224,11 +218,6 @@ export async function deployPorts(input: { cliRoot: string; repoRoot: string; re
         catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
       }
     }),
-    e2e: () => beating(async () => {
-      // GY-2217: the loop reads its own environment for a UAT: an install whose merger is the control plane but whose environment names none (GRAPHYARD_UAT_URL or a static site's GRAPHYARD_UAT_STATIC) serves no delivered outcome there, so those cases run as pending instead of failing every deploy.
-      const uat = !!(process.env.GRAPHYARD_UAT_URL || process.env.GRAPHYARD_UAT_STATIC);
-      await deployedE2e(cliRoot, url, await readToken(directory, e2ePrincipalId(install.installId)), e2eSuite, { uat });
-    }),
     schemas: async commit => ({ target: schemaAt(await run('git', ['show', `${commit}:src/release.ts`], cliRoot).catch(() => '')), database: await databaseSchemaOf(url) }),
     pin: commit => pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run),
   };
@@ -240,7 +229,7 @@ export const renderPlan = (plan: UpgradePlan) => [`upgrade ${plan.from.version} 
 export const upgradeCommands = defineCommands([{
   name: 'upgrade',
   help: [
-    '  upgrade [--to VERSION|stable] [--workspace NAME] [--plan]',
+    '  upgrade [--to VERSION|stable] [--plan]',
     '                                Move the CLI checkout (then npm ci), back up the database,',
     '                                redeploy the server, restart loop and executors, refresh the',
     '                                generated files, and check /healthz, to one dated release;',
@@ -250,9 +239,6 @@ export const upgradeCommands = defineCommands([{
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
     const toIndex = flags.indexOf('--to');
     const to = toIndex >= 0 ? flags[toIndex + 1] ?? '' : stableChannel;
-    const workspaceIndex = flags.indexOf('--workspace');
-    const workspace = workspaceIndex >= 0 ? flags[workspaceIndex + 1] ?? '' : null;
-    if (workspace === '') throw new Error('Use upgrade --workspace NAME-OR-ID (railway whoami --json lists them)');
     const cliRoot = installationRoot, repoRoot = context.repositoryRoot();
     if (!flags.includes('--plan')) git(cliRoot, 'fetch', '--tags', '--force', 'origin');
     const repository = repositoryFromRemote(git(repoRoot, 'remote', 'get-url', 'origin'));
@@ -260,7 +246,7 @@ export const upgradeCommands = defineCommands([{
     const url = process.env.GRAPHYARD_URL || context.connection?.url ? context.base : null;
     const current = checkoutRelease(cliRoot);
     const target = resolveTarget(cliRoot, to);
-    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), workspace, databaseSchema: await databaseSchemaOf(url), url,
+    const inputs: UpgradeInputs = { cliRoot, repoRoot, current, target, cliChanges: cliChangesOf(cliRoot), databaseSchema: await databaseSchemaOf(url), url,
       install: directory ? await readInstallRecord(directory) : null,
       backupFile: join(directory ?? join(repoRoot, '.graphyard'), 'backups', `before-${target.version}-${Date.now()}.json`) };
     const plan = upgradePlan(inputs);

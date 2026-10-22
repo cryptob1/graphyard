@@ -48,7 +48,7 @@ test('unit:approver-stall-first-seen — a moved pane is dated from the cycle th
   const state = emptyDaemonState(config);
   const loop = (at: number): DaemonEffects => ({
     agents: listed, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: iso(at) }),
-    closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, requestProof: () => {}, requestSmoke: () => {}, persist: async () => {},
+    closeSession: pane => { closed.push(pane); panes.delete(pane); }, dispatch: async () => {}, persist: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', input: {}, approvedBy: null, requestedAt: requested }] }),
     approverLaunches: async () => records,

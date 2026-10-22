@@ -54,9 +54,9 @@ async function makeCycle(work: Work[], directory: string, reader: DaemonEffects[
   const { localPostDeployChecks } = await import('../src/master-verification.js');
   const served = () => ({ source: 'endpoint', sha: serving, at: iso(at - 60_000), reason: null, deployed: work.filter(item => item.stage === 'done' && item.delivery && item.key !== 'GY-1733').map(item => item.key), pending: [], requests: 1 });
   const effects: DaemonEffects = {
-    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work, now: iso(at) }), closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, persist: async () => {},
+    agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work, now: iso(at) }), closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
     observeDeployment: async () => served() as never,
-    recordDeployment: async () => {}, requestSmoke: () => {},
+    recordDeployment: async () => {},
     recordReading: async (item: Work, reading: Parameters<NonNullable<DaemonEffects['recordReading']>>[1]) => { recorded.push({ key: item.key, reading }); item.evidence.push({ id: randomUUID(), producer: 'graphyard-master', trusted: true, executed: 1, skipped: 0, at: iso(at), proof: reading.proof, sha: reading.sha, baseSha: reading.baseSha, policyRevision: reading.policyRevision, result: reading.result, reading: { detail: reading.detail } }); },
     closeObservation: async (item: Work, release: string, reason: string, idempotency: string) => { closing(item, release); closed.push({ key: item.key, release, reason, idempotency }); item.stage = 'done'; item.closure = { kind: 'delivered-observation', reason, ref: release, by: 'graphyard-master', at: iso(at), from: 'ready' }; },
     postDeployFiler: localPostDeployChecks, readPostDeploy: reader, ...extra,
@@ -298,7 +298,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('loop-readings-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('readings_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/readings_test`); await store.init();
-  engine = new Engine(store, [15368], 300, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 300, repository); engine.submissionObserver = null;
 });
 after(async () => { await store?.close(); await database?.stop(); });
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;

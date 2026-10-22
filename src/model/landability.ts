@@ -1,4 +1,4 @@
-import { baseRefreshConflict } from '../merge-queue.js';
+import { baseRefreshConflict } from './base-refresh.js';
 import type { Work } from './work.js';
 import { currentEvidence, evidenceIndependenceRefusals } from './evidence.js';
 import { inheritedObligations, requiredProofs } from './bootstrap.js';

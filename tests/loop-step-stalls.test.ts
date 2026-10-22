@@ -814,7 +814,7 @@ test('unit:stall-upstream-removed-cursor-loads — the filer module is gone, the
       credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
       snapshot: async () => ({ work: [], now: new Date(now).toISOString() }) as never,
       closeSession: () => {}, dispatch: async () => { throw new Error('no dispatch was due'); },
-      requestProof: () => {}, requestSmoke: () => {},
+
       observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date(now).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
       recordDeployment: async () => {}, persist: async () => {},
     } as unknown as DaemonEffects, { once: true, intervalMs: 60_000, identity: { pid: process.pid, host: 'test-host' }, now: () => now, log: () => {},

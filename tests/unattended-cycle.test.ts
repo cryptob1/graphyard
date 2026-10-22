@@ -190,7 +190,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       { name: 'review', reasons: [...(approved ? [] : ['Independent approval of the current commit is required']), ...(changes ? ['Outstanding change requests must be resolved through a new review'] : [])] },
       { name: 'test', reasons: checks.map(name => `Required CI check ${name} has not passed on the current candidate`) },
       // No acceptance gate and no freshness bound (GY-1235): proofs gate nothing, and GitHub merges.
-      { name: 'merge', reasons: [...(current ? [] : ['GitHub has not been observed at the current candidate']), ...(observation?.mergeable === false ? ['Pull request is not mergeable against the current base'] : [])] },
+      { name: 'merge', reasons: [...(current ? [] : ['The merge writer has not observed the current candidate']), ...(observation?.mergeable === false ? ['Pull request is not mergeable against the current base'] : [])] },
     ].map(gate => ({ name: gate.name, passed: !gate.reasons.length, reasons: gate.reasons }));
     if (item.stage === 'done') { item.gates = gates.map(gate => ({ ...gate, passed: true, reasons: [] })); return; }
     const failing = gates.find(gate => !gate.passed);
@@ -321,10 +321,8 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       }
       recompute(target);
     },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(clockStart), reason: 'No deployment endpoint is configured in this exercise', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     decide: async (item, action, reason) => {
       const target = find(item.id);
       const entries = decisions.get(target.id) ?? [];

@@ -17,7 +17,7 @@ import { maxApproverLaunches } from '../src/daemon/decisions.js';
 // GY-1346's bound is read through the namespace too, so the base exercise loads this file and its replays fail on their assertions.
 import * as decisions from '../src/daemon/decisions.js';
 import { humanNeededAttention, mergeWriterMotionBoundMs, mergeWriterMovement, mergeWriterStallAttention, owedAttention } from '../src/cli/owed-report.js';
-import { githubUnobservedRefusal, pushRefusal, trialRefusal } from '../src/model/gates.js';
+import { unobservedCandidateRefusal, pushRefusal, trialRefusal } from '../src/model/gates.js';
 // GY-2053's own exports are read through namespaces (and its summary type as a type), so the base exercise loads this file and each new replay fails on its assertion.
 import * as owed from '../src/cli/owed-report.js';
 import * as mergeWriterModule from '../src/daemon/cycle-merge-writer.js';
@@ -563,8 +563,8 @@ test('integration:mechanical-plan-report-surfaced — a refused plan report is a
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {},
     mechanicalFixes: async () => ({ requests: [{ key: 'GY-1761', pr: 1169, head, reviewId: 5499583025, epoch: 1, at: iso(start - 35 * minute), mechanical: [], substantive: [], paths: ['src/widget.ts'] }] }),
     recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
@@ -615,8 +615,8 @@ test('integration:mechanical-plan-report-blocks-decision — an item whose plann
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {},
     mechanicalFixes: async () => ({ requests: [{ key: 'GY-1761', pr: 1169, head, reviewId: 5499583025, epoch: 1, at: iso(start - 35 * minute), mechanical: [], substantive: [], paths: ['src/widget.ts'] }] }),
     recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
@@ -661,8 +661,8 @@ test('integration:mechanical-plan-report-clear-blocks-decision — a held plan t
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {},
     mechanicalFixes: async () => ({ requests: [] }),
     recordMechanicalPlan: async (item: Work, plan: { reviewId: number; head: string } | null) => {
@@ -745,8 +745,8 @@ async function timedOutClearReplay(state: ReturnType<typeof emptyDaemonState>, c
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [work()], now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), wakeObservation: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), wakeObservation: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async () => {},
     mechanicalFixes: async () => ({ requests: [] }),
     recordMechanicalPlan: async (_item: Work, plan: { reviewId: number; head: string } | null) => { attempts.push(plan); throw new Error('The operation was aborted due to timeout'); },
@@ -873,9 +873,9 @@ function instanceItem(key: string, reworkRequested: boolean, verdict: boolean): 
 const instanceEffects = (work: () => Work, overrides: Partial<DaemonEffects>): DaemonEffects => ({
   agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
   snapshot: async () => ({ work: [work()], now: instanceIso(0), jobs: [] }),
-  closeSession: () => {}, dispatch: async () => {}, requestProof: () => {},
+  closeSession: () => {}, dispatch: async () => {},
   observeDeployment: async () => ({ source: 'unavailable', sha: null, at: instanceIso(0), reason: 'not configured', deployed: [], pending: [] }),
-  recordDeployment: async () => {}, requestSmoke: () => {},
+  recordDeployment: async () => {},
   decide: async () => ({ id: 'unused' }), decisions: async () => ({ decisions: [] }),
   approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-1' }), persist: async () => {},
   ...overrides,
@@ -1325,8 +1325,8 @@ test('unit:unheld-push-refusal-still-counts — a push refusal whose head the wr
   // summary — an older caller, or a status read before the writer ran — every push refusal stands as before.
   const unobserved = pushRefused('GY-2004', new Date(now - 31 * 60_000).toISOString(), gy2053Heads);
   const action = unobserved.nextAction as NextAction;
-  Object.assign(unobserved, { nextAction: { ...action, refusal: githubUnobservedRefusal, inputs: { ...action.inputs, kind: 'escalate', trigger: 'merge', detail: githubUnobservedRefusal } } });
-  Object.assign(unobserved.actionQueue!.actions[0], { refusal: githubUnobservedRefusal });
+  Object.assign(unobserved, { nextAction: { ...action, refusal: unobservedCandidateRefusal, inputs: { ...action.inputs, kind: 'escalate', trigger: 'merge', detail: unobservedCandidateRefusal } } });
+  Object.assign(unobserved.actionQueue!.actions[0], { refusal: unobservedCandidateRefusal });
   assert.equal(owed.mergeWriterHolds(unobserved, writer, now), null, 'only the exact push refusal is the writer\'s next step');
   assert.deepEqual(observedFaults([unobserved], gy2053Pass, writer).counted.map(fault => fault.kind), ['owed-decision']);
   assert.equal(owed.mergeWriterHolds(front, null, now), null);
@@ -1665,7 +1665,7 @@ test('manual:fault-class-decision — the base-failure hold grounds nothing past
   assert.deepEqual([expired, trialfailed, otherhead].map(work => owed.baseFailureHoldUntil(work, now)), [null, null, null], 'only a base-failure refusal of the exact candidate head bounds the line');
   // The hold bounds only the writer's trial-refusal line: any other refusal of the item stands as it did.
   const unobserved = item({});
-  const refusal = githubUnobservedRefusal;
+  const refusal = unobservedCandidateRefusal;
   const action: NextAction = { kind: 'escalate', work: unobserved.id, key: unobserved.key, gate: 'test', refusal,
     reason: `${unobserved.key} is refused at the test gate and no executor step answers it: ${refusal}`,
     inputs: { kind: 'escalate', trigger: 'test', detail: refusal } as NextAction['inputs'], llmRole: null, binding: 'test:unobserved' };

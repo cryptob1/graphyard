@@ -100,8 +100,8 @@ test('unit:soak-invariants-hold — over a simulated working day each close seri
   const effects = {
     agents: listed, herdr: () => ({ agents: listed(), available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work.map(entry => Object.assign(structuredClone(entry), { observation: { ...entry.observation!, at: iso(now) } })), now: iso(now) }),
-    closeSession: () => {}, dispatch: async () => {}, requestProof: () => {}, merge: async () => ({}), persist: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, requestSmoke: () => {},
+    closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}), persist: async () => {},
+    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     decide: async (target: Work, action: string, reason: string, input: Record<string, unknown> = {}) => record(find(target.key), action, reason, input, 'graphyard-master-agent'),
     approver: async (target: Work, decision: string) => {
       launches.set(decision, (launches.get(decision) ?? 0) + 1);

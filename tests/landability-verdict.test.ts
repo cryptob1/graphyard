@@ -66,7 +66,7 @@ function item(shape: Shape, extra: Partial<Work> = {}): Work {
  * gate (proofs gate nothing): only the build gate reads the verdict.
  */
 const gatesOf = (work: Work, all: Work[]) => {
-  const gates = evaluate(work, all, now, CI).gates;
+  const gates = evaluate(work, all, now).gates;
   return { build: gates.find(gate => gate.name === 'build')!, acceptance: gates.find(gate => gate.name === 'acceptance') };
 };
 
@@ -223,7 +223,7 @@ test('unit:landability-pure-on-demand — the verdict is deterministic, recomput
     version: LANDABILITY_VERSION,
     inputs: { key: 'GY-U', sha: sha('7'), baseSha: sha('9'), policyRevision: 1, observed: { sha: sha('7'), baseSha: sha('9') }, landingBase: main, evidence: ['unit:own-proof@7777#fail'] },
   });
-  const result = evaluate(stranger, [stranger], now, CI);
+  const result = evaluate(stranger, [stranger], now);
   const build = result.gates.find(gate => gate.name === 'build')!;
   assert.deepEqual(build.verdict, { version: verdict.version, inputs: verdict.inputs });
   assert.ok(result.gates.filter(gate => gate.passed).every(gate => gate.verdict === undefined), 'a passing gate records no refusal');

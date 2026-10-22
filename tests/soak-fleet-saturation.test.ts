@@ -81,10 +81,8 @@ function world(days: number) {
       agents.push({ name: profile.agentName, pane_id: `pane-${profile.name}-${live.key}`, agent_status: 'working' });
       return { pane: `pane-${profile.name}-${live.key}`, agentName: profile.agentName, principal: profile.principal, epoch: live.epoch };
     },
-    requestProof: () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(clock), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    requestSmoke: () => {},
     persist: async () => {},
   };
   return { effects, advance, now: () => clock, items, attempts };

@@ -127,8 +127,8 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <h3>{group.label} <small>· cleared by {group.who}</small></h3>
     <ul className="left-list">{group.lines.map(text => <li key={text}><Explained sentence={text}/></li>)}</ul></section>;
   // Each required check as the test gate reads it, the same states the Test step counts.
-  const checks = checkStates(item, release.ciAppIds);
-  // The review gate's own verdict, whichever provider gave it (GitHub, Codex or an agent reviewer).
+  const checks = checkStates(item);
+  // The review gate's own verdict, whichever provider gave it (a reviewer session, Codex or an agent reviewer).
   const reviewGate = item.gates.find(g => g.name === 'review');
   // What merging it would reach and what could take it back (GY-972), from its changed files and gates.
   const radius = blastRadius(item);

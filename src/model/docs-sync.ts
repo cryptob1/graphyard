@@ -69,7 +69,7 @@ export interface DocsSync {
 export function docsSyncAdoption(work: Work, observation: { candidate: { sha: string; baseSha: string; pr: number }; merged?: boolean; prState?: string }): { from: { sha: string; baseSha: string }; base: string; head: string; to: { sha: string; baseSha: string }; paths: string[] | null } | null {
   const candidate = work.candidate, refresh = work.baseRefresh;
   if (!work.submission || work.reworkRequested || work.stage === 'done' || !candidate || !refresh) return null;
-  if (!refresh.conflict || refresh.head !== null || refresh.stale) return null;
+  if (!refresh.conflict || refresh.head !== null) return null;
   if (refresh.from.sha !== candidate.sha || refresh.from.baseSha !== candidate.baseSha || refresh.policyRevision !== work.policyRevision) return null;
   if (observation.merged || observation.prState === 'closed' || observation.candidate.pr !== candidate.pr || observation.candidate.sha === candidate.sha) return null;
   return { from: refresh.from, base: refresh.base, head: observation.candidate.sha, to: { sha: observation.candidate.sha, baseSha: observation.candidate.baseSha }, paths: refresh.conflictPaths ?? null };

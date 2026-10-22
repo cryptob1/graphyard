@@ -18,8 +18,9 @@ import { withVerificationPath } from './master/verification-slots.js';
 import { clientErrorStatus, retryStopAttention } from './retry-stop.js';
 import { defaultReviewRoundCap, findingLocation, pastReviewCap, reviewRoundCapOf, reviewRoundStatus, type ReviewRoundStatus } from './review-cap.js';
 import { writeReviewBinding } from './review-post.js';
-import { criteriaRuleSection, listedThreadAliases, listedThreadLimit, threadAliasLimit, threadReadFailureSection, threadSection, unaccountedThreads, type LaunchThread, type ThreadResolution } from './review-threads.js';
 import type { FleetProbe } from './fleet.js';
+/** The most threads one pull-request-era launch listed, and the most comment IDs one thread's record kept; bounds the fields old ledger records still carry. */
+const listedThreadLimit = 100, threadAliasLimit = 50;
 import { carriedApproval, declaredPostDeploy, implementerIdentities, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
@@ -99,23 +100,11 @@ export const reviewRecordSchema = z.object({
    * when nothing was started.
    */
   launching: z.literal(true).optional(),
-  /** Why the launch could not read the pull request's review threads for the prompt; surfaced in master status. */
+  // Pull-request-era thread fields (GY-2010): records written before then still load; nothing writes them.
   threadReadFailure: z.string().min(1).max(500).optional(),
-  /** The thread IDs the launch prompt listed; an approval without a `Resolved threads:` line vouches for exactly these. */
   threadsListed: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
-  /**
-   * The comment IDs of each listed thread, keyed by thread ID (GY-959): the other IDs GitHub shows
-   * the reviewer for that thread, so a closing line quoting one names the thread, read from the
-   * launch's own thread read with no further GitHub call.
-   */
   threadAliases: z.record(z.string().min(1).max(200), z.array(z.string().min(1).max(200)).max(threadAliasLimit * 2)).optional(),
-  /** The listed threads this session's approval left unaccounted, when Graphyard withdrew it for that: the next attempt's prompt names them (GY-959). */
   unaccounted: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
-  /**
-   * The threads this session's approval named on its `Resolved threads:` and `Overridden threads:`
-   * lines (`overridden` the ones it passed over rather than found fixed), the outdated threads its
-   * approval settled, and what the loop resolved (review-threads.ts).
-   */
   threadResolution: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
     overridden: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(), outdated: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit * 2),
     refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50), implicit: z.boolean().optional() }).optional(),
@@ -766,7 +755,24 @@ export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
     + 'Judge each on this head\'s pre-merge evidence — the change that should produce the outcome, and what the head shows before merge — and never request changes or hold the merge because the live install or deployed release has not shown it yet; '
     + 'it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. ';
 }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, threads?: { unresolved: LaunchThread[]; failure?: string; total?: number }, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
+/**
+ * The criteria-only review rule (GY-166). GY-164 took 19 attempts: its reviewer confirmed both
+ * criteria met around round 16 and kept requesting changes for new edge cases. The reviewer judges
+ * the item's acceptance criteria; anything worth fixing is BLOCKING and fixed on the same head,
+ * and the rest are nits, never filed as work items (GY-1249). `criteria` are the item's own, written by its operator.
+ */
+export function criteriaRuleSection(key: string, sha: string, criteria: { id: string; text: string }[] = []) {
+  // Each criterion verbatim: a condition cut from its tail would be judged FOLLOW-UP and silently
+  // dropped, and collapsed whitespace changes an indented fragment or exact output it quotes.
+  const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
+  return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
+    + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `
+    + 'Classify each finding as BLOCKING or FOLLOW-UP. BLOCKING: a real defect a user or operator would hit with this change, an acceptance criterion not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. The same worker fixes BLOCKING findings on this head; nothing is deferred to another item. '
+    + 'FOLLOW-UP: nits only — style, naming, hypotheticals and suggestions not worth a round; mention them briefly and move on. '
+    + 'APPROVE when every criterion is met and no finding is BLOCKING; mention the FOLLOW-UP nits in the body instead of requesting changes for them. Graphyard files no backlog item for a nit. '
+    + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. ';
+}
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, documentation?: { obligation: DocumentationObligation; files?: readonly string[] | null }, research?: Pick<Work, 'key' | 'title' | 'description' | 'criteria' | 'researchBrief'> | null, roundsOrMemory?: ReviewRoundStatus | ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, cappedRefusal?: CappedRefusalContext | null) {
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, documentation, research, roundsOrMemory, memory, verification, cappedRefusal);
   let rounds: ReviewRoundStatus | undefined;
   if (roundsOrMemory && 'round' in roundsOrMemory && typeof roundsOrMemory.round === 'number') {
@@ -791,7 +797,6 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + (documentation ? documentationReviewSection(documentation.obligation, documentation.files) : '')
     + repetitionReviewSection(documentation?.files)
     + (research ? researchReviewSection(research) : '')
-    + (threads?.failure ? threadReadFailureSection(threads.failure) : threads?.unresolved.length ? threadSection(binding.sha, threads.unresolved, threads.total) : '')
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
@@ -879,10 +884,10 @@ export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord,
 const launcherPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 /**
  * How the reviewer posts (GY-1492): only through `review post`, which binds the verdict to the
- * launch's head and checks the head, GitHub's mergeability recompute and the thread lines itself.
+ * launch's head and checks the head itself.
  */
 export function reviewPostSection(cliPath: string, changes: string) {
-  return `Post exactly one verdict, only through Graphyard, with the review body on standard input: node ${cliPath} review post --event APPROVE <<'EOF' … EOF (use --event REQUEST_CHANGES instead ${changes}); the body ends with the three thread lines. `
+  return `Post exactly one verdict, only through Graphyard, with the review body on standard input: node ${cliPath} review post --event APPROVE <<'EOF' … EOF (use --event REQUEST_CHANGES instead ${changes}). `
     + 'It binds the verdict to the head this session was launched for and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. Never post a review any other way. ';
 }
 
@@ -1038,8 +1043,6 @@ export async function launchReview(root: string, work: Work, profileName: string
   start?: StartBounds;
   /** How the managed worktree root's volume is read; the kernel's own answer by default. */
   filesystem?: FilesystemProbe;
-  /** How a test launch substitutes listed review threads; none by default, since GitHub review threads are no longer read (GY-2010). */
-  threads?: (repository: string, pr: number) => Promise<LaunchThread[]>;
   /** How a bot round's head is read to verify it as the bot commit (GY-971): none by default, since GitHub commits are no longer read (GY-2010). */
   observeCommit?: (sha: string) => Promise<{ parents: string[]; files: string[]; at: string }>;
   /** How the runtime's sandbox probe runs before the session starts (GY-1507); on the host by default. */
@@ -1199,18 +1202,10 @@ export async function launchReview(root: string, work: Work, profileName: string
       if (plane) { minted = { token: '', expiresAt: new Date(now().getTime() + 3_600_000).toISOString() }; try { await mkdir(sessionDirectory, { recursive: true, mode: 0o700 }); } catch (error) { await discard(); throw error; } }
       else try { minted = await mint(credential!, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
       catch (error) { await discard(); throw error; }
-      // GitHub review threads are no longer read (GY-2010): a launch lists none unless a test substitutes the read.
-      const readThreads = dependencies.threads ?? (async () => [] as LaunchThread[]);
-      let unresolved: LaunchThread[] = [], threadReadFailure: string | undefined;
-      try { unresolved = await readThreads(config.repository, binding.pr); }
-      catch (error) { threadReadFailure = `the review threads of pull request #${binding.pr} could not be read: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]}`.slice(0, 500); }
-      // The prompt lists, and the record keeps, one bounded set: an approval resolves only threads its reviewer was shown.
-      const listed = unresolved.slice(0, listedThreadLimit);
       // The launch's own binding, from that same read, beside the credential (GY-1492): review post
       // checks the verdict against it. A launch that cannot write it starts nothing and keeps no credential.
       try {
         await writeReviewBinding(sessionDirectory, { repository: config.repository, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, criteriaOnly: true,
-          ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }),
           ...(plane ? { mode: 'control-plane' as const, head: binding.sha, baseTip: binding.baseSha, verdictToken: verdictToken!,
             // A control-plane re-review (GY-1988): the head it deltas from, and the paths its earlier findings named, so review post can judge a BLOCKING: line against the hunks changed since that head.
             ...(plane && !postMerge && reservation.record.reviewRound?.previousHead ? { previousHead: reservation.record.reviewRound.previousHead,
@@ -1244,7 +1239,7 @@ export async function launchReview(root: string, work: Work, profileName: string
           : await (dependencies.cappedRefusal ?? (dependencies.mint ? async () => null : readCappedRefusal(config)))(work, binding.sha);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, { unresolved: listed, total: unresolved.length, failure: threadReadFailure }, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null, refusal), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.documentation ? { obligation: work.documentation, files: work.observation?.candidate.sha === binding.sha ? work.observation.files : null } : undefined, work, reviewRoundStatus(work, reviewRoundCapOf(config)), memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null, refusal), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -1267,7 +1262,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         record = await updateReviewLedger(root, ledger => {
           const index = ledger.reviews.findIndex(entry => entry.id === id);
           const { launching: _launching, ...reserved } = index >= 0 ? ledger.reviews[index] : reservation.record;
-          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(threadReadFailure ? { threadReadFailure } : { threadsListed: listed.map(thread => thread.id), ...(listedThreadAliases(listed) ? { threadAliases: listedThreadAliases(listed) } : {}) }), ...(registered ? { launch: registered.launch } : {}) });
+          const settled: ReviewRecord = reviewRecordSchema.parse({ ...reserved, pane: pane ?? null, tokenExpiresAt: minted.expiresAt, delivery, ...(registrySessionOf(selected) ? { session: registrySessionOf(selected) } : {}), ...(consent.length ? { consent } : {}), checkout: checkout.directory, criteriaOnly: true, ...(registered ? { launch: registered.launch } : {}) });
           if (index >= 0) ledger.reviews[index] = settled; else ledger.reviews.push(settled);
           return settled;
         });
@@ -1278,7 +1273,6 @@ export async function launchReview(root: string, work: Work, profileName: string
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
         pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, ...(plane ? { mode: 'control-plane' as const, launch: registered?.launch ?? null } : {}),
         account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
-        ...(threadReadFailure ? { threadReadFailure } : {}),
         recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
     });
   } catch (error) { await release(error); throw error; }

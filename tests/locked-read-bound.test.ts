@@ -82,7 +82,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('locked-read-bound'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('locked_read_bound');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/locked_read_bound`); await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/locked'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/locked'); engine.submissionObserver = null;
   engine.principals = [operator];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

@@ -18,7 +18,7 @@ test('unit:install-apply-exclusive-lock — a second install --apply on one inst
   // Loaded when the test runs, so a checkout without the lock fails here as a test case.
   const { applyLockFile } = await import('../src/install/index.js') as any;
   assert.equal(typeof applyLockFile, 'function', 'src/install/index.ts exports no apply lock');
-  const fixture = await harness({ provider: 'railway' });
+  const fixture = await harness({ provider: 'compose' });
   try {
     // The recording transport, held at the first apply's deploy-key read until released.
     let gated = false, entered!: () => void, release!: () => void;
@@ -33,8 +33,8 @@ test('unit:install-apply-exclusive-lock — a second install --apply on one inst
     const directory = installDirectory('owner-project', fixture.configHome);
     const lock = applyLockFile(directory);
 
-    const first = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, deps);
-    const second = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, deps);
+    const first = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, deps);
+    const second = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, deps);
     const [firstPlan, secondPlan] = [await buildPlan(first), await buildPlan(second)];
 
     gated = true;
@@ -58,7 +58,7 @@ test('unit:install-apply-exclusive-lock — a second install --apply on one inst
     // A lock whose process is gone is reclaimed, and released again after the apply.
     const gone = spawnSync(process.execPath, ['-e', '']).pid!;
     await writeFile(lock, `${JSON.stringify({ pid: gone, host: hostname(), startedAt: new Date(0).toISOString() })}\n`, { mode: 0o600 });
-    const third = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const third = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await applyInstall(third, await buildPlan(third));
     assert.ok(!existsSync(lock), 'the reclaimed lock was not released');
     assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('apply.lock')), [], 'reclaiming left a file behind');
@@ -66,7 +66,7 @@ test('unit:install-apply-exclusive-lock — a second install --apply on one inst
     // A live holder on this machine refuses, and its lock is left as it was.
     const live = `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date(0).toISOString() })}\n`;
     await writeFile(lock, live, { mode: 0o600 });
-    const fourth = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'railway' }, fixture.deps);
+    const fourth = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
     await assert.rejects(applyInstall(fourth, await buildPlan(fourth)), (error: Error) => error.message.includes(`pid ${process.ppid}`));
     assert.equal(await readFile(lock, 'utf8'), live);
   } finally { await fixture.cleanup(); }
@@ -151,22 +151,6 @@ test('unit:install-apply-lock-reused-pid — a lock whose pid now runs a process
   assert.equal(JSON.parse(await readFile(lock, 'utf8')).startedAt, new Date(4_000).toISOString());
   await releaseSuperseding();
   assert.deepEqual((await readdir(directory)).filter(name => name.startsWith('apply.lock')), [], 'reclaiming left a file behind');
-});
-
-test('unit:install-partial-apply-lock — install --herdr-only and --profiles-only refuse while another apply holds the lock, and reach no host transport', async () => {
-  const { installHerdrOnly, installProfilesOnly, applyLockFile, processStart } = await import('../src/install/index.js') as any;
-  const directory = await temporaryDirectory('apply-lock-partial');
-  const live = `${JSON.stringify({ pid: process.ppid, host: hostname(), startedAt: new Date(0).toISOString(), process: processStart(process.ppid) })}\n`;
-  await writeFile(applyLockFile(directory), live, { mode: 0o600 });
-  const touched: string[] = [];
-  const transport = { exec: async (command: string, args: string[]) => { touched.push([command, ...args].join(' ')); throw new Error('transport exec reached'); } };
-  const session = { mode: 'apply', directory, deps: { now: () => 1_000 }, inputs: { repository: REPOSITORY, provider: 'host' }, record: { url: 'https://graphyard.example' },
-    context: { provider: 'host', host: { local: true, layout: {} }, transport }, vault: { scrub: (text: string) => text } };
-  for (const partial of [installHerdrOnly, installProfilesOnly]) {
-    await assert.rejects(partial(session), (error: Error) => /holds the lock/.test(error.message) && error.message.includes(`pid ${process.ppid}`), partial.name);
-  }
-  assert.deepEqual(touched, [], 'a partial apply wrote on the host while another apply held the lock');
-  assert.equal(await readFile(applyLockFile(directory), 'utf8'), live);
 });
 
 async function snapshot(directory: string): Promise<Record<string, string>> {

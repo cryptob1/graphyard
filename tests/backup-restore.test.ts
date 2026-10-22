@@ -60,7 +60,7 @@ after(async () => { if (pg) await pg.stop(); });
  * an intake item citing it, both immutable rows a restore has to carry as history.
  */
 async function populate(store: Store) {
-  const engine = new Engine(store, [15368], 120, 'test/repository');
+  const engine = new Engine(store, 120, 'test/repository');
   const validation = new Validation(engine, principals, 'test/repository');
   const grants = new ProofGrants(store, principals);
   assert.equal((await grants.seed()).length, 5, 'every producer is materialized from the environment');
@@ -100,7 +100,6 @@ async function populate(store: Store) {
   await validation.runnerCommand(runner, 'ack', command, id());
   await validation.collectionAuthority(collector, command);
   await validation.uploadArtifact(collector, { ...command, name: 'report', mediaType: 'application/json', bytes: Buffer.from(JSON.stringify({ format: 'junit-xml-v1', private: 'artifact-bytes-marker' })).toString('base64'), capturePolicy: 'approved-test-data-only' }, id());
-  await store.pool.query("INSERT INTO webhook_receipts(id) VALUES('delivery-1')");
   // Observed delivery for the same environment: a release built, approved, selected and
   // seen running, so the restored ledger still knows what production is expected to be.
   const delivery = new Delivery(validation);
@@ -199,7 +198,7 @@ test('the documented backup and restore exercise preserves assignments, history,
   // state, changes nothing it already knows, and the ledger keeps serving.
   await restored.init();
   assert.deepEqual(await snapshot(restored), before);
-  const engine = new Engine(restored.pool ? restored : source, [15368], 120, 'test/repository');
+  const engine = new Engine(restored.pool ? restored : source, 120, 'test/repository');
   const validation = new Validation(engine, principals, 'test/repository');
   const item = (await restored.list()).find(w => w.id === seeded.workId)!;
   assert.equal(item.lease, null); assert.equal(item.workspaces[0].path, '/srv/worktrees/booking'); assert.equal(item.submission?.pr, 7);

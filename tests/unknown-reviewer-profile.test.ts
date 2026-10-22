@@ -271,54 +271,6 @@ test('unit:up-writes-profiles — a resumed run whose profile write fails stops 
   assert.match(result.next ?? '', /accounts/);
 });
 
-// Review of 28d1bbcb642f, finding 1: a self-contained host's loop, login homes and master.json are on the host, so the write runs there.
-test('unit:up-writes-profiles — on a self-contained host the accounts step writes the profiles there through install --profiles-only, fresh and resumed, and holds the account lines while the host reports either profile missing', async () => {
-  const { runUp } = await import('../src/up.js');
-  const hostWrite = (args: string[]) => args[0] === 'install' && args.includes('--profiles-only');
-
-  // Fresh: the host reports a reviewer and a worker profile; this machine's checkout writes none.
-  const checkout = await temporaryDirectory('up-writes-profiles-host');
-  const world = upWorld(checkout, [], { workers: 1, reviewers: 1 });
-  const result = await runUp(request({ provider: 'host' }), world.deps);
-  assert.ok(world.calls.some(hostWrite), 'the accounts step writes the profiles on the host');
-  const written = world.calls.find(hostWrite)!;
-  assert.ok(written.includes('--apply') && written.includes('--provider') && written[written.indexOf('--provider') + 1] === 'host', `the write is the host install's: ${written.join(' ')}`);
-  assert.ok(!world.calls.some(args => args.join(' ') === 'master environments --apply'), 'nothing is written on this machine for a host install');
-  for (const id of ['account:worker', 'account:reviewer'] as const) assert.equal(result.checklist.find(item => item.id === id)?.done, true, `${id}: ${result.next}`);
-
-  // Resumed over the completed accounts step: the host write runs again, and its failure stops the run naming the step.
-  const again = upWorld(checkout, [], { workers: 1, reviewers: 1 });
-  const cli = again.deps.cli;
-  again.deps.cli = async (args, options) => hostWrite(args) ? { code: 1, stdout: '', stderr: 'master environments --apply did not complete on gy-host' } : cli(args, options);
-  const failed = await runUp(request({ provider: 'host' }), again.deps);
-  assert.notEqual(failed.exitCode, 0, 'the failed host write is not swallowed');
-  assert.match(failed.next ?? '', /accounts/);
-
-  // The host has logged-in accounts but its write made no reviewer profile: the account lines are held and up waits.
-  const missing = await temporaryDirectory('up-writes-profiles-host-missing');
-  const held = await runUp(request({ provider: 'host', waitMs: 20 }), upWorld(missing, [], { workers: 1, reviewers: 0 }).deps);
-  assert.equal(held.exitCode, 3, held.next);
-  for (const id of ['account:worker', 'account:reviewer'] as const) assert.equal(held.checklist.find(item => item.id === id)?.done, false, `${id} is not green while the host lacks its reviewer profile`);
-});
-
-// Review of 4e263adf0b03: --plan prints and changes nothing, so a plan session (any run without --apply) must not write the host's profiles.
-test('unit:up-writes-profiles — install --profiles-only refuses a plan session before any host transport, so only --apply writes the profiles there', async () => {
-  const { installProfilesOnly } = await import('../src/install/index.js');
-  const touched: string[] = [];
-  const transport = { exec: async (command: string, args: string[]) => { touched.push([command, ...args].join(' ')); throw new Error('transport exec reached'); } };
-  // An apply holds the installation's apply lock (GY-1876), taken under its directory.
-  const directory = await temporaryDirectory('up-writes-profiles-lock');
-  const session = (mode: 'plan' | 'apply') => ({
-    mode, directory, deps: { now: () => 0 }, inputs: { repository: 'owner/project', provider: 'host' }, record: { url: 'https://graphyard.example' },
-    context: { provider: 'host', host: { local: true, layout: {} }, transport },
-  }) as unknown as Parameters<typeof installProfilesOnly>[0];
-  await assert.rejects(installProfilesOnly(session('plan')), /--apply/);
-  assert.deepEqual(touched, [], 'a plan session reaches no transport');
-  // The same session in apply mode goes on to the host: the write is attempted through its transport.
-  await assert.rejects(installProfilesOnly(session('apply')), /transport exec reached/);
-  assert.equal(touched.length, 1, `an apply session runs the write on the host: ${touched.join('; ')}`);
-});
-
 test('unit:up-writes-profiles — an account signed in while the accounts step waits gets its profile: a write that left a profile missing runs again on each wait, and the step ends green once both exist', async () => {
   const { runUp } = await import('../src/up.js');
   const checkout = await temporaryDirectory('up-writes-profiles-late');

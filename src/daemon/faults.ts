@@ -15,7 +15,7 @@ import { baseFailureAttention } from './cycle-base-failures.js';
 import { agentOwner } from '../master/attention.js';
 import type { Cycle } from './cycle.js';
 import { checkInvariants, invariantFaultKind, invariantFaults } from '../model/invariants.js';
-import { baseRefreshConflict } from '../merge-queue.js';
+import { baseRefreshConflict } from '../model/base-refresh.js';
 import { mergeBaseDismissal } from '../merge-base-ancestry.js';
 import { containmentInMotion, containmentSettleWaitBoundMs } from '../model/containment.js';
 import { openAction } from '../model/next-action.js';
@@ -50,8 +50,8 @@ export interface FaultSources {
  * (escalations, fences, parks, proof gaps, spent accounts, violations, blockers);
  * the attention `master status` derives from the same snapshot, Herdr and containment reads
  * (session liveness, review convergence, base conflicts, overlap holds, merge violations, installation
- * sources); the status-level problems (App permissions, held or failed integration jobs, a GitHub
- * pause, unserved executors, no GitHub connection); and disk below its bound. Each has a stable
+ * sources); the status-level problems (held or failed integration jobs, unserved executors); and
+ * disk below its bound. Each has a stable
  * subject, so a fault that keeps standing is one instance; one that clears and returns is another.
  * The lines go through the report's own attribution first, so a symptom the report names as its
  * cause (a full ledger, a resource at its bound) is tracked as that cause alone: a resource at its

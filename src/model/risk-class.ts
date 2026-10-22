@@ -5,8 +5,8 @@ import { compiledRules, repositoryPolicy, type CompiledRule, type RepositoryPoli
 
 /**
  * The risk class of a change, judged from the files the merge would actually apply to the base
- * branch, beside the path-glob lane (`policy.ts determineLane`) that still gates github mode. The
- * lane classifies the pull request's observed paths; the class classifies the delta the merge
+ * branch, beside the path-glob lane (`policy.ts determineLane`) that still gates a pull-request-era
+ * observation. The lane classifies the observed paths; the class classifies the delta the merge
  * applies — the landing check's three-way result when it was computed against the live base tip —
  * and names, per file, the rule that made it sensitive. Nothing gates on the class yet: it is
  * computed on read and shown beside the lane by `graphyard status` and the item page.

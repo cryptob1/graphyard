@@ -1,6 +1,6 @@
 // Concern: routine decisions — standing verdicts, decision reasons and the approver step.
 import { type Work, type AgentReview, reviewProviderOf, RefusedResponse } from '../model.js';
-import { baseRefreshConflict, threadsAwaitReview, botThread, openThreads, pendingBaseRefresh, type ReviewThread, describeThread } from '../merge-queue.js';
+import { baseRefreshConflict, pendingBaseRefresh } from '../model/base-refresh.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { conflictReworkDue, decisionBindingMax, type DecisionSituation } from '../model/approval.js'; import { unsettledApproval } from './decision-reads.js';
@@ -11,11 +11,11 @@ import { unproducedManualProofs } from '../model/unproduced-attestation.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { triageClosure } from '../model/machine-backlog.js'; import { refusedAttestationRework, type RefusedAttestation } from '../model/rework-ground.js';
 import { actionDetailMax, approvalWatchSchema, type ApprovalWatch } from './state.js';
-// A decision's wording — its bounded reason and detail, thread summaries, and the refusals a retry
+// A decision's wording — its bounded reason and detail, and the refusals a retry
 // cites — lives in ./decision-text.ts; it is imported for use here and re-exported, so every
 // existing import keeps working.
-import { adoptedOnRefusal, botThreadReworkRounds, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, maxRefusalAnswers, namePaths, refusalNamedIn, reworkDecisionReason, reworkGroundsMin, reworkThreads, setAsideFollowUpThreads, standingNamedIn, threadReworkSummary } from './decision-text.js';
-export { adoptedOnRefusal, botThreadReworkRounds, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, maxRefusalAnswers, namePaths, refusalNamedIn, reworkDecisionReason, reworkGroundsMin, reworkThreads, setAsideFollowUpThreads, standingNamedIn, threadReworkSummary } from './decision-text.js';
+import { adoptedOnRefusal, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, maxRefusalAnswers, namePaths, refusalNamedIn, reworkDecisionReason, reworkGroundsMin, standingNamedIn } from './decision-text.js';
+export { adoptedOnRefusal, boundDetail, decisionReasonMax, detailChanged, fitDecisionReason, maxRefusalAnswers, namePaths, refusalNamedIn, reworkDecisionReason, reworkGroundsMin, standingNamedIn } from './decision-text.js';
 import { blockingFindings, controlPlaneWithdrawal, followUpFindingsOf, pastReviewCap, reviewRound, reviewRoundCapOf, reworkRoundsOf } from '../review-cap.js';
 import { sessionName } from '../session-name.js';
 import type { ScreenMotion } from '../master/approver-stall.js';
@@ -108,49 +108,33 @@ export function cappedReview(work: Work, config: Partial<Pick<MasterConfig, 'rev
 }
 
 /**
- * GY-144. Rework throws away a current review and its proofs, so it is asked for only on a GitHub
- * observation that still describes the item: one taken within the two minutes the merge gate
- * trusts, while GitHub answers. During a rate-limit pause the control plane cannot observe, and
- * a worker may meanwhile have synced, pushed and submitted a green head the last observation
- * never saw; a verdict or conflict read from that observation is about a head the branch has
- * moved past. The loop waits for a fresh observation and decides from that.
+ * GY-144. Rework throws away a current review and its proofs, so it is asked for only on an
+ * observation that still describes the item: one taken within the last two minutes. A worker may
+ * meanwhile have synced, pushed and submitted a green head the last observation never saw; a
+ * verdict or conflict read from that observation is about a head the branch has moved past. The
+ * loop waits for a fresh observation and decides from that.
  */
 export const reworkObservationMaxAgeMs = 120_000;
 /** GY-1266's former age bound on the woken observation, lifted by GY-1257 (a cycle may outlast it); the span a burst replay covers. */
 export const reworkWokenObservationMaxAgeMs = 15 * 60_000;
-export interface GitHubPause { until: string }
-/**
- * Whether the control plane's GitHub client is paused, read from the observation jobs it refused:
- * a paused client refuses every request with "GitHub requests paused until <time>", and the job
- * keeps that error until it next runs. The latest pause still in the future is the one standing.
- */
-export function githubPause(jobs: readonly { error?: string | null }[] | undefined, now: number): GitHubPause | null {
-  let until = 0;
-  for (const job of jobs ?? []) {
-    const at = Date.parse(/requests paused until (\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z)/.exec(job.error ?? '')?.[1] ?? '');
-    if (Number.isFinite(at) && at > now && at > until) until = at;
-  }
-  return until ? { until: new Date(until).toISOString() } : null;
-}
 /** What a rework request records of the observation it was decided from, so an approver can see whether the item has moved since. */
 export const observedFrom = (work: Work) => work.observation
-  ? `[Decided from the GitHub observation taken at ${work.observation.at} of candidate ${work.observation.candidate.sha}; if the item has moved since, this request no longer describes it.]`
-  : '[Decided with no GitHub observation of the item.]';
+  ? `[Decided from the observation taken at ${work.observation.at} of candidate ${work.observation.candidate.sha}; if the item has moved since, this request no longer describes it.]`
+  : '[Decided with no observation of the item.]';
 /**
  * Why a rework request must wait for a fresh observation, or null when the one on the item may be decided
  * from. The reason names the stale observation — its time and head — never its age, so it reads the same each cycle.
  */
-export function reworkObservationWait(work: Work, now: number, pause: GitHubPause | null, wokenAt?: string | null): string | null {
+export function reworkObservationWait(work: Work, now: number, wokenAt?: string | null): string | null {
   const observation = work.observation;
-  if (!observation) return `${work.key}: rework waits for a GitHub observation of the item; there is none to decide from`;
-  const seen = `the last GitHub observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
-  if (pause) return `${work.key}: rework waits for a fresh GitHub observation — GitHub requests are paused until ${pause.until}, so ${seen} is a stale observation that may describe a head the branch has moved past`;
+  if (!observation) return `${work.key}: rework waits for an observation of the item; there is none to decide from`;
+  const seen = `the last observation (taken at ${observation.at} of head ${observation.candidate.sha.slice(0, 12)})`;
   const age = now - Date.parse(observation.at);
   // GY-1266/GY-1257. The loop's own woken observation of the submitted head is the reading it waited for: the next cycle reads it
   // an interval or a slow cycle later, past any age bound on the cycle clock, so on such a bound every landed wake was stale again,
   // re-sent, and no rework was ever requested. Its head must still be the candidate's; apply time withdraws one the item moved past.
   if (wokenAt && Date.parse(observation.at) > Date.parse(wokenAt) && observation.candidate.sha === work.candidate?.sha) return null;
-  if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh GitHub observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
+  if (!(Number.isFinite(age) && age < reworkObservationMaxAgeMs)) return `${work.key}: rework waits for a fresh observation — ${seen} is a stale observation, older than two minutes, and the branch may have moved past that head`;
   return null;
 }
 
@@ -165,11 +149,11 @@ export const conflictReworkOverdue = (work: Work, decision: Pick<RoutineDecision
 /**
  * GY-710. A step refused for want of a fresh observation wakes the item's observation job at once and waits for that
  * observation to land, not the job's cadence. One wake stands until a newer observation lands; a wake that brought none
- * within this bound (the job failed, or the server lost it) is sent again. During a GitHub pause no wake is sent.
+ * within this bound (the job failed, or the server lost it) is sent again.
  */
 export const observationWakeRetryMs = 5 * 60_000;
-export function observationWakeDue(work: Work, wokenAt: string | null | undefined, now: number, pause: GitHubPause | null): boolean {
-  if (pause || !work.submission) return false;
+export function observationWakeDue(work: Work, wokenAt: string | null | undefined, now: number): boolean {
+  if (!work.submission) return false;
   const woken = wokenAt ? Date.parse(wokenAt) : Number.NaN;
   if (!Number.isFinite(woken)) return true;
   const observed = work.observation ? Date.parse(work.observation.at) : Number.NaN;
@@ -234,24 +218,21 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // worker, not a second decision, even when that round's worker dies before pushing.
   const conflict = work.reworkRequested ? null : baseRefreshConflict(work);
   // A rework binding names its grounds as well as the head: a refused request on one ground (the
-  // approver judged it premature) must not bar the same head's rework on another. On 2026-09-24
-  // GY-163's thread rework was refused before its reviewer had judged the head; the reviewer then
-  // requested changes, and the loop never asked again because both keyed on the head alone. Since
+  // approver judged it premature) must not bar the same head's rework on another (GY-163). Since
   // GY-407 the binding rides the request's input, so the server's refusal match sees it too.
   if (conflict) return { action: 'rework', reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
-  // A head GitHub reports conflicting with the base is not waited on either (GY-191): nothing but a sync can move it,
+  // A head observed conflicting with the base is not waited on either (GY-191): nothing but a sync can move it,
   // so the loop asks for that round at once, naming the base tip it conflicts with.
   const sync = work.reworkRequested ? null : syncConflict(work);
   if (sync) return { action: 'rework', reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
   // Past the review-round cap (GY-1118) no review finding sends the item back: a change request is
-  // filed as follow-ups or escalated by the review-cap step (cappedReview), and threads are only
-  // the reviewer's inputs. Proofs, CI, conflicts and refused merges still return the head below.
+  // filed as follow-ups or escalated by the review-cap step (cappedReview). Proofs, conflicts and
+  // refused merges still return the head below.
   const capped = pastReviewCap(work, reviewRoundCapOf(config));
   const verdict = capped ? null : standingVerdict(work);
   if (verdict) return { action: 'rework', reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   // A failed trusted proof, or evidence the producer found does not exercise its criterion, returns
-  // the head before any review (GY-193): no review comes for such a head, so the thread rule below —
-  // which waits for one — must not hold this rework.
+  // the head before any review (GY-193): no review comes for such a head.
   const proofs = proofRework(work);
   if (proofs) return { action: 'rework', ...proofs };
   // No stored CI check result returns a head (GY-2010): checks were GitHub's, and a pull-request-era
@@ -279,16 +260,6 @@ export function neededDecision(work: Work, config: ReviewCapConfig, baseFailed?:
   // (GY-523), never by rework: nothing in the change is wrong, only the record of the attestation.
   const attestation = attestationDecision(work);
   if (attestation) return attestation;
-  // Unresolved review threads block no merge: the reviewer's verdict on the head is the review
-  // gate and the threads are its inputs. A thread still open once the review of the current head
-  // has settled — one it was not shown, or a policy with no review — is a finding the loop sends
-  // back for, early on. The review judges threads first: its approval names the ones fixed or
-  // overridden and the loop resolves them, so a rework requested before it settles would invalidate
-  // the review that clears them. After `botThreadReworkRounds` rework rounds a bot's thread is
-  // advisory: bot findings alone had kept items cycling round after round on the same head family.
-  const threads = !capped && !work.reworkRequested && work.candidate && !threadsAwaitReview(work, Date.parse(work.observation?.at ?? '')) ? reworkThreads(work) : [];
-  if (threads.length) return { action: 'rework', reason: `${work.key}: ${threadReworkSummary(work.candidate!.sha, threads)}. The findings stand against the current head, so the item returns to a worker to address them; the next review names the threads it verified fixed and the loop resolves them.`,
-    binding: `${work.candidate!.sha}:threads:${threads.map(thread => thread.id ?? `${thread.path}:${thread.line}`).sort().join(',')}` };
   // An otherwise-approved head whose approval raised findings classified mechanical (GY-971) returns
   // to a worker-class bot round for one commit that fixes exactly those, before the fresh read.
   const fix = mechanicalRework(work, mechanical);
@@ -378,14 +349,13 @@ export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedPr
  * GY-193. The rework a head's own proofs call for, or null. A trusted proof that failed on the head
  * (the build gate returns it to its worker before review) and evidence the producer recorded as not
  * exercising its criterion (the proof also passed with the change removed) both leave a head no
- * review will ever judge, so the rework is asked for now, whatever threads stand open on it: the
- * rule that waits for a review to judge the threads first would wait for a review that never comes.
+ * review will ever judge, so the rework is asked for now.
  * GY-868: a manual: proof a producer session may run and recorded as failed with cases executed is
  * a trusted proof failed like any other — the producer judged the change and found it inadequate —
  * so it returns the head to its worker too. A manual record with executed = 0 judged nothing and
  * goes to attestationDecision instead, and a manual proof no producer may run is never the
  * worker's: both stay out of this rework.
- * The reason quotes each finding and names the open threads, so the worker takes both in one round.
+ * The reason quotes each finding.
  */
 export function proofRework(work: Work): { reason: string; binding: string } | null {
   const candidate = work.candidate;
@@ -395,14 +365,11 @@ export function proofRework(work: Work): { reason: string; binding: string } | n
   // An unexercised `manual:` proof is not the worker's to fix: see attestationDecision.
   const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:'));
   if (!failed.length && !unexercised.length) return null;
-  const threads = work.observation?.candidate.sha === candidate.sha ? work.observation.conversations?.unresolved ?? [] : [];
   const findings = [
     ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalProof(verdict.proof) ? mechanicalFailure(verdict, candidate.sha) : producerManualFailure(verdict, candidate.sha)).join('; ')}`] : []),
     ...(unexercised.length ? [`the producer recorded evidence that does not exercise its criterion on ${candidate.sha.slice(0, 12)} — ${unexercised.map(entry => `${entry.proof}: "${entry.finding.length > 400 ? `${entry.finding.slice(0, 399)}…` : entry.finding}"`).join('; ')}`] : []),
   ];
-  const named = threads.slice(0, 5).map(thread => { const text = describeThread(thread); return text.length > 120 ? `${text.slice(0, 119)}…` : text; });
-  const open = threads.length ? ` ${threads.length} review thread${threads.length === 1 ? ' is' : 's are'} also unresolved on the pull request (${named.join('; ')}${threads.length > named.length ? `; and ${threads.length - named.length} more` : ''}); address them in the same round.` : '';
-  return { reason: `${work.key}: ${findings.join('. ')}. No review judges a head whose proof did not pass, so the item returns to a worker now to fix what the proof found.${open}`,
+  return { reason: `${work.key}: ${findings.join('. ')}. No review judges a head whose proof did not pass, so the item returns to a worker now to fix what the proof found.`,
     binding: `${candidate.sha}:proof:${[...failed.map(verdict => verdict.proof), ...unexercised.map(entry => `unexercised:${entry.proof}`)].sort().join(',')}` };
 }
 

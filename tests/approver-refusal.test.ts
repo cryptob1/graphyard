@@ -49,7 +49,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('approver-refusal'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('refusal_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/refusal_test`); await store.init();
-  const engine = new Engine(store, [15368], 120, repository); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

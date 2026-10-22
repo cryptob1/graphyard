@@ -3,9 +3,7 @@ import { standingEscalations } from './escalation.js';
 import { leadHoldRefusal } from './delegation.js';
 import type { Work } from './work.js';
 import type { NextActionKind } from './action-kinds.js';
-import { checkRerunHeld, requiredCheck } from '../merge-queue.js';
 import { ciCheckName, mergeWriterPushPattern, mergeWriterTrialPattern } from './ci-refusal.js';
-import { requiredCheckFailurePattern } from './required-check-refusal.js';
 import { mechanicalHoldPattern } from './refusal-catalogue.js';
 
 /**
@@ -51,13 +49,13 @@ export const refusalRules: { gate: string | null; match: RegExp; kind: NextActio
   { gate: 'review', match: mechanicalHoldPattern, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test and merge: the merge writer trials and pushes the head itself (GY-2010); its own merge step
-  // answers both. No GitHub check, mergeability or protection refuses a gate any more.
+  // answers both. No remote check, mergeability or protection refuses a gate any more.
   { gate: 'test', match: mergeWriterTrialPattern, kind: 'merge' },
-  { gate: 'test', match: /^GitHub has not been observed at the current candidate$/, kind: 'resync' },
+  { gate: 'test', match: /^The merge writer has not observed the current candidate$/, kind: 'resync' },
   { gate: 'merge', match: mergeWriterPushPattern, kind: 'merge' },
   // merge
   // Nothing gates the merge on the observation's age (GY-1235): only a reading of the current head.
-  { gate: 'merge', match: /^GitHub has not been observed at the current candidate$/, kind: 'resync' },
+  { gate: 'merge', match: /^The merge writer has not observed the current candidate$/, kind: 'resync' },
   { gate: null, match: /.*/, kind: 'escalate' },
 ];
 
@@ -94,7 +92,7 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
     // Mechanical proofs precede review (GY-115): producers first; a failed proof owes a new head.
     case 'proofs-pending': return { kind: 'dispatch', reason: need.reason };
     case 'proof-failed': return { kind: 'request-rework', reason: need.reason };
-    // Changes requested on this exact head — as a GitHub review, or as the verdict an agent
+    // Changes requested on this exact head — as a reviewer session's verdict, or as the verdict an agent
     // reviewer records — means the item needs a new commit, which is a judgment's to make.
     case 'changes-requested': return { kind: 'request-rework', reason: need.reason };
     // A head that does not contain the base tip is answered by a fresh reading and base refresh.
@@ -117,15 +115,6 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
  * and a review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
 export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
-  // A pull-request-era CI refusal: no gate words it since GY-2010, but a record the loop's
-  // failed-check rework still reads may carry one. A check that reported a failure needs a new
-  // head; one still to answer needs a re-read; a failure held by its owed rerun (GY-516) waits for it.
-  const name = gate === 'test' ? ciCheckName(refusal) : null;
-  if (name !== null) {
-    const latest = requiredCheck(work, name);
-    return latest && ['failure', 'timed_out', 'action_required', 'cancelled'].includes(latest.result) && !checkRerunHeld(work, name) ? 'request-rework' : 'resync';
-  }
-  if (gate === 'test' && requiredCheckFailurePattern.test(refusal)) return 'request-rework';
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);
     if (standstill) return standstill.kind;

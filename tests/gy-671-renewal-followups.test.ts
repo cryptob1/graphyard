@@ -33,7 +33,7 @@ before(async () => {
 after(async () => { if (database) await database.stop(); });
 
 function engineOn(store: Store, leaseSeconds = 120) {
-  const engine = new Engine(store, [15368], leaseSeconds, 'owner/project');
+  const engine = new Engine(store, leaseSeconds, 'owner/project');
   engine.principals = [operator, engineer];
   engine.submissionObserver = null;
   return engine;

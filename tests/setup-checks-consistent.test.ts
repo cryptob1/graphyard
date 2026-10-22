@@ -35,15 +35,15 @@ async function repository(files: Record<string, string>) {
 }
 
 test('unit:setup-checks-consistent — install preflight needs only the repo scope for the deploy key, on every provider', () => {
-  for (const provider of ['compose', 'railway', 'hetzner', 'docker-host', 'host', 'local'] as const) {
+  for (const provider of ['compose', 'local'] as const) {
     const check = githubCliPreflight(provider, signedIn("'gist', 'read:org', 'repo'"), 'owner/scratch');
     assert.equal(check.ok, true, provider); assert.doesNotMatch(`${check.detail} ${check.fix ?? ''}`, /admin:repo_hook|webhook/);
   }
-  const noRepo = githubCliPreflight('railway', signedIn("'gist'"), 'owner/scratch');
+  const noRepo = githubCliPreflight('local', signedIn("'gist'"), 'owner/scratch');
   assert.equal(noRepo.ok, false); assert.match(noRepo.detail, /lacks scope repo/); assert.equal(noRepo.fix, 'Run: gh auth refresh --scopes repo');
   const absent = githubCliPreflight('compose', { code: 1, stdout: '' }, 'owner/scratch');
   assert.equal(absent.ok, false); assert.match(absent.fix!, /gh auth login --scopes repo \(the account must administer owner\/scratch\)/);
-  assert.equal(githubCliPreflight('hetzner', { code: 0, stdout: 'Logged in to github.com account pilot' }, 'owner/scratch').ok, true, 'a login whose scopes gh does not list is not refused for them');
+  assert.equal(githubCliPreflight('compose', { code: 0, stdout: 'Logged in to github.com account pilot' }, 'owner/scratch').ok, true, 'a login whose scopes gh does not list is not refused for them');
 });
 
 test('unit:setup-checks-consistent — onboarding puts worker credentials under GRAPHYARD_CONFIG_HOME and init --apply creates the files its profiles name', async () => {

@@ -87,7 +87,7 @@ before(async () => {
   databaseUrl = `postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_scale`;
   store = new Store(databaseUrl);
   await store.init();
-  engine = new Engine(store, [15368], 120, 'owner/project');
+  engine = new Engine(store, 120, 'owner/project');
   http = server(engine, [{ ...coordinator, token: tokens.coordinator }, { ...admin, token: tokens.admin }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as AddressInfo).port}`;
@@ -290,7 +290,7 @@ test('unit:status-degrades-per-section — master status still returns every oth
   const strict = new Store(databaseUrl);
   // The report runs on the report pool (GY-491), under its own statement timeout.
   strict.reportPool.options.statement_timeout = 1;
-  const slowServer = server(new Engine(strict, [15368], 120, 'owner/project'), [{ ...coordinator, token: tokens.coordinator }]);
+  const slowServer = server(new Engine(strict, 120, 'owner/project'), [{ ...coordinator, token: tokens.coordinator }]);
   await new Promise<void>(resolve => slowServer.listen(0, '127.0.0.1', resolve));
   const logged: string[] = [], original = console.error;
   console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };

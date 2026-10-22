@@ -241,7 +241,7 @@ test('unit:loop-self-upgrade — between cycles the loop checks out the verified
         agents: () => [],
         credentials: async () => ({}),
         observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'none', deployed: [], pending: [] }),
-        requestSmoke: async () => {}, merge: async () => {}, recordDeployment: async () => {}, requestProof: async () => {},
+ merge: async () => {}, recordDeployment: async () => {},
         dispatch: async () => {}, recordSession: async () => {}, closeSession: () => {},
         persist: (written: DaemonState) => writeDaemonState(master, written),
         loadedRelease: readRelease(repo),

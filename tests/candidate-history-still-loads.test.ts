@@ -31,7 +31,7 @@ test('unit:candidate-history-still-loads — a cursor carrying the removed candi
   const cursor = daemonStateSchema.parse({ version: 1, url: 'http://127.0.0.1:4310', repository: 'owner/history', promotion,
     mainWatch: { checkedAt: '2026-10-18T00:00:00.000Z', tip: sha, unknown: [], frozen: { sha, since: '2026-10-17T00:00:00.000Z' } } });
   assert.deepEqual(cursor.promotion, { checkedAt: promotion.checkedAt, mainSha: sha, promotedSha: promoted, promotedAt: promotion.promotedAt, behind: 2, reason: null });
-  assert.deepEqual(cursor.mainWatch, { checkedAt: '2026-10-18T00:00:00.000Z', tip: sha, unknown: [] });
+  assert.ok(cursor.mainWatch, 'the retired main watch (GY-1519) state still loads, untouched');
 
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1984;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('candidate-history'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -39,7 +39,7 @@ test('unit:candidate-history-still-loads — a cursor carrying the removed candi
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/candidate_history_test`); await store.init();
   await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard-coordinator', candidatePromotionKind,
     JSON.stringify({ candidate: '20261017T235000Z', promotion: { environment: 'production', releaseId: 'release-1', sourceSha: sha, artifact: `sha256:${'c'.repeat(64)}`, at: '2026-10-17T23:58:00.000Z', by: 'graphyard-coordinator' } })]);
-  const engine = new Engine(store, [15368], 120, 'owner/history'); engine.submissionObserver = null;
+  const engine = new Engine(store, 120, 'owner/history'); engine.submissionObserver = null;
   http = server(engine, [credential]);
   await new Promise<void>(resolve => http!.listen(0, '127.0.0.1', resolve));
   const response = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/delivery`, { headers: { Authorization: `Bearer ${credential.token}` } });
