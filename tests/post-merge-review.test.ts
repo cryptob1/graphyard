@@ -206,8 +206,8 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   const memoryRoot = await temporaryDirectory('post-merge-memory');
   try {
     await dispatchEffects(memoryRoot, config, { snapshot: async () => ({ work: [], now: at }) }).recordFindings!(wordy, memoryFail, kept[0]!);
-    const entry = (await readProjectMemory(memoryRoot)).decisions.find(decision => decision.action === 'post-merge-review')!;
-    for (const finding of kept[0]!) assert.ok(entry.reason.includes(finding), 'project memory keeps every finding whole');
+    const entry = (await readProjectMemory(memoryRoot)).notes.find(note => note.kind === 'post-merge-review')!;
+    for (const finding of kept[0]!) assert.ok(entry.text.includes(finding), 'project memory keeps every finding whole');
   } finally { await rm(memoryRoot, { recursive: true, force: true }); }
   assert.equal(launched.stage, 'done');
   assert.equal(await filePostMergeFollowUps(launched, record(launched), {}, new Date(clock)), null, 'no verdict, nothing to file');

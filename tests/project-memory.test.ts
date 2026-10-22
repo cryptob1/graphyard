@@ -8,10 +8,9 @@ import {
   emptyProjectMemory,
   projectMemoryDigest,
   projectMemoryWordBudget,
-  recordDecisionInMemory,
+  recordNoteInMemory,
   recordChangeInMemory,
   updateProjectMemoryFromWork,
-  isDecisionRoleRelevant,
   type ProjectMemory,
 } from '../src/model/project-memory.js';
 import {
@@ -34,31 +33,28 @@ import { masterConfigSchema, type MasterConfig } from '../src/master/profiles.js
 function createSampleMemory(): ProjectMemory {
   const memory = emptyProjectMemory('2026-10-02T12:00:00Z');
   // Decisions
-  recordDecisionInMemory(memory, {
+  recordNoteInMemory(memory, {
     id: 'dec-1',
     key: 'GY-1001',
-    action: 'scope',
-    reason: 'Widen scope for auth helpers in src/auth.ts',
-    state: 'applied',
-    approvedBy: 'graphyard-approver',
+    kind: 'scope',
+    text: 'Widen scope for auth helpers in src/auth.ts',
+    by: 'graphyard-approver',
     at: '2026-10-02T10:00:00Z',
   });
-  recordDecisionInMemory(memory, {
+  recordNoteInMemory(memory, {
     id: 'dec-2',
     key: 'GY-1002',
-    action: 'review',
-    reason: 'Approve single-party bypass for docs chore',
-    state: 'approved',
-    approvedBy: 'operator',
+    kind: 'review',
+    text: 'Approve single-party bypass for docs chore',
+    by: 'operator',
     at: '2026-10-02T11:00:00Z',
   });
-  recordDecisionInMemory(memory, {
+  recordNoteInMemory(memory, {
     id: 'dec-3',
     key: 'GY-1003',
-    action: 'attest',
-    reason: 'Attest mechanical proof criteria pass',
-    state: 'applied',
-    approvedBy: 'graphyard-approver',
+    kind: 'attest',
+    text: 'Attest mechanical proof criteria pass',
+    by: 'graphyard-approver',
     at: '2026-10-02T11:30:00Z',
   });
 
@@ -94,7 +90,7 @@ test('unit:session-request-carries-project-memory — worker request carries rol
   const digest = projectMemoryDigest(memory, 'worker', { baseSha });
 
   assert.ok(digest.includes('Shared project memory:'));
-  assert.ok(digest.includes('GY-1001 (scope): Widen scope for auth helpers in src/auth.ts [approved by graphyard-approver]'));
+  assert.ok(digest.includes('GY-1001 (scope): Widen scope for auth helpers in src/auth.ts [by graphyard-approver]'));
   assert.ok(digest.includes('GY-1000 (1111111111): src/auth.ts, tests/auth.test.ts'));
   assert.ok(docsWords(digest) <= projectMemoryWordBudget);
 
@@ -110,7 +106,7 @@ test('unit:session-request-carries-project-memory — worker request carries rol
 
   assert.ok(request.includes('Implement GY-1125: Project memory.'));
   assert.ok(request.includes('Shared project memory:'));
-  assert.ok(request.includes('Recent decisions:'));
+  assert.ok(request.includes('Recent notes:'));
   assert.ok(request.includes('Recent merges to main since base 0000000000: - GY-1000 (1111111111): src/auth.ts, tests/auth.test.ts - GY-999 (5555555555): README.md, docs/overview.md'));
   assert.ok(!request.includes('GY-998'), 'the base merge itself is not news to the session');
 });
@@ -128,10 +124,10 @@ test('unit:session-request-carries-project-memory — merges since base exclude 
 
 test('unit:session-request-carries-project-memory — the digest renders each section in its exact form', () => {
   const memory = emptyProjectMemory('2026-10-02T12:00:00Z');
-  recordDecisionInMemory(memory, { id: 'd', key: 'GY-1', action: 'scope', reason: 'Widen to src/a.ts', state: 'applied', approvedBy: 'approver-1', at: '2026-10-02T10:00:00Z' });
+  recordNoteInMemory(memory, { id: 'd', key: 'GY-1', kind: 'scope', text: 'Widen to src/a.ts', by: 'approver-1', at: '2026-10-02T10:00:00Z' });
   recordChangeInMemory(memory, { key: 'GY-2', sha: 'a'.repeat(40), files: ['src/a.ts'], mergedAt: '2026-10-02T08:00:00Z' });
   assert.equal(projectMemoryDigest(memory, 'worker'),
-    `Shared project memory: Recent decisions: - GY-1 (scope): Widen to src/a.ts [approved by approver-1] Recent merges to main in last 24h: - GY-2 (aaaaaaaaaa): src/a.ts `);
+    `Shared project memory: Recent notes: - GY-1 (scope): Widen to src/a.ts [by approver-1] Recent merges to main in last 24h: - GY-2 (aaaaaaaaaa): src/a.ts `);
   assert.equal(projectMemoryDigest(emptyProjectMemory(), 'worker'), '');
   assert.equal(projectMemoryDigest(null, 'reviewer'), '');
 });
@@ -142,7 +138,7 @@ test('unit:session-request-carries-project-memory — reviewer request carries r
   const digest = projectMemoryDigest(memory, 'reviewer', { baseSha });
 
   assert.ok(digest.includes('Shared project memory:'));
-  assert.ok(digest.includes('GY-1002 (review): Approve single-party bypass for docs chore [approved by operator]'));
+  assert.ok(digest.includes('GY-1002 (review): Approve single-party bypass for docs chore [by operator]'));
   assert.ok(docsWords(digest) <= projectMemoryWordBudget);
 
   const request = reviewPrompt(
@@ -168,7 +164,7 @@ test('unit:session-request-carries-project-memory — producer request carries r
   const digest = projectMemoryDigest(memory, 'producer', { baseSha });
 
   assert.ok(digest.includes('Shared project memory:'));
-  assert.ok(digest.includes('GY-1003 (attest): Attest mechanical proof criteria pass [approved by graphyard-approver]'));
+  assert.ok(digest.includes('GY-1003 (attest): Attest mechanical proof criteria pass [by graphyard-approver]'));
   assert.ok(docsWords(digest) <= projectMemoryWordBudget);
 
   const request = producerPrompt(
@@ -203,13 +199,12 @@ test('unit:session-request-carries-project-memory — piProducerPrompt carries r
 test('unit:session-request-carries-project-memory — fixed word budget truncates overflow and prioritizes role-relevant entries', () => {
   const memory = emptyProjectMemory();
   for (let i = 0; i < 50; i++) {
-    recordDecisionInMemory(memory, {
+    recordNoteInMemory(memory, {
       id: `dec-${i}`,
       key: `GY-${2000 + i}`,
-      action: i % 2 === 0 ? 'scope' : 'other',
-      reason: `Detailed explanation for decision ${i} explaining the full architecture context and requirements rationale for this specific change`,
-      state: 'applied',
-      approvedBy: 'approver',
+      kind: i % 2 === 0 ? 'scope' : 'other',
+      text: `Detailed explanation for decision ${i} explaining the full architecture context and requirements rationale for this specific change`,
+      by: 'approver',
       at: new Date(Date.now() - i * 60_000).toISOString(),
     });
   }
@@ -219,7 +214,7 @@ test('unit:session-request-carries-project-memory — fixed word budget truncate
   assert.ok(digest.startsWith('Shared project memory:'));
 });
 
-test('unit:session-request-carries-project-memory — memory updates from settled decisions and merges only', async () => {
+test('unit:session-request-carries-project-memory — memory updates from operator answers and merges only', async () => {
   const memory = emptyProjectMemory();
 
   // 1. Settled operator answers
@@ -267,12 +262,12 @@ test('unit:session-request-carries-project-memory — memory updates from settle
 
   updateProjectMemoryFromWork(memory, work, Date.now());
 
-  assert.equal(memory.decisions.length, 1);
-  assert.equal(memory.decisions[0].key, 'GY-500');
-  assert.equal(memory.decisions[0].action, 'credentials-for-people');
-  assert.ok(memory.decisions[0].reason.includes('Deploy token for production: Token created and stored in vault'));
-  assert.equal(memory.decisions[0].approvedBy, 'operator-1');
-  assert.ok(!memory.decisions.some(d => d.id === 'hr-0'), 'a declined answer decided nothing');
+  assert.equal(memory.notes.length, 1);
+  assert.equal(memory.notes[0].key, 'GY-500');
+  assert.equal(memory.notes[0].kind, 'credentials-for-people');
+  assert.ok(memory.notes[0].text.includes('Deploy token for production: Token created and stored in vault'));
+  assert.equal(memory.notes[0].by, 'operator-1');
+  assert.ok(!memory.notes.some(d => d.id === 'hr-0'), 'a declined answer decided nothing');
 
   assert.equal(memory.changes.length, 1);
   assert.equal(memory.changes[0].key, 'GY-500');
@@ -285,37 +280,12 @@ test('unit:session-request-carries-project-memory — memory updates from settle
     now: Date.parse('2026-10-02T10:00:00Z'),
   });
 
-  assert.equal(memory.decisions.length, 1);
+  assert.equal(memory.notes.length, 1);
   assert.equal(memory.changes.length, 1);
 });
 
-test('unit:session-request-carries-project-memory — unreviewed agent claims and unapproved decisions are rejected', () => {
+test('unit:session-request-carries-project-memory — an unanswered human request records nothing', () => {
   const memory = emptyProjectMemory();
-
-  // Agent requests decision (state = requested or started, not applied/approved)
-  const rejected1 = recordDecisionInMemory(memory, {
-    id: 'agent-claim-1',
-    key: 'GY-700',
-    action: 'scope',
-    reason: 'I claim that src/secret.ts is in scope',
-    state: 'requested',
-    at: '2026-10-02T10:00:00Z',
-  });
-  assert.equal(rejected1, false, 'Unapproved agent request must not be recorded');
-  assert.equal(memory.decisions.length, 0);
-
-  // Decision without approver
-  const rejected2 = recordDecisionInMemory(memory, {
-    id: 'agent-claim-2',
-    key: 'GY-700',
-    action: 'scope',
-    reason: 'Self-approved scope claim',
-    state: 'applied',
-    approvedBy: undefined,
-    at: '2026-10-02T10:00:00Z',
-  });
-  assert.equal(rejected2, false, 'Self-claim without approvedBy must not be recorded');
-  assert.equal(memory.decisions.length, 0);
 
   // Unsettled human request (no answer provided)
   const unfinishedWork: Work[] = [
@@ -334,7 +304,7 @@ test('unit:session-request-carries-project-memory — unreviewed agent claims an
     } as any,
   ];
   updateProjectMemoryFromWork(memory, unfinishedWork, Date.now());
-  assert.equal(memory.decisions.length, 0, 'Unanswered human requests must not be recorded');
+  assert.equal(memory.notes.length, 0, 'Unanswered human requests must not be recorded');
   assert.equal(memory.changes.length, 0, 'Unmerged items must not be recorded');
 });
 
@@ -361,7 +331,7 @@ test('unit:session-request-carries-project-memory — master status shows projec
     );
 
     assert.ok(status.projectMemory, 'buildMasterStatus must include projectMemory');
-    assert.equal(status.projectMemory.decisions.length, 3);
+    assert.equal(status.projectMemory.notes.length, 3);
     assert.equal(status.projectMemory.changes.length, 3);
 
     // 2. masterStatusReport
@@ -404,7 +374,7 @@ test('unit:session-request-carries-project-memory — master status shows projec
     );
 
     assert.ok(report.projectMemory, `masterStatusReport must include projectMemory: ${JSON.stringify(report.daemon).slice(0, 400)}`);
-    assert.equal(report.projectMemory.decisions.length, 3);
+    assert.equal(report.projectMemory.notes.length, 3);
     assert.equal(report.projectMemory.changes.length, 3);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -419,10 +389,10 @@ test('unit:session-request-carries-project-memory — file persistence round-tri
 
     const loaded = await readProjectMemory(dir);
     assert.equal(loaded.version, 1);
-    assert.equal(loaded.decisions.length, memory.decisions.length);
+    assert.equal(loaded.notes.length, memory.notes.length);
     assert.equal(loaded.changes.length, memory.changes.length);
 
-    assert.deepEqual(loaded.decisions[0], memory.decisions[0]);
+    assert.deepEqual(loaded.notes[0], memory.notes[0]);
     assert.deepEqual(loaded.changes[0], memory.changes[0]);
 
     // ENOENT falls back to emptyProjectMemory
@@ -430,7 +400,7 @@ test('unit:session-request-carries-project-memory — file persistence round-tri
     try {
       const empty = await readProjectMemory(emptyDir);
       assert.equal(empty.version, 1);
-      assert.deepEqual(empty.decisions, []);
+      assert.deepEqual(empty.notes, []);
       assert.deepEqual(empty.changes, []);
     } finally {
       await rm(emptyDir, { recursive: true, force: true }).catch(() => {});

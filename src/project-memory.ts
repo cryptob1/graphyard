@@ -11,18 +11,18 @@ import type { Work } from './model/work.js';
 
 export {
   emptyProjectMemory,
-  isDecisionRoleRelevant,
+  isNoteRoleRelevant,
   projectMemoryDigest,
   projectMemorySchema,
   projectMemoryWordBudget,
   recentChangesWindowMs,
   recordChangeInMemory,
-  recordDecisionInMemory,
+  recordNoteInMemory,
   retainedMemoryChanges,
-  retainedMemoryDecisions,
+  retainedMemoryNotes,
   updateProjectMemoryFromWork,
   type MemoryChange,
-  type MemoryDecision,
+  type MemoryNote,
   type ProjectMemory,
   type SessionRole,
 } from './model/project-memory.js';
@@ -49,7 +49,7 @@ export async function writeProjectMemory(root: string, memory: ProjectMemory): P
 }
 
 /**
- * Updates project memory from settled decisions and merges.
+ * Updates project memory from operator answers and merges.
  * Never updates from an agent's unreviewed claim.
  */
 export async function syncProjectMemory(

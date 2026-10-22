@@ -30,7 +30,7 @@ const profile = (): WorkerProfile => ({ name: 'claude-a', principal: 'graphyard-
 const config = (overrides: Record<string, unknown> = {}): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], run: { intervalSeconds: 60 }, ...overrides });
 
-/** An item in review whose reviewer requested changes on its candidate (the decisions step requests a rework); `quiet` is a bare build-stage item. */
+/** An item in review whose reviewer requested changes on its candidate (the rework step requests a rework); `quiet` is a bare build-stage item. */
 function item(key: string, overrides: Partial<Work> = {}): Work {
   const candidate = { sha, baseSha: base, pr: 42, branch: `graphyard/${key.toLowerCase()}-1`, author: 'worker' };
   const observation = {
@@ -206,6 +206,21 @@ test('unit:step-calls-bounded — resume: an idle re-prompt that does not answer
   assert.equal(slow.calls.length, 1, `the next cycle re-sent the prompt (${key}) and joined the one in flight`);
 });
 
+test('unit:step-calls-bounded — rework: a rework write that does not answer returns the step, is recorded carried with no failed action, and the next cycle joins it rather than sending another', async () => {
+  const sb = await helper();
+  const slow = hanging(), work = item('GY-6');
+  const fx = effects([work], { rework: slow.call as DaemonEffects['rework'] });
+  const state = emptyDaemonState(config());
+  await cycle(state, fx);
+  assert.equal(slow.calls.length, 1, 'the rework was sent');
+  const carried = carriedRows(state, sb).find(([key]) => key === `carried:judgement:${work.id}`)?.[1];
+  assert.match(carried?.detail ?? '', /the rework step's 30 ms per-call bound passed before GY-6's rework call answered/, JSON.stringify(state.actions));
+  assert.ok(!Object.keys(state.actions).some(key => key.startsWith(`rework:${work.id}:`)), 'a carried write records no failed rework');
+  await cycle(state, fx, clock + 60_000);
+  assert.equal(slow.calls.length, 1, 'the next cycle joined the rework in flight');
+  slow.answer({});
+});
+
 test('unit:step-calls-bounded — every named step runs under the shared bound with the calls the item names, and the triage record passes through once the step has ended', async () => {
   const sb = await helper();
   const steps: Record<string, { file: string; calls: string[] }> = {
@@ -216,6 +231,7 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
     reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'preserveWork', 'reportCapacity'] },
     triage: { file: 'cycle-triage.ts', calls: ['recordTriage'] },
     master: { file: 'cycle-master.ts', calls: ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'] },
+    rework: { file: 'rework.ts', calls: ['rework', 'recordMechanicalPlan'] },
   };
   for (const [step, { file, calls }] of Object.entries(steps)) {
     const source = readFileSync(`${root}src/daemon/${file}`, 'utf8');

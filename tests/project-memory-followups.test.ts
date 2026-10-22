@@ -11,11 +11,11 @@ import {
   projectMemoryDigest,
   projectMemoryWordBudget,
   recordChangeInMemory,
-  recordDecisionInMemory,
+  recordNoteInMemory,
   retainedMemoryChanges,
-  retainedMemoryDecisions,
+  retainedMemoryNotes,
   updateProjectMemoryFromWork,
-  type MemoryDecision,
+  type MemoryNote,
   type ProjectMemory,
 } from '../src/model/project-memory.js';
 import {
@@ -65,13 +65,13 @@ test('unit:review-followups-triaged — decisions are retained strictly by answe
   updateProjectMemoryFromWork(memory, reversed);
 
   // Must retain exactly 20 decisions
-  assert.equal(memory.decisions.length, retainedMemoryDecisions);
+  assert.equal(memory.notes.length, retainedMemoryNotes);
 
   // The retained decisions must be the 20 newest (items 11 through 30), strictly sorted newest first
-  for (let i = 0; i < retainedMemoryDecisions; i++) {
+  for (let i = 0; i < retainedMemoryNotes; i++) {
     const expectedItemNumber = 30 - i;
-    assert.equal(memory.decisions[i].key, `GY-${1000 + expectedItemNumber}`);
-    assert.equal(memory.decisions[i].id, `req-${expectedItemNumber}`);
+    assert.equal(memory.notes[i].key, `GY-${1000 + expectedItemNumber}`);
+    assert.equal(memory.notes[i].id, `req-${expectedItemNumber}`);
   }
 
   // Verify that an older answer on a high-numbered item never evicts a newer answer on a low-numbered item
@@ -110,8 +110,8 @@ test('unit:review-followups-triaged — decisions are retained strictly by answe
   ];
 
   updateProjectMemoryFromWork(memory2, workMixed);
-  assert.equal(memory2.decisions[0].key, 'GY-1');
-  assert.equal(memory2.decisions[1].key, 'GY-9999');
+  assert.equal(memory2.notes[0].key, 'GY-1');
+  assert.equal(memory2.notes[1].key, 'GY-9999');
 });
 
 test('unit:review-followups-triaged — oversized memory decision is abbreviated and included within word budget (Finding 3)', () => {
@@ -122,13 +122,12 @@ test('unit:review-followups-triaged — oversized memory decision is abbreviated
   const reason = reasonWords.join(' ');
   assert.ok(docsWords(reason) >= 600);
 
-  recordDecisionInMemory(memory, {
+  recordNoteInMemory(memory, {
     id: 'req-oversized',
     key: 'GY-2000',
-    action: 'human-answer',
-    reason,
-    state: 'provided',
-    approvedBy: 'operator',
+    kind: 'human-answer',
+    text: reason,
+    by: 'operator',
     at: '2026-10-01T12:00:00.000Z',
   });
 
@@ -137,10 +136,10 @@ test('unit:review-followups-triaged — oversized memory decision is abbreviated
   // The digest must NOT be empty
   assert.ok(digest.length > 0);
   assert.ok(digest.includes('Shared project memory:'));
-  assert.ok(digest.includes('Recent decisions:'));
+  assert.ok(digest.includes('Recent notes:'));
   assert.ok(digest.includes('- GY-2000 (human-answer):'));
   // Must end with ellipsis indicating abbreviation
-  assert.ok(digest.includes('… [approved by operator]'));
+  assert.ok(digest.includes('… [by operator]'));
   // Must strictly respect the word budget
   assert.ok(docsWords(digest) <= 500, `Expected <= 500 words, got ${docsWords(digest)}`);
   // The one computed slice fills the budget exactly rather than leaving words unused (GY-1180).
@@ -152,22 +151,20 @@ test('unit:review-followups-triaged — loop continues on oversized entry instea
 
   // 1. Decisions: First decision is long, second is short.
   // With a small budget, the second short decision must still be included if it fits.
-  recordDecisionInMemory(memory, {
+  recordNoteInMemory(memory, {
     id: 'dec-1',
     key: 'GY-101',
-    action: 'requirements',
-    reason: Array.from({ length: 40 }, () => 'longdetail').join(' '),
-    state: 'approved',
-    approvedBy: 'operator',
+    kind: 'requirements',
+    text: Array.from({ length: 40 }, () => 'longdetail').join(' '),
+    by: 'operator',
     at: '2026-10-01T12:00:00.000Z',
   });
-  recordDecisionInMemory(memory, {
+  recordNoteInMemory(memory, {
     id: 'dec-2',
     key: 'GY-102',
-    action: 'scope',
-    reason: 'tiny fix',
-    state: 'approved',
-    approvedBy: 'operator',
+    kind: 'scope',
+    text: 'tiny fix',
+    by: 'operator',
     at: '2026-10-01T11:00:00.000Z',
   });
 
@@ -204,13 +201,12 @@ test('unit:review-followups-triaged — syncProjectMemory caps retention and cha
 
   // Populate memory beyond caps
   for (let i = 1; i <= 30; i++) {
-    recordDecisionInMemory(memory, {
+    recordNoteInMemory(memory, {
       id: `dec-${i}`,
       key: `GY-${i}`,
-      action: 'scope',
-      reason: `Reason ${i}`,
-      state: 'approved',
-      approvedBy: 'approver',
+      kind: 'scope',
+      text: `Reason ${i}`,
+      by: 'approver',
       at: new Date(Date.now() + i * 1000).toISOString(),
     });
   }
@@ -224,13 +220,13 @@ test('unit:review-followups-triaged — syncProjectMemory caps retention and cha
   }
 
   // Retention caps must be enforced
-  assert.equal(memory.decisions.length, retainedMemoryDecisions); // 20
+  assert.equal(memory.notes.length, retainedMemoryNotes); // 20
   assert.equal(memory.changes.length, retainedMemoryChanges);     // 30
 
   // Write to disk and read back
   await writeProjectMemory(root, memory);
   const fromDisk = await readProjectMemory(root);
-  assert.equal(fromDisk.decisions.length, retainedMemoryDecisions);
+  assert.equal(fromDisk.notes.length, retainedMemoryNotes);
   assert.equal(fromDisk.changes.length, retainedMemoryChanges);
 
   // Change-only persistence, driven through the loop's real persist (GY-1180): the mirror file is
@@ -260,17 +256,16 @@ test('unit:review-followups-triaged — syncProjectMemory caps retention and cha
   }
 });
 
-test('unit:review-followups-triaged — settled summary items preserve existing project memory decisions without backfill (Finding 1 & 4)', () => {
+test('unit:review-followups-triaged — settled summary items preserve existing project memory notes without backfill (Finding 1 & 4)', () => {
   const memory = emptyProjectMemory();
 
   // Existing decision in memory
-  recordDecisionInMemory(memory, {
+  recordNoteInMemory(memory, {
     id: 'existing-dec',
     key: 'GY-500',
-    action: 'requirements',
-    reason: 'Existing approved requirement',
-    state: 'approved',
-    approvedBy: 'operator',
+    kind: 'requirements',
+    text: 'Existing approved requirement',
+    by: 'operator',
     at: '2026-10-01T10:00:00.000Z',
   });
 
@@ -292,8 +287,8 @@ test('unit:review-followups-triaged — settled summary items preserve existing 
   updateProjectMemoryFromWork(memory, settledSummaryWork);
 
   // Existing decisions are intact
-  assert.equal(memory.decisions.length, 1);
-  assert.equal(memory.decisions[0].key, 'GY-500');
+  assert.equal(memory.notes.length, 1);
+  assert.equal(memory.notes[0].key, 'GY-500');
   // Settled item with delivery is recorded in changes
   assert.equal(memory.changes.length, 1);
   assert.equal(memory.changes[0].key, 'GY-400');

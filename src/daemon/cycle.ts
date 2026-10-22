@@ -283,7 +283,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   state.lastCycleAt = new Date(now()).toISOString();
   if (state.lock) state.lock = { ...state.lock, heartbeatAt: state.lastCycleAt };
   // GY-1125 / GY-1144: project memory is synchronized per cycle from settled work and merges.
-  // It is bounded by retention caps (retainedMemoryDecisions=20, retainedMemoryChanges=30), and effects.persist mirrors .graphyard/project-memory.json only when
+  // It is bounded by retention caps (retainedMemoryNotes=20, retainedMemoryChanges=30), and effects.persist mirrors .graphyard/project-memory.json only when
   // state.projectMemory actually changes, ensuring no redundant disk writes occur per cycle.
   state.projectMemory = await syncProjectMemory({
     existing: state.projectMemory,

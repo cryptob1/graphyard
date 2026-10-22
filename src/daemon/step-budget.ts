@@ -22,7 +22,7 @@ export const stepBudgetMs = (intervalMs: number) => Math.max(actionableIntervalM
 /** How long one external call may take before the step returns and carries the call's work to the next cycle (GY-1766, GY-1774). */
 export const stepCallBoundMs = 10_000;
 /** The steps bounded this way, by the name their carried calls record (GY-1774); `decisions` keeps GY-1766's wording. */
-export type BoundedStep = 'decisions' | 'blockers' | 'dispatch' | 'sessions' | 'resume' | 'reclaim' | 'triage' | 'master';
+export type BoundedStep = 'blockers' | 'dispatch' | 'sessions' | 'resume' | 'reclaim' | 'triage' | 'master' | 'rework';
 
 /**
  * A step's clock. `left()` is the budget still unspent, which caps every call's bound while the

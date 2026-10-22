@@ -2,20 +2,21 @@ import { z } from 'zod';
 import { docsWords } from './documentation.js';
 import type { Work } from './work.js';
 
-export const retainedMemoryDecisions = 20;
+export const retainedMemoryNotes = 20;
 export const retainedMemoryChanges = 30;
 export const recentChangesWindowMs = 24 * 3_600_000;
 export const projectMemoryWordBudget = 500;
 
-export const memoryDecisionSchema = z.object({
+/** One thing a person or reviewer told the project that later sessions should know: an operator's answer, a research answer, a post-merge review's note. */
+export const memoryNoteSchema = z.object({
   id: z.string(),
   key: z.string(),
-  action: z.string(),
-  reason: z.string(),
-  approvedBy: z.string(),
+  kind: z.string(),
+  text: z.string(),
+  by: z.string(),
   at: z.string(),
 }).strict();
-export type MemoryDecision = z.infer<typeof memoryDecisionSchema>;
+export type MemoryNote = z.infer<typeof memoryNoteSchema>;
 
 export const memoryChangeSchema = z.object({
   key: z.string(),
@@ -29,38 +30,34 @@ export type MemoryChange = z.infer<typeof memoryChangeSchema>;
 export const projectMemorySchema = z.object({
   version: z.literal(1).default(1),
   updatedAt: z.string(),
-  decisions: z.array(memoryDecisionSchema).max(100).default([]),
+  notes: z.array(memoryNoteSchema).max(100).default([]),
   changes: z.array(memoryChangeSchema).max(100).default([]),
-}); // not strict: a memory written before GY-2873 carries `pitfalls`, which parsing drops
+}); // not strict: a memory written before GY-2873 carries `pitfalls`, and one before GY-2874 its retired records, which parsing drops
 export type ProjectMemory = z.infer<typeof projectMemorySchema>;
 
 export function emptyProjectMemory(now: string = new Date().toISOString()): ProjectMemory {
-  return { version: 1, updatedAt: now, decisions: [], changes: [] };
+  return { version: 1, updatedAt: now, notes: [], changes: [] };
 }
 
 export type SessionRole = 'worker' | 'reviewer' | 'producer';
 
-/** Role relevance for decisions: prioritizing actions each role acts on or requires. */
-const decisionRoles: Record<SessionRole, string[]> = {
-  worker: ['requirements', 'scope', 'rework', 'unblock', 'close', 'human-answer', 'goals-and-priorities', 'money-or-accounts', 'credentials-for-people'],
-  reviewer: ['review', 'merge', 'requirements', 'close', 'rework'],
-  producer: ['attest', 'requirements', 'rework'],
+/** The note kinds each role acts on, shown to it first. */
+const noteRoles: Record<SessionRole, string[]> = {
+  worker: ['human-answer', 'product-answer', 'goals-and-priorities', 'money-or-accounts', 'credentials-for-people'],
+  reviewer: ['post-merge-review', 'product-answer'],
+  producer: ['product-answer'],
 };
-export function isDecisionRoleRelevant(decision: MemoryDecision, role: SessionRole): boolean {
-  return decisionRoles[role]?.includes(decision.action.toLowerCase()) ?? true;
+export function isNoteRoleRelevant(note: MemoryNote, role: SessionRole): boolean {
+  return noteRoles[role]?.includes(note.kind.toLowerCase()) ?? true;
 }
 
-/** Record an approved/settled decision in project memory. Never updates from an agent's unreviewed claim. */
-export function recordDecisionInMemory(memory: ProjectMemory, decision: { id: string; key: string; action: string; reason: string; state: string; approvedBy?: string | null; at: string }): boolean {
-  // Only settled / applied / approved decisions and operator answers, never unreviewed agent claims.
-  if (decision.state !== 'applied' && decision.state !== 'approved' && decision.state !== 'provided') return false;
-  if (!decision.approvedBy) return false;
-  const entry: MemoryDecision = { id: decision.id, key: decision.key, action: decision.action, reason: decision.reason.trim(), approvedBy: decision.approvedBy, at: decision.at };
-  const filtered = memory.decisions.filter(d => d.id !== entry.id);
-  memory.decisions = [entry, ...filtered]
+/** Record a note in project memory, newest first, replacing one with the same id. */
+export function recordNoteInMemory(memory: ProjectMemory, note: MemoryNote): boolean {
+  const entry: MemoryNote = { ...note, text: note.text.trim() };
+  memory.notes = [entry, ...memory.notes.filter(n => n.id !== entry.id)]
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
-    .slice(0, retainedMemoryDecisions);
-  memory.updatedAt = memory.decisions[0]?.at ?? entry.at;
+    .slice(0, retainedMemoryNotes);
+  memory.updatedAt = memory.notes[0]?.at ?? entry.at;
   return true;
 }
 
@@ -76,29 +73,24 @@ export function recordChangeInMemory(memory: ProjectMemory, change: { key: strin
   return true;
 }
 
-/** Update project memory from settled operator answers and merges in work. Never from an agent's claim. */
+/** Update project memory from operator answers and merges in work. Never from an agent's claim. */
 export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonly Work[], now: number = Date.now()): ProjectMemory {
-  // 1. Settled operator answers: an answered request moves to `humanRequests` and the open one is
-  // cleared, so the retained history is where a provided answer lives. A declined one decided nothing.
-  // GY-1125 follow-up 1/4 (declined): settled snapshot items are summaries without humanRequests/
-  // researchBrief (summaryOmitted, src/store/summary-sql.ts); answers enter memory while their item is
-  // open and persist in .graphyard/project-memory.json, so whole settled documents are not re-read.
-  // Follow-up 2: candidates are retained newest-first by answer time, not work-item order.
-  const candidateDecisions: { id: string; key: string; action: string; reason: string; state: string; approvedBy: string; at: string }[] = [];
+  // 1. Operator answers: an answered request moves to `humanRequests` and the open one is cleared, so
+  // the retained history is where a provided answer lives. A declined one answered nothing. Settled
+  // snapshot items are summaries without humanRequests/researchBrief (GY-1125), so answers enter
+  // memory while their item is open and persist in .graphyard/project-memory.json.
+  const notes: MemoryNote[] = [];
   for (const item of work) {
     for (const request of item.humanRequests ?? []) {
       if (request.answer?.outcome !== 'provided') continue;
-      candidateDecisions.push({ id: request.id, key: item.key, action: request.kind, reason: `${request.needed}: ${request.answer.text}`, state: 'provided', approvedBy: request.answer.by || 'operator', at: request.answer.at });
+      notes.push({ id: request.id, key: item.key, kind: request.kind, text: `${request.needed}: ${request.answer.text}`, by: request.answer.by || 'operator', at: request.answer.at });
     }
-    // Answered research product decisions
     for (const q of item.researchBrief?.questions ?? []) {
-      if (q.answer) candidateDecisions.push({ id: q.id, key: item.key, action: 'product-decision', reason: `${q.question}: ${q.answer.text}`, state: 'provided', approvedBy: q.answer.by || 'operator', at: q.answer.at });
+      if (q.answer) notes.push({ id: q.id, key: item.key, kind: 'product-answer', text: `${q.question}: ${q.answer.text}`, by: q.answer.by || 'operator', at: q.answer.at });
     }
   }
-  candidateDecisions.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
-  for (const candidate of candidateDecisions) {
-    recordDecisionInMemory(memory, candidate);
-  }
+  notes.sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
+  for (const note of notes) recordNoteInMemory(memory, note);
 
   // 2. Merges to main in the last 24 hours
   const recentCutoff = now - recentChangesWindowMs;
@@ -124,10 +116,10 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
   if (!memory) return '';
   const budget = options?.wordBudget ?? projectMemoryWordBudget;
 
-  // Filter and prioritize decisions: role-relevant first, then newest
-  const decisions = [...memory.decisions].sort((a, b) => {
-    const aRel = isDecisionRoleRelevant(a, role) ? 1 : 0;
-    const bRel = isDecisionRoleRelevant(b, role) ? 1 : 0;
+  // Role-relevant notes first, then newest
+  const notes = [...memory.notes].sort((a, b) => {
+    const aRel = isNoteRoleRelevant(a, role) ? 1 : 0;
+    const bRel = isNoteRoleRelevant(b, role) ? 1 : 0;
     if (aRel !== bRel) return bRel - aRel;
     return Date.parse(b.at) - Date.parse(a.at);
   });
@@ -141,36 +133,36 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
   if (baseMerge) changes = changes.filter(c => c.sha !== baseMerge.sha && Date.parse(c.mergedAt) > Date.parse(baseMerge.mergedAt));
   changes.sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt));
 
-  if (!decisions.length && !changes.length) return '';
+  if (!notes.length && !changes.length) return '';
 
   const parts: string[] = ['Shared project memory:'];
 
-  // Add decisions
-  if (decisions.length) {
-    const decisionLines: string[] = [];
-    for (const d of decisions) {
-      const line = `- ${d.key} (${d.action}): ${d.reason} [approved by ${d.approvedBy}]`;
-      const candidate = [...parts, 'Recent decisions:', ...decisionLines, line].join(' ');
+  // Add notes
+  if (notes.length) {
+    const noteLines: string[] = [];
+    for (const n of notes) {
+      const line = `- ${n.key} (${n.kind}): ${n.text} [by ${n.by}]`;
+      const candidate = [...parts, 'Recent notes:', ...noteLines, line].join(' ');
       if (docsWords(candidate) <= budget) {
-        decisionLines.push(line);
+        noteLines.push(line);
         continue;
       }
-      // If oversized, include an abbreviated decision if budget allows (GY-1125 follow-up finding 3):
-      const prefix = `- ${d.key} (${d.action}): `;
-      const suffix = ` [approved by ${d.approvedBy}]`;
-      const abbrBase = [...parts, 'Recent decisions:', ...decisionLines, `${prefix}…${suffix}`].join(' ');
+      // If oversized, include an abbreviated note if budget allows (GY-1125 follow-up finding 3):
+      const prefix = `- ${n.key} (${n.kind}): `;
+      const suffix = ` [by ${n.by}]`;
+      const abbrBase = [...parts, 'Recent notes:', ...noteLines, `${prefix}…${suffix}`].join(' ');
       const baseWords = docsWords(abbrBase);
       if (baseWords <= budget) {
         const wordsAvailable = budget - baseWords;
-        const reasonWords = d.reason.split(/\s+/).filter(Boolean);
+        const textWords = n.text.split(/\s+/).filter(Boolean);
         // The ellipsis joins the last kept word, so the abbreviated line takes `count - 1` words
         // beyond the base: the slice is computed once rather than re-counted per dropped word (GY-1180).
-        if (decisionLines.length === 0 || wordsAvailable >= 5)
-          decisionLines.push(`${prefix}${reasonWords.slice(0, Math.min(reasonWords.length, wordsAvailable + 1)).join(' ')}…${suffix}`);
+        if (noteLines.length === 0 || wordsAvailable >= 5)
+          noteLines.push(`${prefix}${textWords.slice(0, Math.min(textWords.length, wordsAvailable + 1)).join(' ')}…${suffix}`);
       }
-      // GY-1125 follow-up finding 5: continue to allow later shorter decisions to be considered
+      // GY-1125 follow-up finding 5: continue to allow later shorter notes to be considered
     }
-    if (decisionLines.length) parts.push('Recent decisions:', decisionLines.join(' '));
+    if (noteLines.length) parts.push('Recent notes:', noteLines.join(' '));
   }
 
   // Add merges since base

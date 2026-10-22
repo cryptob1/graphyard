@@ -1,4 +1,4 @@
-// Concern: cycle step 4c's observation wakes (GY-1865) — the rework waker's `observe` and the waiting refusal's `wakeObservation`, run under the decisions step's bound, carried across cycles, retried once and retired when moot.
+// Concern: cycle step 4c's observation wakes (GY-1865) — the rework waker's `observe` and the waiting refusal's `wakeObservation`, run under the rework step's bound, carried across cycles, retried once and retired when moot.
 import { observationWaker } from '../master/base-break-refresh.js';
 import type { Work } from '../model.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
@@ -29,7 +29,7 @@ const carriedObserve = (row: DaemonAction | undefined, work: Work) => carriedRow
  * later wake from the obsolete flight, so it is a fresh send, never the retired wake's answer.
  */
 export const boundWakes = (cycle: Cycle, base: DaemonEffects, budgetLeft: () => number) =>
-  boundedCalls(base, cycle.state, cycle.now, budgetLeft, { step: 'decisions', calls: wakeCalls, key: (call, args) => callKey(call, [args[0], wakeGeneration(cycle.state, (args[0] as Work | undefined)?.id)]), wording: (_call, args) => ({ what: `${(args[0] as Work | undefined)?.key ?? 'the item'}'s observation wake`, owed: 'wake', per: 'call' }) });
+  boundedCalls(base, cycle.state, cycle.now, budgetLeft, { step: 'rework', calls: wakeCalls, key: (call, args) => callKey(call, [args[0], wakeGeneration(cycle.state, (args[0] as Work | undefined)?.id)]), wording: (_call, args) => ({ what: `${(args[0] as Work | undefined)?.key ?? 'the item'}'s observation wake`, owed: 'wake', per: 'call' }) });
 
 /**
  * GY-1865 review: a carried wake whose item no longer waits is retired, never left `waiting` forever —

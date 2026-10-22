@@ -9,7 +9,8 @@ import { latencySampleSchema, message, type DaemonActionKind } from './state.js'
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged } from './text.js';
 import { record } from './effects.js';
-import { observationWakes, retireDepartedWakes } from './cycle-wakes.js';
+import { boundWakes, observationWakes, retireDepartedWakes } from './cycle-wakes.js';
+import { stepCallCarried, withinStepBudget } from './step-budget.js';
 import { docsSyncRoute } from './docs-sync-route.js';
 import { planReportSink, reportMechanicalPlans } from './mechanical-plan-report.js';
 import type { Cycle } from './cycle.js';
@@ -167,10 +168,14 @@ export const reworkKey = (work: Pick<Work, 'id'>, binding: string) => `rework:${
  * Step 4c: apply every rework the snapshot calls for, at once, with the master's own identity. A
  * docs-only base conflict is a docs-sync session's first (GY-566); a rework otherwise waits only
  * for an observation that still describes the head (GY-144). A failed application is one failed
- * action, retried on the widening interval of any failed action.
+ * action, retried on the widening interval of any failed action. Every write waits under the shared
+ * step budget (GY-1774): one past its bound, or reached once the budget is spent, is carried to the
+ * next cycle, so a slow plane cannot hold the cycle for one timeout per item.
  */
-export async function reworkStep(cycle: Cycle) {
-  const { config, state, effects, snapshot, clock, now, performed, isolate, agents } = cycle;
+export const reworkStep = (cycle: Cycle) => withinStepBudget(cycle, 'rework', ['rework', 'recordMechanicalPlan'], reworkStepWithin);
+async function reworkStepWithin(cycle: Cycle, budgetLeft: () => number | null) {
+  const { config, state, snapshot, clock, now, performed, isolate, agents } = cycle;
+  const effects = boundWakes(cycle, cycle.effects, () => budgetLeft() ?? 0);
   if (!effects.rework) return;
   const stamp = new Date(clock).toISOString();
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
@@ -208,6 +213,7 @@ export async function reworkStep(cycle: Cycle) {
       if (Number.isFinite(verdictAt) && rework.binding.includes(':verdict:')) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
       performed.push(await record(state, key, { kind: 'judgement', work: item.key, principal: null, state: 'done', detail: `Returned ${item.key} to a worker: ${rework.reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
+      if (stepCallCarried(error)) throw error;
       performed.push(await record(state, key, { kind: 'judgement', work: item.key, principal: null, state: 'failed', detail: `Could not return ${item.key} to a worker: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
   });

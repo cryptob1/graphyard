@@ -150,18 +150,18 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
 }
 
 function ProjectMemorySection({ memory }: { memory?: any }) {
-  if (!memory || (!memory.decisions?.length && !memory.changes?.length)) return null;
-  const count = (memory.decisions?.length ?? 0) + (memory.changes?.length ?? 0);
+  if (!memory || (!memory.notes?.length && !memory.changes?.length)) return null;
+  const count = (memory.notes?.length ?? 0) + (memory.changes?.length ?? 0);
   return <details className="finished-sessions project-memory" data-project-memory open>
     <summary>Shared project memory <span className="count">{count}</span></summary>
     <div className="memory-content">
-      {memory.decisions?.length ? (
+      {memory.notes?.length ? (
         <div className="memory-block">
-          <h3>Recent decisions</h3>
+          <h3>Recent notes</h3>
           <ul className="memory-list">
-            {memory.decisions.map((d: any) => (
-              <li key={d.id} data-decision={d.id}>
-                <span className="mono bold">{d.key}</span> ({d.action}): {d.reason} <span className="muted">· approved by {d.approvedBy}</span>
+            {memory.notes.map((n: any) => (
+              <li key={n.id} data-note={n.id}>
+                <span className="mono bold">{n.key}</span> ({n.kind}): {n.text} <span className="muted">· by {n.by}</span>
               </li>
             ))}
           </ul>

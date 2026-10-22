@@ -148,7 +148,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   if (failures.last) Object.assign(failures.last, { call: cut(failures.last.call, 100), reason: cut(failures.last.reason, 1000) });
   if (failures.lastUnhandled) failures.lastUnhandled.reason = cut(failures.lastUnhandled.reason, 1000);
   if (state.projectMemory) {
-    state.projectMemory.decisions = (state.projectMemory.decisions ?? []).slice(0, 50);
+    state.projectMemory.notes = (state.projectMemory.notes ?? []).slice(0, 50);
     state.projectMemory.changes = (state.projectMemory.changes ?? []).slice(0, 50);
   }
   return state;

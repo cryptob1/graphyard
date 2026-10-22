@@ -20,7 +20,7 @@ import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileR
 import { launchRefusalProbeDue, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeRefusalProbeMs, wholeFindings } from './model/post-merge-review.js';
 import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
-import { readProjectMemory, recordDecisionInMemory, writeProjectMemory } from './project-memory.js';
+import { readProjectMemory, recordNoteInMemory, writeProjectMemory } from './project-memory.js';
 import { agentToken } from './master/autonomy.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { currentEvidence } from './model/evidence.js';
@@ -1505,9 +1505,9 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     },
     recordFindings: async (work, record, findings) => {
       const memory = await readProjectMemory(root), at = new Date((deps.now ?? Date.now)()).toISOString();
-      recordDecisionInMemory(memory, { id: `post-merge-review:${work.key}:${record.sha.slice(0, 12)}`, key: work.key, action: 'post-merge-review', state: 'applied', approvedBy: record.verdict?.reviewer ?? 'reviewer', at,
+      recordNoteInMemory(memory, { id: `post-merge-review:${work.key}:${record.sha.slice(0, 12)}`, key: work.key, kind: 'post-merge-review', by: record.verdict?.reviewer ?? 'reviewer', at,
         // Every finding, uncut: the entry is bounded by the verdict body the API accepted (65,536 characters).
-        reason: `Post-merge review of ${record.sha.slice(0, 12)} noted: ${findings.join(' | ')}` });
+        text: `Post-merge review of ${record.sha.slice(0, 12)} noted: ${findings.join(' | ')}` });
       await writeProjectMemory(root, memory);
     },
     settlePostMerge: (record, outcome) => updateReviewLedger(root, ledger => { const entry = ledger.reviews.find(candidate => candidate.id === record.id); if (entry) entry.postMergeFollowUps = outcome; }),

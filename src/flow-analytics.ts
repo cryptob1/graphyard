@@ -2380,7 +2380,7 @@ export async function speedSections(speed: Record<string, any>, masterApi: (path
   }
   const attention = deliverySpeedBreaches(report).map(breach => ({ subject: 'delivery speed', text: breach.text,
     // agentOwner('master', …)'s shape, built here: src/master/attention.ts imports Node-only modules this browser-bundled file must not.
-    role: 'master' as const, approvedBy: null, human: false, humanOnly: null,
+    role: 'master' as const, human: false, humanOnly: null,
     next: breach.stage
       ? `Remove what holds items in ${deliveryStageLabels[breach.stage.stage]}: find what held ${breach.stage.items.map(item => item.key).join(', ')} there (graphyard status GY-N) and file the fix that removes that hold; the targets are deliverySpeed in master.json`
       : 'Find what held the slowest items (graphyard status GY-N) and file the fix that removes it; the targets are deliverySpeed in master.json' }));

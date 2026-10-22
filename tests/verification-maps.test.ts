@@ -10,7 +10,7 @@ import { documentationGlobMatches } from '../src/model/documentation-glob.js';
 import type { VerificationMap } from '../src/verification-maps.js';
 import { workerPrompt } from '../src/master/dispatch.js';
 import { reviewPrompt } from '../src/reviewer.js';
-import { emptyProjectMemory, projectMemoryDigest, recordDecisionInMemory } from '../src/model/project-memory.js';
+import { emptyProjectMemory, projectMemoryDigest, recordNoteInMemory } from '../src/model/project-memory.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -112,7 +112,7 @@ test('unit:verification-maps-in-prompts — worker and reviewer requests inline 
   assert.ok(digest && withMaps.includes(digest));
   assert.equal(withMaps.replace(digest, ''), before);
   const memory = emptyProjectMemory('2026-10-07T00:00:00Z');
-  recordDecisionInMemory(memory, { id: 'd', key: 'GY-1', action: 'rework', reason: 'Rework the lock read', state: 'applied', approvedBy: 'approver-1', at: '2026-10-07T00:00:00Z' });
+  recordNoteInMemory(memory, { id: 'd', key: 'GY-1', kind: 'human-answer', text: 'Rework the lock read', by: 'operator', at: '2026-10-07T00:00:00Z' });
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha: 'a'.repeat(40) });
   assert.ok(workerPrompt(config, work, profile, 1, null, memory, 'a'.repeat(40), null, parsed).includes(`${memoryDigest}${digest}`), 'the digest directly follows the project-memory digest');
   const unmatched = { ...work, description: 'Bound the board in web/main.tsx.' };
