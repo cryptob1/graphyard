@@ -6,6 +6,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
+import { appliedReworkBrief } from '../src/master/rework-brief.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-2874: the master applies intent with its own identity at once, and a lapsed lease ends the attempt.
@@ -48,6 +49,17 @@ test('unit:master-intent-applies-directly — the master rewrites requirements w
   for (const field of ['escalation', 'escalations', 'containmentQuarantine']) assert.equal(field in stored, false, `no ${field} on the item`);
   assert.equal(stored.blocker, null, 'nothing waits on the rewrite');
   assert.ok(!(await events(work)).some(event => retired.test(event.kind)), 'no decision, approver or escalation record in its history');
+});
+
+test('unit:master-intent-applies-directly — a master rework applies at once and records the reason the next round is briefed with', async () => {
+  let work = await create('A rework');
+  work = await engine.execute(operator, 'ready', work.id, {}, id());
+  const before = (await events(work)).length;
+  const reworked = await engine.execute(master, 'rework', work.id, { reason: 'The review named a missing guard', previousWorkerStopped: true }, id());
+  assert.equal(reworked.reworkRequested, true);
+  assert.equal(reworked.lastRework?.reason, 'The review named a missing guard');
+  assert.deepEqual((await events(work)).slice(before).map(event => event.kind), ['rework'], 'exactly one history event records the rework');
+  assert.deepEqual(appliedReworkBrief({ ...reworked, submission: { epoch: 1, pr: 1 } as Work['submission'], pipeline: undefined }), { reason: 'The review named a missing guard', at: reworked.lastRework!.at });
 });
 
 test('unit:lapsed-lease-is-claimable — a lapsed lease ends the attempt and the item is claimable on the next cycle, with no containment, escalation or decision', async () => {

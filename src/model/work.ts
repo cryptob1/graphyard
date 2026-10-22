@@ -202,6 +202,8 @@ export interface Work extends Create {
    */
   baseRefresh?: BaseRefresh | null; baseRefreshRequest?: BaseRefreshRequest | null; mergeRefusal?: MergeRefusal | null; // baseRefreshRequest: the standing request to merge a repaired base in (GY-528); mergeRefusal: the guarded merge's refusal (GY-831)
   reworkRequested: boolean;
+  /** The last rework applied: its reason, the binding the loop sent it back on, and when (GY-1569's brief). */
+  lastRework?: { reason: string; binding: string | null; at: string } | null;
   scenarioRequirements: { proof: string; revision: number; environment: string; hash: string }[];
   reviewRequest?: ReviewRequest | null;
   reviewFailovers?: ReviewFailover[];

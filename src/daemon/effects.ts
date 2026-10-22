@@ -136,7 +136,7 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   /** GY-1008: probe a blocker's cause as the next attempt meets it (blocker-probes.ts), and record it as the coordinator; a pass clears it. */ probeBlocker?: (work: Work, classification: BlockerClassification) => Promise<BlockerProbeResult | null>; recordBlockerProbe?: (work: Work, body: BlockerProbeRecord) => Promise<Work>;
   /** GY-1740: hold an unleased post-deploy follow-up on the instant its blocker names, clearing it (`window`). */ deferWindow?: (work: Work, body: { expectedRevision: number; notBefore: string; reason: string }) => Promise<Work>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`); absent, the loop applies no rework. */
-  rework?: (work: Work, reason: string) => Promise<unknown>;
+  rework?: (work: Work, reason: string, binding?: string) => Promise<unknown>;
   /**
    * Ends an agent registry session whose runtime ran out of quota, so the role's slot is free for
    * the replacement launched in the same cycle (GY-182). The registry would otherwise count it live

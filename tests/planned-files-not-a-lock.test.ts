@@ -96,7 +96,7 @@ test('unit:sync-ignores-planned-files — a real merge conflict is still reporte
 
 test('unit:worker-text-has-no-scope-rules — the worker launch request, before-push text, rework brief, force-push remedy, complete help and the managed AGENTS.md block carry no scope rule, and the reviewer criteria rule names no planned files', () => {
   const cli = '/bin/graphyard.mjs';
-  const rework = { id: 'd1', reason: 'Fix the flake the review named', approvedAt: new Date(0).toISOString() };
+  const rework = { reason: 'Fix the flake the review named', at: new Date(0).toISOString() };
   const texts: [string, string][] = [
     ['the worker launch request', workerPrompt({ cliPath: cli, fastGates: true }, { key: 'GY-1', title: 'Scope' }, { principal: 'p' }, 1)],
     ['the worker launch request without the gates', workerPrompt({ cliPath: cli }, { key: 'GY-1', title: 'Scope' }, { principal: 'p' }, 1)],

@@ -33,7 +33,7 @@ import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory
 import { readProjectMemory } from '../project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from '../verification-maps.js';
 import { namedPaths } from '../model/documentation-glob.js';
-import { appliedReworkBrief, readReworkDecisions, reworkBriefSection, type AppliedRework, type ReworkDecisionRow } from './rework-brief.js';
+import { appliedReworkBrief, reworkBriefSection, type AppliedRework } from './rework-brief.js';
 import { workerBeforePushSection, workerFastGatesPresent } from './worker-fast-gates.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
@@ -70,8 +70,6 @@ export interface DispatchOptions {
   renewIntervalMs?: number;
   /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
   verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
-  /** Reads a rework round's decisions before anything is claimed (GY-1569); readReworkDecisions by default, which refuses the launch when the read fails. */
-  readDecisions?: (config: MasterConfig, work: Work) => Promise<ReworkDecisionRow[]>;
 }
 /** Renews `key` epoch `epoch` under `profileName`'s credential, as the worker's own heartbeat does. */
 export type LeaseRenewer = (root: string, key: string, epoch: number, profileName: string) => Promise<unknown>;
@@ -164,7 +162,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // A rework round's grounds are read before anything is claimed, too (GY-1569).
-    round = await reworkRound(root, config, work, options.readDecisions ?? readReworkDecisions);
+    round = await reworkRound(root, work);
     // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
     // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
     const unreserve = await reserveDispatch(root, work, profile, observedAt);
@@ -288,19 +286,15 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
 
 /**
  * GY-971. Whether this attempt is a mechanical-fix round: only a rework of a submitted candidate can
- * be, and only when the item's most recently applied rework decision was that round's; the review
- * ledger's plans are read only then. Any other rework round carries the applied decision's reason as
- * its brief (GY-1569). The decisions are read with the master's credential before anything is
- * claimed; a read that fails refuses the launch (ReworkDecisionsUnreadError), so no round starts
- * without what sent it back, and the item is dispatched again once the read succeeds.
+ * be, and only when the item's last applied rework was that round's; the review ledger's plans are
+ * read only then. Any other rework round carries the last rework's reason as its brief (GY-1569).
  */
 export type ReworkRound = { mechanical: { requests: MechanicalFixRequest[]; reviewId: number } | null; rework: AppliedRework | null };
-async function reworkRound(root: string, config: MasterConfig, work: Work, read: NonNullable<DispatchOptions['readDecisions']>): Promise<ReworkRound> {
+async function reworkRound(root: string, work: Work): Promise<ReworkRound> {
   if (!work.submission) return { mechanical: null, rework: null };
-  const decisions = await read(config, work);
-  const reviewId = work.candidate ? appliedMechanicalRework(work, decisions) : null;
+  const reviewId = work.candidate ? appliedMechanicalRework(work) : null;
   if (reviewId !== null) return { mechanical: { requests: await readMechanicalFixRequests(root), reviewId }, rework: null };
-  return { mechanical: null, rework: appliedReworkBrief(work, decisions) };
+  return { mechanical: null, rework: appliedReworkBrief(work) };
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;

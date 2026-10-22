@@ -85,7 +85,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
     return result;
   };
-  const rework: DaemonEffects['rework'] = (work, reason) => asOperatorAgent('POST', `work/${work.id}/rework`, { reason, previousWorkerStopped: true });
+  const rework: DaemonEffects['rework'] = (work, reason, binding) => asOperatorAgent('POST', `work/${work.id}/rework`, { reason, previousWorkerStopped: true, ...(binding ? { binding } : {}) });
   const docsSyncing = docsSyncEffects(root, run, work => handle => mutate(`work/${work.id}/session`, handle));
   const endRegistrySession: DaemonEffects['endRegistrySession'] = async (session, reason) => {
     const config = current();

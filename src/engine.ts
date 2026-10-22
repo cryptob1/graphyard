@@ -67,7 +67,7 @@ const commands = {
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs, split: createSchema.shape.split }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
-  rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true) }).strict(),
+  rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
   // GY-1764: the loop reports the review ledger's planned mechanical-fix round for the item (or its absence), the one ground the review gate's hold reads.
   mechanicalplan: z.object({ reviewId: z.number().int().positive(), head: sha, planned: z.boolean() }).strict(),
@@ -1040,6 +1040,8 @@ export class Engine {
         if (actor.role !== 'operator-agent') admin(actor);
         demand(!work.observation?.merged, 'Merged work requires a follow-up task');
         work.reworkRequested = true;
+        // The round's brief: the next worker's request carries this reason (master/rework-brief.ts).
+        work.lastRework = { reason: data.reason, binding: data.binding ?? null, at: now.toISOString() };
         // Reassignment discards whatever assignment still stood: its end is recorded here, the
         // last moment it is visible, and the item is claimable again.
         preserveAssignment(work);

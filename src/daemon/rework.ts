@@ -202,7 +202,7 @@ export async function reworkStep(cycle: Cycle) {
     const attempts = (previous?.attempts ?? 0) + 1;
     const verdict = standingVerdict(item);
     try {
-      await effects.rework!(item, rework.reason);
+      await effects.rework!(item, rework.reason, rework.binding);
       // The verdict-to-rework latency the loop is judged on (metrics.ts `latencyTargets`).
       const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
       if (Number.isFinite(verdictAt) && rework.binding.includes(':verdict:')) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));

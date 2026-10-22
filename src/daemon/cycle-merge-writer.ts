@@ -440,7 +440,7 @@ export async function requestPendingReworks(cycle: Pick<Cycle, 'state' | 'effect
     if (!effects.rework) { kept.push({ ...pending, attempts: pending.attempts + 1, lastError: 'this loop runs without the master identity' }); action('failed', `The rework the merge writer's refusal of ${pending.key} head ${pending.head} grounds waits: this loop runs without the master identity, so apply it with graphyard master rework ${pending.key} REASON`); continue; }
     const rework = trialFailureRework(item, pending.head, pending.reason);
     try {
-      await effects.rework(item, rework.reason);
+      await effects.rework(item, rework.reason, rework.input.binding);
       action('done', `Returned ${pending.key} to a worker on the merge writer's refusal of head ${pending.head}`);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

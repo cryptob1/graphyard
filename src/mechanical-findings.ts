@@ -333,19 +333,17 @@ export function mechanicalRework(work: Work, requests: readonly MechanicalFixReq
     binding: mechanicalReworkBinding(candidate.sha, request.reviewId) };
 }
 
-/** The binding a mechanical-fix round's rework decision carries: the approved head and the approval that planned it. */
+/** The binding a mechanical-fix round's rework carries: the approved head and the approval that planned it. */
 export const mechanicalReworkBinding = (head: string, reviewId: number) => `${head}:mechanical:${reviewId}`;
 /**
- * The approval whose mechanical-fix round this attempt is, read from the item's decisions: the most
- * recently applied rework decision, when it was the mechanical round's (`mechanicalReworkBinding`)
+ * The approval whose mechanical-fix round this attempt is: the item's last applied rework, when it
+ * was the mechanical round's (`mechanicalReworkBinding`)
  * for the item's current candidate. Any other rework — a sync, a CI repair, a change request — is
  * not a bot round, so its worker is never given the bot's instruction. Null otherwise.
  */
-export function appliedMechanicalRework(work: Pick<Work, 'candidate'>, decisions: readonly { action: string; state: string; input?: any; approvedAt?: string | null }[]): number | null {
+export function appliedMechanicalRework(work: Pick<Work, 'candidate' | 'lastRework'>): number | null {
   const head = work.candidate?.sha;
-  const latest = decisions.filter(decision => decision.action === 'rework' && decision.state === 'applied')
-    .sort((a, b) => Date.parse(a.approvedAt ?? '') - Date.parse(b.approvedAt ?? '')).at(-1);
-  const bound = typeof latest?.input?.binding === 'string' ? /^([0-9a-f]{40}):mechanical:(\d+)$/i.exec(latest.input.binding) : null;
+  const bound = work.lastRework?.binding ? /^([0-9a-f]{40}):mechanical:(\d+)$/i.exec(work.lastRework.binding) : null;
   return head && bound && bound[1].toLowerCase() === head.toLowerCase() ? Number(bound[2]) : null;
 }
 
