@@ -52,15 +52,18 @@ class FakeGit {
 }
 
 /** Fake ports: every call is recorded as `step:commit-prefix`; `fails` names the step that throws for a commit; `holds` keeps the deploy step itself in flight, before anything is recorded, until it is released. */
-function fakePorts(options: { fails?: Record<string, string>; schemas?: { target: number | null; database: number | null }; holds?: Promise<void> } = {}) {
+function fakePorts(options: { fails?: Record<string, string>; target?: number; migrates?: string; holds?: Promise<void> } = {}) {
   const calls: string[] = [], pins: string[] = [];
+  let database = 7;
   const step = (name: 'deploy' | 'health') => async (commit: string) => {
     if (options.holds && name === 'deploy') await options.holds;
     calls.push(`${name}:${commit.slice(0, 12)}`);
     if (options.fails?.[commit] === name) throw new Error(`${name} refused ${commit.slice(0, 12)}`);
+    // `migrates` names the commit whose deploy step migrates the database to `target` once it completes.
+    if (name === 'deploy' && commit === options.migrates) database = options.target ?? database;
   };
   const ports: DeployPorts = { deploy: step('deploy'), health: step('health'),
-    schemas: async () => options.schemas ?? { target: 7, database: 7 }, pin: async commit => { pins.push(commit); } };
+    schemas: async () => ({ target: options.target ?? 7, database }), pin: async commit => { pins.push(commit); } };
   return { ports, calls, pins };
 }
 
@@ -212,7 +215,7 @@ test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that 
   // Production is observed serving the recorded release, which does not contain the tip: the
   // release-lagged hold (GY-1585) would have held the restart onto it.
   state.deployment = { source: 'github', sha: released, at: iso(start), reason: null, deployed: ['GY-1'], pending: ['GY-2'] } as unknown as DaemonState['deployment'];
-  const { ports, calls } = fakePorts({ fails: { [tip]: 'health' }, schemas: { target: 8, database: 7 } }), fleet = { self: 0 };
+  const { ports, calls } = fakePorts({ fails: { [tip]: 'health' }, target: 8, migrates: tip }), fleet = { self: 0 };
   const upgradePass = () => performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
 
   assert.equal((await upgradePass()).outcome, 'skipped', 'the deploy starts off the cycle');
@@ -228,6 +231,28 @@ test('unit:continuous-deploy-no-rollback-across-migration — a failed tip that 
   assert.equal(fleet.self, 1);
   assert.notEqual(state.upgrade.stalled?.cause, 'release-lagged', 'no restart is held for a served-release observation');
   assert.equal(state.actions['upgrade:held'], undefined);
+});
+
+test('unit:continuous-deploy-rolls-back-before-migration — a tip declaring a newer schema whose deploy fails before the database migrated is rolled back, never promoted, and retried', async () => {
+  const { deployLine, promotionReading } = await upgrade();
+  const state = releasedState(promotionReading), fake = new FakeGit(released, tip), clock = { now: start };
+  const { ports, calls } = fakePorts({ fails: { [tip]: 'deploy' }, target: 8 }), fleet = { self: 0 };
+  const upgradePass = () => performSelfUpgrade(master, state, deps(fake, clock, ports, fleet));
+
+  assert.equal((await upgradePass()).outcome, 'skipped', 'the deploy starts off the cycle');
+  await settled(() => !!state.promotion?.deployFailed);
+  assert.deepEqual(calls, [`deploy:${tip.slice(0, 12)}`, `deploy:${released.slice(0, 12)}`, `health:${released.slice(0, 12)}`], 'the recorded release is redeployed');
+  assert.equal(state.promotion?.deployFailed?.kept, false);
+  assert.equal(state.promotion?.deployFailed?.rolledBackTo, released);
+  assert.equal(state.promotion?.promotedSha, released, 'the unserved tip is never promoted');
+  assert.equal(fake.head, released, 'the checkout is back on the recorded release');
+  assert.equal(deployLine(state.promotion?.deployFailed), `deploy of ${tip.slice(0, 12)} failed at deploy: deploy refused ${tip.slice(0, 12)}; rolled back to ${released.slice(0, 12)}`);
+  calls.length = 0;
+  clock.now += 60_000;
+  assert.equal((await upgradePass()).outcome, 'skipped', 'the tip is retried');
+  await settled(() => state.promotion?.deployFailed?.attempts === 2);
+  assert.deepEqual(calls.slice(0, 1), [`deploy:${tip.slice(0, 12)}`]);
+  assert.equal(fleet.self, 0, 'nothing restarts onto the failed tip');
 });
 
 /** A real Git checkout whose HEAD stands detached at `commit`: the tree a deploy builds from. */

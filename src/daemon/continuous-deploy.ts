@@ -13,7 +13,7 @@ export const deployKey = 'upgrade:deploy';
  * GY-1982: what continuous deploy runs a commit through, each throwing its failure's reason:
  * `deploy` the upgrade sequence after the checkout move (npm ci, database backup, redeploy through
  * the install adapter), `health` the served revision's /healthz reporting the deployed commit.
- * `schemas` reads, before the deploy, the commit's schema generation and the database's; `pin`
+ * `schemas` reads the commit's schema generation and the database's, before the deploy and again after a failed one; `pin`
  * marks a deployed commit known good.
  */
 export interface DeployPorts {
@@ -44,7 +44,7 @@ export const deployLine = (failed: DeployFailure | null | undefined) => !failed 
  * moves onto the tip, which is deployed and health-checked; passing, the release reading names it,
  * it is pinned known good, and 'deployed' has the alignment restart onto it. Failing, the recorded
  * release is redeployed the same way, the checkout returned and the failure recorded — unless the
- * tip migrated the database past what the older release accepts: then it is kept, and the restart
+ * failed deploy migrated the database (its schema read after the failure is past the one read before): then it is kept, and the restart
  * onto it goes ahead.
  */
 export async function deployTip(state: DaemonState, tip: string, from: string, ports: DeployPorts, ctx: { git: (...args: string[]) => Promise<string> | string; at: () => string; persist: () => Promise<void>; note: (detail: string, failure: boolean) => Promise<void> }): Promise<SelfUpgradeOutcome | 'deployed' | null> {
@@ -57,7 +57,7 @@ export async function deployTip(state: DaemonState, tip: string, from: string, p
     for (const step of ['deploy', 'health'] as const) try { await ports[step](commit); } catch (error) { return { step, reason: message(error) }; }
     return null;
   };
-  const schemas = await ports.schemas(tip).catch(() => ({ target: null, database: null }));
+  const before = await ports.schemas(tip).then(read => read.database, () => null);
   const failure = await sequence(tip);
   if (!failure) {
     // GY-2844: the deploy is recorded with its commit's committer date, so merged→production counts every merge it contains as served from now.
@@ -69,7 +69,9 @@ export async function deployTip(state: DaemonState, tip: string, from: string, p
     await ctx.note(`Deployed base tip ${shortCommit(tip)}: health passed`, false);
     return 'deployed';
   }
-  const kept = schemas.target !== null && schemas.database !== null && schemas.target > schemas.database;
+  // Kept only when the database itself moved during the failed deploy: a tip that merely declares a newer schema but failed before migrating is rolled back.
+  const after = await ports.schemas(tip).then(read => read.database, () => null);
+  const kept = before !== null && after !== null && after > before;
   const back = kept || !recorded ? null : await sequence(recorded);
   if (!kept) await Promise.resolve().then(() => ctx.git('checkout', '--detach', '--quiet', from)).catch(() => '');
   const deployFailed: DeployFailure = { sha: tip, step: failure.step, reason: back ? `${failure.reason}; redeploying ${shortCommit(recorded)} failed at ${back.step}: ${back.reason}` : failure.reason,
