@@ -27,7 +27,8 @@ export const reviewBindingSchema = z.object({
   head: sha.optional(), baseTip: sha.optional(), verdictToken: verdictTokenSchema.optional(),
   /** A control-plane re-review (GY-1988): the earlier head this round deltas from, and the paths its findings named — the session's own launch context for the unchanged-code check. */
   previousHead: sha.optional(), earlierPaths: z.array(z.string().min(1).max(1000)).max(10).optional(),
-}).strict().refine(binding => binding.mode !== 'control-plane' || (!!binding.head && !!binding.baseTip && !!binding.verdictToken), 'A control-plane binding carries head, baseTip and verdictToken')
+// Not strict (GY-2933): the loop's release writes the binding and the checkout's CLI reads it, so a field one version still writes and the other dropped is ignored, not refused.
+}).refine(binding => binding.mode !== 'control-plane' || (!!binding.head && !!binding.baseTip && !!binding.verdictToken), 'A control-plane binding carries head, baseTip and verdictToken')
   .refine(binding => binding.mode === 'control-plane' || (binding.head === undefined && binding.baseTip === undefined && binding.verdictToken === undefined), 'Only a control-plane binding carries head, baseTip or verdictToken')
   .refine(binding => binding.mode === 'control-plane' || (binding.previousHead === undefined && binding.earlierPaths === undefined), 'Only a control-plane binding carries previousHead or earlierPaths');
 export type ReviewPostBinding = z.infer<typeof reviewBindingSchema>;

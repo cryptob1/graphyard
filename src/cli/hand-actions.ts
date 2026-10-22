@@ -117,12 +117,10 @@ function stoppedRequest(label: string, request: { id: string }, sessions: LoopSe
  * or — for a producer row — once an executor recorded a launch refusal no time gets past
  * (`producerLaunchStop`), which the control plane then stops offering to every executor. A
  * launcher refusal read from this host's ledger alone never counts: an executor on another host
- * claims the same row without that ledger and launches. A review row has no such stop: the executor's `request-review` handler launches through `launchReview`
- * (src/reviewer.ts), which refuses only while a session for the request is pending or visible in
- * Herdr, never because the request settled or exhausted its sessions. It relaunches the review as
- * soon as no session holds it, so while the row stands the loop has not stopped, and a hand launch
- * would be the second of two launches for one request — the second verdict review-conflict.ts
- * withholds together with the first.
+ * claims the same row without that ledger and launches. A review row stops only with its request's
+ * exhausted sessions (`reviewRecovery`): the executor relaunches a settled request from it, so a hand
+ * launch then would be the second of two launches for one request — the second verdict
+ * review-conflict.ts withholds together with the first.
  */
 const rowRunning = (rows: ActionRow[]) => rows.length > 0;
 
@@ -140,7 +138,10 @@ const producerRows = (work: Pick<Work, 'actionQueue'>, request: { id: string; gr
  */
 export function reviewRecovery(work: Work, sessions: ReviewSession[], failure: { attempts: number } | undefined, now: number): string | null {
   const request = liveReviewRequest(work);
-  return request ? stoppedRequest('review', request, sessions, failure, now, reviewRows(work)) : null;
+  if (!request) return null;
+  // GY-2933: the dispatcher abandons a request whose sessions are exhausted, so a request-review row still queued for it launches nothing more.
+  const exhausted = sessionRetry(sessions, request.id, now).exhausted;
+  return stoppedRequest('review', request, sessions, failure, now, exhausted ? [] : reviewRows(work));
 }
 
 /**
