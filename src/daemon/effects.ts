@@ -48,8 +48,6 @@ import { writeProjectMemory } from '../project-memory.js';
 import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
-import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
-import type { ReportedAttention } from './faults.js';
 import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
@@ -62,7 +60,6 @@ import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
 import type { ResearchEvent } from '../research.js';
 import type { DecompositionEvent } from '../decomposition.js';
-import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
@@ -81,7 +78,6 @@ export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 /** GY-852: paste by pane_id, else name (profiles reuse names across sessions). */
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
-/** An item the loop files as the operator-agent: a fault-class item, which names no class. */
 export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffects, ReadingEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
@@ -226,18 +222,16 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
   answerSession?: (agent: HerdrAgent, keys: string[]) => void | Promise<void>;
   promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<Work>;
-  blockDispatch?: (work: Work, reason: string) => Promise<unknown>; // GY-1078: an item's repeated dispatch-failure cause as its blocker; absent, the loop holds it
   /**
    * Research before build (GY-259): records a research run's start, brief or failure on the item as
    * the coordinator, and names the checkout the research session reads (and, in a test, its runner).
    * A loop wired without it, or whose config has no `run.research`, researches nothing and dispatches as before.
    */
   recordResearch?: (work: Work, event: ResearchEvent) => Promise<unknown>;
-  research?: { cwd: string; runner?: Runner }; harness?: { servingUnit?: string | null; unitDirectory?: string }; // GY-1662: the unit serving this loop, checked against the checkout the harness contract is applied to
+  research?: { cwd: string; runner?: Runner };
   recordDecomposition?: (work: Work, event: DecompositionEvent) => Promise<unknown>; // GY-1126: a split run's start, decision or failure, as the coordinator; runs in `research`'s checkout and runner
   adoptRuns?: () => Promise<AdoptedRun[]>; // the headless runs a restart left running (GY-453, run-adoption.ts); unwired adopts nothing
   recordTriage?: (work: Work, body: { judgement: TriageJudgement; runtime?: string }) => Promise<unknown>; // records a triage judgement on a machine-filed item as the coordinator (GY-402, POST work/ID/triage)
-  withdrawTriage?: (work: Work, body: { triageAt: string; reason: string }) => Promise<unknown>; // withdraws the closure proposed at `triageAt` (GY-1632, POST work/ID/triage `withdraw`)
   /** The reviewer and producer sessions the launch ledgers hold as pending. */
   launchedSessions?: () => Promise<LaunchedSession[]>;
   /** The account a session was launched on, as its launcher recorded it: a worker attempt's own launch record, a reviewer's or producer's own selection, by the `session` named (GY-1582). */
@@ -306,30 +300,8 @@ export interface DaemonEffects extends Partial<DocsSyncEffects>, ThroughputEffec
    */
   followUpThreads?: (work: Work[], now: number) => Promise<Map<string, Set<string>>>;
   persist: (state: DaemonState) => Promise<void>;
-  /** The pipeline doctor (GY-711, src/daemon/doctor.ts): absent while `run.doctor.enabled` is false or the operator-agent identity is missing, the loop then running only the deterministic remedies. */
-  doctor?: DoctorEffects;
-  /** Clears an item's blocker as the operator-agent identity, bound to the revision the loop read (GY-711): only for a blocker the loop verified moot. */
-  unblock?: (work: Work, reason: string) => Promise<Work>;
   acceptance?: AcceptanceEffects; // the acceptance role (GY-1417); absent while either master identity is missing
   planner?: PlannerEffects; // the planner (GY-1418); absent while either master identity is missing — each acts only through the two identities a two-party decision needs
-  /** The recurrence rule; the environment's (GRAPHYARD_FAULT_CLASS_*) or the shipped default when absent. */
-  faultClassPolicy?: FaultClassPolicy;
-  /**
-   * The control plane's status, read with the coordinator's visibility, whose status-level problems
-   * (held jobs, production) are classified and
-   * tracked each cycle. A read that fails makes the cycle partial: it opens what it saw and ends nothing.
-   */
-  controlPlane?: () => Promise<ControlPlaneStatus & Record<string, unknown>>;
-  /**
-   * The attention `master status` adds after `buildMasterStatus` (generated-file drift, context overflows, intervention patterns,
-   * terminal decisions, throughput, resources, and the requests, review conflicts, stalls, overlong sessions, owed judgments, setup and
-   * dispatcher lines of derivedAttention), read with the control plane's status so the loop tracks every class the report shows. `attribute`
-   * is the report's last step over the whole list — a ledger refusal in place of the launch symptoms it causes, a resource at its bound
-   * named in place of its symptom — so one cause is tracked as the report shows it, once.
-   */
-  reportedAttention?: (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string;
-    /** GY-2015: the loop's own merge-writer summary, so a trial refusal its queue holds reads as its motion, not an owed decision. */
-    mergeWriter?: MergeWriterSummary | null }) => Promise<ReportedAttention>;
   masterSession?: MasterSessionEffects; // the loop's own master session (GY-898); absent, none is launched, woken or rotated
 }
 

@@ -21,7 +21,6 @@ import { createWorktree } from '../src/cli/workspace-worktree.js';
 import type { CliContext } from '../src/cli/context.js';
 import { masterConfigSchema } from '../src/master.js';
 import { reconcileReviews, saveReviewLedger } from '../src/reviewer.js';
-import { daemonEffects } from '../src/daemon/effects-production.js';
 import { routineDecision } from '../src/daemon/decisions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-05-01 instant is the loop's injected clock and the explicit
@@ -229,14 +228,9 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   const actions: string[] = [];
   try {
     // Before the writer runs, the stale checks stand over repeated cycles with the decision effects
-    // enabled and the production attention path (effects-production.ts) reading the live plane: the
-    // loop requests no rework for them and reads no check run back.
-    const credentialFile = join(fixture, 'coordinator.token');
-    await writeFile(credentialFile, token(coordinator), { mode: 0o600 });
-    const production = daemonEffects(checkout, { ...master, credentialFile }, { snapshot: effects.snapshot, run, fetcher: globalThis.fetch,
-      mutate: async () => { throw new Error('nothing to mutate'); }, reportReadBoundMs: 5_000 });
+    // enabled: the loop requests no rework for them and reads no check run back.
     const decided: { action: string; input?: Record<string, unknown>; reason: string }[] = [];
-    const deciding = { ...effects, mergeWriter: undefined, controlPlane: production.controlPlane, reportedAttention: production.reportedAttention,
+    const deciding = { ...effects, mergeWriter: undefined,
       decide: async (_: Work, action: string, reason: string, input?: Record<string, unknown>) => { decided.push({ action, reason, input }); return { id: randomUUID() }; },
       approver: async () => ({ agentName: 'approver', pane: null }) } as unknown as DaemonEffects;
     for (let cycle = 0; cycle < 3; cycle++) {
@@ -246,10 +240,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
       for (const document of [stale, { ...stale, observation: { ...stale.observation!, reviews: [] } } as Work])
         assert.doesNotMatch(String(routineDecision(document, master, clock + cycle * 3_600_000)?.binding ?? ''), /:ci:/, 'no stored failed check grounds a rework');
     }
-    const attention = await production.reportedAttention!([(await store.workDocument(work.id))!], await production.controlPlane!(), { agents: [], approvals: daemonSummary(state, clock, 60_000).approvals, loop: daemonSummary(state, clock, 60_000).liveness, now: at });
-    assert.ok(Array.isArray(attention.items), 'the production attention path answered');
     assert.ok(!decided.some(entry => /:ci:/.test(String(entry.input?.binding ?? '')) || /required CI check/i.test(entry.reason)), `no rework for a stored failed check: ${JSON.stringify(decided)}`);
-    assert.ok(!JSON.stringify(attention).includes('typecheck failed on'), 'no stored check is reported as a timing failure');
     assert.deepEqual(children.filter(([command]) => command === 'gh'), [], `no gh child ran over the stale-check cycles: ${JSON.stringify(children.filter(([command]) => command === 'gh'))}`);
     assert.ok(!children.some(args => args.some(arg => /check-runs|annotations/.test(arg))), 'no check run was read back');
     for (let cycle = 0; cycle < 3 && (await store.workDocument(work.id))!.stage !== 'done'; cycle++) {

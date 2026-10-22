@@ -6,9 +6,6 @@ import { elapsed } from '../model/sessions.js';
 import { baseBreakHold, describeBaseBreak } from '../master/base-break-refresh.js';
 import type { LeadTimeReport } from '../pipeline-speed.js';
 import { baseFailureAttention } from '../daemon/cycle-base-failures.js';
-import { recurringFaultAttention } from '../daemon/faults.js';
-import { faultClassPolicyFromEnv } from '../model/fault-classes.js';
-import type { DaemonState } from '../daemon/state.js';
 
 // The orphaned-supervisor builders live in their own module (GY-138); they are read from here too.
 export { nameOrphanSupervisors, orphanSupervisorAttention, supervisorReclaimCommand } from './orphan-supervisors.js';
@@ -148,12 +145,7 @@ export function nameBaseBreaks<S extends { work: { key: string; refusal: { gate:
   return { ...status, work: rows, attentionItems };
 }
 
-/** GY-2186: each fault class recurring past its policy threshold in the window is one attention line naming the class, the count, the window and the latest instance. */
-export function recurringFaultLines(cursor: Pick<DaemonState, 'faults'> | null): AttentionItem[] {
-  return cursor ? recurringFaultAttention(cursor, faultClassPolicyFromEnv(process.env), Date.now()) : [];
-}
-
-/** The loop cursor's own attention: a failing base test and a fault class recurring past its threshold (GY-2186), one line each. */
-export function loopCursorLines(cycling: { baseFailures: Parameters<typeof baseFailureAttention>[0] }, cursor: Pick<DaemonState, 'faults'> | null, baseBranch: string): AttentionItem[] {
-  return [...baseFailureAttention(cycling.baseFailures, baseBranch), ...recurringFaultLines(cursor)];
+/** The loop cursor's own attention: a failing base test, one line each. */
+export function loopCursorLines(cycling: { baseFailures: Parameters<typeof baseFailureAttention>[0] }, baseBranch: string): AttentionItem[] {
+  return baseFailureAttention(cycling.baseFailures, baseBranch);
 }

@@ -55,8 +55,6 @@ function effects(work: Work | Work[], overrides: Partial<DaemonEffects>): Daemon
   } as DaemonEffects;
 }
 const records = (result: { actions: { kind: string; work: string | null; state: string; detail: string }[] }, item: string) => result.actions.filter(action => action.kind === 'decision' && action.work === item);
-/** The faults a carried wake could have raised: the fixture's own standing ones (an unobserved deployment) are not the step's. */
-const carriedFaults = (state: DaemonState) => state.faults.instances.filter(instance => instance.faultClass === 'decision' || /bound passed|budget passed/.test(instance.text ?? ''));
 const wakeRow = (state: DaemonState, work: Work) => state.actions[`wake:observation:${work.id}`];
 /** The step must return on its own bound: a run that outlives this race fails the test here — and fails against the base's sources too, where the wake holds the step for the resync timeout. */
 const returns = <T>(run: Promise<T>, boundMs = 5_000): Promise<T> => Promise.race([run, new Promise<never>((_, reject) => { const timer = setTimeout(() => reject(new Error(`the decisions step did not return within ${boundMs} ms`)), boundMs); timer.unref?.(); })]);
@@ -95,7 +93,6 @@ test('unit:slow-loop-step-bounded — a wakeObservation resync past the bound is
   assert.ok(row, 'the wake recorded its row');
   assert.equal(row.state, 'waiting', 'a carried wake is an outcome still in flight, not a failure');
   assert.match(row.detail, /Waking GY-1868's observation job was carried to the next cycle: the decisions step's 30 ms per-call bound passed before GY-1868's observation wake answered; the wake stays owed and is retried next cycle/, `the row records the carried wake: ${row.detail}`);
-  assert.deepEqual(carriedFaults(state), [], 'a carried wake is no fault');
   // The carried wake is retried on the very next cycle, inside the re-wake interval a finished wake would hold: the retry joins the call still in flight, so the effect starts once and counts no second send.
   await returns(runCycle(config(), state, fx, () => clock + 60_000));
   const retried = wakeRow(state, work);
@@ -147,7 +144,6 @@ test('unit:slow-loop-step-bounded — with several items whose resync never answ
   assert.equal(slow.calls.length, 2, 'the first two items were woken one at a time; the third waited for the next cycle once the budget was spent');
   assert.deepEqual(state.decisionsDeferred, ['GY-1871'], 'the item the spent budget left is put off for the next cycle, not waited on');
   assert.ok(!records(result, 'GY-1871').length, 'no third wake started past the budget');
-  assert.deepEqual(carriedFaults(state), [], 'carried wakes are no fault');
   assert.deepEqual(Object.values(state.approvals), [], 'no watch exists until a decision stands');
 });
 
@@ -161,7 +157,6 @@ test('unit:slow-loop-step-bounded — an observe past its per-call bound with bu
   const row = wakeRow(state, work);
   assert.equal(row?.state, 'waiting', 'the carried observe is recorded on the item\'s wake row');
   assert.match(row.detail, /^Observing GY-1874's reading was carried to the next cycle: .*per-call bound passed/, `the row records the carried observe: ${row.detail}`);
-  assert.deepEqual(carriedFaults(state), [], 'a carried observe is no fault');
   // Inside the waker's re-wake interval, the row's retry joins the observe still in flight: no second resync of either kind.
   await returns(runCycle(config(), state, fx, () => clock + 20_000));
   const joined = wakeRow(state, work);
@@ -256,5 +251,4 @@ test('unit:slow-loop-step-bounded — while a wakeObservation resync is carried,
   assert.equal(wakeRow(state, work).state, 'done', `the retry consumed the kept answer: ${wakeRow(state, work).detail}`);
   assert.equal(observes.length, 1, 'the consumed wake was the item\'s one resync: no observe was sent for it meanwhile');
   assert.equal(slow.calls.length, 1, 'the wake was never sent twice');
-  assert.deepEqual(carriedFaults(state), [], 'a carried wake is no fault');
 });

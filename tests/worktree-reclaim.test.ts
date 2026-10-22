@@ -5,12 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { wording } from '../src/model/fault-wording.js';
-import { standingDiskLine } from '../src/master/worktree-disk.js';
 import { dependencyDirectories, diskExhaustion, diskPressure, diskPressureAttention, diskThresholdBytes, freeBytes, inventoryWorktrees, masterConfigSchema, planWorktreeReclaim, prepareWorkerLaunch, reclaimIdleMs, reclaimWorktrees, removeReclaimableWorktrees, statusWorktreeInventory, writeWorktreeInventoryCache, worktreeReclaimAuditFile, saveWorkerProfile, setupMaster, shareDependencies, sharedInstallSource, workerPrompt, worktreesDirectory, writeFailure, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
-import { cycleFaults, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { readResources, resourceAttention } from '../src/master-resources.js';
-import { trackFaults } from '../src/model/fault-classes.js';
 import type { Work } from '../src/model.js';
 import { runChild } from '../src/child-runner.js';
 import * as worktrees from '../src/master/worktrees.js';
@@ -280,12 +277,6 @@ test('unit:disk-pressure-attention — master status asks for a reclaim before t
   assert.match(item.next, /graphyard master run reclaims every cycle while free space is low/);
   assert.match(item.next, /lower run\.reclaimIdleHours in \.graphyard\/master\.json/);
   assert.match(item.next, /graphyard master run --once reclaims immediately when no loop is running/);
-
-  // Inside the recovery band of a standing fault the attention line does not claim the reading is below the threshold.
-  const inBand = diskPressure(worktrees, 10_500_000_000, 10_000_000_000, plan, { standing: true });
-  assert.equal(inBand.low, true);
-  assert.match(diskPressureAttention(inBand)[0].text, /10\.5 GB free on .*, within the recovery band above the configured 10\.0 GB threshold/);
-  assert.doesNotMatch(diskPressureAttention(inBand)[0].text, /below the configured/);
 
   // The threshold is what decides, and it is configuration, not a constant.
   assert.deepEqual(diskPressureAttention(diskPressure(worktrees, 40_000_000_000, 10_000_000_000, plan)), []);
@@ -607,13 +598,13 @@ test('unit:worktree-orphan-reclaimed — a delivered item\'s directory Git no lo
 // `reclaim:trees` action, a resources fault. A refused tree was never remembered as held, so a
 // backlog that ran the pass every cycle re-ran the same refused command and recorded a fresh
 // failure, one instance per cycle, while nothing about the tree had changed.
-test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is one failed pass, then held and kept like a dirty tree while the backlog drains, and tried again after a day without a second fault', async () => {
+test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is one failed pass, then held and kept like a dirty tree while the backlog drains, and tried again after a day', async () => {
   const root = await host(false), credentials = await temporaryDirectory('reclaim-refusal');
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
     // Namespace-read so this file loads on the base, which has no retry bound, and the REPRODUCE assertions below run there.
     const refusalRetryMs = (worktrees as { worktreeRefusalRetryMs?: number }).worktreeRefusalRetryMs ?? 24 * hour;
-    // The threshold is set far below any host's free space: this test is about the refusal's one fault, not the volume (GY-1784 found it flapping on a host at its 10 GB default).
+    // The threshold is set far below any host's free space: this test is about the refusal, not the volume (GY-1784 found it flapping on a host at its 10 GB default).
     const master = config(token, { worktreeRemovalLimit: 1, diskThresholdGb: 0.1 });
     const refused = assignment(root, 'GY-200', 1), second = assignment(root, 'GY-201', 1), third = assignment(root, 'GY-202', 1);
     await idleFor(refused.path, 6 * hour); await idleFor(second.path, 5 * hour); await idleFor(third.path, 4 * hour);
@@ -631,15 +622,13 @@ test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is on
       return { ...await reclaimWorktrees(root, items, { idleMs: reclaimIdleMs(master), entries: removal.entries }), trees: removal };
     };
     const state = emptyDaemonState(master);
-    const resourcesFaults = () => state.faults.instances.filter(entry => entry.faultClass === 'resources').map(entry => entry.kind);
     const treesActions = () => Object.entries(state.actions).filter(([key]) => key.startsWith('reclaim:trees:')).map(([, action]) => action);
     const first = await runCycle(master, state, effects({ snapshot: async () => ({ work: snapshot, now: new Date().toISOString() }), reclaim: items => reclaim(items) }));
-    // Pass 1: the oldest tree is examined first, Git refuses it, and the pass is recorded as failed — one fault.
+    // Pass 1: the oldest tree is examined first, Git refuses it, and the pass is recorded as failed.
     assert.equal(passes[0].removed.length, 0); assert.equal(passes[0].backlog, 2);
     assert.match(passes[0].errors[0], /GY-200-1: .*rev-list/);
     assert.equal(treesActions().length, 1); assert.equal(treesActions()[0].state, 'failed');
     assert.match(first.actions.find(action => action.kind === 'reclaim')!.detail, /1 could not be removed: .*GY-200-1: .*rev-list/);
-    assert.deepEqual(resourcesFaults(), ['action:reclaim'], 'the refusal is one resources fault');
     assert.equal(revLists.length, 1);
     // Pass 2, the next cycle (the backlog drains on consecutive cycles): the refused tree is held and kept, Git is not asked again, and the pass succeeds on the next tree.
     await runCycle(master, state, effects({ snapshot: async () => ({ work: snapshot, now: new Date().toISOString() }), reclaim: items => reclaim(items) }));
@@ -651,7 +640,6 @@ test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is on
     const second2 = treesActions().find(action => action.state === 'done');
     assert.ok(second2, 'REPRODUCE: the base recorded the second pass as failed too');
     assert.match(second2!.detail, /^Removed 1 finished worktree\(s\) with git worktree remove; 1 more are reclaimable and go on the next cycle \(at most 1 per cycle\); 1 kept as dirty, unpushed, unregistered or refused by Git, first .*GY-200-1: Git refused: /);
-    assert.deepEqual(resourcesFaults(), ['action:reclaim'], 'REPRODUCE: the base counted a second resources fault for the same standing refusal');
     // Pass 3 drains the backlog with the refused tree still held; a pass a day later tries it again, in case the refusal cleared.
     const third3 = (await reclaim(snapshot)).trees;
     assert.deepEqual(third3.removed.map(entry => entry.key), ['GY-202']); assert.deepEqual(third3.errors, []); assert.equal(revLists.length, 1);
@@ -664,77 +652,35 @@ test('manual:fault-class-resources — GY-1515 reclaim: a tree Git refuses is on
 });
 
 /*
- * GY-1784: the `disk` line of master status and the loop's derived disk-pressure fault are judged as
- * the registry's worktree-disk reading is (src/master/worktree-disk.ts): answered while the loop's
- * latest pass is current and drained, raised at the exhaustion floor whatever the pass answered, and
- * held inside the recovery band while the line's fault stands. Instants here are relative to the
+ * GY-1784: the `disk` line of master status is judged as the registry's worktree-disk reading is
+ * (src/master/worktree-disk.ts): answered while the loop's latest pass is current and drained, and
+ * raised at the exhaustion floor whatever the pass answered. Instants here are relative to the
  * clock this test runs on; no calendar date is constructed.
  */
 const reclaimSummary = (at: number, freeBytes: number, overrides: Record<string, unknown> = {}) =>
   ({ at: new Date(at).toISOString(), scanned: 240, removed: 0, kept: 240, freedBytes: 0, freeBytes, errors: [], checkouts: 0, checkoutsOffVolume: 0, rootFreeBytes: null, trees: 0, treeBacklog: 0, ...overrides });
 
-test('unit:disk-pressure-drained-flap — the derived disk-pressure line gets the answered gate and the recovery band the worktree-disk reading has, so the two lines cannot flap between them', async () => {
+test('unit:disk-pressure-drained-flap — the worktree-disk reading is answered by a current drained pass, left standing by reach, an error or a stale pass, and raised at the hard line whatever the pass answered', async () => {
   const disk = await import('../src/master/worktree-disk.js');
   const credentials = await temporaryDirectory('disk-flap');
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
-    const master = config(token, { diskThresholdGb: 10 }), threshold = diskThresholdBytes(master);
-    const state = emptyDaemonState(master);
-    let now = Date.now();
-    const standing = () => disk.standingDiskLine(state.faults.open, 'disk-pressure');
-    /** One cycle's faults step over a reclaim summary recorded `age` ms before it, tracked into the record. */
-    const observe = (freeBytes: number, age = 60_000, overrides: Record<string, unknown> = {}) => {
-      state.reclaim = reclaimSummary(now - age, freeBytes, overrides) as typeof state.reclaim;
-      const lines = cycleFaults(state, [], now, { config: master }).filter(fault => fault.kind === 'disk-pressure');
-      const opened = trackFaults(state.faults, lines, new Date(now).toISOString()).map(fault => fault.kind);
-      now += 20_000;
-      return { lines, opened };
-    };
-    // Below the line with a current, drained pass: no line, and the registry reading on the same inputs is answered too.
-    const answered = observe(9_900_000_000);
-    assert.deepEqual(answered.lines, []); assert.equal(standing(), false);
-    assert.equal(disk.judgeWorktreeDisk({ freeBytes: 9_900_000_000, thresholdBytes: threshold, pass: disk.worktreePassOf(state.reclaim!) }, now).answered, true);
-    // Left anything reclaimable, or stale: the line stands and says why.
-    const backlog = observe(9_900_000_000, 60_000, { treeBacklog: 120 });
-    assert.deepEqual(backlog.opened, ['disk-pressure']);
-    assert.match(backlog.lines[0].text, /^Free space below its configured bound at the last reclaim \([^)]*\)$/, 'the observation is worded the same whatever the reading or the pass says, so one wobble is one instance');
-    assert.deepEqual(observe(9_900_000_000, 60_000, { removed: 2 }).lines.map(line => line.kind), ['disk-pressure']);
-    assert.deepEqual(observe(9_900_000_000, 60_000, { checkouts: 1 }).lines.map(line => line.kind), ['disk-pressure']);
-    assert.deepEqual(observe(9_900_000_000, 60_000, { errors: ['x: Git refused'] }).lines.map(line => line.kind), ['disk-pressure']);
-    const stale = observe(9_900_000_000, disk.worktreePassCurrentMs + 1);
-    assert.match(stale.lines[0].text, /^Free space below its configured bound at the last reclaim \([^)]*\)$/);
-    // The reach and why the reading stands live in the judged detail master status carries, not in the fault's wording.
-    assert.match(disk.judgeWorktreeDisk({ freeBytes: 9_900_000_000, thresholdBytes: threshold, pass: disk.worktreePassOf(state.reclaim!), standing: true, reclaimable: 0 }, now).detail!, /found nothing reclaimable .* outside its reach: free host data on the volume, raise run\.diskThresholdGb .*; that pass is past its 30-minute currency bound/);
-    assert.equal(state.faults.instances.filter(instance => instance.kind === 'disk-pressure').length, 1, 'the standing line is one instance however its wording moves');
-    // Drained and current again while the fault stands: the line holds — a fresh drained pass ends it only past the recovery band (GY-1784 review, AC-4).
-    const held = observe(9_900_000_000);
-    assert.equal(held.lines.length, 1, 'a standing line is not answered, however fresh the drained pass');
-    assert.match(held.lines[0].text, /^Free space below its configured bound/);
-    assert.match(disk.judgeWorktreeDisk({ freeBytes: 9_900_000_000, thresholdBytes: threshold, pass: disk.worktreePassOf(state.reclaim!), standing: true, reclaimable: 0 }, now).detail!, /the reading's fault stands, so it holds until free space recovers past the 1\.0 GB band above the 10\.0 GB line, whatever that pass answered/);
-    assert.equal(state.faults.instances.filter(instance => instance.kind === 'disk-pressure').length, 1, 'the hold opens no new instance');
-    // Recovered past the band while the pass is current and drained: the line ends.
-    assert.deepEqual(observe(threshold + disk.diskRecoveryBandBytes(threshold), 60_000).lines, []); assert.equal(standing(), false);
-    // The wobble GY-1782 recorded, with a stale pass so the line is raised: 9.98 → 10.24 → 9.95 → 10.33 → 9.9 GB is one instance, not one per crossing.
-    const walk = [9_980_000_000, 10_240_000_000, 9_950_000_000, 10_330_000_000, 9_900_000_000].map(free => observe(free, 2 * hour));
-    assert.deepEqual(walk.map(step => step.opened), [['disk-pressure'], [], [], [], []]);
-    assert.deepEqual(walk.map(step => step.lines.length), [1, 1, 1, 1, 1], 'inside the band the line keeps standing');
-    // The wording never moves with the reading (a fault is its wording); what the band says lives in the judged detail.
-    assert.match(disk.judgeWorktreeDisk({ freeBytes: 10_240_000_000, thresholdBytes: threshold, pass: disk.worktreePassOf(state.reclaim!), standing: true, reclaimable: 0 }, now).detail!, /within the 1\.0 GB recovery band above the 10\.0 GB line/);
-    assert.equal(wording(walk[1].lines[0].text), wording(walk[0].lines[0].text), 'inside the band the derived line is the same fault, not a new one');
-    assert.match(walk[0].lines[0].text, /^Free space below its configured bound/);
-    // Recovered past the band: the instance ends; the next dip under the line is a new one. Without a standing line the band is not in force.
-    assert.deepEqual(observe(threshold + disk.diskRecoveryBandBytes(threshold), 2 * hour).lines, []); assert.equal(standing(), false);
-    assert.deepEqual(observe(10_500_000_000, 2 * hour).lines, [], 'above the line with no standing fault, the band does not apply');
-    assert.deepEqual(observe(9_990_000_000, 2 * hour).opened, ['disk-pressure']);
-    // Recovered once more, so no fault stands: the hard line is all that overrides the answered gate.
-    assert.deepEqual(observe(threshold + disk.diskRecoveryBandBytes(threshold), 60_000).lines, []);
-    // The hard line: at or below the floor the line is raised though the pass is current and drained.
+    const master = config(token, { diskThresholdGb: 10 }), threshold = diskThresholdBytes(master), now = Date.now();
+    const judge = (freeBytes: number, age = 60_000, overrides: Record<string, unknown> = {}) =>
+      disk.judgeWorktreeDisk({ freeBytes, thresholdBytes: threshold, pass: disk.worktreePassOf(reclaimSummary(now - age, freeBytes, overrides) as Parameters<typeof disk.worktreePassOf>[0]) }, now);
+    // Below the line with a current, drained pass: answered. Left anything reclaimable, errored, or stale: it stands.
+    assert.equal(judge(9_900_000_000).answered, true);
+    assert.equal(judge(9_900_000_000, 60_000, { treeBacklog: 120 }).answered, false);
+    assert.equal(judge(9_900_000_000, 60_000, { removed: 2 }).answered, false);
+    assert.equal(judge(9_900_000_000, 60_000, { checkouts: 1 }).answered, false);
+    assert.equal(judge(9_900_000_000, 60_000, { errors: ['x: Git refused'] }).answered, false);
+    assert.equal(judge(9_900_000_000, disk.worktreePassCurrentMs + 1).answered, false);
+    assert.match(judge(9_900_000_000, disk.worktreePassCurrentMs + 1).detail!, /found nothing reclaimable .* outside its reach: free host data on the volume, raise run\.diskThresholdGb .*; that pass is past its 30-minute currency bound/);
+    // The hard line: at or below the floor the reading is raised though the pass is current and drained.
     const floor = disk.diskExhaustionFloorBytes(threshold);
-    assert.equal(observe(floor + 1).lines.length, 0, 'just above the floor the drained pass answers');
-    assert.match(observe(floor).lines[0].text, /^Free space below its configured bound/);
-    assert.match(disk.judgeWorktreeDisk({ freeBytes: floor, thresholdBytes: threshold, pass: disk.worktreePassOf(state.reclaim!), reclaimable: 0 }, now).detail!, /at or below the 5\.0 GB exhaustion floor, which raises attention whatever that pass answered/);
-    // The managed root's own minimum is judged as before, beside the worktree volume.
-    assert.equal(observe(40_000_000_000, 60_000, { rootFreeBytes: 1 }).lines.length, 1, 'the managed root below its minimum still raises the line');
+    assert.equal(judge(floor + 1).answered, true, 'just above the floor the drained pass answers');
+    assert.equal(judge(floor).answered, false);
+    assert.match(judge(floor).detail!, /at or below the 5\.0 GB exhaustion floor, which raises attention whatever that pass answered/);
   } finally { await rm(credentials, { recursive: true, force: true }); }
 });
 
@@ -779,7 +725,7 @@ test('unit:disk-pressure-attention-names-outside-reach — with nothing reclaima
   assert.match(reading[0].next, /free host data on the volume, raise run\.diskThresholdGb, or move the worktree root to a dedicated volume/);
 });
 
-test('unit:disk-reach-now — a pass that removed the last disposable material leaves both lines describing nothing reclaimable now, and the managed root fault never stands for the worktree volume', async () => {
+test('unit:disk-reach-now — a pass that removed the last disposable material leaves both lines describing nothing reclaimable now', async () => {
   const at = new Date(Date.now() - 60_000).toISOString(), pass = { at, removed: 3, trees: 0, treeBacklog: 0, checkouts: 0, errors: 0, freeBytes: 4_000_000_000 };
   const low = diskPressure('/w', 4_000_000_000, 10_000_000_000, [], { pass });
   assert.equal(low.drained, true, 'nothing is reclaimable now, whatever the pass removed');
@@ -789,10 +735,6 @@ test('unit:disk-reach-now — a pass that removed the last disposable material l
   assert.doesNotMatch(item.text, /Reclaim them before the volume fills|still has reach/);
   const backlog = diskPressure('/w', 4_000_000_000, 10_000_000_000, [], { pass: { ...pass, treeBacklog: 2 } });
   assert.equal(backlog.drained, false, 'worktrees waiting on the next cycle are reach');
-  // A root-minimum fault on the shared subject is not the worktree volume's fault: it never applies the recovery band.
-  const open = (text: string) => ({ [`disk-pressure|disk|${wording(text)}`]: 'x' });
-  assert.equal(standingDiskLine(open('Managed worktree root free space is below its minimum at the last reclaim (t)'), 'disk-pressure'), false);
-  assert.equal(standingDiskLine(open('Free space below its configured bound at the last reclaim (t)'), 'disk-pressure'), true);
 });
 
 test('unit:disk-answer-needs-honest-inputs — a pass dated ahead of the clock, an unreadable inventory and a plan with reach now each leave a low reading raised', async () => {
@@ -817,11 +759,6 @@ test('unit:disk-answer-needs-honest-inputs — a pass dated ahead of the clock, 
       await rm(worktreesDirectory(root), { force: true });
       assert.equal(await disposableWorktrees(root, master, { work: [], now }), 0, 'a directory that does not exist yet is an empty plan');
     } finally { await rm(root, { recursive: true, force: true }); }
-    // AC-4: the loop's derived line judges the same plan the registry does: a current drained pass does not answer a plan with reach now.
-    const state = emptyDaemonState(master);
-    state.reclaim = reclaimSummary(now - 60_000, low, {}) as typeof state.reclaim;
-    const kinds = (worktreeReclaimable?: number | null) => cycleFaults(state, [], now, { config: master, worktreeReclaimable }).filter(fault => fault.kind === 'disk-pressure').length;
-    assert.equal(kinds(0), 0); assert.equal(kinds(2), 1); assert.equal(kinds(null), 1);
   } finally { await rm(credentials, { recursive: true, force: true }); }
 });
 

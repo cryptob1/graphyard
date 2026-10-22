@@ -62,7 +62,7 @@ test('unit:soak-worktree-inventory-unreadable — over simulated cycles a worktr
     const turnUnreadable = async () => { await rename(trees, aside); await writeFile(trees, 'a file where the directory was'); unreadable = true; };
     const turnReadable = async () => { await rm(trees, { force: true }); await rename(aside, trees); unreadable = false; };
     const reportedAttention = async (snapshot: Work[]) => {
-      const read = (await readDisk(root, config10, { reclaim: worktreePassOf(state.reclaim), open: state.faults.open }, { work: snapshot, now }))!;
+      const read = (await readDisk(root, config10, { reclaim: worktreePassOf(state.reclaim) }, { work: snapshot, now }))!;
       return { items: resourceAttention(readResources({ now, reviews: [], producers: [], agents: [], work: snapshot, plane: null, loop: null, revision: null,
         profiles: { workers: [], reviewers: [], producers: [] }, disk: { ...read, totalBytes, freeBytes } })) };
     };
@@ -88,40 +88,34 @@ test('unit:soak-worktree-inventory-unreadable — over simulated cycles a worktr
       const violations = state.invariants.report.filter(check => !check.holds).map(check => `${check.invariant}: ${check.reading}`);
       assert.deepEqual(violations, [], `cycle at +${Math.round((now - start) / minute)} min: every system invariant holds`);
       const items = (await reportedAttention([item])).items.filter(entry => entry.subject === 'resource:worktree-disk').map(entry => entry.subject);
-      const disk = (await readDisk(root, config10, { reclaim: worktreePassOf(state.reclaim), open: state.faults.open }, { work: [item], now }))!;
+      const disk = (await readDisk(root, config10, { reclaim: worktreePassOf(state.reclaim) }, { work: [item], now }))!;
       const reading = readResources({ now, reviews: [], producers: [], agents: [], work: [item], plane: null, loop: null, revision: null,
         profiles: { workers: [], reviewers: [], producers: [] }, disk: { ...disk, totalBytes, freeBytes } }).find(entry => entry.resource === 'worktree-disk')!;
-      const instances = Object.keys(state.faults.open).filter(key => key.startsWith('resource-bound|resource:worktree-disk|')).length;
-      return { items, reading, instances };
+      return { items, reading };
     };
     // Phase A — readable, a pass has drained: the low reading is answered and nothing opens.
     for (let index = 0; index < 3; index++) {
       const step = await cycle();
       assert.deepEqual(step.items, [], `readable cycle ${index}: the drained pass answers the low reading`);
-      assert.equal(step.instances, 0);
       assert.equal(step.reading.answered, true);
     }
     // Phase B — the directory turns unreadable under that cache, and stays so across the cache's whole currency window and beyond.
     await turnUnreadable();
-    let raised = false;
     for (let index = 0; index < 12; index++) {
       const step = await cycle();
       assert.equal(step.reading.answered, undefined, `unreadable cycle ${index}: the cached empty reading never answers the fault`);
-      if (step.instances === 1) raised = true;
-      if (raised) assert.deepEqual(step.items, ['resource:worktree-disk'], `unreadable cycle ${index}: the raised line stays raised`);
+      assert.deepEqual(step.items, ['resource:worktree-disk'], `unreadable cycle ${index}: the unanswered low reading stays raised`);
     }
-    assert.equal(raised, true, 'the unanswered low reading opened its instance while the directory was unreadable');
-    // Phase C — readable again: the pass walks the trees, the reading is judged on the real inventory once more, and the one instance never multiplied.
+    // Phase C — readable again: the pass walks the trees, the reading is judged on the real inventory once more, and answers again.
     await turnReadable();
     for (let index = 0; index < 3; index++) {
       const step = await cycle();
-      assert.equal(step.instances, 1, `recovery cycle ${index}: the same single instance`);
+      assert.deepEqual(step.items, [], `recovery cycle ${index}: the cached reading answers once more`);
+      assert.equal(step.reading.answered, true);
     }
     freeBytes = threshold + 2_000_000_000;
     for (let index = 0; index < 4; index++) await cycle();
     const recovered = await cycle();
     assert.deepEqual(recovered.items, [], 'recovered above the line, the registry line is silent');
-    assert.equal(recovered.instances, 0, 'and the instance ended');
-    assert.equal(state.faults.instances.filter(instance => instance.subject === 'resource:worktree-disk').length, 1, 'the whole interval left one instance on the record');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });

@@ -7,7 +7,6 @@ import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { decompositionSettingsSchema, diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { researchSettingsSchema } from '../research.js';
-import { doctorSettingsSchema } from './doctor-settings.js';
 import { candidateSettingsSchema, mergeWriterSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
@@ -352,8 +351,7 @@ export const masterRunSchema = z.object({
   // starts — its model (the Z.AI GLM flash model by default), time limit and token budget.
   research: researchSettingsSchema.optional(),
   decomposition: decompositionSettingsSchema.optional(), // splitting broad items before first dispatch (GY-1126): size bounds and run time limit; it runs on run.research's account
-  // The pipeline doctor (GY-711): headless Pi session fixing stuck work every intervalMinutes (5 by default).
-  doctor: doctorSettingsSchema.optional(),
+  doctor: z.unknown().optional(), // the pipeline doctor, retired by GY-2873; parsed so an older master.json loads
   // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
   // cause and fix item — its model, fallback, time limit, bound and log-reading commands.
   diagnostician: diagnosticianSettingsSchema.optional(),

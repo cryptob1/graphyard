@@ -19,7 +19,7 @@ Sweeps run every automatic-dispatch tick; a handle closes at the second consecut
 
 `blocked` frees its slot; [classes](protocol/work-commands.md#blocked-work-unblocks-itself) self-clear (`github-credential`, `control-plane-error`, `sandbox-path`, `worktree-mismatch`, `outside-scope-test-failure`, `dispatch-failure`, `host-supervisor`, `runtime-denial`, `runtime-exhaustion`, `github-outage`); `master-role` a master-role identity runs and unblocks; `needs-decision` approver. `genuine`/`human-only` escalate.
 
-`Recurring <class>` and `invariant:` faults are attention lines, never items; `stale`/`withdrawn` decisions re-request ≤3×, then `decision-stale`; refused `create` 409/400 is `fix-item`. Review follow-ups: Pi (`run.research`) triages.
+`invariant:` lines are attention, never items; `stale`/`withdrawn` decisions re-request ≤3×, then `decision-stale`. Review follow-ups: Pi (`run.research`) triages.
 
 ## Automatic dispatch at submit
 

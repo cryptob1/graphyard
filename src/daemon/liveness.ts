@@ -1,12 +1,10 @@
 // Concern: loop liveness — cycle cost, cycle-failure backoff, loop attention, the progress watchdog and the supervisor's watchdog.
 import { type AttentionItem, agentOwner } from '../master.js';
 import { type Work } from '../model.js';
-import { classified, noteFault } from '../model/fault-classes.js';
 import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, initialPidNamespace, liveProcess, type LoopRelease, message, pidNamespace, type PromotionState, type StepCost } from './state.js';
 import type { LatencyBudget } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
-import { planeUnavailable, planeUnavailableText } from '../model/refusal.js';
 
 // ---- The loop's own liveness ---------------------------------------------------------------
 export type LoopState = 'running' | 'slow' | 'stalled' | 'absent';
@@ -39,8 +37,8 @@ export interface CycleCost {
   /**
    * The step the loop-cost lines name as slowest and to shorten (GY-1355): the slowest timed step
    * (metrics.timings) whenever the cycle recorded timings, else the coarse bucket `slowest`, named
-   * as the roll-up it is. Four timed steps — the faults step among them — share the coarse
-   * 'deployment' bucket, so naming the bucket filed a faults-step cost against deployment.
+   * as the roll-up it is. Several timed steps share the coarse 'deployment' bucket, so naming the
+   * bucket would file another step's cost against deployment.
    */
   culprit: { step: string; ms: number; timed: boolean; phrase: string } | null;
 }
@@ -51,10 +49,10 @@ export interface CycleCost {
 export const cycleBucketSteps: Record<CycleStepName, string> = {
   observe: 'the snapshot, follow-up threads, merge settings and reconcile steps',
   close: 'the observe, credentials, close, launches, master session and reclaim steps',
-  decisions: 'the scope, successors, blockers, base failures, review cap, decisions and remedies steps',
+  decisions: 'the scope, successors, blockers, base failures, review cap and decisions steps',
   dispatch: 'the dispatch and reviews and proofs steps',
   merge: 'the merges step',
-  deployment: 'the deployment verification, faults, triage and doctor steps',
+  deployment: 'the deployment verification, invariants, triage and setup steps',
 };
 /** A cycle whose wall time passes this raises a liveness attention naming its three slowest steps (GY-616). */
 export const slowCycleMs = 60_000;
@@ -203,9 +201,6 @@ export async function noteCycleFailure(state: DaemonState, error: unknown, phase
   const at = new Date(options.now).toISOString();
   const last = { cycle: state.cycle, at, phase, call, reason: message(error).slice(0, 1000), delayMs, nextAt: new Date(options.now + delayMs).toISOString() };
   state.failures = { ...state.failures, consecutive, total: state.failures.total + 1, last };
-  // A run of failures reaching the attention bound is one loop fault instance (GY-173), not one per retry.
-  // GY-1344: cycles failing on a control plane that does not answer are that outage, not the loop's.
-  if (consecutive === cycleFailureAttentionAfter) noteFault(state.faults, { ...classified(planeUnavailable(error) ? 'plane-unavailable' : 'loop-failures'), subject: 'loop', text: `${consecutive} consecutive failed cycles, the last in ${describeFailingCall(last)}: ${last.reason}` }, at);
   // The cycle ended, failed, and the loop is alive: the counter and the heartbeat both say so.
   state.cycle += 1;
   state.lastCycleAt = at;
@@ -273,22 +268,22 @@ export function loopAttention(report: { liveness: LoopLiveness; /** Retired (GY-
     ? `graphyard master status shows the last cycle's step breakdown under daemon.cost; the time went to child processes in the ${cost.longestWait.step} step (${Math.round(cost.longestWait.childWaitMs / 1000)}s), so look at what Herdr, gh or git is slow on rather than restarting a loop that is still cycling`
     : cost?.culprit ? `graphyard master status shows the last cycle's step breakdown under daemon.cost${cost.culprit.timed ? ' and its timed steps under daemon.metrics.timings' : ''}; shorten ${cost.culprit.phrase} rather than restarting a loop that is still cycling`
       : 'graphyard master status shows the last cycle under daemon.cost';
-  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart), ...classified('loop-liveness') });
+  if (report.liveness.state !== 'running') items.push({ subject: 'loop', text: report.liveness.detail, ...agentOwner('master', report.liveness.state === 'slow' ? shorten : report.liveness.restart) });
   // A cycle whose own work does not fit its interval is raised whatever the lag says: the loop
   // looks healthy the instant a long cycle ends, and the cost is the only reading that names
   // what took the time. A cycle that merely waited is reported net: its work fit, and the wait is
   // in the breakdown for anyone reading it.
   if (cost && !cost.withinInterval && report.liveness.state !== 'slow' && report.liveness.state !== 'absent') {
-    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.culprit ? `. ${cost.culprit.timed ? `The ${cost.culprit.step} step is the slowest timed step, at ${Math.round(cost.culprit.ms / 1000)}s` : `The ${cost.culprit.step} bucket is the slowest, at ${Math.round(cost.culprit.ms / 1000)}s of work; it rolls up ${cycleBucketSteps[cost.culprit.step as CycleStepName]}, so no one step inside it is named`}. It is ${culpritShare(cost)}% of the cycle's own work` : ''}`, ...agentOwner('master', shorten), ...classified('loop-cost') });
+    items.push({ subject: 'loop', text: `Cycle ${cost.cycle} spent ${Math.round(cost.workMs / 1000)}s on its own work, longer than the ${Math.round(cost.intervalMs / 1000)}s interval${cost.withinLivenessBound ? '' : ` and past the two-interval liveness bound of ${Math.round(cost.stalledAfterMs / 1000)}s`} (${Math.round(cost.durationMs / 1000)}s in all, ${Math.round(cost.childWaitMs / 1000)}s of it waiting on child processes): ${cost.breakdown}${cost.culprit ? `. ${cost.culprit.timed ? `The ${cost.culprit.step} step is the slowest timed step, at ${Math.round(cost.culprit.ms / 1000)}s` : `The ${cost.culprit.step} bucket is the slowest, at ${Math.round(cost.culprit.ms / 1000)}s of work; it rolls up ${cycleBucketSteps[cost.culprit.step as CycleStepName]}, so no one step inside it is named`}. It is ${culpritShare(cost)}% of the cycle's own work` : ''}`, ...agentOwner('master', shorten) });
   }
   // A cycle that keeps failing is retried in-process with backoff; past the bound it names the
   // failing call, because a restart would not clear a read that times out every time.
   const failures = report.failures;
   if (failures?.last && failures.consecutive >= cycleFailureAttentionAfter) items.push({ subject: 'loop',
     text: `The master loop has failed ${failures.consecutive} consecutive cycles, the last (cycle ${failures.last.cycle} at ${failures.last.at}) in ${describeFailingCall(failures.last)}: ${failures.last.reason}. It keeps cycling in-process, waiting ${Math.round(failures.last.delayMs / 1000)}s before the next attempt (due ${failures.last.nextAt}); a restart does not clear this`,
-    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`), ...classified(planeUnavailableText(failures.last.reason) ? 'plane-unavailable' : 'loop-failures') });
+    ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
   if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
-    ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step'), ...classified('delivery-budget') });
+    ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step') });
   return items;
 }
 
@@ -304,7 +299,7 @@ export function slowCycleAttention(report: { liveness: Pick<LoopLiveness, 'state
   if (!cost || cost.durationMs <= slowCycleMs || report.liveness.state === 'absent') return [];
   const usual = report.cycleTime?.p50Ms != null ? ` (p50 ${seconds(report.cycleTime.p50Ms)}, p95 ${seconds(report.cycleTime.p95Ms ?? report.cycleTime.p50Ms)} over the last ${Math.round(report.cycleTime.windowMs / 60_000)} minutes)` : '';
   return [{ subject: 'loop', text: `Cycle ${cost.cycle} took ${seconds(cost.durationMs)}, past the ${seconds(slowCycleMs)} cycle bound${usual}, and every merge, decision and close in it waited that long; slowest steps: ${cost.slowestSteps.map(step => `${step.step} ${seconds(step.ms)}`).join(', ') || 'none recorded'}`,
-    ...agentOwner('master', `graphyard master status shows the cycle's timings under daemon.metrics.timings and the loop's cycle time under daemon.cycleTime; shorten the ${cost.slowestSteps[0]?.step ?? 'slowest'} step rather than restarting a loop that is still cycling`), ...classified('loop-liveness') }];
+    ...agentOwner('master', `graphyard master status shows the cycle's timings under daemon.metrics.timings and the loop's cycle time under daemon.cycleTime; shorten the ${cost.slowestSteps[0]?.step ?? 'slowest'} step rather than restarting a loop that is still cycling`) }];
 }
 
 /**
@@ -333,7 +328,7 @@ export const actionableIntervalMs = 30_000;
 export const cycleDelay = (intervalMs: number, actionable: number) => actionable > 0 ? Math.min(intervalMs, actionableIntervalMs) : intervalMs;
 
 // ---- The progress watchdog (GY-1980) --------------------------------------------------------
-/** Nothing may go without progress longer than this: one faultless line, never an item. */
+/** Nothing may go without progress longer than this: one line, never an item. */
 export const progressStallMs = 60 * 60_000;
 /** A merged change may wait this long past the running release before one line says so. */
 export const releaseLagMs = 90 * 60_000;
@@ -349,8 +344,7 @@ const stalledOpenItem = (work: readonly Work[]) =>
  * The stall watchdog (GY-1980): the one reading a busy-but-frozen pipeline needs, where the
  * per-subject silence record used to sit — a record a retrying loop kept resetting, so nothing
  * ever looked stalled. Both lines are pure judgements over the snapshot and the release reading
- * the cursor already keeps, carry no fault class (the fault step never files or counts them), and
- * persist nothing. Thresholds are the module constants above, not settings.
+ * the cursor already keeps, and persist nothing. Thresholds are the module constants above, not settings.
  *
  * (a) No progress: while any item is open, the latest progress instant is the newest of every
  *     item's `stageEnteredAt`, every delivery's `mergedAt` and the release's `promotedAt`; when
@@ -361,8 +355,8 @@ const stalledOpenItem = (work: readonly Work[]) =>
  *     their oldest before one line counts them and names that oldest merge. Every merged item
  *     behind the release is progress; none is lag.
  */
-export function progressAttention(work: readonly Work[], release: Pick<PromotionState, 'promotedAt'> | null | undefined, now: number): (AttentionItem & { faultless: true })[] {
-  const items: (AttentionItem & { faultless: true })[] = [];
+export function progressAttention(work: readonly Work[], release: Pick<PromotionState, 'promotedAt'> | null | undefined, now: number): AttentionItem[] {
+  const items: AttentionItem[] = [];
   const open = work.filter(item => watchdogOpenStages.has(item.stage));
   const merged = work.flatMap(item => { const at = parseInstant(item.delivery?.mergedAt); return at === null ? [] : [{ key: item.key, at }]; });
   const promotedAt = parseInstant(release?.promotedAt ?? null);
@@ -372,14 +366,14 @@ export function progressAttention(work: readonly Work[], release: Pick<Promotion
     const newest = progress.length ? Math.max(...progress) : null;
     const waited = stalledOpenItem(open);
     if (newest !== null && waited && now - newest > progressStallMs)
-      items.push({ subject: waited.item.key, faultless: true,
+      items.push({ subject: waited.item.key,
         text: `Nothing has progressed for ${Math.round((now - newest) / 60_000)} minutes (since ${new Date(newest).toISOString()}): ${waited.item.key} has been in ${waited.item.stage} since ${waited.item.stageEnteredAt}`,
         ...agentOwner('master', `graphyard master status names what holds ${waited.item.key} in ${waited.item.stage}; judge and clear that wait — a restart clears only a loop that has stopped cycling, and this one says it has not`) });
   }
   const unreleased = merged.filter(entry => promotedAt === null || entry.at > promotedAt);
   const oldest = unreleased.slice().sort((a, b) => a.at - b.at)[0] ?? null;
   if (oldest && now - oldest.at > releaseLagMs)
-    items.push({ subject: 'release', faultless: true,
+    items.push({ subject: 'release',
       text: `${unreleased.length} merged change(s) have not reached the running release for ${Math.round((now - oldest.at) / 60_000)} minutes; the oldest is ${oldest.key} merged at ${new Date(oldest.at).toISOString()}; ${promotedAt === null ? 'no release has been observed' : `the release last moved at ${new Date(promotedAt).toISOString()}`}`,
       ...agentOwner('master', 'graphyard master status shows the continuous deploy under promotion; judge why the release has not moved onto the merged heads and unblock it — the merges themselves are delivered') });
   return items;

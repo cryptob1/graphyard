@@ -9,13 +9,10 @@ import {
   projectMemoryDigest,
   projectMemoryWordBudget,
   recordDecisionInMemory,
-  recordPitfallInMemory,
   recordChangeInMemory,
   recordSettledDecision,
   updateProjectMemoryFromWork,
-  sanctionedRemedies,
   isDecisionRoleRelevant,
-  isPitfallRoleRelevant,
   type ProjectMemory,
 } from '../src/model/project-memory.js';
 import {
@@ -31,7 +28,7 @@ import { buildMasterStatus } from '../src/master/status.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model/work.js';
-import { emptyDaemonState, writeDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { emptyDaemonState, writeDaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master/profiles.js';
 // Time-bomb allowance (GY-1694): the 2026-10-02 instants are memory/answer timestamps that updateProjectMemoryFromWork only sorts; its 24 h merge window runs on Date.now() against mergedAt values also derived from Date.now().
 
@@ -64,23 +61,6 @@ function createSampleMemory(): ProjectMemory {
     state: 'applied',
     approvedBy: 'graphyard-approver',
     at: '2026-10-02T11:30:00Z',
-  });
-
-  // Pitfalls
-  recordPitfallInMemory(memory, {
-    faultClass: 'scope',
-    count: 3,
-    at: '2026-10-02T09:00:00Z',
-  });
-  recordPitfallInMemory(memory, {
-    faultClass: 'review-convergence',
-    count: 2,
-    at: '2026-10-02T09:30:00Z',
-  });
-  recordPitfallInMemory(memory, {
-    faultClass: 'proof',
-    count: 4,
-    at: '2026-10-02T08:00:00Z',
   });
 
   // Changes
@@ -116,7 +96,6 @@ test('unit:session-request-carries-project-memory — worker request carries rol
 
   assert.ok(digest.includes('Shared project memory:'));
   assert.ok(digest.includes('GY-1001 (scope): Widen scope for auth helpers in src/auth.ts [approved by graphyard-approver]'));
-  assert.ok(digest.includes('scope (3 recurrences): ' + sanctionedRemedies['scope']));
   assert.ok(digest.includes('GY-1000 (1111111111): src/auth.ts, tests/auth.test.ts'));
   assert.ok(docsWords(digest) <= projectMemoryWordBudget);
 
@@ -133,7 +112,6 @@ test('unit:session-request-carries-project-memory — worker request carries rol
   assert.ok(request.includes('Implement GY-1125: Project memory.'));
   assert.ok(request.includes('Shared project memory:'));
   assert.ok(request.includes('Recent decisions:'));
-  assert.ok(request.includes('Recurring pitfalls and remedies:'));
   assert.ok(request.includes('Recent merges to main since base 0000000000: - GY-1000 (1111111111): src/auth.ts, tests/auth.test.ts - GY-999 (5555555555): README.md, docs/overview.md'));
   assert.ok(!request.includes('GY-998'), 'the base merge itself is not news to the session');
 });
@@ -152,10 +130,9 @@ test('unit:session-request-carries-project-memory — merges since base exclude 
 test('unit:session-request-carries-project-memory — the digest renders each section in its exact form', () => {
   const memory = emptyProjectMemory('2026-10-02T12:00:00Z');
   recordDecisionInMemory(memory, { id: 'd', key: 'GY-1', action: 'scope', reason: 'Widen to src/a.ts', state: 'applied', approvedBy: 'approver-1', at: '2026-10-02T10:00:00Z' });
-  recordPitfallInMemory(memory, { faultClass: 'merge', count: 1, at: '2026-10-02T09:00:00Z' });
   recordChangeInMemory(memory, { key: 'GY-2', sha: 'a'.repeat(40), files: ['src/a.ts'], mergedAt: '2026-10-02T08:00:00Z' });
   assert.equal(projectMemoryDigest(memory, 'worker'),
-    `Shared project memory: Recent decisions: - GY-1 (scope): Widen to src/a.ts [approved by approver-1] Recurring pitfalls and remedies: - merge (1 recurrence): ${sanctionedRemedies.merge} Recent merges to main in last 24h: - GY-2 (aaaaaaaaaa): src/a.ts `);
+    `Shared project memory: Recent decisions: - GY-1 (scope): Widen to src/a.ts [approved by approver-1] Recent merges to main in last 24h: - GY-2 (aaaaaaaaaa): src/a.ts `);
   assert.equal(projectMemoryDigest(emptyProjectMemory(), 'worker'), '');
   assert.equal(projectMemoryDigest(null, 'reviewer'), '');
 });
@@ -167,7 +144,6 @@ test('unit:session-request-carries-project-memory — reviewer request carries r
 
   assert.ok(digest.includes('Shared project memory:'));
   assert.ok(digest.includes('GY-1002 (review): Approve single-party bypass for docs chore [approved by operator]'));
-  assert.ok(digest.includes('review-convergence (2 recurrences): ' + sanctionedRemedies['review-convergence']));
   assert.ok(docsWords(digest) <= projectMemoryWordBudget);
 
   const request = reviewPrompt(
@@ -194,7 +170,6 @@ test('unit:session-request-carries-project-memory — producer request carries r
 
   assert.ok(digest.includes('Shared project memory:'));
   assert.ok(digest.includes('GY-1003 (attest): Attest mechanical proof criteria pass [approved by graphyard-approver]'));
-  assert.ok(digest.includes('proof (4 recurrences): ' + sanctionedRemedies['proof']));
   assert.ok(docsWords(digest) <= projectMemoryWordBudget);
 
   const request = producerPrompt(
@@ -208,7 +183,6 @@ test('unit:session-request-carries-project-memory — producer request carries r
   assert.ok(request.includes('Produce trusted evidence for work item GY-1125'));
   assert.ok(request.includes('Shared project memory:'));
   assert.ok(request.includes('GY-1003 (attest)'));
-  assert.ok(request.includes('proof (4 recurrences)'));
 });
 
 test('unit:session-request-carries-project-memory — piProducerPrompt carries role-relevant project-memory digest', () => {
@@ -225,7 +199,6 @@ test('unit:session-request-carries-project-memory — piProducerPrompt carries r
 
   assert.ok(request.includes('Produce evidence for work item GY-1125'));
   assert.ok(request.includes('Shared project memory:'));
-  assert.ok(request.includes('proof (4 recurrences)'));
 });
 
 test('unit:session-request-carries-project-memory — fixed word budget truncates overflow and prioritizes role-relevant entries', () => {
@@ -247,7 +220,7 @@ test('unit:session-request-carries-project-memory — fixed word budget truncate
   assert.ok(digest.startsWith('Shared project memory:'));
 });
 
-test('unit:session-request-carries-project-memory — memory updates from settled decisions, recurring fault classes, and merges only', async () => {
+test('unit:session-request-carries-project-memory — memory updates from settled decisions and merges only', async () => {
   const memory = emptyProjectMemory();
 
   // 1. Settled operator answers
@@ -316,35 +289,15 @@ test('unit:session-request-carries-project-memory — memory updates from settle
   assert.equal(recordSettledDecision(memory, refusedWatch, null, '2026-10-02T09:20:00Z'), false);
   assert.ok(!memory.decisions.some(d => d.key === 'GY-601'), 'a refused decision is never remembered as approved');
 
-  // 3. Recurring fault classes; a settled approval watch alone (which a refusal also sets) adds no decision.
-  const daemonState: DaemonState = {
-    version: 1,
-    url: 'http://localhost:3000',
-    repository: 'owner/project',
-    approvals: {
-      'dec-watch-2': { decision: 'dec-refused-2', work: 'GY-602', action: 'requirements', requestedAt: '2026-10-02T09:00:00Z', settledAt: '2026-10-02T09:15:00Z', agentName: 'graphyard-approver' } as any,
-    },
-    faults: {
-      instances: [
-        { id: 'f-1', faultClass: 'scope', kind: 'action:scope', subject: 'GY-600', text: 'Scope error', at: '2026-10-02T09:00:00Z' },
-        { id: 'f-2', faultClass: 'scope', kind: 'action:scope', subject: 'GY-601', text: 'Scope error 2', at: '2026-10-02T09:10:00Z' },
-      ],
-      open: {},
-      failing: {},
-    },
-  } as any;
-
+  // 3. A sync over the same work records nothing new.
   await syncProjectMemory({
     existing: memory,
     work,
-    state: daemonState,
     now: Date.parse('2026-10-02T10:00:00Z'),
-    policy: { threshold: 2, windowHours: 24 },
   });
 
-  assert.ok(!memory.decisions.some(d => d.key === 'GY-602'));
-  assert.equal(memory.pitfalls.some(p => p.faultClass === 'scope' && p.count >= 2), true);
-  assert.ok(memory.pitfalls.find(p => p.faultClass === 'scope')?.remedy.includes('Change only what the criteria need'));
+  assert.equal(memory.decisions.length, 2);
+  assert.equal(memory.changes.length, 1);
 });
 
 test('unit:session-request-carries-project-memory — unreviewed agent claims and unapproved decisions are rejected', () => {
@@ -421,7 +374,6 @@ test('unit:session-request-carries-project-memory — master status shows projec
 
     assert.ok(status.projectMemory, 'buildMasterStatus must include projectMemory');
     assert.equal(status.projectMemory.decisions.length, 3);
-    assert.equal(status.projectMemory.pitfalls.length, 3);
     assert.equal(status.projectMemory.changes.length, 3);
 
     // 2. masterStatusReport
@@ -460,13 +412,11 @@ test('unit:session-request-carries-project-memory — master status shows projec
       config,
       mockApi,
       { actor: { id: 'coordinator-1' } },
-      { commit: null },
-      { reportReadBoundMs: 1000 }
+      { commit: null }
     );
 
     assert.ok(report.projectMemory, `masterStatusReport must include projectMemory: ${JSON.stringify(report.daemon).slice(0, 400)}`);
     assert.equal(report.projectMemory.decisions.length, 3);
-    assert.equal(report.projectMemory.pitfalls.length, 3);
     assert.equal(report.projectMemory.changes.length, 3);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
@@ -482,11 +432,9 @@ test('unit:session-request-carries-project-memory — file persistence round-tri
     const loaded = await readProjectMemory(dir);
     assert.equal(loaded.version, 1);
     assert.equal(loaded.decisions.length, memory.decisions.length);
-    assert.equal(loaded.pitfalls.length, memory.pitfalls.length);
     assert.equal(loaded.changes.length, memory.changes.length);
 
     assert.deepEqual(loaded.decisions[0], memory.decisions[0]);
-    assert.deepEqual(loaded.pitfalls[0], memory.pitfalls[0]);
     assert.deepEqual(loaded.changes[0], memory.changes[0]);
 
     // ENOENT falls back to emptyProjectMemory
@@ -495,7 +443,6 @@ test('unit:session-request-carries-project-memory — file persistence round-tri
       const empty = await readProjectMemory(emptyDir);
       assert.equal(empty.version, 1);
       assert.deepEqual(empty.decisions, []);
-      assert.deepEqual(empty.pitfalls, []);
       assert.deepEqual(empty.changes, []);
     } finally {
       await rm(emptyDir, { recursive: true, force: true }).catch(() => {});

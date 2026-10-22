@@ -115,9 +115,6 @@ export function boardApi(path: string, role = 'admin') {
   if (route === 'board') return boardFromStatus(work as any, NOW, boardStatus(role));
   if (route === 'work') return work;
   if (route.startsWith('analytics/flow')) return flowApi(work, role)(path);
-  if (route === 'interventions') return { total: 1, deliveries: 3, ratePerDelivery: 0.33, window: { days: 30 }, open: 1, waitedMs: 10 * hour, ledger: { truncated: false, rows: 40 },
-    byKindAndStage: [], costliest: [], patterns: [], policy: { threshold: 3, windowDays: 7 }, judgements: [], interventions: [],
-    trend: Array.from({ length: 5 }, (_, index) => ({ from: at((index - 5) * 7 * 24 * hour), interventions: index === 4 ? 1 : 0, deliveries: index % 2, waitedMs: index === 4 ? 10 * hour : 0 })) };
   // The Tests page (GY-162): one flaky case with history, one skipped, one never run.
   if (route === 'tests') return testsSummary();
   if (route === 'agent-registry') return { configured: false, attention: [], roles: [], accounts: [], runtimes: [], models: [], sessions: [], refusals: [] };

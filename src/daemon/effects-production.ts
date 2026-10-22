@@ -1,6 +1,7 @@
 // Concern: the production wiring of the cycle's effects — every read, launch, write and reclaim the loop runs, bound to one coordinator process.
 import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
+import { basename, dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { worktreeReclaimPass } from './worktree-reclaim.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
@@ -19,7 +20,7 @@ import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { readApproverLaunches } from '../master/autonomy.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ContainmentAssessment, type EscalationSession, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, approverRoleHealth, decisionInput, escalationRoleHealth, holdRepeatedLimitAccount, launchApprover, launchEscalationHandler, readApproverLaunch, readEscalationSessions, saveEscalationSession, verifiedContext, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, assessContainment, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type SessionIdentity } from '../master.js';
 import { readControlPlaneClock, type ContainmentObservation, type ControlPlaneClock } from '../master/containment.js';
 import { annotatePaneShell } from '../quarantine.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
@@ -30,8 +31,6 @@ import { writeProjectMemory } from '../project-memory.js';
 import { type OrphanSupervisor, stopWatchSupervisor } from './sessions.js';
 import { neededDecision, type ExhaustedProof, type RoutineDecisionAction } from './decisions.js';
 import { decisionEventKinds } from './decision-reads.js';
-import type { FaultClassPolicy, FaultKind } from '../model/fault-classes.js';
-import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import { worktreeRoot } from '../install/worktree-root.js';
@@ -45,7 +44,6 @@ import type { RunRecord, Runner } from '../runner/types.js';
 import { loopRunAdoption, type AdoptedRun } from './run-adoption.js';
 import type { ResearchEvent } from '../research.js';
 import type { DecompositionEvent } from '../decomposition.js';
-import { doctorEffects, doctorSettings, type DoctorEffects } from './doctor.js';
 import { docsSyncEffects, type DocsSyncEffects } from '../docs-sync.js';
 import { acceptanceEffects, type AcceptanceEffects } from './acceptance.js';
 import { plannerEffects, type PlannerEffects } from './planner.js';
@@ -62,8 +60,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   /** The child runner; a test's stub, or the process's own bounded asynchronous runner. */
   run?: ChildRun;
   fetcher?: typeof fetch;
-  /** How long a cycle waits for the intervention report when no copy is cached yet; `reportReadBoundMs` by default. */
-  reportReadBoundMs?: number;
 }): DaemonEffects {
   // One runner, one ledger, for everything this loop runs — Herdr, gh, git, systemctl — so the
   // cycle's `childWaitMs` counts the cycle's own children and not the dispatcher's beside it.
@@ -89,17 +85,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     const text = await response.text(); // GY-1751: a proxy's empty or HTML 502-504 keeps its status
     let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: text.slice(0, 200) }; }
     // The body is kept on the error: a decision refusal names the standing refused decision as a field (GY-265).
-    // GY-1713: the message carries error and zod issues so diagnosis/doctor attention names the field.
+    // GY-1713: the message carries error and zod issues.
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedBodyDetail(result)}`, response.status, result);
     return result;
   };
-  /**
-   * The status read faults are classified from, with the loop's own coordinator credential: the
-   * operator-agent read withholds held jobs, integration jobs and production (routes/status.ts),
-   * so faults in those catalogued kinds could never recur to the loop and file their class (GY-173).
-   * The attention master status adds is read the same way, as `master status` reads it: the
-   * intervention report refuses operator-agent callers (routes/interventions.ts).
-   */
+  /** One read with the loop's own coordinator credential. */
   const asCoordinator = async (path: string, _credential?: string, timeoutMs = 30_000) => {
     const config = current();
     const response = await fetcher(`${config.url}/api/${path}`, { headers: { Authorization: `Bearer ${await readCredentialFile(config.credentialFile)}` }, signal: AbortSignal.timeout(timeoutMs) });
@@ -108,7 +98,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${result?.error ?? JSON.stringify(result)}`, response.status, result);
     return result;
   };
-  const coordinatorStatus = async () => await asCoordinator('status') as ControlPlaneStatus & Record<string, unknown>;
   const decide: DaemonEffects['decide'] = async (work, action, reason, input = {}) => {
     const post = (target: Work) => asOperatorAgent('POST', `work/${target.id}/decide`, { action, input: decisionInput(action, target, input), reason });
     try { return await post(work); }
@@ -192,12 +181,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // that follows lands in the runtime's input rather than in the closing menu.
     answerSession: async (agent, keys) => { await herdrCall(run, ['pane', 'send-keys', agent.pane_id!, ...keys]); await delay(2_000); },
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
-    reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event), blockDispatch: (work, reason) => mutate(`work/${work.id}/dispatchblock`, { reason }),
+    reportCapacity: (work, event) => mutate(`work/${work.id}/capacity`, event),
     recordResearch: (work, event) => mutate(`work/${work.id}/research`, event), recordDecomposition: (work, event) => mutate(`work/${work.id}/decomposition`, event),
-    research: { cwd: root }, harness: { servingUnit: detectLoopSupervisorUnit() },
+    research: { cwd: root },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     recordTriage: (work, body) => mutate(`work/${work.id}/triage`, body),
-    withdrawTriage: (work, body) => mutate(`work/${work.id}/triage`, { withdraw: body }),
     launchedSessions: async () => [
       ...(await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending' && !entry.launching).map(entry => ({ role: 'reviewer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId ?? null })),
       ...(await readProducerLedger(root)).producers.filter(entry => entry.state === 'pending').map(entry => ({ role: 'producer' as const, record: entry.id, profile: entry.profile, agentName: entry.agentName, pane: entry.pane, work: entry.key, requestId: entry.requestId, group: entry.group })),
@@ -298,9 +286,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // Imported when first run: only this step reads the install modules. Each run also registers the merge
     // writer's deploy key when it is missing (setupRenewingDeployKey; soaked in tests/soak-deploy-key-renewal.test.ts).
     selfProvision: async () => {
-      const [{ loopSelfProvision, setupRenewingDeployKey }, { hostCredentialPorts }] = await Promise.all([import('../cli/master-setup.js'), import('./step-stalls.js')]);
-      const config = current();
-      return loopSelfProvision(root, config, { setup: setupRenewingDeployKey(() => hostCredentialPorts(config, root).renewDeployKey()) });
+      const [{ loopSelfProvision, setupRenewingDeployKey }, { mergeWriterSettings }, { installIdFor }, { DEPLOY_KEY_FILE, ensureDeployKey }, { githubCli }, { localTransport }] = await Promise.all([
+        import('../cli/master-setup.js'), import('../master/merge-writer-settings.js'), import('../install/types.js'), import('../install/deploy-key.js'), import('../install/github.js'), import('../install/transport.js')]);
+      const config = current(), keyFile = mergeWriterSettings(config.run, installIdFor(config.repository)).deployKeyFile;
+      return loopSelfProvision(root, config, { setup: setupRenewingDeployKey(async () => {
+        if (basename(keyFile) !== DEPLOY_KEY_FILE) throw new Error(`the configured deploy key ${keyFile} is not the install's own; renewing it is the operator's`);
+        return ensureDeployKey(dirname(keyFile), config.repository, githubCli(localTransport()));
+      }) });
     },
     publishMergeSettings: async () => {
       const config = { rerunFailedChecks: rerunFailedChecks(current()) };
@@ -309,7 +301,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator), ...readingEffects(current, mutate, asCoordinator), // GY-1779: the loop's own post-deploy readings
+    ...throughputEffects(root, current, run, asCoordinator), ...readingEffects(current, mutate), // GY-1779: the loop's own post-deploy readings
     readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
     readWork: async work => await asCoordinator(`work/${encodeURIComponent(work.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
@@ -333,28 +325,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     get resume() { return current().operatorAgent ? resume : undefined; },
     get decisions() { return current().operatorAgent ? decisions : undefined; },
     get decisionChanges() { return current().operatorAgent ? decisionChanges : undefined; },
-    // A recurring fault class is filed as intent, by the same operator-agent identity (GY-173);
-    // the faults it counts are read with the coordinator's visibility, with or without that identity,
-    // so an installation that has not provisioned it yet still counts every recurrence.
-    controlPlane: coordinatorStatus,
-    reportedAttention: async (work: Work[], coordinator: ControlPlaneStatus & Record<string, unknown>, observed: { agents: HerdrAgent[]; available?: boolean; approvals: ReturnType<typeof daemonSummary>['approvals']; loop: ReturnType<typeof daemonSummary>['liveness']; now: string; mergeWriter?: ReturnType<typeof daemonSummary>['mergeWriter'] | null }) => {
-      // Imported when first read: the status report imports this module, so a static import would be a cycle.
-      const reported = await (await import('../cli/master-status.js')).reportedAttention(root, withRoleDefaults(current()), asCoordinator, coordinator, { work, now: observed.now }, { reviews: (await readReviewLedger(root)).reviews, producers: (await readProducerLedger(root)).producers,
-        runtime: { available: observed.available ?? true, agents: observed.agents }, commit: null, approvals: observed.approvals, loop: observed.loop, standalone: true,
-        // GY-2015: the loop's own writer summary rides the same observed, so its fault step counts a held trial refusal as the writer's motion.
-        mergeWriter: observed.mergeWriter ?? null,
-        // The intervention report takes the server close to a minute (GY-377): the cycle uses the
-        // cached copy and refreshes it detached from itself, which is also the copy master status reads.
-        reports: 'background', reportBoundMs: deps.reportReadBoundMs });
-      // No check-run annotation is read back (GY-2010): stored checks are pull-request-era history.
-      return reported;
-    },
     // GY-1535: under a control-plane merger (read afresh before each draft) the draft is committed here and landed by the merge writer's reads, with no pull request.
     get acceptance() { const config = current(); return config.operatorAgent && config.approver ? acceptanceEffects(config, root, { run, fetcher, asCoordinator, asOperatorAgent, merger: recordedMerger,
       writer: mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: recordedMerger, hold: recordedHold }) }) : undefined; },
     get planner() { const config = current(); return config.operatorAgent && config.approver ? plannerEffects(config, root, { fetcher, asCoordinator, asOperatorAgent }) : undefined; },
-    get unblock() { return current().operatorAgent ? (work: Work, reason: string) => asOperatorAgent('POST', `work/${work.id}/unblock`, { reason, expectedRevision: work.revision }) as Promise<Work> : undefined; },
-    get doctor() { const config = current(); return config.operatorAgent && doctorSettings(config.run).enabled ? doctorEffects(config, root, asOperatorAgent) : undefined; },
     controlPlaneClock: () => readControlPlaneClock(current().url, { fetcher }),
     containment: (work, observed) => assessContainment(work, { hostId: current().hostId, observedAt: observed.now, clockOffset: observed.clockOffset, clockRoundTripMs: observed.clockRoundTripMs, clockSource: observed.clockSource, probe: async target => annotatePaneShell(await probeSupervisorAbsence(target, { run }),
       work.find(item => item.key === target.key && item.containmentQuarantine?.epoch === target.epoch), pane => herdrJson(['pane', 'process-info', '--pane', pane], run), undefined, () => herdrJson(['pane', 'list'], run),

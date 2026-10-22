@@ -1,4 +1,4 @@
-import { after, afterEach, before, test } from 'node:test';
+import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -9,17 +9,14 @@ import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import {
-  doctorLimitRetryAt, doctorLimitUntilMarker, headlessTimeoutLimit, headlessTimeoutLimitCharge, runTimeoutLimit, silentPaneExhaustion, silentPaneExhaustionReason,
+  headlessTimeoutLimit, headlessTimeoutLimitCharge, runTimeoutLimit, silentPaneExhaustion, silentPaneExhaustionReason,
 } from '../src/model/capacity.js';
 import {
   approverProfile, approverRoleHealth, approverSessionName, holdRepeatedLimitAccount, masterConfigSchema, observedExhaustions, recordEnvironmentLog,
   recordObservedExhaustion, repeatedLimitAccount, selectAccount, selectApproverAccount, selectionKey, sessionAccount, type MasterConfig,
 } from '../src/master.js';
-import { clearDoctorRuns, doctorDue, doctorRunsSettled, doctorStep, type DoctorEffects } from '../src/daemon/doctor.js';
-import { doctorSettingsSchema } from '../src/master/doctor-settings.js';
-import type { Cycle } from '../src/daemon/cycle.js';
 import type { Principal, Work } from '../src/model.js';
-import type { RunEvent, RunResult, Runner } from '../src/runner/types.js';
+import type { RunEvent } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1705: a pane-role session that ends silent (Herdr `done`, never working, no outcome or notice
@@ -67,7 +64,6 @@ after(async () => {
   await store.close();
   await database.stop();
 });
-afterEach(() => clearDoctorRuns());
 
 const limitError = '429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-03 08:27:35"}';/** 2026-10-01T22:22:33.900Z as a millisecond epoch — handed to limit detectors as their fixed now. */
 const limitNow = 1_790_893_353_900;
@@ -307,11 +303,6 @@ test('integration:replay-approver-silent-deaths — GY-1701\'s silent claude-c d
   assert.equal((await reload(work.id)).capacity!.exhaustions.filter(entry => entry.account === 'env-a').length, 1);
 });
 
-const timeoutFailure = (): RunResult<never> => ({ ok: false, failure: { reason: 'timeout', detail: 'no terminal event within 1200s; the run was stopped' }, payloads: [] });
-function limitedTimeoutRunner(events: RunEvent[]): Runner {
-  return { name: 'pi', start() { return { id: randomUUID(), events, onEvent: () => () => {}, cancel() {}, result: async () => timeoutFailure() }; } };
-}
-
 test('unit:run-timeout-limit-signal — headlessTimeoutLimitCharge holds every named limit attempt with its own reset', () => {
   const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
   // Fallback-only notice on an unnamed Pi login: do not charge the silent registry primary.
@@ -355,52 +346,4 @@ test('unit:run-timeout-limit-signal — headlessTimeoutLimitCharge holds every n
     { result: 'timeout', detail: 'stopped', events: [earlyRetry] },
   ], limitNow);
   assert.equal(round?.resetsAt, paired?.limit.resetsAt, 'round retry still uses the earliest reset');
-});
-
-test('integration:doctor-timeout-account-hold — a no-report timeout round with a readable limit holds the account and doctorDue waits it out', async () => {
-  const held: { account: string; role: string }[] = [];
-  const settings = doctorSettingsSchema.parse({ intervalMinutes: 10 }) as DoctorEffects['settings'];
-  const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };
-  const doctor: DoctorEffects = {
-    settings, cwd: '/tmp', env: {},
-    // Registry primary + null Pi fallback, both with a limit — hold the named primary (AC-2/AC-3).
-    runner: async attempt => ({ runtime: 'pi', model: attempt, account: attempt === 'primary' ? 'zai-doctor' : null, release: async () => {}, runner: limitedTimeoutRunner([retry]) }),
-    file: async () => { throw new Error('nothing filed'); },
-    recordRun: async () => {},
-  };
-  /** 2026-10-11T12:11:26.439Z as a millisecond epoch — the filed doctor no-report clock. */
-  const at = 1_791_720_686_439;
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: 'graphyard',
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  const state = emptyDaemonState(config);
-  const fx = {
-    doctor, persist: async () => {},
-    holdAccount: async (account: string, observed: { role: string }) => { held.push({ account, role: observed.role }); },
-  } as unknown as DaemonEffects;
-  const cycle = { config, state, effects: fx, now: () => at, snapshot: { work: [], now: new Date(at).toISOString() }, clock: at, performed: [] as any[],
-    isolate: async (_k: string, _i: unknown, _n: string, body: () => Promise<unknown>) => body() } as unknown as Cycle;
-  await doctorStep(cycle);
-  await doctorRunsSettled();
-  assert.deepEqual(held, [{ account: 'zai-doctor', role: 'doctor' }]);
-  const run = state.doctor.runs.at(-1)!;
-  assert.equal(run.state, 'failed');
-  assert.ok(run.detail.includes(doctorLimitUntilMarker), run.detail);
-  assert.equal(doctorDue(state, at + 10 * 60_000, settings), false);
-  const until = doctorLimitRetryAt(state.doctor.runs, at)!;
-  assert.ok(until);
-  assert.equal(doctorDue(state, Date.parse(until) + 1, settings), true);
-});
-
-test('manual:replay-doctor-no-report — the 2026-10-11 zai no-report rounds would hold the account so the next interval does not spend it twice', () => {
-  const at = 1_791_720_686_439;
-  const until = new Date(at + 3_600_000).toISOString();
-  const marked = { state: 'failed', detail: `no report: zai/glm-5.3-flash timeout; zai/glm-5.3 timeout; ${doctorLimitUntilMarker}${until}` };
-  const unmarked = { state: 'failed', detail: 'no report: zai/glm-5.3-flash timeout; zai/glm-5.3 timeout' };
-  assert.equal(doctorLimitRetryAt([unmarked, marked], at + 10 * 60_000), until, 'the latest marked no-report waits out the hold');
-  assert.equal(doctorLimitRetryAt([marked, unmarked], at + 10 * 60_000), null, 'an unmarked latest no-report (pre-fix) would not wait');
-  const round = headlessTimeoutLimit([
-    { result: 'timeout', detail: 'no terminal event within 1200s; the run was stopped', events: [{ kind: 'retry', error: limitError }] },
-    { result: 'timeout', detail: 'no terminal event within 1200s; the run was stopped', events: [{ kind: 'retry', error: limitError }] },
-  ], at);
-  assert.ok(round);
 });

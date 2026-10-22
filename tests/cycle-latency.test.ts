@@ -9,7 +9,6 @@ import { daemonEffects, emptyDaemonState, runDaemon, writeDaemonState, type Daem
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { describeTimings, mapBounded, serverCallName, slowCallMs, timedFetch, timedRun, childCall, Timings, withTimings } from '../src/master/timings.js';
-import { interventionReportPath, reportCachePath, reportReadBoundMs } from '../src/master/report-cache.js';
 import type { Work } from '../src/model.js';
 import { listDecisions } from '../src/server/decision-ledger.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -39,7 +38,7 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
  * (the fault observation, the /tmp and worktree scans, git) is not scaled, and on a loaded trial host it
  * took 7 s: a finer scale inflates it past the budget.
  */
-const measured = { snapshot: 1_960, status: 760, actions: 660, decisions: [390, 910, 270, 590, 220, 340, 420, 410], interventions: 58_760, context: 400, mutation: 300 };
+const measured = { snapshot: 1_960, status: 760, actions: 660, decisions: [390, 910, 270, 590, 220, 340, 420, 410], context: 400, mutation: 300 };
 const scale = 1 / 2;
 const cycleBudgetMs = 30_000 * scale, statusBudgetMs = 20_000 * scale;
 const scaled = (ms: number) => Math.round(ms * scale);
@@ -68,13 +67,12 @@ function slowServer(work: () => Work[], factor = scale) {
   const reads: string[] = [];
   let decision = 0;
   const latency = (path: string) => path.startsWith('work-snapshot') ? measured.snapshot : path === 'status' ? measured.status : path === 'actions' ? measured.actions
-    : path.startsWith('interventions') ? measured.interventions : /\/decisions$/.test(path) ? measured.decisions[decision++ % measured.decisions.length]
+    : /\/decisions$/.test(path) ? measured.decisions[decision++ % measured.decisions.length]
       : /\/context/.test(path) ? measured.context : 50;
   const answer = (path: string) => path.startsWith('work-snapshot') ? { work: work(), now: new Date().toISOString() }
     : path === 'status' ? { actor: { id: 'coordinator-1', role: 'coordinator' } }
       : path === 'actions' ? { executors: undefined }
-        : path.startsWith('interventions') ? { window: { days: 7 }, deliveries: 0, total: 0, open: 0, waitedMs: 0, ratePerDelivery: 0, byKind: {}, byStage: {}, costliest: [], patterns: [], judgements: [], ledger: null, padding: 'x'.repeat(1_000) }
-          : /\/decisions$/.test(path) ? { decisions: [] } : {};
+        : /\/decisions$/.test(path) ? { decisions: [] } : {};
   /** One read: it takes its measured time, scaled, unless the caller's own timeout ends it first. */
   const read = async (path: string, timeoutMs?: number) => {
     reads.push(path);
@@ -98,8 +96,6 @@ function loopEffects(root: string, master: MasterConfig, server: ReturnType<type
     mutate: async (path: string) => { await sleep(scaled(measured.mutation)); return { path }; },
     run: async (command: string) => { await sleep(3); if (command === 'herdr') return JSON.stringify({ result: { agents: [] } }); return ''; },
     fetcher: server.fetcher,
-    // A cold loop waits this long for the report's first copy: the default bound, scaled.
-    reportReadBoundMs: scaled(reportReadBoundMs),
   });
   return Object.assign(effects, {
     agents: async () => [], herdr: async () => ({ agents: [], available: true }), credentials: async () => ({}), roleHealth: async () => ({}),
@@ -143,8 +139,6 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     const state: DaemonState = emptyDaemonState(master);
     const effects = loopEffects(root, master, server, {
       snapshot: async () => ({ work, now: new Date().toISOString() }),
-      controlPlane: async () => ({ actor: { id: 'coordinator-1', role: 'coordinator' } }) as never,
-      reportedAttention: async () => ({ items: [] }),
       credentials: async () => { await probe('https://api.anthropic.com/api/oauth/usage'); return {}; },
       observeDeployment: async () => { await run('gh', ['api', 'repos/owner/project/deployments?environment=production']); return { source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }; },
     });
@@ -152,7 +146,7 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     const timings = state.metrics.at(-1)!.timings!;
     assert.ok(timings, 'the cycle recorded its timings on the cursor');
     const steps = timings.steps.map(step => step.step);
-    for (const step of ['snapshot', 'observe', 'credentials', 'close', 'reclaim', 'dispatch', 'launches', 'decisions', 'reviews and proofs', 'merges', 'deployment verification', 'faults', 'measure'])
+    for (const step of ['snapshot', 'observe', 'credentials', 'close', 'reclaim', 'dispatch', 'launches', 'decisions', 'reviews and proofs', 'merges', 'deployment verification', 'invariants', 'measure'])
       assert.ok(steps.includes(step), `the cycle records its ${step} step: ${steps.join(', ')}`);
     const slowest = [...timings.steps].sort((a, b) => b.ms - a.ms);
     assert.equal(slowest[0].step, 'deployment verification');
@@ -169,10 +163,10 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     const status = slowServer(() => work, 1 / 10);
     // Master status no longer reads GET actions; the board read is the one slow server read left to time.
     const slowBoard = async (path: string, _credential?: string, timeoutMs?: number) => path === 'board' ? (await sleep(1_250), status.read(path, timeoutMs)) : status.read(path, timeoutMs);
-    const report = await masterStatusReport(root, master, slowBoard, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
+    const report = await masterStatusReport(root, master, slowBoard, { actor: { id: 'coordinator-1' } }, { commit: null });
     assert.ok(report.timings, 'master status reports its timings');
     const phases = report.timings.steps.map(step => step.step);
-    for (const phase of ['herdr', 'credentials', 'snapshot', 'reconcile reviews', 'reconcile producers', 'setup', 'containment', 'worktrees', 'build status', 'attention: interventions', 'attention: decisions', 'attention: derived'])
+    for (const phase of ['herdr', 'credentials', 'snapshot', 'reconcile reviews', 'reconcile producers', 'setup', 'containment', 'worktrees', 'build status', 'attention: decisions', 'attention: derived'])
       assert.ok(phases.includes(phase), `status times its ${phase} phase: ${phases.join(', ')}`);
     const statusSlowest = [...report.timings.steps].sort((a, b) => b.ms - a.ms)[0];
     assert.equal(statusSlowest.step, 'board', `the board read is the slowest phase: ${describeTimings(report.timings)}`);
@@ -186,12 +180,6 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
 test('unit:cycle-latency-budget — with 170 open items and 1,100 worktrees at the measured latencies, a cycle fits 30 s and master status 20 s, and independent launches run at once, bounded by capacity', async () => {
   const { root, master, work, cleanup } = await fixture(170, 1_100);
   try {
-    // A serial pass over the per-item decisions alone would not fit: this is the cost that was found.
-    const serialDecisions = work.length * measured.decisions.reduce((total, ms) => total + ms, 0) / measured.decisions.length;
-    assert.ok(serialDecisions > 30_000 * 2, `170 serial decision reads are ${Math.round(serialDecisions / 1000)}s, over twice the cycle budget`);
-    assert.ok(measured.interventions > 30_000, 'and the intervention report alone outlasts the budget and the loop\'s 30 s read bound');
-
-    // A cold loop: no cached intervention report. The cycle does not wait on it; it is refreshed beside the cycle.
     const server = slowServer(() => work);
     const state = emptyDaemonState(master);
     const lines: string[] = [];
@@ -200,26 +188,13 @@ test('unit:cycle-latency-budget — with 170 open items and 1,100 worktrees at t
     const cycle = state.metrics.at(-1)!;
     assert.ok(Date.now() - started < cycleBudgetMs, `the cycle ran in ${Date.now() - started}ms against the scaled budget of ${cycleBudgetMs}ms: ${describeTimings(cycle.timings!)}`);
     assert.ok(cycle.durationMs < cycleBudgetMs);
-    assert.equal(server.reads.filter(path => path.endsWith('/decisions')).length, 170, 'every open item\'s decisions were still read');
-    assert.ok(server.reads.includes(interventionReportPath), 'the intervention report refresh was started');
     assert.match(lines.find(line => / complete in /.test(line))!, /slowest steps: /);
 
-    // Status right after, before the refresh landed: a bounded live read, never the whole minute.
+    // Status right after: a bounded live read, never the whole minute.
     let begun = Date.now();
-    const cold = await masterStatusReport(root, master, (path, _credential, timeoutMs) => server.read(path, timeoutMs), { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: scaled(reportReadBoundMs) });
+    const cold = await masterStatusReport(root, master, (path, _credential, timeoutMs) => server.read(path, timeoutMs), { actor: { id: 'coordinator-1' } }, { commit: null });
     assert.ok(Date.now() - begun < statusBudgetMs, `a cold master status took ${Date.now() - begun}ms against the scaled budget of ${statusBudgetMs}ms: ${describeTimings(cold.timings)}`);
     assert.equal(cold.disk.reclaimable.length, 0, 'the 1,100 worktrees were inventoried; none is reclaimable while its item is open');
-
-    // Once the loop's refresh lands, status and the next cycle read the cached copy and ask the server nothing for it.
-    await sleep(scaled(measured.interventions) + 200);
-    const cached = JSON.parse(execFileSync('cat', [reportCachePath(master)], { encoding: 'utf8' }));
-    assert.ok(cached.reports[interventionReportPath].readAt, 'the loop cached the report beside its cursor');
-    const asked = server.reads.filter(path => path === interventionReportPath).length;
-    begun = Date.now();
-    const warm = await masterStatusReport(root, master, (path, _credential, timeoutMs) => server.read(path, timeoutMs), { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: scaled(reportReadBoundMs) });
-    assert.ok(Date.now() - begun < statusBudgetMs, `a warm master status took ${Date.now() - begun}ms: ${describeTimings(warm.timings)}`);
-    assert.equal(server.reads.filter(path => path === interventionReportPath).length, asked, 'status read the cached report');
-    assert.equal((warm.interventions as { stale?: boolean }).stale, false);
 
     // Independent worker launches run at once, bounded by capacity: four free profiles, six ready items, 400 ms per launch.
     // The launcher beside the cycle runs `run.launchConcurrency` of them at once (GY-616, default 3), set here to the four profiles.
@@ -232,7 +207,6 @@ test('unit:cycle-latency-budget — with 170 open items and 1,100 worktrees at t
     begun = Date.now();
     await runDaemon(launching, launchState, loopEffects(root, launching, slowServer(() => ready), {
       snapshot: async () => ({ work: ready, now: new Date().toISOString() }),
-      reportedAttention: async () => ({ items: [] }), controlPlane: async () => ({}) as never,
       credentials: async () => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
       dispatch: async (target: Work, profile: { name: string }) => { inFlight++; peak = Math.max(peak, inFlight); await sleep(400); inFlight--; dispatched.push(`${target.key}:${profile.name}`); return { pane: null }; },
     }), { once: true, intervalMs: 30_000, identity: { pid: process.pid, host: master.hostId }, log: () => {}, signals: [] });

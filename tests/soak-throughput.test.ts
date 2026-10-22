@@ -128,7 +128,6 @@ test('unit:soak-throughput-stall — over a simulated day whose every delivery c
     assert.ok(asks.length >= 12, `re-measured while the needs-decision stands: ${asks.length}`);
     // GY-2186: no owner item is filed and no escalation raised; the attention line is the ask.
     assert.deepEqual(stalled.throughputActions().sort(), [`throughput:${serving}`], 'one answer record for the release');
-    assert.deepEqual((await stalled.state.faults.instances.filter(entry => entry.kind === 'throughput')), [], 'no throughput fault instance opens either');
     assert.equal(counts.statusReads, asks.length, 'one status read per ask');
     assert.ok((await readdir(join(root, throughputMeasurementDirectory))).filter(name => name !== throughputLedgerFile).length <= throughputMeasurementRetention, 'the measurement directory stays within its retention');
   } finally { await rm(root, { recursive: true, force: true }); }

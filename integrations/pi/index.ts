@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, realpathSync, statSync } from 'node:fs';
+import { realpathSync, statSync } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { autonomyContract } from '../../src/autonomy';
@@ -11,7 +11,7 @@ import { autonomyContract } from '../../src/autonomy';
  * never run blindly. Nothing here asks a person anything: there is no UI call anywhere in this
  * file, and a refused call returns its reason to the agent so it retries safely.
  *
- * `GRAPHYARD_PI_ROLE` (approver | producer | research | decomposition | doctor | triage) selects the role's tool; unset, the approver's
+ * `GRAPHYARD_PI_ROLE` (approver | producer | research | decomposition | triage) selects the role's tool; unset, the approver's
  * and the producer's are registered.
  * The tools submit nothing to the control plane themselves: the runner hands the validated payload
  * to the loop, which applies it through the same routes a terminal session uses, and the gates
@@ -88,33 +88,6 @@ export const decomposeParameters: JsonSchema = {
       } } },
   },
 };
-/** The pipeline doctor's report (GY-711, src/runner/payloads.ts doctorReportPayloadSchema): what was stuck, what it did, what it filed. */
-export const doctorReportParameters: JsonSchema = {
-  type: 'object', additionalProperties: false, required: ['findings', 'actions', 'filed'],
-  properties: {
-    findings: { type: 'array', maxItems: 50, description: 'One entry per finding: the work item key or status-level subject, the check whose bound it passed, and what was stuck',
-      items: { type: 'object', additionalProperties: false, required: ['subject', 'check', 'detail'],
-        properties: {
-          subject: text(200, 'The work item key the finding is on, such as GY-711, or a status-level subject such as installation'),
-          check: { type: 'string', enum: ['blocked', 'worker', 'ci', 'review-request', 'launch', 'proofs', 'mergeable', 'decision', 'containment', 'refusal', 'overdue'], description: 'The check whose fault bound the finding passed' },
-          detail: text(2000, 'What was stuck, since when, and why'),
-          unactionable: { type: 'boolean', description: 'true when you could not act on it: a human-only decision, or a fault class with no item to act through' },
-        } } },
-    actions: { type: 'array', maxItems: 50, description: 'One entry per sanctioned command you ran: what it was and what became of it',
-      items: { type: 'object', additionalProperties: false, required: ['subject', 'command', 'outcome', 'detail'],
-        properties: { subject: text(200, 'The work item key the command acted on'), command: text(500, 'The command, as you ran it'), outcome: { type: 'string', enum: ['applied', 'refused'], description: 'applied when the control plane accepted it' }, detail: text(1000, 'What it changed, or the refusal the control plane gave') } } },
-    filed: { type: 'array', maxItems: 20, description: 'One entry per fault item to file for a finding no open item covers (the loop files it and deduplicates it against open items)',
-      items: { type: 'object', additionalProperties: false, required: ['faultClass', 'title', 'description', 'priority', 'criteria'],
-        properties: {
-          faultClass: { type: 'string', enum: ['session-liveness', 'review-convergence', 'decision', 'scope', 'overlap-hold', 'observation', 'deployment', 'configuration', 'containment', 'merge', 'proof', 'capacity', 'resources', 'loop', 'human-decision', 'stalled-gate', 'unclassified'], description: 'The fault class the finding belongs to' },
-          title: text(200, 'The fault item title'), description: text(20000, 'What is wrong, the evidence, and what should change'),
-          priority: { type: 'integer', minimum: 0, description: '0 (P0) or 1 (P1): a fault the doctor files is urgent, never lower' },
-          criteria: { type: 'array', minItems: 1, maxItems: 20, items: { type: 'object', additionalProperties: false, required: ['id', 'text', 'proofs'],
-            properties: { id: { type: 'string', pattern: '^[A-Z]+-\\d+$', description: 'AC-1, AC-2, ...' }, text: text(4000, 'A testable criterion'), proofs: { type: 'array', minItems: 1, maxItems: 10, items: proof } } } },
-        } } },
-  },
-};
-
 export const acceptanceParameters: JsonSchema = {
   type: 'object', additionalProperties: false, required: ['goal', 'outcomes'],
   properties: {
@@ -229,418 +202,17 @@ export function graphyardTools(role: string | undefined = process.env.GRAPHYARD_
   };
   const decide = tool('graphyard_decide', 'Graphyard decide', 'Record your verdict on the Graphyard decision you were asked to judge: approve true or false, with your reason. Call it exactly once; it is your answer.', decideParameters, params => `decision ${params.decision}`, true);
   const evidence = tool('graphyard_submit_evidence', 'Graphyard evidence', 'Submit one proof\'s result on the exact head, base and policy revision you were given, with the exercise run against the tree with the criterion\'s behaviour removed. Call it once per proof, pass or fail.', evidenceParameters, params => `proof ${params.proof}`, false);
-  // The research session's brief (GY-259) and the doctor's report (GY-711) are registered for their own roles only.
+  // The research session's brief (GY-259) is registered for its own role only.
   if (role === 'acceptance') return [tool('graphyard_acceptance', 'Graphyard acceptance', 'Record the acceptance draft for the goal you were asked to draft: each customer outcome in plain language with its criteria and the one required uat E2E case that proves it. Call it exactly once; it is your result.', acceptanceParameters, params => `acceptance ${params.goal}`, true)];
   if (role === 'acceptance-judge') return [tool('graphyard_acceptance_judgement', 'Graphyard acceptance judgement', 'Record your verdict on the acceptance draft you were asked to judge: approve, or refuse naming what the next draft must change. Call it exactly once; it is your result.', acceptanceJudgementParameters, params => `judgement ${params.goal}`, true)];
   if (role === 'planner') return [tool('graphyard_plan', 'Graphyard plan', 'Record the plan for the goal you were asked to plan: a plain summary of at most three sentences, an architecture note of at most 400 words and the work items that deliver its approved outcomes, each with a one-sentence plain description, the cases it must make pass, its criteria and dependencies. Call it exactly once; it is your result.', planParameters, params => `plan ${params.goal}`, true)];
   if (role === 'plan-judge') return [tool('graphyard_plan_judgement', 'Graphyard plan judgement', 'Record your verdict on the plan you were asked to judge: approve, or refuse naming what the next plan must change. Call it exactly once; it is your result.', planJudgementParameters, params => `plan judgement ${params.goal}`, true)];
   if (role === 'decomposition') return [tool('graphyard_decompose', 'Graphyard decompose', 'Record how the broad item you were asked to split divides into small child items, each with the parent criterion IDs it takes and the earlier children it lands after; or an empty children list to keep it whole. Call it exactly once; it is your result.', decomposeParameters, () => 'the split', true)];
-  if (role === 'doctor') return [tool(doctorReportToolName, 'Graphyard doctor report', 'Record the report of your doctor run: one entry per finding (what was stuck, under which check bound, and whether you could act), one per sanctioned command you ran and what it changed, and one per fault item to file for a finding no open item covers. Call it exactly once; it is your result.', doctorReportParameters, () => 'the doctor report', true)];
   if (role === 'research') return [tool('graphyard_research_brief', 'Graphyard research brief', 'Record the research brief for the item you were asked to research: existing code to reuse, patterns and prior art with sources, risks, the approach you recommend, and the operator\'s product questions with your recommended answers. Call it exactly once; it is your result.', researchParameters, () => 'the brief', true)];
   // The triage session's judgement of a machine-filed backlog item (GY-402), likewise for its own role only.
   if (role === 'triage') return [tool('graphyard_triage_decision', 'Graphyard triage decision', 'Record your judgement of the machine-filed backlog item you were asked to triage: release it with a priority, close it with a reason (naming the delivered item that already fixed it, if any), or merge it into another open item. Call it exactly once; it is your result.', triageParameters, () => 'the judgement', true)];
   return role === 'approver' ? [decide] : role === 'producer' ? [evidence] : [decide, evidence];
 }
-
-// ---- The doctor's command allowlist (GY-711) ----------------------------------------------------
-/**
- * The master subcommands the doctor's operator-agent identity may run: the sanctioned intents and
- * two-party requests, and `checkout-restore` (GY-1658), which asks the loop to save a dirty
- * coordinator checkout under a named ref and restart — never `merge`, `dispatch`, an evidence
- * submission, a lease command or a direct checkout mutation. Item creation stays sanctioned but is
- * held to its stated code-change reason at the gate itself (GY-2005): a `master create` with
- * nothing stated past the file is refused, so a notice never files an item. A
- * command the allowlist refuses is recorded in the doctor's report, never run.
- */
-export const doctorSanctionedCommands = ['requirements', 'unblock', 'decide', 'approver', 'settle-containment', 'close', 'create', 'release', 'checkout-restore'] as const;
-/** The master subcommands and root commands that only read. */
-export const doctorReadOnlyCommands = ['status', 'decisions', 'context', 'guide', 'board'] as const;
-/**
- * The read-only programs a doctor may consult, each with the options that would make it write, run
- * another program or reach past the checkout, refused by name (`sort -o`, `rg --pre`). GNU accepts
- * unique prefixes of its long options (`sort --out=leaked.txt` for `--output`), so `sort` refuses
- * every long option those options' first letters name — `--output`, `--compress-program`,
- * `--temporary-directory`, and `--check`, whose o/c/t space they share — and every short-option
- * cluster carrying the same letters (`-ro`, `-ofile`, `-T dir`).
- */
-const doctorReadPrograms = new Map<string, RegExp | null>([
-  ['cat', null], ['ls', null], ['head', null], ['tail', null], ['grep', null], ['wc', null], ['jq', null], ['diff', null], ['stat', null],
-  ['rg', /^--pre(?:=|-glob|$)/], ['sort', /^(?:-[^-]*[oT]|--[oct][a-z-]*(?:=.*)?)/],
-]);
-/** Options git's read subcommands take that write a file or run a configured program. */
-const gitWriting = /^(?:--output|--ext-diff|--textconv|--open-files-in-pager|-O$)/;
-/** `git branch` options that only list; a positional is a pattern only once one of the listing options is present. */
-const gitBranchListing = /^(?:-a|-r|-l|-v|-vv|--all|--remotes|--list|--show-current|--contains|--no-contains|--merged|--no-merged|--points-at|--sort=.*|--format=.*|--color(?:=.*)?|--no-color|--column(?:=.*)?|--no-column|--verbose|--abbrev=.*|--omit-empty)$/;
-const gitReads = new Set(['log', 'show', 'diff', 'status', 'rev-parse', 'blame', 'describe', 'shortlog', 'ls-files', 'branch', 'worktree']);
-/** The provider CLI's read subcommands, under the groups a doctor reads. */
-/** The environment variables that point gh at another repository or host without a word on the command line. */
-export const doctorGhOverrides = ['GH_REPO', 'GH_HOST'] as const;
-/** The gh groups a doctor reads, before the recorded merger narrows them (see `ghReads`). */
-const ghReadGroups = new Map([['pr', new Set(['view', 'list', 'checks', 'diff'])], ['run', new Set(['view', 'list'])], ['issue', new Set(['view', 'list'])]]);
-/**
- * The gh reads the doctor's guard admits, by the recorded merger the session was launched with
- * (GY-1835, review of 3b7408170110): under the control-plane merger an item's pull request, its
- * reviews and its checks are the control plane's own records, so the `pr` group is absent and no
- * `gh pr` read passes the guard — the doctor reads the control plane (`graphyard status GY-N`,
- * `master status`) instead, as its prompt's read list says. With GitHub the merger, or before a
- * merger is known, the reads stand as before. The environment is the session's, as for the
- * ambient `GH_REPO`/`GH_HOST` check: process.env when none is given.
- */
-const ghReads = (env: NodeJS.ProcessEnv | undefined) => {
-  const groups = new Map(ghReadGroups);
-  if ((env ?? process.env).GRAPHYARD_MERGER === 'control-plane') groups.delete('pr');
-  return groups;
-};
-/** The CLI programs a Graphyard command may be invoked through; the words after it are the CLI's own. */
-const doctorCliPrograms = new Set(['graphyard']);
-
-export interface DoctorGuardContext { cwd: string; home?: string; /** The Graphyard CLI the loop names in the prompt; `node` may run only this script. */ cli?: string; /** The environment gh would run with; process.env when absent. */ env?: NodeJS.ProcessEnv }
-
-/**
- * Whether the raw command line redirects: a `<` or `>` outside quotes. A doctor reads; it never
- * writes a file, and a redirection is how a read would (`cat x > y`), so any is refused.
- */
-export function doctorRedirects(line: string) { return doctorScan(line).redirect >= 0; }
-/** The column of the first `<` or `>` outside quotes, and of a quote the line opens and never closes; -1 for none. */
-function doctorScan(line: string) {
-  let quote: '"' | '\'' | null = null, opened = -1, redirect = -1;
-  for (let index = 0; index < line.length; index++) {
-    const char = line[index];
-    if (quote === '\'') { if (char === '\'') quote = null; continue; }
-    if (char === '\\') { index++; continue; }
-    if (quote === '"') { if (char === '"') quote = null; continue; }
-    if (char === '\'' || char === '"') { quote = char; opened = index; }
-    else if ((char === '<' || char === '>') && redirect < 0) redirect = index;
-  }
-  return { redirect, open: quote ? opened : -1 };
-}
-
-/** The longest free-text reason the doctor's guard passes as prose (GY-1653): the 2000-character cap every sanctioned command's request schema enforces. */
-export const doctorReasonLimit = 2000;
-
-/**
- * Whether a whole command line is within the doctor role's allowlist, and the line to run (GY-1653).
- * A quote the line never closes is refused first, since bash cannot run the line at all; then a
- * redirection; then each segment by doctorSegmentAllowed, every refusal naming its rule and the
- * word's position. A refused line that is a sanctioned master command with its free-text reason
- * enclosed in one pair of quotes runs instead with that reason as one prose argument: an
- * apostrophe, `;`, `(`, backtick or `$` inside the reason is what broke it, and none of it is read
- * as a command — the returned `command` passes the reason single-quoted, so the first submission
- * runs as written and nothing after the command's grammar can run. A line the allowlist accepts
- * runs this way too when its single-quoted reason holds an apostrophe inside a word (`item's`),
- * which only prose writes: the shell would drop that quote and split the reason.
- */
-export function doctorCommandVerdict(line: string, context: DoctorGuardContext = { cwd: process.cwd(), cli: process.env.GRAPHYARD_DOCTOR_CLI }): GuardVerdict & { command?: string } {
-  const verdict = doctorLineAllowed(line, context);
-  if (verdict.allow) {
-    // GY-2005: a line inside the grammar is still held to create's stated reason before it runs.
-    const segments = shellWords(line);
-    for (const [index, words] of segments.entries()) {
-      const refusal = createReasonRefusal(words, { segment: index + 1, line });
-      if (refusal) return refusal;
-    }
-    // An allowed line can still mangle its reason: two apostrophes in a single-quoted reason pair up,
-    // so the shell runs it with the quotes dropped and the prose split; it runs as one prose argument too.
-    return doctorProseReason(line, context, true) ?? verdict;
-  }
-  return doctorProseReason(line, context, false) ?? verdict;
-}
-function doctorLineAllowed(line: string, context: DoctorGuardContext): GuardVerdict {
-  const { open, redirect } = doctorScan(line);
-  if (open >= 0) {
-    // The argument the unclosed quote sits in: the words of its segment before it, plus one unless the quote continues a word.
-    const before = shellWords(line.slice(0, open)), segment = before.length || 1, argument = (before.at(-1)?.length ?? 0) + (/\s$/.test(line.slice(0, open)) || open === 0 ? 1 : 0);
-    return { allow: false, reason: doctorRefusal(`a line whose ${line[open]} quote never closes — an apostrophe inside a single-quoted argument closes it early — which bash cannot run,`, 'closed-quotes', `column ${open + 1}, in word ${argument} of segment ${segment}`) };
-  }
-  if (redirect >= 0) return { allow: false, reason: doctorRefusal(`a redirection (${line[redirect]})`, 'no-redirection', `column ${redirect + 1}`) };
-  const segments = shellWords(line);
-  for (let index = 0; index < segments.length; index++) {
-    const verdict = doctorSegmentAllowed(segments[index], context, { segment: index + 1, line });
-    if (!verdict.allow) return verdict;
-  }
-  return { allow: true };
-}
-/**
- * The positional words each sanctioned master command takes before its free-text reason, as the
- * CLI reads them: `master decide GY-N ACTION [JSON|@FILE] REASON` takes one more when the word
- * after ACTION opens with `{` or `@`. The flags each one reads a value after — `master decide`'s
- * `--precedent` and `--context`, `master close`'s `--duplicate-of` and `--superseded-by` — are its own.
- */
-const doctorReasonAfter: Record<(typeof doctorSanctionedCommands)[number], number> = { requirements: 2, unblock: 1, decide: 2, approver: 2, 'settle-containment': 1, close: 1, create: 1, release: 1, 'checkout-restore': 0 };
-const doctorValueFlags: Partial<Record<(typeof doctorSanctionedCommands)[number], Set<string>>> = { decide: new Set(['--precedent', '--context']), close: new Set(['--duplicate-of', '--superseded-by']) };
-/**
- * The line a sanctioned master command runs as when its reason broke the shell's reading of it:
- * the command's grammar — program, CLI script, `master`, subcommand, then the positional words,
- * flags and quoted values (`master decide`'s JSON) the subcommand takes before its reason — then
- * one argument enclosed in matching quotes that ends the line. The reason's opening quote is the
- * first one, after the grammar's own words, that the command's grammar reads as its reason, so an
- * earlier quoted argument is never absorbed into it. The reason is the text inside those quotes, as
- * the doctor wrote it (a double-quoted one with its backslash escapes undone), and every quoted
- * reason is bounded by doctorRules['reason-bounds'], whether or not the line needs rewriting. A
- * line that needs it runs with the reason passed single-quoted. Anything else is null: the line is
- * judged as written.
- */
-function doctorProseReason(line: string, context: DoctorGuardContext, apostrophesOnly: boolean): (GuardVerdict & { command?: string }) | null {
-  const text = line.trim(), closer = text.at(-1);
-  if (closer !== '\'' && closer !== '"') return null;
-  for (let index = 1; index < text.length - 1; index++) {
-    if (text[index] !== closer || !/[ \t]/.test(text[index - 1])) continue;
-    const grammar = text.slice(0, index).trimEnd(), scan = doctorScan(grammar);
-    // A quote opened before this one and still open: this one sits inside an earlier quoted argument.
-    if (scan.open >= 0) continue;
-    // The grammar is whole words outside the reason: nothing in it the shell would run.
-    if (scan.redirect >= 0 || /[`$;|&()\n]/.test(grammar.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, ''))) return null;
-    const segments = shellWords(grammar);
-    if (segments.length !== 1) return null;
-    const words = segments[0], program = words[0]?.value, cli = program === 'node' ? words.slice(2) : words.slice(1);
-    if (!doctorCliPrograms.has(program) && program !== 'node') return null;
-    const name = cli[1]?.value as (typeof doctorSanctionedCommands)[number];
-    if (cli[0]?.value !== 'master' || !doctorSanctionedCommands.includes(name)) return null;
-    const raw = text.slice(index + 1, -1);
-    const valueFlags = doctorValueFlags[name];
-    let positionals = 0, flagValue = false;
-    for (let at = 2; at < cli.length; at++) {
-      if (valueFlags?.has(cli[at].value)) { at++; flagValue = at === cli.length; }
-      else if (!cli[at].value.startsWith('-')) positionals++;
-    }
-    // Too few words yet, the quoted argument here is the value of the flag just before it
-    // (`--precedent 'D-1'`), or it is one the grammar reads before the reason: read on.
-    if (flagValue || positionals < doctorReasonAfter[name] || name === 'decide' && positionals === 2 && /^[{@]/.test(raw)) continue;
-    if (!doctorSegmentAllowed(words, context).allow) return null;
-    const reason = closer === '"' ? raw.replace(/\\([\\"$`\n])/g, (_match, char: string) => char === '\n' ? '' : char) : raw;
-    if (!reason.trim()) return null;
-    if (reason.length > doctorReasonLimit || /[\u0000-\u0008\u000b-\u001f\u007f]/.test(reason))
-      return { allow: false, reason: doctorRefusal(`a reason of ${reason.length} characters${reason.length > doctorReasonLimit ? '' : ' carrying a control character'}`, 'reason-bounds', `the reason argument after "${name}", column ${line.indexOf(text) + index + 1}`) };
-    if (apostrophesOnly && !(closer === '\'' && /\w'\w/.test(raw))) return null;
-    const command = `${grammar} '${reason.replace(/'/g, `'\\''`)}'`;
-    return doctorLineAllowed(command, context).allow ? { allow: true, command } : null;
-  }
-  return null;
-}
-
-/**
- * Whether one shell segment is within the doctor role's allowlist (GY-711). The segment must name
- * its program first — no assignment (`NODE_OPTIONS=…`), wrapper (`sudo`, `env`, `timeout`) or
- * expansion (`$GRAPHYARD_TOKEN_FILE`, `$(…)`) whose value cannot be checked before it runs.
- * `graphyard` and `node <the Graphyard CLI>` are judged by their command word: the sanctioned
- * subcommands, the read-only ones, and nothing else — `master merge`, `master dispatch`, an
- * evidence submission and a lease command are refused by name. `node` runs the Graphyard CLI
- * script and nothing else: no option (`-e`, `--require`) and no other script. The read-only
- * programs and git's and gh's read subcommands run with every path they name inside the checkout,
- * so the operator-agent credential, which is kept outside every checkout, is never read — and the
- * local secret files that resolve inside the checkout (`.env`, `.graphyard/credentials.json`) are
- * refused by name, because the checkout boundary is not a read boundary for them.
- */
-export function doctorSegmentAllowed(words: ShellWord[], context: DoctorGuardContext = { cwd: process.cwd(), cli: process.env.GRAPHYARD_DOCTOR_CLI }, place: DoctorPlace = { segment: 1 }): GuardVerdict {
-  const { index, wrapped } = commandIndex(words);
-  // Every refusal names the rule it applies and the word it refused, by position (GY-1653).
-  const refuse = (rule: DoctorRule, what: string, word: ShellWord | undefined): GuardVerdict => ({ allow: false, reason: doctorRefusal(what, rule, doctorWhere(words, word, place)) });
-  const program = words[index]?.value.split('/').pop() ?? '';
-  if (index !== 0 || wrapped) return refuse('program-first', `a command run through an assignment or ${words[index - 1]?.value ?? 'a wrapper'}`, words[Math.max(index - 1, 0)]);
-  // A word the shell would expand — variable, substitution or pathname glob — cannot be checked
-  // before it runs: `cat {README.md,/etc/passwd}` is a glob, and its matches are read verbatim.
-  const expanded = words.find(word => word.dynamic || word.glob);
-  if (expanded) return refuse('no-expansion', `the expansion "${expanded.value}", whose value or matches cannot be checked before it runs,`, expanded);
-  // The program by its bare name, found on PATH: never a script of the same name in the checkout.
-  if (words[0].value !== program) return refuse('bare-program-name', `${words[0].value} (run programs by their bare name)`, words[0]);
-  const rest = words.slice(1);
-  if (doctorCliPrograms.has(program)) return doctorCommandWords(rest, words, place);
-  if (program === 'node') {
-    // node runs only the Graphyard CLI script, with no options or variable expansion
-    if (rest.length < 1 || rest[0].value.startsWith('-') || rest[0].dynamic) return refuse('node-runs-cli-only', 'node (node runs only the Graphyard CLI script, with no options or expansions)', rest[0] ?? words[0]);
-    if (!doctorCliScript(rest[0].value, context)) return refuse('node-runs-cli-only', `node ${rest[0].value} (node runs only the Graphyard CLI script)`, rest[0]);
-    return doctorCommandWords(rest.slice(1), words, place);
-  }
-  const reads = doctorReadPrograms.get(program);
-  let allowed = reads !== undefined && !rest.some(word => reads?.test(word.value));
-  if (program === 'git') allowed = gitRead(rest.map(word => word.value));
-  if (program === 'gh') {
-    // gh reads the repository this checkout serves only: a `-R`/`--repo` flag or its prefix, any
-    // URL — any scheme, any host, any letter case (`https://GitHub.com/…`, `git://…`, an enterprise
-    // host) — an scp-style `git@host:path` or `host.tld:path`, or any `github.`-containing word
-    // names a repository another way, so all are refused rather than resolved against the checkout.
-    const override = rest.find(word => {
-      const value = word.value;
-      return value.startsWith('-R') || value.startsWith('--rep') || value.includes('://')
-        || /^git@/i.test(value) || /github\./i.test(value) || /^[\w.-]*\w\.[\w.-]+:\w/.test(value);
-    });
-    if (override) return refuse('gh-this-repository', `gh ${override.value} (gh reads the repository this checkout serves; no repository override)`, override);
-    // An ambient GH_REPO or GH_HOST selects another repository with no word on the line; the
-    // extension clears both for the doctor, and gh is refused should either still be set.
-    const ambient = doctorGhOverrides.find(name => (context.env ?? process.env)[name]);
-    if (ambient) return refuse('gh-this-repository', `gh while ${ambient} is set (gh reads the repository this checkout serves; no repository override)`, words[0]);
-    // -w/--web opens a browser under the coordinator's account: a headless doctor reads, never launches.
-    const web = rest.find(word => word.value.startsWith('--web') || /^-[a-zA-Z]*w/.test(word.value));
-    if (web) return refuse('gh-headless', `gh ${web.value} (the doctor reads headless; no browser launch)`, web);
-    allowed = ghReads(context.env).get(rest[0]?.value ?? '')?.has(rest[1]?.value ?? '') ?? false;
-  }
-  if (!allowed) return refuse('read-programs', `${program}${rest[0] ? ` ${rest[0].value}` : ''}`, reads === undefined && program !== 'git' && program !== 'gh' ? words[0] : rest.find(word => reads?.test(word.value)) ?? rest[0] ?? words[0]);
-  const recursive = doctorRecursiveReads.get(program);
-  if (recursive) {
-    const rec = rest.find(word => recursive.test(word.value));
-    if (rec) return refuse('no-recursive-read', `a recursive read with ${rec.value}`, rec);
-  }
-  const secret = rest.find(word => doctorSecretFile(word.value, context));
-  if (secret) return refuse('no-secret-files', `reading ${secret.value}, a local secret file the checkout boundary does not cover,`, secret);
-  const outside = rest.find(word => doctorPathOutside(word.value, context));
-  return outside ? refuse('inside-checkout', `reading ${outside.value}, a path outside the checkout ${context.cwd},`, outside) : { allow: true };
-}
-function gitRead(args: string[]) {
-  const [subcommand, ...rest] = args;
-  if (!gitReads.has(subcommand ?? '') || rest.some(arg => gitWriting.test(arg))) return false;
-  if (subcommand === 'worktree') {
-    // Only `git worktree list` is safe; `add` and `remove` write and can erase worktrees
-    return (rest.length === 1 && rest[0] === 'list') || (rest[0] === 'list' && rest.slice(1).every(arg => ['--porcelain', '-v', '--verbose', '-z'].includes(arg)));
-  }
-  if (subcommand === 'branch') {
-    // Only listing options are safe; `-D`, `-d`, `-m`, `-c` are destructive
-    const options = rest.filter(arg => arg.startsWith('-'));
-    if (!options.every(arg => gitBranchListing.test(arg))) return false;
-    // Allow only if all args are listing options, or at least one listing option makes it a list command
-    return rest.length === options.length || options.some(arg => /^(?:-a|-r|-l|--all|--remotes|--list|--contains|--no-contains|--merged|--no-merged|--points-at)$/.test(arg));
-  }
-  return true;
-}
-/** Whether `script` is the Graphyard CLI the loop named, or, when it named none, a `graphyard.mjs` launcher. */
-function doctorCliScript(script: string, context: DoctorGuardContext) {
-  const physicalOf = (path: string) => { try { return realpathSync(resolve(context.cwd, path)); } catch { return resolve(context.cwd, path); } };
-  return context.cli ? physicalOf(script) === physicalOf(context.cli) : basename(script) === 'graphyard.mjs';
-}
-/** Whether a word names a path outside the checkout: absolute, home-relative, `..`, or a link that resolves out. `--opt=PATH` is judged by its PATH. */
-function doctorPathOutside(value: string, context: DoctorGuardContext) {
-  const path = value.startsWith('-') ? value.includes('=') ? value.slice(value.indexOf('=') + 1) : '' : path_without_flag(value);
-  if (!path) return false;
-  const root = physical(resolve(context.cwd), true);
-  const within = (candidate: string) => candidate === root || inside(candidate, root);
-  if (path.startsWith('~')) return !within(physical(resolve(path.replace(/^~/, context.home ?? homedir())), true));
-  // A revision range or pathspec a git read names (`HEAD..main`, `:/src`) is not a file.
-  const absolute = path.startsWith('/'), parent = path.split('/').includes('..');
-  if (!absolute && !parent) {
-    try { statSync(resolve(context.cwd, path)); } catch { return false; }
-  }
-  return !within(physical(resolve(context.cwd, path), true));
-}
-function path_without_flag(value: string) { return value.startsWith('-') ? '' : value; }
-const doctorRecursiveReads = new Map<string, RegExp>([
-  ['grep', /^(?:-[a-zA-Z]*[rR][a-zA-Z]*|--(?:recursive|dereference-recursive)(?:=.*)?)$/],
-  ['ls', /^(?:-[a-zA-Z]*R[a-zA-Z]*|--recursive(?:=.*)?)$/],
-  ['diff', /^(?:-[a-zA-Z]*[rR][a-zA-Z]*|--recursive(?:=.*)?)$/],
-]);
-/**
- * Whether a word names a local secret file, wherever it sits: an environment file, Graphyard's
- * installation credentials, App keys, tokens, package-registry auth files, a git directory (its
- * config can hold a credential), or the classic credential files a clone can carry.
- * These resolve inside the checkout, so the checkout boundary is not a read boundary for them;
- * naming one is refused whether or not the file exists, because probing a secret path is itself
- * information. A git revision path (`HEAD:.env`) and an option's path (`--ignore-file=.env`) are
- * judged by their path.
- */
-const doctorSecretBasenames = new Set(['.git-credentials', '.netrc', '.npmrc', '.pypirc', '.yarnrc.yml', 'id_rsa', 'id_dsa', 'id_ecdsa', 'id_ed25519']);
-function doctorSecretFile(value: string, context?: DoctorGuardContext) {
-  const cwd = context?.cwd ?? process.cwd();
-  for (const part of value.split(':')) {
-    const rawPath = part.startsWith('-') ? part.includes('=') ? part.slice(part.indexOf('=') + 1) : '' : part;
-    if (!rawPath) continue;
-    const path = isAbsolute(rawPath) ? relative(cwd, resolve(cwd, rawPath)) : rawPath;
-    const base = path.split('/').pop() ?? '';
-    if (/^\.env(?:\.|$)/.test(base)) return true;
-    if (base.endsWith('.pem') || base.endsWith('.token')) return true;
-    if (doctorSecretBasenames.has(base)) return true;
-    if (path === '.graphyard' || path.startsWith('.graphyard/') || /(?:^|\/)\.(?:graphyard|config\/graphyard)(?:\/|$)/.test(path)) return true;
-    // A git directory's config can carry a credential (an extraheader, a tokenised remote URL).
-    if (path === '.git' || path.startsWith('.git/') || /(?:^|\/)\.git(?:\/|$)/.test(path)) return true;
-    if (path !== '.' && path !== './' && !path.startsWith('..')) {
-      try {
-        const full = resolve(cwd, path);
-        if (existsSync(full) && statSync(full).isDirectory()) {
-          if (existsSync(join(full, '.graphyard')) || existsSync(join(full, '.env'))) return true;
-          const entries = readdirSync(full, { withFileTypes: true });
-          for (const entry of entries) {
-            if (entry.name.endsWith('.pem') || entry.name.endsWith('.token') || /^\.env(?:\.|$)/.test(entry.name) || doctorSecretBasenames.has(entry.name)) return true;
-            if (entry.isDirectory() && entry.name === '.graphyard') return true;
-          }
-        }
-      } catch {}
-    }
-  }
-  return false;
-}
-/**
- * Whether a Graphyard CLI command is one the doctor may run, judged on its grammar alone (GY-1653):
- * the subcommand word — `master` and the sanctioned or read-only name after it. The words after
- * that (the item key, files, flags and the free-text reason) are never read as commands: the CLI
- * joins the reason's words as prose, so "most recent" or "policy revision" in it is a phrase, not
- * a program. `words` are the CLI's own words; `segment` is the whole segment, for the position.
- */
-function doctorCommandWords(cliWords: ShellWord[], segment: ShellWord[] = cliWords, place: DoctorPlace = { segment: 1 }): GuardVerdict {
-  const words = cliWords.map(word => word.value);
-  const at = words.findIndex(word => !word.startsWith('-') && word !== 'master');
-  const command = words[at];
-  const isMaster = words[0] === 'master';
-  const name = isMaster ? words[1] : command;
-  const refuse = (what: string, word: ShellWord | undefined): GuardVerdict => ({ allow: false, reason: doctorRefusal(what, 'sanctioned-commands', doctorWhere(segment, word, place)) });
-  if (isMaster && doctorSanctionedCommands.includes(name as never)) return { allow: true };
-  if (command === 'evidence') return refuse('graphyard evidence', cliWords[at]);
-  if (doctorReadOnlyCommands.includes(name as never)) return { allow: true };
-  return refuse(name ? `graphyard ${isMaster ? 'master ' : ''}${name}` : 'that command', isMaster ? cliWords[1] ?? cliWords[0] : cliWords[at]);
-}
-/**
- * GY-2005: item creation is held to its stated code-change reason at the gate itself. A
- * `master create` whose grammar carries nothing stated past the file — no reason word after the
- * file and its flags — is refused before it runs, so a notice can never spend a round filing an
- * item; whether the reason names a code change stays the charter's judgement, and the CLI's own
- * REASON requirement stays the second gate. `words` are one segment's words; null when the
- * segment is not a master create, or a reason is stated.
- */
-function createReasonRefusal(words: ShellWord[], place: DoctorPlace): GuardVerdict | null {
-  const values = words.map(word => word.value);
-  const at = values.indexOf('create');
-  if (at < 1 || values[at - 1] !== 'master') return null;
-  const stated = values.slice(at + 1).filter(value => !value.startsWith('-'));
-  if (stated.length >= 2) return null;
-  return { allow: false, reason: doctorRefusal('master create with no reason stated past the file (an item is filed only for a code change judged needed, saying why)', 'create-reason', doctorWhere(words, words[at + 1] ?? words[words.length - 1], place)) };
-}
-/**
- * The rules of the doctor's allowlist, each named in the refusal it gives (GY-1653), so a refusal
- * says which rule denied which word rather than calling a phrase an unsanctioned command.
- */
-export const doctorRules = {
-  'program-first': 'the segment names its program first: no assignment or wrapper before it',
-  'no-expansion': 'no word the shell would expand: no variable, command substitution or glob',
-  'create-reason': 'item creation states the code change judged needed: a reason is stated past the file',
-  'bare-program-name': 'programs run by their bare name, never a path to a script',
-  'node-runs-cli-only': 'node runs only the Graphyard CLI script, with no node options',
-  'sanctioned-commands': 'the Graphyard subcommand is a sanctioned master command or a read-only one',
-  'read-programs': 'any other program is a read-only program, or a read subcommand of git or gh',
-  'gh-this-repository': 'gh reads the repository this checkout serves, with no repository override',
-  'gh-headless': 'gh reads headless, never opening a browser',
-  'no-recursive-read': 'no recursive read',
-  'no-secret-files': 'no local secret file is named',
-  'inside-checkout': 'every path named lies inside the checkout',
-  'no-redirection': 'no redirection (< or >)',
-  'closed-quotes': 'every quote the line opens is closed',
-  'reason-bounds': 'a free-text reason is at most 2000 characters with no control characters but newline and tab',
-} as const;
-export type DoctorRule = keyof typeof doctorRules;
-/** Where a judged segment sits on its line: its number (1 is the first) and the raw line, to name the separator that began it. */
-export interface DoctorPlace { segment: number; line?: string }
-/**
- * The position a refusal names: the word, its number within its segment, its column, and — for a
- * segment after the first — the separator that began it, since a phrase after an unquoted `;` or
- * `(` in a reason becomes a segment of its own.
- */
-function doctorWhere(segment: ShellWord[], word: ShellWord | undefined, place: DoctorPlace) {
-  if (!word) return `segment ${place.segment}`;
-  const number = segment.indexOf(word) + 1, column = word.at === undefined ? '' : `, column ${word.at + 1}`;
-  let opened = '';
-  if (place.segment > 1 && place.line !== undefined && segment[0]?.at !== undefined) {
-    const before = place.line.slice(0, segment[0].at).trimEnd(), separator = before.at(-1);
-    if (separator) opened = `, which the ${separator === '\n' ? 'newline' : `"${separator}"`} at column ${before.length} began outside any quote (if these words are a reason's prose, enclose the whole reason in one pair of quotes)`;
-  }
-  return `word ${number} "${word.value}"${column} of segment ${place.segment}${opened}`;
-}
-/** The refusal a command outside the doctor's allowlist gets: recorded, never run. It names the rule that denied it and where (GY-1653). */
-const doctorRefusal = (what: string, rule: DoctorRule, where?: string) => `Graphyard refused this command for the doctor role under its ${rule} rule (${doctorRules[rule]})${where ? `, at ${where}` : ''}: ${what} is outside the doctor's command allowlist, so it was not run. The doctor's sanctioned commands are master ${doctorSanctionedCommands.join(', master ')}; everything else it may do is read-only. Record the refused command in your graphyard_doctor_report instead of retrying it.`;
 
 // ---- The destructive-command guard -------------------------------------------------------------
 export interface GuardContext { cwd: string; home?: string; sessionDirectories?: Iterable<string> }
@@ -854,12 +426,6 @@ export function mktempDirectories(command: string, output: string, root = tmpdir
   try { return statSync(line).isDirectory() ? [line] : []; } catch { return []; }
 }
 
-/** The tool name the doctor's session submits its report through; the one non-bash tool it holds. */
-export const doctorReportToolName = 'graphyard_doctor_report';
-
-/** The refusal a tool outside the doctor's surface gets: recorded, never run. */
-const doctorToolRefusal = (what: string) => `Graphyard refused this tool for the doctor role: ${what} is outside the doctor's tool surface, so it was not run. The doctor runs bash under its command allowlist and its ${doctorReportToolName} tool; every other tool — read, edit, write, any built-in — is refused. Record the refused call in your graphyard_doctor_report instead of retrying it.`;
-
 // ---- The extension -----------------------------------------------------------------------------
 /** The section Graphyard adds to every Pi session's system prompt. */
 export const systemPromptSection = `${autonomyContract} You run headless: nobody reads this session while it runs and nothing you print reaches a person. Your answer is the Graphyard tool call your request names, and nothing else counts as an answer. When a command is refused, read the reason and retry safely; never wait for anyone.`;
@@ -875,28 +441,11 @@ export default function graphyard(pi: ExtensionApi) {
     else if (typeof event?.systemPrompt === 'string') return { systemPrompt: `${event.systemPrompt}\n\n${systemPromptSection}` };
     return undefined;
   });
-  // The doctor's bash children inherit this process's environment: an ambient repository or host
-  // selection is cleared so gh reads the repository the checkout serves (GY-711).
-  if (process.env.GRAPHYARD_PI_ROLE === 'doctor') for (const name of doctorGhOverrides) delete process.env[name];
   pi.on('tool_call', (event, ctx) => {
     const tool = String(event?.toolName ?? '');
-    // The doctor role holds every tool, not only bash (GY-711): no built-in read, edit or write
-    // may bypass the checkout boundary or the sanctioned commands, so every tool but bash and the
-    // doctor's own report tool is refused before anything runs.
-    if (process.env.GRAPHYARD_PI_ROLE === 'doctor' && tool !== 'bash' && tool !== doctorReportToolName)
-      return { block: true, reason: doctorToolRefusal(tool || 'an unnamed tool') };
     if (tool !== 'bash') return undefined;
-    let command = String(event.input?.command ?? '');
+    const command = String(event.input?.command ?? '');
     const context = { cwd: ctx?.cwd ?? process.cwd(), sessionDirectories };
-    // The doctor role is judged by its command allowlist (GY-711) before the destructive-command
-    // guard: a command outside it is blocked with the reason to record, never run. A sanctioned
-    // master command whose prose reason broke the shell's quoting runs with that reason as one
-    // single-quoted argument (GY-1653): the tool call's input is rewritten, so it runs first time.
-    if (process.env.GRAPHYARD_PI_ROLE === 'doctor') {
-      const verdict = doctorCommandVerdict(command, { cwd: context.cwd, cli: process.env.GRAPHYARD_DOCTOR_CLI });
-      if (!verdict.allow) return { block: true, reason: verdict.reason };
-      if (verdict.command !== undefined) event.input.command = command = verdict.command;
-    }
     const verdict = guardCommand(command, context);
     return verdict.allow ? undefined : { block: true, reason: verdict.reason };
   });

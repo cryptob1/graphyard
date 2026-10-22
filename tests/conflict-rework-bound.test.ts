@@ -9,7 +9,6 @@ import { docsSyncRoute } from '../src/daemon/docs-sync-route.js';
 import { routineDecision } from '../src/daemon/decisions.js';
 import { docsSyncSessionName, type DocsSyncPlan } from '../src/docs-sync.js';
 import { loopRework } from '../src/cli/hand-rework.js';
-import { faultClassOf } from '../src/model/fault-classes.js';
 
 /**
  * GY-1434. On 2026-10-07 GY-1419's candidate 69dcd419da45 (PR #904) was recorded conflicting with three
@@ -198,7 +197,6 @@ test('unit:stalled-decision-attention-on-overdue-rework — master status names 
   // Inside the bound: the conflict, owned by the loop's step that requests it — never a refused hand command for an approver.
   const inside = row('07:47:30', tips.second);
   assert.equal(inside.items.length, 1);
-  assert.equal(inside.items[0].kind, 'base-conflict');
   assert.equal(inside.items[0].role, 'control plane');
   assert.equal(inside.items[0].approvedBy, null);
   assert.match(inside.items[0].next, /the loop's decisions step requests GY-1419's rework itself \(due at 2026-10-07T07:52:04\.000Z/);
@@ -206,15 +204,11 @@ test('unit:stalled-decision-attention-on-overdue-rework — master status names 
   // 08:11:09, the board clock of the report: a stalled-step attention with its subject, in the loop class.
   const stalled = row('08:11:09', tips.third);
   assert.equal(stalled.items.length, 1);
-  assert.equal(stalled.items[0].kind, 'stalled-step');
-  assert.equal(stalled.items[0].faultClass, 'loop');
-  assert.equal(faultClassOf('stalled-step'), 'loop');
   assert.match(stalled.items[0].text, /^The loop's decisions step has not requested GY-1419's conflict rework \(round 69dcd419da45eefde1840d88db515a3cedb101e5:conflict\) within 10 minutes of the conflict first recorded at 2026-10-07T07:42:04\.000Z: it fell due at 2026-10-07T07:52:04\.000Z and is 20 minute\(s\) overdue\. Candidate 69dcd419da45 cannot be brought onto base branch tip 2c6f5bdb3095/);
   assert.equal(stalled.items[0].approvedBy, null);
   assert.match(stalled.items[0].next, /a hand rework of GY-1419 is refused/);
   assert.equal(stalled.row.attention, stalled.items[0].text);
   // A hand-driven item's conflict stays the master's to rework, with its approver.
   const hand = buildMasterStatus({ work: [gy1419(tips.third, at('08:11:00'), false)], now: iso(at('08:11:09')) }, [], []).attentionItems.find(item => item.subject === 'GY-1419')!;
-  assert.equal(hand.kind, 'base-conflict');
   assert.equal(hand.approvedBy, 'approver');
 });

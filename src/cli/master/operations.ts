@@ -44,7 +44,7 @@ const recoverEffects: RecoverEffects = { run: defaultChildRun, host: {}, restart
 export async function postDeployChecksCommand(stdin: AsyncIterable<string | Buffer> = process.stdin, write: (text: string) => void = text => process.stdout.write(text)) {
   let raw = ''; for await (const chunk of stdin) { raw += chunk; if (raw.length > 4_000_000) throw new Error('post-deploy-checks input is too large'); }
   const input = JSON.parse(raw) as PostDeployChecksInput;
-  if (!input?.work?.id || typeof input.release !== 'string' || typeof input.now !== 'string') throw new Error('Use master post-deploy-checks with {"work","release","now","projections","servedAt"} as JSON on stdin');
+  if (!input?.work?.id || typeof input.release !== 'string' || typeof input.now !== 'string') throw new Error('Use master post-deploy-checks with {"work","release","now","servedAt"} as JSON on stdin');
   write(`${JSON.stringify(await localPostDeployChecks(input))}\n`);
 }
 

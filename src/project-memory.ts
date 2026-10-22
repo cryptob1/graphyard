@@ -1,12 +1,9 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import type { DaemonState } from './daemon/state.js';
-import { faultClassPolicyDefaults, recurringClasses, type FaultClassPolicy } from './model/fault-classes.js';
 import {
   emptyProjectMemory,
   projectMemorySchema,
-  recordPitfallInMemory,
   updateProjectMemoryFromWork,
   type ProjectMemory,
 } from './model/project-memory.js';
@@ -15,23 +12,18 @@ import type { Work } from './model/work.js';
 export {
   emptyProjectMemory,
   isDecisionRoleRelevant,
-  isPitfallRoleRelevant,
   projectMemoryDigest,
   projectMemorySchema,
   projectMemoryWordBudget,
   recentChangesWindowMs,
   recordChangeInMemory,
   recordDecisionInMemory,
-  recordPitfallInMemory,
   recordSettledDecision,
   retainedMemoryChanges,
   retainedMemoryDecisions,
-  retainedMemoryPitfalls,
-  sanctionedRemedies,
   updateProjectMemoryFromWork,
   type MemoryChange,
   type MemoryDecision,
-  type MemoryPitfall,
   type ProjectMemory,
   type SessionRole,
 } from './model/project-memory.js';
@@ -58,7 +50,7 @@ export async function writeProjectMemory(root: string, memory: ProjectMemory): P
 }
 
 /**
- * Updates project memory from settled decisions, recurring fault classes, and merges.
+ * Updates project memory from settled decisions and merges.
  * Never updates from an agent's unreviewed claim.
  */
 export async function syncProjectMemory(
@@ -66,9 +58,7 @@ export async function syncProjectMemory(
     root?: string;
     existing?: ProjectMemory;
     work?: readonly Work[];
-    state?: DaemonState;
     now?: number;
-    policy?: FaultClassPolicy;
   }
 ): Promise<ProjectMemory> {
   const now = options.now ?? Date.now();
@@ -81,21 +71,6 @@ export async function syncProjectMemory(
 
   // 2. Applied two-party decisions are recorded as the loop settles them (recordSettledDecision
   //    in daemon/cycle-decisions.ts), with the approver's reason; a refused one settles nothing here.
-
-  // 3. Update from recurring fault classes in daemon state
-  if (options.state?.faults) {
-    const policy = options.policy ?? faultClassPolicyDefaults;
-    const recurring = recurringClasses(options.state.faults.instances, policy, now);
-    for (const item of recurring) {
-      if (item.count >= policy.threshold) {
-        recordPitfallInMemory(memory, {
-          faultClass: item.faultClass,
-          count: item.count,
-          at: item.recent.at(-1)?.at ?? new Date(now).toISOString(),
-        });
-      }
-    }
-  }
 
   // Save to disk if root provided
   if (options.root) {

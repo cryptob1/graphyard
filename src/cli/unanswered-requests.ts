@@ -1,6 +1,5 @@
 import { agentOwner, type AttentionItem } from '../master.js';
 import { elapsed } from '../model/sessions.js';
-import { classified } from '../model/fault-classes.js';
 import { unansweredRequests, unobtainableReview, unobtainableReviewLine, type RequestProgress, type SettledReviewSession, type UnansweredRequest, type UnobtainableReview } from '../model/dispatch.js';
 
 /** Who answers a request whose session settled unanswered, and with which command. */
@@ -37,7 +36,7 @@ export function unansweredRequestAttention(rows: { key: string; dispatch: { revi
     const next = request.next;
     // Once the reader knows how long ago the session settled — so the grace has been measured —
     // the decision its evidence calls for is the named answer, not an unanswered request.
-    if (next?.kind === 'decision' && request.settledMs !== null) return { subject: row.key, requestId: request.requestId, ...classified('request-remedy'),
+    if (next?.kind === 'decision' && request.settledMs !== null) return { subject: row.key, requestId: request.requestId,
       text: `${subject} for ${row.key} awaits the ${next.decision} decision its evidence calls for, ${elapsed(request.sinceMs)} after it was requested: ${settled}; ${next.proofs.join(', ')} ${next.proofs.length === 1 ? 'was' : 'were'} recorded as not exercising ${next.proofs.length === 1 ? 'its criterion' : 'their criteria'} on this head, so no producer is launched for it again and the loop raises the ${next.decision} decision instead`,
       ...requestRemedyOwner(row.key, next) };
     // A producer that recorded its proofs as not exercising their criterion answered the request

@@ -9,11 +9,10 @@ import { decisionKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { approvalStep, recordWatchEnded, approverLaunchKey, attestDecisions, boundDetail, cappedReworkBound, exhaustedProofKey, decisionReasonMax, detailChanged, fitDecisionReason, handWatchPrefix, maxApproverCloses, maxRefusalAnswers, maxDecisionRequests, neededDecision, observedFrom, overtakenDecision, resolveCovers, reworkDecisionReason, refusalNamedIn, standingNamedIn, adoptedOnRefusal, conflictReworkOverdue, reworkObservationWait, routineDecision, type RoutineDecision, standingVerdict, withheldDecision } from './decisions.js';
 import { approvedResumePendingDetail, staleRevisionDecideRefusal, staleRevisionDecideNote, staleRevisionDecideDetail } from './metrics.js';
-import { candidateMovedMeanwhile, decisionFailureKind, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
+import { candidateMovedMeanwhile, decisionReads, deliveredMeanwhile, lateDecisionRead, resumedApplication, selfHealingDecisionFailure } from './decision-reads.js';
 import { refusedAttestationWatch, type RefusedAttestation } from '../model/rework-ground.js';
 import { type DaemonEffects, record } from './effects.js'; import { type HeldReworkAnswer, heldReworkAnswer, heldReworkWatch, refusedHeldReworkAnswer } from './decision-holds.js'; import { planReportSink, reportMechanicalPlans } from './mechanical-plan-report.js';
 import { adoptedWatch, refusedOnOtherGrounds } from './rework-grounds.js';
-import type { FaultKind } from '../model/fault-classes.js';
 import type { Cycle } from './cycle.js';
 import { baseRefreshConflict } from '../model/base-refresh.js'; import { docsSyncRoute } from './docs-sync-route.js';
 import { createApproverSupervisor } from './cycle-approvers.js'; import { boundWakes, observationWakes, retireDepartedWakes } from './cycle-wakes.js';
@@ -32,8 +31,8 @@ export async function decisionStep(cycle: Cycle, assessments: Record<string, Con
   const effects = recordingWrites(boundedDecisions(boundedCalls(await decisionReads(boundWakes(cycle, cycle.effects, () => budgetLeft()), cycle.heldDecisions, snapshot.work, Object.values(state.approvals), clock, cycle.effects.decisionReadDeadlineMs), cycle.heldDecisions, now, () => budgetLeft(), { step: 'approvers', calls: approverCalls }), cycle.heldDecisions, now, () => budgetLeft()), written);
   // 4c. Routine decisions: request with the master's operator-agent identity, launch an independent approver, supervise every cycle (see `approvalStep`).
   const stamp = new Date(clock).toISOString(), bounds = holdBounds.get(state) ?? new Map<string, number>(); holdBounds.set(state, bounds); for (const id of bounds.keys()) if (!snapshot.work.some(work => work.id === id)) bounds.delete(id);
-  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now(), faultKind?: FaultKind | null) =>
-    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist, faultKind));
+  const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
+    performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
   const approvers = createApproverSupervisor(cycle, effects, stamp, note, capacities, approversSpent);
   const { sessions, invalidate, closeApprover, endApproverSession, endWatchSession, launch, capacityRelaunchWaits, approverExhausted, bindHandLaunch, rebindReplacedPane, stallInputs, escalateUnjudged, actOnStep } = approvers;
   /** Request the decision (or adopt the one already standing) and put it to an approver. */
@@ -159,15 +158,15 @@ export async function decisionStep(cycle: Cycle, assessments: Record<string, Con
     } catch (error) {
       // Late read / delivered / moved / self-healing: first miss is no fault (GY-1293/1405/1430/1505). A stale-revision refusal waits.
       const refusedHold = refusedHeldReworkAnswer(item, decision, error); if (refusedHold) { await adoptHolding(refusedHold); return; } // GY-1888: a hold the history read missed
-      if (decisionCallCarried(message(error))) return void performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver in time: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
+      if (decisionCallCarried(message(error))) return void performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver in time: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
       if (staleRevisionDecideRefusal(error)) {
-        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}; ${staleRevisionDecideNote}, so the request is re-computed next cycle against the applied revision`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
+        performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}; ${staleRevisionDecideNote}, so the request is re-computed next cycle against the applied revision`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
       const detail = `Could not put the ${decision.action} decision for ${item.key} to an approver: ${message(error)}`;
-      const moot = deliveredMeanwhile(detail), moved = !moot && candidateMovedMeanwhile(detail, item), late = lateDecisionRead(detail) && !(previous?.state === 'failed' && lateDecisionRead(previous.detail));
+      const moot = deliveredMeanwhile(detail), moved = !moot && candidateMovedMeanwhile(detail, item);
       const why = moot ? `; ${item.key} was delivered after this cycle's snapshot, so it needs no ${decision.action} decision` : moved ? `; ${item.key}'s candidate moved after this cycle's snapshot, so the next snapshot decides afresh` : '';
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `${detail}${why}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, late || moot || moved ? null : decisionFailureKind(state, item.key, detail, previous)));
+      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `${detail}${why}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
   };
   /** Look again at a decision already requested: its state on the control plane, and its session. */
@@ -403,10 +402,9 @@ export async function decisionStep(cycle: Cycle, assessments: Record<string, Con
         // GY-1405: a history read that only missed the step's deadline judged nothing, as on the
         // request path (GY-1293): one alone is no fault, and the withdrawal is tried next cycle; the
         // second in a row counts. A withdrawal refused on an item delivered meanwhile is moot.
-        const withdrawKey = `approver:${watch.decision}:withdrawn`, prior = state.actions[withdrawKey];
+        const withdrawKey = `approver:${watch.decision}:withdrawn`;
         const detail = `Could not withdraw ${watch.action} decision ${watch.decision}, which ${watch.work} no longer needs: ${message(error)}`;
-        const late = lateDecisionRead(detail) && !(prior?.state === 'failed' && lateDecisionRead(prior.detail));
-        if (!carried) await note(withdrawKey, item, 'decision', 'failed', detail, now(), late || deliveredMeanwhile(detail) ? null : undefined);
+        if (!carried) await note(withdrawKey, item, 'decision', 'failed', detail, now());
       }
     }
     // An item no longer open has no pane to close, but its registry session still holds a slot.

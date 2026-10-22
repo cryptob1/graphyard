@@ -8,8 +8,7 @@ import { runRecordSchema } from '../runner/types.js';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { boundDetail } from './decisions.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
-import { classified, faultClasses, faultInstanceSchema, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
-import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js'; import { unansweredStands } from '../model/fault-record.js';
+import { docsSyncWatchSchema, routedConflictSchema } from '../model/docs-sync.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
 import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
@@ -18,8 +17,6 @@ import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-wri
 // 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
-/** A failed action is a pipeline fault; its kind in the fault catalogue (GY-173) follows the action's kind. */
-export const daemonActionFaultKind = (kind: DaemonActionKind) => `action:${kind}` as FaultKind;
 /** The most an action's detail may carry: daemonActionSchema's bound, which record() enforces. */
 export const actionDetailMax = 2000;
 export const daemonActionSchema = z.object({
@@ -34,8 +31,6 @@ export const daemonActionSchema = z.object({
   epoch: z.number().int().min(0).nullable().default(null),
   cycle: z.number().int().min(0),
   at: z.string(),
-  /** Set on a failed or indeterminate action: the fault class that failure is an instance of (GY-173). */
-  faultClass: z.enum(faultClasses).optional(),
   /** Set on a refused merge (GY-831): when the guarded merge first gave the refusal this detail names, unchanged since. */
   since: z.string().optional(),
   /** Set on an owed launch coordinate (GY-1895): the exact write to send again — the item and the launch's own handle — so a restarted loop resends it, never retiring it unsent. */
@@ -295,51 +290,6 @@ export const baseFailureSchema = z.object({
   cleared: z.object({ at: z.string(), baseSha: z.string().max(64), jobId: z.number().int().nullable() }).strict().nullable(),
 }).strict();
 
-// ---- The pipeline doctor's run record (GY-711, src/daemon/doctor.ts) ---------------------------
-const doctorLine = (max: number) => z.string().trim().min(1).max(max);
-/** One finding of a doctor run: what was stuck, under which check bound, and whether it could act. */
-export const doctorFindingsSchema = z.object({
-  subject: doctorLine(200),
-  check: z.enum(['blocked', 'worker', 'ci', 'review-request', 'launch', 'proofs', 'mergeable', 'decision', 'containment', 'refusal', 'overdue']),
-  detail: doctorLine(2000),
-  unactionable: z.boolean().default(false),
-}).strict();
-/** One sanctioned command the doctor ran, with what became of it. */
-export const doctorActionSchema = z.object({
-  subject: doctorLine(200), command: doctorLine(500), outcome: z.enum(['applied', 'refused']), detail: doctorLine(1000),
-}).strict();
-/** The fault item a doctor run asks the loop to file, deduplicated against open items. */
-export const doctorFileEntrySchema = z.object({
-  faultClass: z.enum(faultClasses), title: z.string().max(200), work: z.string().max(50).nullable().default(null), deduplicated: z.boolean().default(false),
-}).strict();
-/** The full fault-filing request a doctor run makes (src/daemon/doctor.ts doctorFileItem): what the loop files when no open item covers the class. */
-export const doctorFiledSchema = z.object({
-  faultClass: z.enum(faultClasses), title: doctorLine(200), description: doctorLine(20000),
-  priority: z.number().int().min(0).max(1),
-  criteria: z.array(z.object({ id: z.string().trim().regex(/^[A-Z]+-\d+$/), text: doctorLine(4000), proofs: z.array(doctorLine(200)).min(1).max(10) }).strict()).min(1).max(20),
-  /** Retired (GY-1992): items carry no planned files; a run or cursor that still names them keeps parsing. */
-  plannedFiles: z.unknown().optional(),
-}).strict();
-/** A filing the control plane did not accept when its run applied, kept for the later cycles that file it again. */
-export const doctorPendingFileSchema = z.object({
-  /** The filing's stable idempotency key: the same key the refused filing was posted under. */
-  key: doctorLine(200), at: z.string().max(40), file: doctorFiledSchema,
-}).strict();
-export const doctorStates = ['running', 'reported', 'failed'] as const;
-export const doctorRunRecordSchema = z.object({
-  at: z.string().max(40), state: z.enum(doctorStates),
-  runs: z.array(z.object({ runtime: z.string().max(40), model: z.string().max(200), result: z.string().max(40), detail: z.string().max(500) }).strict()).max(4).default([]),
-  findings: z.array(doctorFindingsSchema).max(50).default([]),
-  actions: z.array(doctorActionSchema).max(50).default([]),
-  filed: z.array(doctorFileEntrySchema).max(20).default([]),
-  detail: z.string().max(1000).default(''),
-}).strict();
-export const retainedDoctorRuns = 20;
-export type DoctorRunRecord = z.infer<typeof doctorRunRecordSchema>;
-export type DoctorFinding = z.infer<typeof doctorFindingsSchema>;
-export type DoctorAction = z.infer<typeof doctorActionSchema>;
-export type DoctorFiled = z.infer<typeof doctorFiledSchema>;
-export type DoctorPendingFile = z.infer<typeof doctorPendingFileSchema>;
 /** The release this loop's own process loaded, read once at its startup (GY-437) and overwritten by every new process: what every action it takes runs, until its supervisor replaces it. */
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
@@ -426,42 +376,6 @@ export function masterSummary(master: MasterSessionState, now: number) {
     rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
 }
 
-export const dispatchFailureRunSchema = z.object({ key: z.string().max(100), cause: z.string().max(2000), count: z.number().int().min(1), epoch: z.number().int().min(0).default(0), firstAt: z.string(), lastAt: z.string() }).strict(); export type DispatchFailureRun = z.infer<typeof dispatchFailureRunSchema>;
-/** GY-1854: one attempt of the remedy a stalled loop-step signature binds to, recorded on the stall. */
-export const stepStallRemedyRecordSchema = z.object({
-  kind: z.string().max(40), at: z.string(),
-  /** `started` is the attempt written before its mutation runs: a process that ends during it leaves the run remedied, never applied twice. */
-  outcome: z.enum(['started', 'applied', 'unchanged', 'refused']), verified: z.boolean(), detail: z.string().max(2000),
-}).strict();
-export type StepStallRemedyRecord = z.infer<typeof stepStallRemedyRecordSchema>;
-/**
- * GY-1854: one run of consecutive cycles a loop step or dispatcher call failed with one normalised
- * signature, and the stall three of them are — recorded once, its bound remedy applied once and
- * verified, and its call backed off to once per five minutes. The rules live in
- * ./step-stalls.ts, which also bounds the record a cycle that fails nowhere clears.
- */
-export const stepStallSchema = z.object({
-  signature: z.string().max(800),
-  /** The failing call: a cycle step's action kind, the dispatcher's `dispatch`, or `cycle` for a whole failed cycle. */
-  step: z.string().max(100),
-  count: z.number().int().min(1),
-  /** The loop cycle the run was last seen failing in: a cycle that ends without the step failing clears the run. */
-  lastCycle: z.number().int().min(0),
-  firstAt: z.string(), lastAt: z.string(), lastError: z.string().max(1000),
-  /** When the run reached three consecutive cycles and was recorded as this stall; null until then. */
-  stalledAt: z.string().nullable(),
-  /** The one attempt of its bound remedy, or null while none was applied. */
-  remedy: stepStallRemedyRecordSchema.nullable().default(null),
-  /** When the stalled call may be attempted next: once per five minutes while the stall stands. */
-  nextAttemptAt: z.string().nullable().default(null),
-  /** When the held call admitted its window's one attempt, until that attempt's failure is counted; null otherwise. */
-  attemptAt: z.string().nullable().default(null),
-  /** The loop effects whose thrown failure the run's failed actions carry, whether each failed as a promise, and the resource the failing invocation named (its first argument's key, pane or id; null when it named none — or the run holds every invocation of the call, the collapse a full list becomes once a signature is shared by more invocations than the bound names, GY-1900): the invocations its window holds. The bound is stallInvocationBound in ./step-stalls.ts. */
-  calls: z.array(z.object({ call: z.string().max(100), async: z.boolean(), resource: z.string().max(200).nullable().default(null) }).strict()).max(8).default(() => []),
-  /** Whether the run is a failed cycle's own call (the snapshot read a cycle fails on): the loop holds the whole next cycle to its window. */
-  cycle: z.boolean().default(false),
-}).strict();
-export type StepStall = z.infer<typeof stepStallSchema>;
 export const daemonStateSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   /** `pidNamespace` (GY-1370): the PID namespace the pid was taken in, absent on a lock written before it was recorded. */
@@ -486,7 +400,7 @@ export const daemonStateSchema = z.object({
   memory: hostMemoryStateSchema.nullable().default(null),
   clocks: z.record(z.string(), itemClockSchema).default({}), // per-item passage clocks and the samples they produced: the loop's own latency measurement
   latency: z.array(latencySampleSchema).default([]),
-  /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and src/daemon/doctor.ts still names it until it drops its `silenceReport` argument. */
+  /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and a cursor written before keeps parsing. */
   silence: z.unknown().optional(),
   /** Retired (GY-1992): the scope requests this loop decided; a cursor written before keeps parsing. */
   scope: z.unknown().optional(),
@@ -503,39 +417,11 @@ export const daemonStateSchema = z.object({
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
   /**
-   * Every fault instance the loop recorded, each with its class (GY-173), and per standing fault
-   * (`kind|subject`) the instance it is, and per action key in a run of failures the instance that run
-   * is. A class that recurs past its threshold is one master-status attention line (GY-2186): no item
-   * is filed and no instance is linked to one. `observedAt` is when (loop time) the loop last read the sources standing faults are observed from, which it reads on a slower cadence than it cycles.
-   * The default is a factory: zod 4 hands a literal default out by reference, which would share one record between states.
-   */
-  faults: z.object({ instances: z.array(faultInstanceSchema).default([]), open: z.record(z.string(), z.string()).default({}), failing: z.record(z.string(), z.string()).default({}), observedAt: z.string().optional() }).strict()
-    .default(() => ({ instances: [], open: {}, failing: {} })),
-  /**
    * Per failing test and base head (`baseFailureKey`), a required check that fails on the base
    * branch head as well as on the candidates it blocks (GY-528): no rework is requested for it, one
    * P0 item is filed, and once the base passes again the blocked candidates are rerun and refreshed.
    */
   baseFailures: z.record(z.string(), baseFailureSchema).default(() => ({})),
-  /**
-   * The pipeline doctor's last runs (GY-711, src/daemon/doctor.ts): each with what it found, did
-   * and filed, and the runs it took. The newest is kept whole; the list is bounded below.
-   */
-  doctor: z.object({
-    runs: z.array(doctorRunRecordSchema).default([]),
-    /** The runs (by `at`) the control plane has not yet accepted: posted again on later cycles until it does. */
-    unposted: z.array(z.string().max(40)).max(40).default([]),
-    /** Filings the control plane did not accept when their run applied: filed again on later cycles, under the same key, until one is. */
-    pendingFiles: z.array(doctorPendingFileSchema).max(40).default([]),
-    /** GY-1530: digests of filings the create route refused as written, with when the doctor last reported each: a later run reporting the same content is not filed again. A digest is kept for good (only its last-reported time is renewed): neither other refusals nor the time since the doctor last reported it evict it. */
-    refusedFilings: z.array(z.object({ digest: z.string().max(80), at: z.number() }).strict()).default([]),
-    /** When the approver remedy last read each open item's decision history, by item id. */
-    decisionsCheckedAt: z.record(z.string(), z.string()).default({}),
-    /** GY-2005: set when the loop's progress watchdog fires (cycle.ts, at the onset of its progressAttention lines): the next doctorStep launches a run at once, past the interval. */
-    watchdogDue: z.boolean().default(false),
-    /** GY-2005: whether the last cycle ended with the progress watchdog's lines standing — its edge, so the resolver fires once per stall, not every cycle. */
-    watchdogStanding: z.boolean().default(false),
-  }).strict().default(() => ({ runs: [], unposted: [], pendingFiles: [], refusedFilings: [], decisionsCheckedAt: {}, watchdogDue: false, watchdogStanding: false })),
   /**
    * The system invariants (GY-404): what the loop carries between cycles to judge them — base
    * refreshes per candidate, when each merge candidate was first seen mergeable, the builds and lease
@@ -544,21 +430,9 @@ export const daemonStateSchema = z.object({
   invariants: invariantRecordSchema.default(emptyInvariantRecord),
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
-  /**
-   * Per work item id, the run of consecutive dispatch failures with one unchanged cause (GY-1078),
-   * across epochs: each failed launch spends an epoch, so no per-epoch record could see the run.
-   * Cleared by a launch that lands and once the blocker naming the cause is recorded.
-   */
-  dispatchFailures: z.record(z.string(), dispatchFailureRunSchema).default(() => ({})),
-  /**
-   * Per normalised signature (GY-1854), the run of consecutive cycles a loop step or dispatcher
-   * call failed with it, and the stall three of them are. src/daemon/step-stalls.ts owns the rules
-   * and bounds the record (retainedStepStalls).
-   */
-  stepStalls: z.record(z.string(), stepStallSchema).default(() => ({})),
   /** The item keys the decisions step reached past its time budget last cycle, which this cycle reaches first (GY-1286). */
   decisionsDeferred: z.array(z.string().max(200)).max(5000).default(() => []),
-  /** Shared project memory (GY-1125): recent approved decisions, recurring pitfalls with sanctioned remedies, and merges. */
+  /** Shared project memory (GY-1125): recent approved decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
 }).strict();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
@@ -582,5 +456,5 @@ export async function archiveDaemonCursor(config: Pick<MasterConfig, 'credential
 // The cursor's persistence, bounds and single-writer lock live in ./state-cursor.ts; these
 // re-export it, so every existing import keeps working.
 import { daemonStatePath, clampCount } from './state-cursor.js';
-export { standingTmpKey, retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, retainedSamples, retainedClocks, retainedBaseFailures, retainedDispatchFailureRuns, reclaimIntervalMs, gigabytes, emptyDaemonState, daemonStatePath, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, faultActionKey, boundDaemonState, boundDeployment, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
+export { standingTmpKey, retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, retainedSamples, retainedClocks, retainedBaseFailures, reclaimIntervalMs, gigabytes, emptyDaemonState, daemonStatePath, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, boundDaemonState, boundDeployment, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
 

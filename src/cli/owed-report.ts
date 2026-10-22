@@ -166,7 +166,7 @@ export function mergeWriterStallAttention(writer: MergeWriterSummary | null | un
   const since = movement
     ? `its newest movement is ${movement.what}, ${Math.max(0, Math.round((now - movement.at) / 60_000))} minutes ago`
     : 'it names no movement at all';
-  return { subject: 'merge-writer', kind: 'stalled-step',
+  return { subject: 'merge-writer',
     text: `The merge writer's queue holds ${writer.queue.length} head(s) it cannot move: no trial is in flight and ${since}; ${front.key}'s head ${front.head.slice(0, 12)} has waited ${Math.round(front.waitingMs / 60_000)} minutes at the front. One stall stands for the queue instead of an owed decision per head`,
     ...agentOwner('master', 'Nothing to run per item: the queue\'s only mover is the loop\'s merge-writer step. Check the loop is cycling (master status names its liveness; systemctl --user restart graphyard-master.service restarts a stopped loop) and file the merge-writer defect that left its queue unmoved') };
 }

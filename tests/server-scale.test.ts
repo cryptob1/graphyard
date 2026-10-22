@@ -17,7 +17,6 @@ import { isSummary } from '../src/model/work-summary.js';
 import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
-import { interventionReportPath } from '../src/master/report-cache.js';
 import { boardFromStatus } from '../src/model/board.js';
 import { views } from '../web/pages/index.js';
 import WorkDetails from '../web/pages/work-details.js';
@@ -128,37 +127,6 @@ async function read(path: string, token = tokens.coordinator) {
   return { status: response.status, ms: performance.now() - started, bytes: Buffer.byteLength(text), body: JSON.parse(text) };
 }
 
-test('unit:interventions-bounded — the intervention report reads only its window of the ledger, through the (kind, created_at) index, and answers within 2 s over 200,000 events and 3,000 sessions', async () => {
-  const seeded = (await store.pool.query('SELECT count(*)::int AS events FROM events')).rows[0].events;
-  assert.equal(seeded, EVENTS);
-  const sessions = (await store.pool.query("SELECT sum(jsonb_array_length(document->'sessions'))::int AS sessions FROM work_items")).rows[0].sessions;
-  assert.ok(sessions >= 3_000, `the store holds ${sessions} sessions`);
-
-  // The window's rows come from the index on kind and time, never a walk of the ledger newest-first.
-  const plan = (await store.pool.query(`EXPLAIN SELECT * FROM events WHERE kind = ANY($1) AND created_at >= $2::timestamptz ORDER BY seq DESC LIMIT 20001`, [['blocked', 'unblock', 'intervention.recorded'], iso(seededAt - 7 * day)])).rows.map(row => row['QUERY PLAN']).join('\n');
-  assert.match(plan, /events_kind_created/, plan);
-
-  const report = await read('interventions?window=7');
-  assert.equal(report.status, 200, JSON.stringify(report.body));
-  assert.ok(report.ms < 2_000, `GET /api/interventions?window=7 took ${Math.round(report.ms)}ms over the seeded store`);
-  // Its result is the window's: every session nudge recorded in the last seven days, and nothing older.
-  const since = iso(seededAt - 7 * day);
-  const nudges = (await store.pool.query("SELECT count(*)::int AS count FROM events WHERE kind='intervention.recorded' AND created_at >= $1", [since])).rows[0].count;
-  assert.ok(nudges > 0);
-  assert.equal(report.body.window.days, 7);
-  assert.equal(report.body.byKind.find((entry: { kind: string }) => entry.kind === 'session-nudge')?.count, nudges, JSON.stringify(report.body.byKind));
-  const windowRows = (await store.pool.query("SELECT count(*)::int AS count FROM events WHERE kind = ANY($1) AND created_at >= $2", [['blocked', 'unblock', 'intervention.recorded'], since])).rows[0].count;
-  assert.equal(report.body.ledger.rows, windowRows, 'the report folded exactly the window\'s rows of the kinds it reads');
-  assert.equal(report.body.ledger.truncated, false);
-  assert.ok(Date.parse(report.body.ledger.since) >= seededAt - 7 * day, `the ledger read starts at the window: ${report.body.ledger.since}`);
-  assert.ok(report.body.deliveries > 0, 'deliveries in the window are counted from the settled summaries');
-
-  // The thirty-day window stays inside the same bound.
-  const month = await read('interventions?window=30');
-  assert.equal(month.status, 200);
-  assert.ok(month.ms < 2_000, `GET /api/interventions?window=30 took ${Math.round(month.ms)}ms`);
-});
-
 function dashboard(work: Work[], now: number, overrides: Partial<Dashboard> = {}): Dashboard {
   const noop = () => {};
   const status = { actor: { id: 'operator', role: 'admin' }, humanOnly: [], executors: { live: 0, liveMs: 60_000, served: [], unserved: [], attention: [] }, delegation: null, github: false, reviewProviders: ['github'], reviewerApps: [], jobs: [], heldJobs: 0, now: iso(now) };
@@ -241,7 +209,7 @@ function masterConfig(credentialFile: string, worktreeRoot: string): MasterConfi
     autoMerge: true, mergeMethod: 'merge', workers: [], run: { worktreeRoot } });
 }
 
-test('unit:status-degrades-per-section — master status still returns every other section when the interventions route times out, with interventions marked unavailable and the error named; a failed request is logged with its route and the SQL statement that timed out', async () => {
+test('unit:status-degrades-per-section — master status still returns every other section when the goals route times out, with goals marked unavailable and the error named; a failed request is logged with its route and the SQL statement that timed out', async () => {
   const root = await temporaryDirectory('scale-root'), secrets = await temporaryDirectory('scale-secrets');
   try {
     execFileSync('git', ['init', '-q', root]);
@@ -249,41 +217,33 @@ test('unit:status-degrades-per-section — master status still returns every oth
     await writeFile(credential, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const master = masterConfig(credential, join(secrets, 'checkouts'));
     await writeDaemonState(master, emptyDaemonState(master));
-    const asked: string[] = [];
-    // The real server over the seeded store, except the intervention report, which never answers
-    // inside the reader's timeout, as on 2026-09-25.
-    const masterApi = async (path: string, _credential?: string, timeoutMs?: number) => {
+    const asked: string[] = [], goalsPath = 'goals?open=1&view=summary';
+    // The real server over the seeded store, except the goals route, which times out.
+    const masterApi = async (path: string, _credential?: string, _timeoutMs?: number) => {
       asked.push(path);
-      if (path === interventionReportPath) { await sleep(timeoutMs ?? 30_000); throw new Error(`GET ${path}: The operation was aborted due to timeout`); }
+      if (path === goalsPath) { await sleep(100); throw new Error(`GET ${path}: The operation was aborted due to timeout`); }
       const answer = await read(path);
       if (answer.status !== 200) throw new Error(`GET ${path} answered ${answer.status}`);
       return answer.body;
     };
     const status = (await read('status')).body;
     const started = Date.now();
-    const report = await masterStatusReport(root, master, masterApi, status, { commit: null }, { reportReadBoundMs: 300 }) as Record<string, any>;
+    const report = await masterStatusReport(root, master, masterApi, status, { commit: null }) as Record<string, any>;
     assert.ok(Date.now() - started < 20_000, `master status returned in ${Date.now() - started}ms`);
-    assert.ok(asked.includes(interventionReportPath), 'the intervention report was asked for');
+    assert.ok(asked.includes(goalsPath), 'the goals route was asked for');
 
     // The section is marked unavailable, with its route and the error it answered.
-    assert.equal(report.interventions.available, false);
-    assert.match(report.interventions.error, /did not answer within|aborted due to timeout/);
-    const unavailable = report.unavailable.find((entry: { section: string }) => entry.section === 'interventions');
+    assert.equal(report.goals, null);
+    const unavailable = report.unavailable.find((entry: { section: string }) => entry.section === 'goals');
     assert.ok(unavailable, JSON.stringify(report.unavailable));
-    assert.equal(unavailable.route, 'GET /api/interventions?window=7');
+    assert.equal(unavailable.route, 'GET /api/goals');
     assert.match(unavailable.error, /did not answer within|aborted due to timeout/);
-    assert.equal(report.unavailable.length, 1, `only the interventions section is unavailable: ${JSON.stringify(report.unavailable)}`);
+    assert.equal(report.unavailable.length, 1, `only the goals section is unavailable: ${JSON.stringify(report.unavailable)}`);
     // Every other section is still there, built from the bounded snapshot.
     for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'throughput', 'terminalDecisions', 'runtime', 'timings'])
       assert.ok(section in report && report[section] !== undefined, `master status returned its ${section} section`);
     assert.ok(report.work.length >= OPEN, 'the open items are reported');
 
-    // A second route failing is named beside it, and the report still returns.
-    const withoutGoals = async (path: string, credential?: string, timeoutMs?: number) => path === 'goals?open=1&view=summary' ? Promise.reject(new Error('The operation was aborted due to timeout')) : masterApi(path, credential, timeoutMs);
-    const degraded = await masterStatusReport(root, master, withoutGoals, status, { commit: null }, { reportReadBoundMs: 300 }) as Record<string, any>;
-    assert.deepEqual(degraded.unavailable.map((entry: { section: string; route: string }) => [entry.section, entry.route]).sort(), [['goals', 'GET /api/goals'], ['interventions', 'GET /api/interventions?window=7']]);
-    assert.match(degraded.unavailable.find((entry: { section: string }) => entry.section === 'goals').error, /aborted due to timeout/);
-    assert.ok(Array.isArray(degraded.attentionItems) && degraded.board && degraded.sessions);
   } finally { await rm(root, { recursive: true, force: true }); await rm(secrets, { recursive: true, force: true }); }
 
   // The server's request error log names the route and the statement that timed out.
@@ -295,7 +255,7 @@ test('unit:status-degrades-per-section — master status still returns every oth
   const logged: string[] = [], original = console.error;
   console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
   try {
-    const response = await fetch(`http://127.0.0.1:${(slowServer.address() as AddressInfo).port}/api/interventions?window=90`, { headers: { Authorization: `Bearer ${tokens.coordinator}` } });
+    const response = await fetch(`http://127.0.0.1:${(slowServer.address() as AddressInfo).port}/api/shipping-pulse`, { headers: { Authorization: `Bearer ${tokens.coordinator}` } });
     assert.equal(response.status, 500);
   } finally {
     console.error = original;
@@ -304,5 +264,5 @@ test('unit:status-degrades-per-section — master status still returns every oth
   }
   const line = logged.find(entry => entry.startsWith('request failed'));
   assert.ok(line, logged.join('\n'));
-  assert.match(line, /^request failed GET \/api\/interventions: canceling statement due to statement timeout \(statement: SELECT /);
+  assert.match(line, /^request failed GET \/api\/shipping-pulse: canceling statement due to statement timeout \(statement: /);
 });

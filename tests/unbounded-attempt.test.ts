@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { assessContainment, masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { faultClassOf, workFaults } from '../src/model/fault-classes.js';
 import { sessionObservationFreshMs } from '../src/model/session-state.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
@@ -52,42 +51,17 @@ function attempt(claimedMinutesAgo: number, overrides: Partial<Work> = {}, now =
     ...overrides,
   } as Work;
 }
-const unsubmittedFaults = (work: Work, now = Date.now()) => workFaults(work, now).filter(fault => fault.kind === 'unsubmitted-attempt');
-
-test('unit:stalled-gate-on-renewed-attempt — an attempt past the 60-minute bound with a renewed lease and a working session is a stalled-gate fault naming key, epoch, minutes past the bound and the renewal', () => {
-  const now = Date.now();
-  const item = attempt(60 + 11, {}, now); // GY-1457: 60m11s, rounded to the minute
-  const faults = unsubmittedFaults(item, now);
-  assert.equal(faults.length, 1, 'the renewed lease past the bound is recorded');
-  const [fault] = faults;
-  assert.equal(fault.faultClass, 'stalled-gate');
-  assert.equal(faultClassOf('unsubmitted-attempt'), 'stalled-gate');
-  assert.equal(fault.subject, 'GY-1457');
-  assert.match(fault.text, /^GY-1457 epoch 1 \(worker-a\) has held its lease 11 minutes past the 60-minute worker bound without a submission/);
-  assert.match(fault.text, new RegExp(`lease renewed to ${item.lease!.expiresAt.replace(/[.]/g, '\\.')}`), 'the renewal evidence: the lease expiry the read found past the bound');
-  assert.match(fault.text, /session last observed working at /);
-  assert.match(fault.text, new RegExp(`claimed at ${item.lastAssignment!.claimedAt!.replace(/[.]/g, '\\.')}`));
-  assert.ok(fault.text.length <= 500, 'the line fits the fault record');
-  // The lapse path never fires for it: the lease is live and its fence is live, so no containment fault stands.
-  assert.deepEqual(workFaults(item, now).filter(entry => entry.faultClass === 'containment'), []);
-  // The pipeline timeline is enough when the assignment record does not carry the claim.
-  const timeline = { ...attempt(75, { lastAssignment: { owner: 'worker-a', epoch: 1 } }, now), pipeline: { attempts: [{ epoch: 1, owner: 'worker-a', claimedAt: iso(-75 * minute, now) }] } } as Work;
-  assert.match(unsubmittedFaults(timeline, now)[0]?.text ?? '', /15 minutes past the 60-minute worker bound/);
-});
-
-test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound, once the attempt submitted, or while submission progress is inside the cadence', async () => {
-  const { observeHead, submissionProgressCadenceMs, unsubmittedAttempt, workerReclaimBoundMs, workerSubmissionBoundMs } = await bound();
+test('unit:inside-bound-no-fault — no lease stop inside the bound, once the attempt submitted, or while submission progress is inside the cadence', async () => {
+  const { observeHead, submissionProgressCadenceMs, unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs, workerSubmissionBoundMs } = await bound();
   const now = Date.now();
   assert.equal(submissionProgressCadenceMs, sessionObservationFreshMs, 'the cadence is the session reporting cadence');
   assert.equal(workerSubmissionBoundMs, 60 * minute);
   assert.equal(workerReclaimBoundMs, 120 * minute);
   // Inside the bound, however long the lease has been renewed.
   assert.equal(unsubmittedAttempt(attempt(59, {}, now), now), null);
-  assert.deepEqual(unsubmittedFaults(attempt(59, {}, now), now), []);
   // A submission (or a resubmission, which keeps the same record) under the attempt's epoch.
   const submitted = attempt(150, { submission: { epoch: 1, pr: 77 } }, now);
   assert.equal(unsubmittedAttempt(submitted, now), null);
-  assert.deepEqual(unsubmittedFaults(submitted, now), []);
   // An earlier epoch's submission does not cover a rework attempt that has not submitted.
   assert.ok(unsubmittedAttempt(attempt(150, { submission: { epoch: 0, pr: 77 } }, now), now)?.reclaim);
   // Submission progress inside the cadence: a pull request or head first observed on the attempt's own branch during the attempt…
@@ -98,7 +72,6 @@ test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound
     return item;
   };
   assert.equal(unsubmittedAttempt(observed(iso(-5 * minute, now)), now), null);
-  assert.deepEqual(unsubmittedFaults(observed(iso(-5 * minute, now)), now), []);
   // …or the attempt's session bound to a commit it pushed.
   const pushed = attempt(150, { sessions: [handle({ head: 'd'.repeat(40), headAt: iso(-3 * minute, now) })] }, now);
   assert.equal(unsubmittedAttempt(pushed, now), null);
@@ -128,17 +101,17 @@ test('unit:inside-bound-no-fault — no fault and no lease stop inside the bound
   // Progress older than the cadence does not hold it, and a renewed lease or a working session alone never does.
   const stale = unsubmittedAttempt(observed(iso(-20 * minute, now)), now);
   assert.ok(stale?.reclaim, 'progress past the cadence is not progress');
-  assert.match(unsubmittedFaults(observed(iso(-20 * minute, now)), now)[0].text, /last submission progress at /);
+  assert.match(unsubmittedAttemptText(stale!), /last submission progress at /);
   const working = unsubmittedAttempt(attempt(150, {}, now), now);
   assert.ok(working && working.live && working.reclaim, 'a working session with a renewed lease is still past the bound');
-  assert.ok(unsubmittedFaults(attempt(150, {}, now), now)[0].text.length <= 500, 'the reclaim line fits the fault record');
+  assert.ok(unsubmittedAttemptText(working!).length <= 500, 'the reclaim line fits 500 characters');
   // Another branch's pull request is not this attempt's progress.
   const other = attempt(150, { observation: { at: iso(-1 * minute, now), candidate: { sha: 'b'.repeat(40), baseSha: 'c'.repeat(40), pr: 70, branch: 'graphyard/gy-1457-0', author: 'worker-z' } } as Work['observation'] }, now);
   assert.ok(unsubmittedAttempt(other, now)?.reclaim);
   // Between the bounds the fault stands but nothing stops renewing.
   const between = unsubmittedAttempt(attempt(90, {}, now), now);
   assert.equal(between?.reclaim, false);
-  assert.match(unsubmittedFaults(attempt(90, {}, now), now)[0].text, /past 120 minutes with no submission the loop stops renewing the lease$/);
+  assert.match(unsubmittedAttemptText(between!), /past 120 minutes with no submission the loop stops renewing the lease$/);
 });
 
 function cycleFor(state: DaemonState, config: MasterConfig, effects: Partial<DaemonEffects>, item: Work, now = Date.now()): Cycle {
@@ -222,7 +195,7 @@ test('unit:lease-stop-renewal — past the reclaim bound the loop ends the attem
 });
 
 test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past the worker bound is named by its record and left to the loop\'s reclaim; past the reclaim bound its renewal stops: the attempt ends on the record, its supervisor stops, its fence settles and the item returns to the queue with its worktree kept, and the remedy that worked opens no fault instance', async () => {
-  const { unboundedAttemptKey } = await reclaim();
+  const { unboundedAttemptKey } = await reclaim(), { unsubmittedAttempt, unsubmittedAttemptText } = await bound();
   const { config, cleanup } = await configured();
   // The plane's record, renewed by the supervisor on every read while it runs, as `graphyard watch` does.
   const plane = { item: attempt(119), preserved: [] as string[] };
@@ -258,22 +231,18 @@ test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past 
     recordSession: async () => {},
     stopSupervisor: () => { supervisor.running = false; },
   } as unknown as DaemonEffects;
-  const cycle = () => { state.faults.observedAt = undefined; return runCycle(config, state, effects); };
-  const standing = () => state.faults.instances.filter(instance => instance.kind === 'unsubmitted-attempt' && instance.subject === 'GY-1457');
+  const cycle = () => runCycle(config, state, effects);
   try {
-    // Inside the bound: nothing.
+    // Inside the bound: nothing stops.
     plane.item = attempt(59);
     await cycle();
-    assert.deepEqual(standing(), [], 'no fault inside the bound');
-    // Past the 60-minute bound with the lease still renewing: the record names the stalled-gate fault, nothing stopped;
-    // the loop counts no instance while its own reclaim remedy is still due (GY-1557).
+    assert.equal(supervisor.running, true);
+    // Past the 60-minute bound with the lease still renewing: the record names the attempt, nothing stopped.
     plane.item = attempt(61);
     await cycle();
-    const named = workFaults(plane.item, Date.now()).filter(fault => fault.kind === 'unsubmitted-attempt');
-    assert.equal(named.length, 1, 'the renewed attempt past the bound is named by its record');
-    assert.equal(named[0].faultClass, 'stalled-gate');
-    assert.match(named[0].text, /GY-1457 epoch 1 \(worker-a\) has held its lease 1 minutes past the 60-minute worker bound without a submission \(claimed at .+, lease renewed to /);
-    assert.deepEqual(standing(), [], 'no fault instance an hour before the reclaim bound');
+    const named = unsubmittedAttempt(plane.item, Date.now());
+    assert.ok(named, 'the renewed attempt past the bound is named by its record');
+    assert.match(unsubmittedAttemptText(named), /GY-1457 epoch 1 \(worker-a\) has held its lease 1 minutes past the 60-minute worker bound without a submission \(claimed at .+, lease renewed to /);
     assert.equal(supervisor.running, true, 'the first bound stops nothing');
     // One further bound, still no submission and no progress: the loop stops renewing — it ends the
     // attempt through the reclaim path, keeping its work, stopping its supervisor and settling its fence.
@@ -286,10 +255,7 @@ test('integration:unbounded-attempt-reclaimed — a live, renewing attempt past 
     assert.equal(plane.item.lease, null, 'the attempt ended on the record, so the item is claimable again and no lease lapses unexplained');
     assert.equal(plane.item.containmentQuarantine, null, 'the fence was settled once the host verified the supervisor gone');
     assert.deepEqual(plane.item.workspaces.map(workspace => workspace.path), [path], 'its worktree is kept on the record');
-    assert.deepEqual(standing(), [], 'the remedy that ended it this cycle opens no fault instance, though the snapshot the cycle began with still showed the lease');
     await cycle();
     assert.equal(supervisor.running, false);
-    assert.deepEqual(standing(), [], 'no fault instance across the whole episode');
-    assert.equal(state.faults.open[Object.keys(state.faults.open).find(key => key.startsWith('unsubmitted-attempt|GY-1457')) ?? ''], undefined, 'nothing stands once the item is back in the queue');
   } finally { await cleanup(); }
 });

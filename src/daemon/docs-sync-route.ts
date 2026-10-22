@@ -5,7 +5,6 @@
 import type { Work } from '../model.js';
 import type { HerdrAgent } from '../master.js';
 import { message, type DaemonActionKind, type DaemonState } from './state.js';
-import type { FaultKind } from '../model/fault-classes.js';
 import type { DaemonEffects } from './effects.js';
 import { conflictRoute, docsSyncHoldDeadline, docsSyncHoldMs, docsSyncStallMs, docsSyncWatchFor, docsSyncWatchKey, docsSyncWatchSchema, routedConflictRetention, routedConflictSchema, routedConflictWindowMs, type DocsSyncWatch } from '../model/docs-sync.js';
 import { docsSyncSessionName, docsSyncStoppedMs, type DocsSyncPlan } from '../docs-sync.js';
@@ -54,7 +53,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
   effects: Pick<DaemonEffects, 'conflictPaths' | 'docsSync' | 'docsSyncSettled' | 'persist' | 'closeSession' | 'endRegistrySession'>;
   snapshot: { work: Work[] };
   sessions: () => Promise<{ agents: HerdrAgent[]; available: boolean }>;
-  note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number, faultKind?: FaultKind | null) => Promise<unknown>;
+  note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number) => Promise<unknown>;
   inventorySpent: () => void;
   stamp: string;
   clock: number;
@@ -150,7 +149,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
         watch.settledAt = stamp;
         await settle(item, watch, watch.failed);
         markRework(item.key, head);
-        await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the docs-sync hold ends`, undefined, null);
+        await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the docs-sync hold ends`, undefined);
         return { held: false };
       }
       watch.base = base; watch.paths = paths!;
@@ -173,7 +172,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       await settle(item, watch, watch.failed);
       markRework(item.key, head);
       // GY-1541: the cutoff stop is the loop's own designed route (GY-1434), as the own-accord stop below is: no decision fault.
-      await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined, null);
+      await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined);
       return { held: false };
     }
     // A hold the loop found ended stays ended (GY-1436): a session Herdr lists working again before
@@ -200,7 +199,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     watch.settledAt = stamp;
     await settle(item, watch, watch.failed);
     markRework(item.key, head);
-    await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined, aborted ? null : undefined);
+    await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined);
     return { held: false };
   };
   /** Whether a docs-sync holds the item's conflict. */

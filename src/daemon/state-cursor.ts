@@ -6,10 +6,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { forwardTolerant } from '../master/profiles.js';
 import { boundDetail } from './decisions.js';
-import { waitReason } from '../model/action-kinds.js';
-import { classified, noteActionOutcome, type FaultKind } from '../model/fault-classes.js';
-import { unansweredStands } from '../model/fault-record.js';
-import { daemonActionFaultKind, daemonActionSchema, daemonStateSchema, retainedDoctorRuns, type DaemonAction, type DaemonState, type DeploymentObservation } from './state.js';
+import { daemonActionSchema, daemonStateSchema, type DaemonAction, type DaemonState, type DeploymentObservation } from './state.js';
 
 export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of a run of /tmp passes removing 0 under the standing inode bound
 /**
@@ -27,8 +24,6 @@ const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSche
 export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
 export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
-/** How many items' dispatch-failure runs (GY-1078) are kept; a run is retired when its item dispatches or is blocked, so this only catches items the loop stopped seeing. */
-export const retainedDispatchFailureRuns = 500;
 /** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
 export const reclaimIntervalMs = 600_000;
 export const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
@@ -54,12 +49,10 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   // rollback or a held-CLI snapshot neither fails nor silently drops what the newer loop recorded.
   // Declared fields are still validated: a malformed one refuses the read as before.
   // GY-2087: the shadow gate's verdicts an older loop kept are dropped, not carried.
-  // GY-2186: the diagnostician's records and the fault instances' item links an older loop kept are
-  // dropped, not carried: the loop launches no diagnostician and links no instance any more, and the
-  // schema no longer declares the fields, so riding them forward would keep them for ever.
-  const { shadow: _shadow, ...stored } = JSON.parse(raw);
-  delete (stored as Record<string, unknown>).diagnoses;
-  if (stored.faults && typeof stored.faults === 'object') delete (stored.faults as Record<string, unknown>).linked;
+  // GY-2186, GY-2873: records of retired machinery an older loop kept are dropped, not carried, so
+  // they do not ride forward for ever.
+  const { shadow: _shadow, diagnoses: _diagnoses, faults: _faults, doctor: _doctor, dispatchFailures: _dispatchFailures, stepStalls: _stepStalls, ...stored } = JSON.parse(raw);
+  for (const action of Object.values<Record<string, unknown>>(stored.actions ?? {})) delete action.faultClass;
   const state = toleratedStateSchema().parse(stored);
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
   return state;
@@ -79,15 +72,11 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
 /** Keep the cursor bounded without ever discarding an unresolved action. */
 export function pruneDaemonState(state: DaemonState) {
   const entries = Object.entries(state.actions);
-  // A row holding a standing failing run is that fault's only record (GY-1086): retired oldest, its next refusal
-  // opened a new instance — six in a day for one cause — so it is kept while its run stands (endFailingRuns ends it).
-  // The standing /tmp pass row (GY-1600) is likewise its run's only count and exists only while the inode bound stands.
-  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && !state.faults.failing[key] && key !== standingTmpKey);
+  // The standing /tmp pass row (GY-1600) is its run's only count and exists only while the inode bound stands.
+  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && key !== standingTmpKey);
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
-  // A failing run whose action row is retired has ended (GY-173): its reference would otherwise hold its instance forever.
-  for (const key of Object.keys(state.faults.failing)) if (!state.actions[key]) delete state.faults.failing[key];
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
   if (state.latency.length > retainedSamples) state.latency = state.latency.slice(-retainedSamples);
   // A clock is dropped when its delivery was sampled; this bound only catches items the loop
@@ -100,17 +89,6 @@ export function pruneDaemonState(state: DaemonState) {
   // A cleared base failure is retired by its step once its candidates were rerun and refreshed; this bound drops the oldest, cleared first.
   const failures = Object.entries(state.baseFailures).sort((a, b) => Number(!a[1].cleared) - Number(!b[1].cleared) || Date.parse(a[1].raisedAt) - Date.parse(b[1].raisedAt));
   if (failures.length > retainedBaseFailures) for (const [key] of failures.slice(0, failures.length - retainedBaseFailures)) delete state.baseFailures[key];
-  // The doctor's runs are kept newest first from the report; the oldest go past the bound, never one still running.
-  if (state.doctor.runs.length > retainedDoctorRuns) {
-    const settled = state.doctor.runs.filter(entry => entry.state !== 'running');
-    const excess = state.doctor.runs.length - retainedDoctorRuns;
-    if (settled.length >= excess) {
-      const drop = new Set(settled.slice(0, excess).map(entry => entry.at));
-      state.doctor.runs = state.doctor.runs.filter(entry => !drop.has(entry.at));
-    }
-  }
-  const runs = Object.entries(state.dispatchFailures).sort((a, b) => Date.parse(a[1].lastAt) - Date.parse(b[1].lastAt));
-  if (runs.length > retainedDispatchFailureRuns) for (const [id] of runs.slice(0, runs.length - retainedDispatchFailureRuns)) delete state.dispatchFailures[id];
   return state;
 }
 
@@ -125,48 +103,20 @@ export function pruneDaemonState(state: DaemonState) {
 export const clampCount = (value: number, max: number) => Math.min(max, Math.max(0, Math.floor(Number.isFinite(value) ? value : 0)));
 
 /**
- * Every write of an action goes through here (GY-173): a failed or indeterminate action carries
- * the class of its fault kind, anything else carries none, and the outcome is noted against the
- * fault record — a failure opening one instance per run of failures, a success ending the run.
- * A null fault kind is an outcome that is no fault (a guarded merge the gate refused): it is
- * stored for retry like any failure but carries no class and is never noted as an instance.
- * The detail is bounded here, before the schema sees it, so a caller that quotes a long error or
- * path list cannot fail every cycle with an over-long string (GY-179).
+ * Every write of an action goes through here. The detail is bounded here, before the schema sees
+ * it, so a caller that quotes a long error or path list cannot fail every cycle with an over-long
+ * string (GY-179).
  */
-export function storeAction(state: DaemonState, key: string, action: Omit<DaemonAction, 'faultClass'> & { faultClass?: unknown }, faultKind: FaultKind | null = daemonActionFaultKind(action.kind)): DaemonAction {
-  const { faultClass: _, ...rest } = action;
-  const failed = faultKind !== null && (rest.state === 'failed' || rest.state === 'indeterminate');
-  const fault = faultKind === null || unansweredStands(state.faults, key) || (faultKind.startsWith('action:') && waitReason(rest.detail)) ? null : classified(faultKind);
-  const entry = daemonActionSchema.parse({ ...rest, detail: boundDetail(rest.detail), attempts: clampCount(rest.attempts, 1000), ...(failed && fault ? { faultClass: fault.faultClass } : {}) });
-  if (fault) { dispatchRun(state.faults.failing, key, entry.state); noteActionOutcome(state.faults, key, entry.state, { ...fault, subject: entry.work ?? key, text: entry.detail }, entry.at); }
+export function storeAction(state: DaemonState, key: string, action: DaemonAction): DaemonAction {
+  const entry = daemonActionSchema.parse({ ...action, detail: boundDetail(action.detail), attempts: clampCount(action.attempts, 1000) });
   state.actions[key] = entry;
   return entry;
 }
-/**
- * GY-1287: an item's dispatch row is keyed by the epoch it was offered at (`dispatch:ID:EPOCH`), and
- * a launch that fails after its claim advances that epoch, so the item's next dispatch writes a new
- * row. Its failures are still one run of one fault: a failure carries the item's failing run from
- * the earlier row onto this one, and a success ends the run whichever row opened it. On 5 October
- * 2026 GY-717's lapsed launch and the retry that met the control plane restarting counted as two.
- */
-function dispatchRun(failing: Record<string, string>, key: string, outcome: DaemonAction['state']) {
-  const item = /^dispatch:([^:]+):\d+$/.exec(key)?.[1];
-  if (!item) return;
-  const earlier = Object.keys(failing).filter(other => other !== key && other.startsWith(`dispatch:${item}:`));
-  if (outcome === 'done') for (const other of earlier) delete failing[other];
-  else if ((outcome === 'failed' || outcome === 'indeterminate') && !failing[key] && earlier.length) { failing[key] = failing[earlier.at(-1)!]; for (const other of earlier) delete failing[other]; }
-}
-/**
- * A refusal that still stands, observed again with the same detail (GY-1086): its row is not
- * rewritten — the run it opened is the one fault — but its time moves, so neither the cursor
- * bound nor the recurrence window takes it for a run that has ended and opens it again.
- */
+/** A refusal that still stands, observed again with the same detail (GY-1086): its row is not rewritten, but its time moves. */
 export function touchStanding(state: DaemonState, key: string, at: string) {
   const row = state.actions[key];
   if (row && row.state === 'failed') row.at = at;
 }
-/** The action key a recurring class's filing is recorded under. */
-export const faultActionKey = (faultClass: string) => `fault:${faultClass}`;
 const cut = <T extends string | null | undefined>(value: T, max: number): T => (typeof value === 'string' && value.length > max ? boundDetail(value, max) : value) as T;
 export function boundDaemonState(state: DaemonState): DaemonState {
   for (const action of Object.values(state.actions)) {
@@ -206,7 +156,6 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   if (failures.lastUnhandled) failures.lastUnhandled.reason = cut(failures.lastUnhandled.reason, 1000);
   if (state.projectMemory) {
     state.projectMemory.decisions = (state.projectMemory.decisions ?? []).slice(0, 50);
-    state.projectMemory.pitfalls = (state.projectMemory.pitfalls ?? []).slice(0, 50);
     state.projectMemory.changes = (state.projectMemory.changes ?? []).slice(0, 50);
   }
   return state;

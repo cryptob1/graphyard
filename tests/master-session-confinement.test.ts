@@ -10,8 +10,6 @@ import { checkoutRestoreDriftRemedy, checkoutRestoreRemedy, coordinatorCheckoutG
 import { emptyDaemonState } from '../src/master-daemon.js';
 import { checkoutProcessScan } from '../src/cli/checkout-writers.js';
 import { checkoutRestoreCommand, checkoutRestoreRefPrefix, checkoutRestoreRequestPath, checkoutWriterProcesses, fileCheckoutRestoreRequest, freezeCheckoutWriters, loopRestartRequestPath, readCheckoutRestoreRequest, restoreCoordinatorCheckout, serveCheckoutRestore, statusPaths } from '../src/cli/master-checkout-restore.js';
-import { doctorCommandVerdict, doctorSanctionedCommands as piSanctioned } from '../integrations/pi/index.js';
-import { doctorPrompt, doctorSanctionedCommands } from '../src/daemon/doctor.js';
 import { confinedMaster } from '../src/cli/master/operations.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -130,18 +128,6 @@ test('integration:standing-pane-writer-attribution — the dirty-checkout escala
   assert.match(checkoutRestoreRemedy, /graphyard master checkout-restore REASON/);
 });
 
-test('unit:doctor-allowlist-checkout-restore — the doctor may run master checkout-restore, and still no checkout mutation of its own', () => {
-  assert.ok(doctorSanctionedCommands.includes('checkout-restore') && piSanctioned.includes('checkout-restore'), 'both allowlists sanction it');
-  const context = { cwd: '/srv/graphyard', cli: '/srv/graphyard/bin/graphyard.mjs' };
-  assert.deepEqual(doctorCommandVerdict(`graphyard master checkout-restore "the loop refuses its dirty checkout"`, context).allow, true);
-  const prose = doctorCommandVerdict(`node /srv/graphyard/bin/graphyard.mjs master checkout-restore 'the loop's checkout holds 6 dirty paths; save them'`, context);
-  assert.equal(prose.allow, true, 'a reason with an apostrophe runs as one prose argument');
-  assert.match(prose.command ?? '', /master checkout-restore 'the loop'\\''s checkout holds 6 dirty paths; save them'$/);
-  for (const line of ['git -C /srv/graphyard stash push', 'git stash', 'git checkout -- src/loop.ts', 'systemctl --user restart graphyard-master'])
-    assert.equal(doctorCommandVerdict(line, context).allow, false, `${line} stays refused`);
-  assert.match(doctorPrompt({ repository: 'owner/project', cliPath: '/srv/graphyard/bin/graphyard.mjs' }, { items: [], faults: [] }), /escalation:dirty-checkout.*master checkout-restore/);
-});
-
 test('integration:checkout-restore-clears-guard — the restore saves every dirty path under a named ref, discards nothing, restarts the loop through its unit and ends the escalation', async () => {
   const base = await temporaryDirectory('checkout-restore');
   const { root, git } = coordinator(base);
@@ -165,7 +151,7 @@ test('integration:checkout-restore-clears-guard — the restore saves every dirt
   const guard = guardFor(root, state);
   assert.ok(await guard.start(null), 'the dirty checkout is refused');
   assert.equal(state.actions['escalation:dirty-checkout']?.attempts, 1);
-  // The doctor files the request beside the cursor; the loop carries it out.
+  // The operator agent files the request beside the cursor; the loop carries it out.
   const file = checkoutRestoreRequestPath(config(base));
   assert.equal(file, join(base, 'coordinator.checkout-restore.json'));
   await fileCheckoutRestoreRequest(file, 'the loop refuses its dirty checkout', 'graphyard-operator-agent');

@@ -153,7 +153,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
   assert.equal(sectionOf.Insights, 'insights');
-  for (const page of ['Delivered', 'Interventions', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
+  for (const page of ['Delivered', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
   for (const page of ['Test cases', 'Proof authority', 'Operator automation', 'Agents']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
@@ -162,7 +162,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'insights'), [], 'Insights is one page with no tabs (GY-168)');
-  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Interventions', 'Validation', 'Releases']);
+  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Validation', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'grants'), ['Test cases', 'Proof authority', 'Operator automation', 'Agents']);
   assert.deepEqual(tabs(dashboard(), 'work'), [], 'a section with one page draws no tab row');
   assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
@@ -176,7 +176,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   const probed = await probeFeatures(async path => path === 'operator-agents' ? [] : { environments: [], releases: [], requests: [], candidates: [] }, true, false);
   assert.deepEqual(probed.features, { releases: false, validation: false, automation: false });
   const none = dashboard({}, 'admin', probed.features);
-  assert.deepEqual(tabs(none, 'shipped'), ['Delivered', 'Interventions']);
+  assert.deepEqual(tabs(none, 'shipped'), [], 'Delivered alone draws no tab row');
   assert.deepEqual(tabs(none, 'grants'), ['Test cases', 'Proof authority', 'Agents']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: null, automation: null }, 'an outage never hides a page');

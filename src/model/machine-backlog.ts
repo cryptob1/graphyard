@@ -5,7 +5,7 @@ import type { Work } from './work.js';
 // ---------------------------------------------------------------------------
 // Machine-filed backlog (GY-402).
 //
-// The loop files recurring fault classes (GY-173, model/fault-classes.ts) as backlog items on its
+// The loop filed recurring fault classes (GY-173, retired by GY-2186) as backlog items on its
 // own. Until GY-1249 it also filed the follow-ups an approved review named beyond the item's
 // criteria: on 2026-10-05 they made 48 of 90 open items and about a third of merges. Review
 // findings worth fixing are now fixed on the same pull request and nits are not filed, so no code
@@ -30,6 +30,9 @@ const entry = z.object({ path: z.string().min(1).max(1000).nullable(), text: z.s
  */
 export const reviewFollowUpsOriginSchema = z.object({ parent: z.string().regex(/^[A-Z][A-Z0-9]*-\d+$/), findings: z.array(entry).max(followUpEntriesMax) }).strict();
 export type ReviewFollowUpsOrigin = z.infer<typeof reviewFollowUpsOriginSchema>;
+/** Where Graphyard itself opened an item. `pattern`, `judgement` and `faultClass` are retired (GY-2873): an item filed with one keeps parsing. */
+export const workOriginSchema = z.object({ pattern: z.unknown().optional(), judgement: z.unknown().optional(), faultClass: z.unknown().optional(), reviewFollowUps: reviewFollowUpsOriginSchema.optional() }).strict();
+export type WorkOrigin = z.infer<typeof workOriginSchema>;
 /** The title every review follow-up item carried while they were filed (before GY-1249). */
 const followUpTitle = /^Follow-ups from the approved review of ([A-Z][A-Z0-9]*-\d+)\b/;
 const faultTitle = /^Recurring \S+ faults:/;

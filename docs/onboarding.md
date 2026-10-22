@@ -39,10 +39,6 @@ Propose **Agent registry** from login homes: `master registry propose`, then `--
 
 `master init` writes the user unit, `systemctl --user enable --now`, `loginctl enable-linger`. Move: `master init --token-stdin --replace-supervisor` there. Shared hosts: units are per repository in `.graphyard/units.json`.
 
-### The pipeline doctor
-
-A Pi **doctor** acts on `run.doctor.intervalMinutes`, never asks people; files only code-change items.
-
 ### Supervised mode (up --local)
 
 `graphyard up --local` writes `"supervision": "supervised"`; absent is autonomous: an agent reviewer reviews each head, the control plane merges it. Promote: `master reviewer add`, then `master promote` ([promotion](master-agent-reference.md#promotion-to-autonomy)).

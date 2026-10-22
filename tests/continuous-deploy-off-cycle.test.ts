@@ -77,7 +77,6 @@ function loopEffects(root: string, master: MasterConfig, deps: SelfUpgradeDeps):
     snapshot: async () => ({ work: [], now: iso(Date.now()) }),
     mutate: async path => ({ path }),
     // The loop's cold wait for the intervention report's first copy would outlast every phase here; nothing below reads it.
-    reportReadBoundMs: 50,
     run: async command => { if (command === 'herdr') return JSON.stringify({ result: { agents: [] } }); throw new Error(`unplanned child: ${command}`); },
   });
   return Object.assign(effects, {

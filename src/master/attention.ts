@@ -9,7 +9,6 @@ import { missingBaseAncestry } from '../merge-base-ancestry.js';
 import { type ProductionReport, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';
 import { roleAtCapacity } from '../fleet.js';
-import { classified, type FaultClass, type FaultKind } from '../model/fault-classes.js';
 import { humanOnlyDecisions } from './harness.js';
 import { conflictReworkBoundMs, conflictReworkDue } from '../model/approval.js';
 import { containmentInMotion, containmentSettleWaitBoundMs } from '../model/containment.js';
@@ -35,16 +34,13 @@ export interface ControlPlaneStatus {
  * and `humanOnly` then names which of those decisions it is.
  */
 export interface AttentionOwner { role: 'master' | 'reviewer' | 'control plane' | 'human'; approvedBy: 'approver' | null; human: boolean; humanOnly: typeof humanOnlyDecisions[number] | null; next: string }
-/**
- * An attention item carries its fault kind and class (GY-173); a builder that sets neither is classified by its wording.
- * `resource` names the registered resource a symptom was attributed to (GY-1272), so the loop tracks it as that resource's fault.
- */
-export interface AttentionItem extends AttentionOwner { subject: string; text: string; kind?: FaultKind; faultClass?: FaultClass; resource?: string;
-  /** Until when the loop is itself carrying what the line names (GY-1315): shown in master status, counted as a fault only past it. */
+/** One attention line. `resource` names the registered resource a symptom was attributed to (GY-1272). */
+export interface AttentionItem extends AttentionOwner { subject: string; text: string; resource?: string;
+  /** Until when the loop is itself carrying what the line names (GY-1315): shown in master status. */
   inMotionUntil?: string }
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string, approvedBy: 'approver' | null = null): AttentionOwner => ({ role, approvedBy, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', approvedBy: null, human: true, humanOnly, next });
-/** The sources of installation attention; each is also its fault kind. */
+/** The sources of installation attention. */
 export const installationSources = ['app-permissions', 'held-jobs', 'delegation-limits', 'production'] as const;
 /** The owner of one installation attention line, by the source that raised it. */
 export function installationOwner(source: typeof installationSources[number], text: string, productionBranch: string | null = null): AttentionOwner {
@@ -59,9 +55,9 @@ export function installationOwner(source: typeof installationSources[number], te
     ? `Fix the failing deployment of ${productionBranch}, the branch production tracks, with the configured provider`
     : 'Fix the failing deployment of the base branch, which production tracks, with the configured provider');
 }
-/** Why a work item raises attention; each cause is also its fault kind. */
+/** Why a work item raises attention. */
 export const workAttentionCauses = ['human-request', 'containment-settleable', 'containment-grace', 'containment', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
-  'stalled-step', 'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const satisfies readonly FaultKind[];
+  'stalled-step', 'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const;
 export type WorkAttentionCause = typeof workAttentionCauses[number];
 /**
  * The owner of a work item's attention, from the same facts that raised it. Everything an agent
@@ -153,12 +149,12 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const report = status?.appPermissions;
   const items: AttentionItem[] = [];
-  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text, source === 'production' ? status?.production?.release?.branch ?? null : null), ...classified(source) });
+  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text, source === 'production' ? status?.production?.release?.branch ?? null : null) });
   for (const text of report?.attention ?? []) raise('app-permissions', text);
   if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
   // A job that keeps finishing without an observation holds the merge queue behind its item (GY-506).
-  for (const job of status?.starvedJobs ?? []) { const text = starvedJobText(job); items.push({ subject: job.key, text, ...agentOwner('master', `graphyard diagnose ${job.key}: the recorded reason names what keeps the observation from being saved; the next saved observation clears this`), ...classified('integration-job') }); }
+  for (const job of status?.starvedJobs ?? []) { const text = starvedJobText(job); items.push({ subject: job.key, text, ...agentOwner('master', `graphyard diagnose ${job.key}: the recorded reason names what keeps the observation from being saved; the next saved observation clears this`) }); }
   const production = status?.production ? productionSummary(status.production) : null;
   for (const text of production?.attention ?? []) raise('production', text);
   const attention = items.map(item => item.text);
@@ -189,9 +185,9 @@ export function fleetStatus(fleet: FleetView | null | undefined) {
   // A role at its limit with all sessions on work is no fault (GY-1086), nor is the opt-in master role when unconfigured.
   const fullRoleOnWork = (text: string) => /^role \S+ is at its concurrency limit\b/.test(text) && !/carrying no work/.test(text);
   const attentionItems: AttentionItem[] = fleet.configured ? fleet.attention.filter(text => !fullRoleOnWork(text) && !masterRoleUnnamed(text)).map(text => /^role \S+ is at its concurrency limit\b/.test(text) ? { subject: 'fleet', text,
-    ...agentOwner('master', 'graphyard master registry session end ID --reason REASON for each session it names, once its runtime has nothing to do'), ...classified('fleet-capacity') } : { subject: 'fleet', text,
+    ...agentOwner('master', 'graphyard master registry session end ID --reason REASON for each session it names, once its runtime has nothing to do') } : { subject: 'fleet', text,
     ...agentOwner('master', /is not configured/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --concurrency N --reason REASON' : /serves no role/.test(text) ? 'graphyard master registry role set ROLE ACCOUNT[,ACCOUNT…] --reason REASON, or graphyard master registry account remove NAME --reason REASON'
-      : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)'), ...classified('fleet') }) : [];
+      : 'graphyard master registry (each account\'s ineligible reason names what to fix: log it in, wait for its reset, or add an account and name it in the role)') }) : [];
   return { attentionItems, fleet: { configured: fleet.configured, revision: fleet.revision, updatedAt: fleet.updatedAt, host: fleet.host, runtimes: fleet.runtimes.map(runtime => runtime.name), accounts, roles: fleet.roles,
     ineligible: accounts.filter(account => !account.eligible).map(account => ({ account: account.account, reason: account.ineligible })), recentSelections: fleet.sessions.slice(-10).map(session => ({ at: session.selectedAt, role: session.role, account: session.account, work: session.work, reason: session.reason, endedAt: session.endedAt })),
     refusals: fleet.refusals.slice(-5), next: fleet.configured ? null : 'No role is configured in the agent registry, so sessions launch from local profiles; run graphyard master registry propose --apply' } };

@@ -1,4 +1,4 @@
-// Concern: the production wiring of the loop's own post-deploy readings (GY-1779) — recorded and closed with the coordinator credential, the parent's check through the filer verify-deployment uses, the report's rows through the coordinator read.
+// Concern: the production wiring of the loop's own post-deploy readings (GY-1779) — recorded and closed with the coordinator credential, the parent's check through the filer verify-deployment uses.
 import type { MasterConfig } from '../master.js';
 import type { ReadingEffects } from './cycle-readings.js';
 export type { ReadingEffects } from './cycle-readings.js';
@@ -7,7 +7,7 @@ export type { ReadingEffects } from './cycle-readings.js';
  * The reading effects over the loop's coordinator calls. The filer and the readers are loaded at
  * call time: master-verification.ts imports the daemon, so a static import here would be a cycle.
  */
-export function readingEffects(current: () => MasterConfig, mutate: (path: string, data: unknown, requestId?: string) => Promise<unknown>, asCoordinator: (path: string) => Promise<unknown>): Required<ReadingEffects> {
+export function readingEffects(current: () => MasterConfig, mutate: (path: string, data: unknown, requestId?: string) => Promise<unknown>): Required<ReadingEffects> {
   const verification = () => import('../master-verification.js');
   return {
     recordReading: (work, reading) => mutate(`work/${work.id}/reading`, reading),
@@ -19,7 +19,6 @@ export function readingEffects(current: () => MasterConfig, mutate: (path: strin
       if ('reason' in resolved) throw new Error(resolved.reason);
       try { return await resolved.filer(input); } finally { await resolved.dispose(); }
     },
-    readPattern: async pattern => (await verification()).patternReader(asCoordinator)(pattern),
-    readPostDeploy: async input => (await import('../master/post-deploy-readings.js')).postDeployReader((await verification()).patternReader(asCoordinator), current().cliPath)(input),
+    readPostDeploy: async input => (await import('../master/post-deploy-readings.js')).postDeployReader(current().cliPath)(input),
   };
 }

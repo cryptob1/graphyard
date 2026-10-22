@@ -40,7 +40,7 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       // The guarded merge only asks GitHub to merge one exact head, so asking again is safe: a
       // restart that interrupted it is a retry, never a merge fault (GY-1087: GY-999 counted at a
       // restart and merged on the retry twelve minutes later).
-      if (next.state === 'failed') { resumed.push(storeAction(state, key, next, null)); continue; }
+      if (next.state === 'failed') { resumed.push(storeAction(state, key, next)); continue; }
     } else if (action.kind === 'scope') {
       // Scope requests are retired (GY-1992): nothing decides or retries one now.
       next.state = 'done';

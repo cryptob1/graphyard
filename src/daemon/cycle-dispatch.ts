@@ -27,7 +27,7 @@ import { researchHold, researchRunner, researchSettings, researchStep } from '..
 import { decompositionHold, decompositionSettings } from '../decomposition.js';
 import { decompositionStep } from '../decomposition-step.js';
 import { judgeHostMemory } from '../master-resources.js';
-import { dispatchBlockRetryMs, dispatchFailureBlockAfter, dispatchFailureBlocker, deploySkewFailure, noteDispatchFailure, planeWideFailure } from './dispatch-failures.js';
+import { deploySkewFailure, planeWideFailure } from '../model/blocker-class.js';
 import { closeStanding, closingItems } from './stale-closes.js';
 import { guardCarried, settleCarriedWrites } from './carried-writes.js';
 import { carriedCall, launchWrite, owedWrite, recordCarried, stepCallCarried, supersedeOwed, unboundedEffects, withinStepBudget } from './step-budget.js';
@@ -114,7 +114,7 @@ export function saturatedFleet(health: readonly ProfileHealth[], held: (entry: P
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) =>
-  withinStepBudget(cycle, 'dispatch', ['decide', 'approver', 'agents', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'blockDispatch', 'decisions', 'recordDecomposition', 'recordResearch'], bounded => dispatchStepWithin(bounded, cycle, health, assessments)); // GY-1774: every call the step makes — the role and plane health reads, the escalation listing, each capacity report, the memory reading, the split and research records, the blocker record, the decision history, the cap decision and its approver launch — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
+  withinStepBudget(cycle, 'dispatch', ['decide', 'approver', 'agents', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'decisions', 'recordDecomposition', 'recordResearch'], bounded => dispatchStepWithin(bounded, cycle, health, assessments)); // GY-1774: every call the step makes — the role and plane health reads, the escalation listing, each capacity report, the memory reading, the split and research records, the decision history, the cap decision and its approver launch — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
 async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: ReturnType<typeof profileHealth>, assessments: Record<string, ContainmentAssessment>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
@@ -135,19 +135,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     if (closing.has(item.key)) return false;
     try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; }
   }), hotFiles, clock);
-
-  // GY-1082: a failure run counts this loop's own consecutive failed launches, so it is retired
-  // whenever the snapshot shows the item somewhere a run cannot follow: gone or delivered, carrying
-  // a blocker (the one the run recorded, even when the loop stopped before forgetting it, or anyone
-  // else's), held under a lease no launch of this loop is running, or past an epoch this loop's
-  // last failure did not spend — another dispatcher claimed it in between, so the failures were
-  // not consecutive. A later failure then starts a new run.
-  for (const [id, run] of Object.entries(state.dispatchFailures)) {
-    if (cycle.launcher.keys().some(key => key.startsWith(`dispatch:${id}:`))) continue;
-    const item = snapshot.work.find(entry => entry.id === id);
-    const claimed = !!item?.lease && Date.parse(item.lease.expiresAt) > clock;
-    if (!item || item.stage === 'done' || item.blocker || claimed || item.epoch > run.epoch + 1) delete state.dispatchFailures[id];
-  }
 
   // GY-885: an attempt past its role's time box is ended and retried fresh (cycle-sessions 1f'),
   // as is one blocked on a GitHub credential failure (GY-999, 1e). The retry ladder is computed from the item's own exhaustion record, so it survives this
@@ -341,10 +328,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     // waits out the usual doubling backoff instead of retrying the same host git state every cycle.
     const failed = state.actions[key];
     if (failed && workspaceDispatchFailure(failed.detail) && state.cycle - failed.cycle < Math.min(2 ** failed.attempts, 30)) return;
-    // GY-1078: an item whose dispatches keep failing for one cause is not dispatched again; the
-    // cause is recorded as its blocker, and a block the control plane refused is asked for again.
-    const failing = state.dispatchFailures[item.id];
-    if (failing && failing.count >= dispatchFailureBlockAfter) { performed.push(...await blockRepeatedFailure(item)); return; }
     const free = await effects.agents();
     // After an attempt ended as reblocked (GY-867), a profile on another runtime is tried first.
     const order = preferOtherRuntime(health, runtimeToAvoid(item));
@@ -406,27 +389,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     return detailChanged(state.actions[waitKey], detail) ? [await record(state, waitKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[waitKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist)] : [];
   }
 
-  /**
-   * GY-1078: the item's dispatches failed `dispatchFailureBlockAfter` times in a row for one cause.
-   * The cause becomes the item's blocker, so neither this loop nor an executor dispatches it again
-   * until an operator clears it; the run is then forgotten, and a later failure starts a new one.
-   * Without the effect, or when the control plane refuses, the run stands and holds the item here;
-   * a refused block is asked for again only after `dispatchBlockRetryMs`, never every cycle. The
-   * run keeps one escalation record, whose attempts count the refusals.
-   */
-  async function blockRepeatedFailure(item: Work): Promise<DaemonAction[]> {
-    const run = state.dispatchFailures[item.id]!, reason = dispatchFailureBlocker(run), key = `escalation:dispatch-failures:${item.id}:${run.firstAt}`;
-    const previous = state.actions[key];
-    const note = async (outcome: 'done' | 'failed' | 'waiting', detail: string, always = false) => always || detailChanged(previous, detail)
-      ? [await record(state, key, { kind: 'escalation', work: item.key, principal: null, epoch: item.epoch, state: outcome, detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist)] : [];
-    if (!effects.blockDispatch) return note('waiting', `${reason}. This loop cannot record a blocker, so it holds ${item.key} itself until it restarts`);
-    if (previous?.state === 'failed' && now() - Date.parse(previous.at) < dispatchBlockRetryMs(previous.attempts)) return [];
-    try { await effects.blockDispatch(item, reason); }
-    catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, key, { kind: 'escalation', work: item.key, epoch: item.epoch }, error, `Recording the blocker on ${item.key}`); return []; } return note('failed', `Could not record the blocker on ${item.key}, so the loop holds it and asks again after ${dispatchBlockRetryMs((previous?.attempts ?? 0) + 1) / 60_000} minutes: ${message(error)}. ${reason}`, true); }
-    delete state.dispatchFailures[item.id];
-    return note('done', `Recorded the blocker on ${item.key}: ${reason}. It is dispatched again once the blocker is cleared (graphyard unblock ${item.key} REASON)`);
-  }
-
   /** What a dispatch that starts on a hot file adds to its record, so master status can show the contention (GY-882). */
   function hotspotNote(beside: Pick<Hotspot, 'file'> & { beside: string[] } | null) {
     if (!beside) return '';
@@ -477,7 +439,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
         const rekey = await rekeyLaunchedSession(launchRecord, guessed, item.epoch + 1, launched as { epoch?: number; pane?: string | null; agentName?: string | null }, pane => `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}`);
         await retireGuessedCoordinate(cycle, item, guessed.id, rekey);
         clearProfileFailure(state, current.profile);
-        delete state.dispatchFailures[item.id];
         // The file comes before the claimant keys, so the 2000-character detail bound trims a long
         // key list and never the file it contends on; a cold dispatch records nothing new here.
         performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'done', detail: `Dispatched ${item.key} to ${current.profile.name}; the worker launcher claimed under ${current.profile.principal}${hotspotNote(beside)}${launched?.reclaimed?.length ? `; freed its branch by reclaiming ${launched.reclaimed.join('; ')}` : ''}${launched?.closedAgent ? `; closed finished session ${launched.closedAgent} that held the profile's name` : ''}${rekey.outcome === 'moved' ? `; the launch claimed epoch ${launched?.epoch}, so its session record moved from ${rekey.from} to ${rekey.to}` : rekey.outcome === 'failed' ? `; the launch claimed epoch ${launched?.epoch} but its session record could not be moved from ${rekey.from} to ${rekey.to} (${rekey.reason}): the attempt's own handle is not on the record, so the loop reclaims it on the bound unless a later write lands` : rekey.outcome === 'owed' ? `; the launch claimed epoch ${launched?.epoch} and its session record's move from ${rekey.from} to ${rekey.to} is owed to the next cycle (the control plane did not answer), so the pane stays on the guessed record until the retry lands` : ''}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
@@ -502,14 +463,10 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
         // GY-1345: nor does a plane-wide failure, which says nothing about the profile that met it.
         // GY-2177: nor a deploy's release-skew window — the deploy is the loop's own lifecycle, and
         // until the upgrade pass aligns the held CLI to the served release, every claim refuses with
-        // the skew named, whatever the item: it cools no profile, counts zero and files no fault.
+        // the skew named, whatever the item: it cools no profile.
         const workspace = workspaceDispatchFailure(message(error)), planeWide = planeWideFailure(message(error)), deployWide = deploySkewFailure(message(error));
         if (!workspace && !planeWide && !deployWide) recordProfileFailure(state, current.profile, message(error), now());
-        const run = noteDispatchFailure(state, item, message(error), new Date(now()).toISOString());
-        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}${run.count ? ` (failure ${run.count} of ${dispatchFailureBlockAfter} with this cause)` : planeWide ? ' (a plane-wide control-plane failure, which cools no profile and never counts toward a dispatch-failure blocker)' : deployWide ? " (the deploy's release-skew window, which cools no profile and never counts toward a dispatch-failure blocker)" : ' (a fleet-idle cause, which never counts toward a dispatch-failure blocker)'}`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist,
-          // GY-1375: nor is it a session-liveness fault of the item's: the outage is the one fault, and the retry redispatches.
-          planeWide || deployWide ? null : undefined));
-        if (run.count && run.count >= dispatchFailureBlockAfter) performed.push(...await blockRepeatedFailure(item));
+        performed.push(await record(state, key, { kind: 'dispatch', work: item.key, principal: current.profile.principal, epoch: item.epoch, state: 'failed', detail: `Dispatch of ${item.key} to ${current.profile.name} failed: ${message(error)}${workspace ? " (the item's workspace could not be prepared on this host; the profile is not cooled off and the item's next dispatch waits out a doubling backoff)" : ''}; it is retried next cycle`, attempts: state.actions[key].attempts, cycle: state.cycle }, now(), effects.persist));
         return;
       }
     }
@@ -652,7 +609,7 @@ async function holdAtCap(cycle: Cycle, item: Work, hold: AttemptRetryHold) {
       try { launched = await launchWith(item, requested.id); }
       catch (error) {
         if (!stepCallCarried(error)) throw error;
-        sink.push(await record(state, launchKey, { kind: 'decision', work: item.key, principal: null, state: 'waiting', detail: `Launching the approver of ${item.key}'s cap decision ${requested.id} was carried to the next cycle: ${message(error)}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null));
+        sink.push(await record(state, launchKey, { kind: 'decision', work: item.key, principal: null, state: 'waiting', detail: `Launching the approver of ${item.key}'s cap decision ${requested.id} was carried to the next cycle: ${message(error)}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
         return;
       }
       sink.push(await record(state, launchKey, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `${item.key}'s cap decision ${requested.id}: launched independent approver session ${launched.agentName}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));

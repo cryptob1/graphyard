@@ -12,9 +12,9 @@ import { type DaemonEffects, failoverKey, record, stoppedStates } from './effect
 import { capacityRefusal, unknownRegistrySession } from '../fleet.js';
 import type { Cycle } from './cycle.js';
 import { sessionExhaustion } from './cycle-sessions.js';
-import { decisionFailureKind, resumedApplication } from './decision-reads.js';
+import { resumedApplication } from './decision-reads.js';
 import { planeWideRefusal } from '../model/blocker-class.js';
-import type { FaultKind } from '../model/fault-classes.js'; import { carriedIsolate, owedWrite, recordCarried, stepCallCarried } from './step-budget.js';
+import { carriedIsolate, owedWrite, recordCarried, stepCallCarried } from './step-budget.js';
 
 /**
  * The approver sessions step 4c puts its decisions to (GY-1147 moved them here from
@@ -22,7 +22,7 @@ import type { FaultKind } from '../model/fault-classes.js'; import { carriedIsol
  * request of the loop's launched (4c'), and the registry sessions that end with them (4d).
  */
 export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, stamp: string,
-  note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number, faultKind?: FaultKind | null) => Promise<unknown>,
+  note: (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at?: number) => Promise<unknown>,
   capacities: RoleCapacity[], approversSpent: boolean) {
   const { config, state, now, snapshot, clock, performed } = cycle, carried = { ...cycle, effects }, isolate = carriedIsolate(carried, 'approvers'); // GY-1774: a carried call reaching the isolation is recorded, no fault
   // One Herdr read serves the step, and is taken again after anything that changes the inventory.
@@ -51,7 +51,7 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
         return true;
       }
       const unanswered = planeWideRefusal(error);
-      await note(`close:approver-session:${watch.decision}:${watch.session}`, item, 'close', 'failed', `Could not end approver registry session ${watch.session}${unanswered ? ' (the control plane did not answer, so it is ended on the next try)' : ''}: ${message(error)}`, undefined, unanswered ? null : undefined);
+      await note(`close:approver-session:${watch.decision}:${watch.session}`, item, 'close', 'failed', `Could not end approver registry session ${watch.session}${unanswered ? ' (the control plane did not answer, so it is ended on the next try)' : ''}: ${message(error)}`, undefined);
       return false;
     }
   };
@@ -411,14 +411,14 @@ export function createApproverSupervisor(cycle: Cycle, effects: DaemonEffects, s
       const adopt = await adoptable(item, watch);
       if (adopt === 'wait') return 'wait';
       try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; ${await launch(item, watch, adopt === 'adopt')}`); }
-      catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, `${base}:launch:${watch.launches + 1}`, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Launching the approver of ${item.key}'s ${watch.action} decision ${watch.decision}`); return 'done'; } const detail = `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail)); }
+      catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, `${base}:launch:${watch.launches + 1}`, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Launching the approver of ${item.key}'s ${watch.action} decision ${watch.decision}`); return 'done'; } const detail = `${item.key}'s ${watch.action} decision ${watch.decision} ${waited}; its approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail); }
       return 'done';
     }
     recordWatchEnded(watch, step.detail);
     if (step.step === 'rerequest') return 'rerequest';
     if (step.step === 'exhausted') { await escalateUnjudged(item, watch, step.detail); return 'done'; }
     try { await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'done', `${step.detail}; ${await launch(item, watch, false)}`); }
-    catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, `${base}:launch:${watch.launches + 1}`, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Launching a replacement approver for ${item.key}'s ${watch.action} decision ${watch.decision}`); return 'done'; } const detail = `${step.detail}; a replacement approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail, undefined, decisionFailureKind(state, item.key, detail)); }
+    catch (error) { if (stepCallCarried(error)) { await recordCarried(cycle, `${base}:launch:${watch.launches + 1}`, { kind: 'decision', work: item.key, epoch: item.epoch }, error, `Launching a replacement approver for ${item.key}'s ${watch.action} decision ${watch.decision}`); return 'done'; } const detail = `${step.detail}; a replacement approver session could not be launched: ${message(error)}`; await note(`${base}:launch:${watch.launches + 1}`, item, 'decision', 'failed', detail); }
     return 'done';
   };
   /**

@@ -188,7 +188,6 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)', door: 'it is the merge writer: its base fetch and leased push are the door itself' },
   'src/daemon/deployment.ts': { subcommands: ['fetch'], runs: 'the loop\'s deployment observation (the base tip it reads ancestry against)', credential: 'the coordinator checkout\'s own git credential', door: 'deployment observation must read the base tip and rc/* records fresh every cycle, including while the merge writer is stalled or disabled (github delivery mode runs none), and it writes nothing' },
   'src/daemon/held-cli.ts': { subcommands: ['clone'], runs: 'the loop pinning a held CLI snapshot', credential: 'none: a --shared clone of the checkout\'s own object store', door: 'a --shared clone of the checkout\'s own object store: it never reaches the remote, so there is no network call to move' },
-  'src/daemon/step-stalls.ts': { subcommands: ['ls-remote'], runs: 'the loop diagnosing a stalled merge step', credential: 'the merge writer\'s deploy key alone (pushEnvironment)', door: 'the probe diagnoses whether the merge writer\'s deploy key still reaches the remote while the writer is stalled; routing it through the stalled writer would make the diagnosis wait on the fault it diagnoses' },
   'src/daemon/upgrade.ts': { subcommands: ['fetch'], runs: 'the loop\'s self-upgrade reading the base tip', credential: 'the coordinator checkout\'s own git credential', door: 'the self-upgrade decides whether to restart the loop that runs the merge writer, so it must read the base tip without it, from a writer that may be the one owed the restart' },
   'src/docs-sync.ts': { subcommands: ['fetch'], runs: 'the loop\'s docs-sync (branch and base reads)', credential: 'the coordinator checkout\'s own git credential', door: 'the fetches put a reviewed worker branch and its base into the coordinator\'s object store for an in-memory merge-tree and a detached worktree; the merge writer exposes no read of a branch it is not merging, and a failed fetch falls back to commits already held' },
   'src/master/autonomy.ts': { subcommands: ['clone', 'fetch'], runs: 'the master cloning the approver\'s own copy (approverClone) and fetching its bound sha', credential: 'the coordinator checkout\'s own git credential for the bound-sha fetch; the clone itself is local', door: 'the clone is local (the approver\'s own unshared copy of the coordinator checkout) and never reaches the remote; the fetch reads a worker\'s bound sha into that copy, a branch the merge writer never handles, and a miss is tolerated' },
@@ -228,7 +227,6 @@ export const baseline = [
   'src/daemon/cycle-merge-writer.ts',
   'src/daemon/deployment.ts',
   'src/daemon/held-cli.ts',
-  'src/daemon/step-stalls.ts',
   'src/daemon/upgrade.ts',
   'src/docs-sync.ts',
   'src/master/autonomy.ts',
@@ -247,7 +245,7 @@ export const baseline = [
  * with the promotion drive (simplify 1a): only the plane's exact-candidate client remains there.
  */
 export const releaseCluster = [
-  'src/release-project.ts', 'src/daemon/deployment.ts', 'src/daemon/step-stalls.ts',
+  'src/release-project.ts', 'src/daemon/deployment.ts',
   'src/daemon/upgrade.ts', 'src/master/branch-release.ts', 'src/daemon/cycle-merge-writer.ts', 'src/merge-writer/executor.ts',
 ];
 

@@ -13,7 +13,7 @@ import { boundedCalls, boundedPhase, carriedRow, recordCarried, stepCallBoundMs,
  * Step 7c. Start a triage run for each machine-filed item awaiting triage, on the research account (`run.research`): an unconfigured loop
  * triages nothing, and the item is raised as attention once it has waited a day.
  */
-export const triageBacklogStep = (cycle: Cycle) => withinStepBudget(cycle, 'triage', ['recordTriage', 'withdrawTriage'], triageBacklogStepWithin); // GY-1774: the triage record and the closure withdrawal are bounded
+export const triageBacklogStep = (cycle: Cycle) => withinStepBudget(cycle, 'triage', ['recordTriage'], triageBacklogStepWithin); // GY-1774: the triage record is bounded
 async function triageBacklogStepWithin(cycle: Cycle, budgetLeft: () => number | null) {
   const { config, state, effects, now, snapshot, clock, performed, isolate } = cycle;
   const note = async (key: string, work: string | null, outcome: 'done' | 'failed', detail: string) => {
@@ -47,7 +47,7 @@ async function triageBacklogStepWithin(cycle: Cycle, budgetLeft: () => number | 
     };
     const recordTriage: TriageStepInput['record'] = (work, body) => { if (!running) return later(work, body); const write = within(work, body); writes.push(write); return write; };
     try {
-      const actions = triageStep({ work: snapshot.work, clock, settings, config, cwd: effects.research!.cwd, runner: effects.research!.runner ?? researchRunner(settings), record: recordTriage, carried: stepCallCarried, faults: state.faults, withdraw: effects.withdrawTriage });
+      const actions = triageStep({ work: snapshot.work, clock, settings, config, cwd: effects.research!.cwd, runner: effects.research!.runner ?? researchRunner(settings), record: recordTriage, carried: stepCallCarried });
       for (const action of actions) {
         const item = snapshot.work.find(entry => entry.key === action.work)!;
         await note(`triage:${item.id}:${action.state}`, item.key, 'done', action.detail);

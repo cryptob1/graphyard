@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { Launcher, defaultLaunchConcurrency } from '../src/daemon/cycle.js';
@@ -245,8 +244,7 @@ test('unit:decision-stale-named-wait-single-attention — repeated stale settles
   const raised = await report(3);
   assert.equal(raised.length, 1);
   assert.equal(raised[0]!.text, 'Decision GY-1437/close (close) is stale on 3 or more requests in a row: the item moved between each request and its approval, so the loop no longer requests it again');
-  assert.equal(classifyAttention(raised)[0]!.kind, 'decision-stale');
-  // A fourth stale settle (the master asked by hand) is the same line, so the same fault instance.
+  // A fourth stale settle (the master asked by hand) is the same line.
   w.requestByHand('GY-1437', 'close', reason, duplicate); w.bump('GY-1437', 1); w.approve(closes(w).at(-1)!.id);
   assert.deepEqual((await report(4)).map(entry => entry.text), raised.map(entry => entry.text));
 

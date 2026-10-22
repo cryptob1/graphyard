@@ -3,7 +3,6 @@ import type { Dashboard } from './dashboard';
 import OverviewPage from './overview';
 import ShippedPage from './shipped';
 import HumanRequestsPage from './human-requests';
-import InterventionsPage from './interventions';
 import GuidePage from './guide';
 import AutomationPage from './automation';
 import FleetPage from './fleet';
@@ -61,8 +60,6 @@ export const views: readonly View[] = [
   { id: 'shipped', icon: '✓', label: 'Delivered', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
   // Every agent session across every item (GY-116), its own sidebar entry (GY-161).
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
-  // What shipping cost people (GY-98): every intervention, and the operator's judgement about what shipped, as a tab beside the delivered list.
-  { id: 'interventions', icon: '☝', label: 'Interventions', section: 'shipped', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <InterventionsPage {...dashboard}/> },
   // What waits on a release, beside what shipped: under Shipped since Insights became one page (GY-168).
   { id: 'validation', icon: '↻', label: 'Validation', section: 'shipped', visible: dashboard => configured(dashboard.features.validation), render: dashboard => <ValidationView api={dashboard.api} work={dashboard.work}/> },
   { id: 'releases', icon: '⇈', label: 'Releases', section: 'shipped', visible: dashboard => configured(dashboard.features.releases), render: dashboard => <ReleasesView api={dashboard.api} work={dashboard.work}/> },

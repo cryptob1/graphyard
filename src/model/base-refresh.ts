@@ -47,7 +47,7 @@ export interface BaseRefresh {
   /**
    * With a conflict (GY-1200): when a conflict was first recorded for this same head and policy
    * revision. A refresh onto each new base tip rewrites `at`, so on a base that moves often `at`
-   * alone would keep restarting the bound an unhandled conflict is counted against (faults.ts
+   * alone would keep restarting the bound an unhandled conflict is counted against (the retired faults.ts
    * baseConflictInMotion). Absent on records that predate the rule, which read as `at`.
    */
   conflictSince?: string | null;

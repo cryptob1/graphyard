@@ -58,8 +58,8 @@ test('unit:old-scope-history-loads — a document and history carrying scopeRequ
   await event(operator.id, 'decision.requested', { id: randomUUID(), action: 'requirements', input: { plannedFiles: ['src/a.ts', 'src/b.ts'], answers: { epoch: 1, at } }, reason: 'widen' });
 
   // Every reader of the stored document and its history answers.
-  for (const path of [`work/${work.id}`, 'board', 'status', 'work-snapshot?view=coordination', `events?work=${work.id}`, 'pipeline-timelines', 'interventions']) {
-    const read = await get(path, path === 'interventions' ? operator : coordinator);
+  for (const path of [`work/${work.id}`, 'board', 'status', 'work-snapshot?view=coordination', `events?work=${work.id}`, 'pipeline-timelines']) {
+    const read = await get(path, coordinator);
     assert.equal(read.status, 200, `${path}: ${JSON.stringify(read.body).slice(0, 500)}`);
   }
 

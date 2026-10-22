@@ -297,7 +297,6 @@ test('unit:deployment-step-cycle-budget — a release-landing verification slowe
     assert.deepEqual(state.deployment!.pending, ['GY-1']);
     assert.equal(deploymentModule.deploymentReadsPending(state), 1, 'the cut read is kept in flight');
     assert.match(state.actions['deployment:deferred']?.detail ?? '', /spent its 60s budget before the release observation finished, so the last verified observation stands/);
-    assert.equal(state.actions['deployment:deferred'].faultClass, undefined, 'a bounded step is no fault');
     // Cycles go on at the actionable cadence; none waits on the read again, none starts another.
     for (let cycles = 0; cycles < 30 && deploymentModule.deploymentReadsPending(state); cycles++) {
       mock.timers.tick(30_000);

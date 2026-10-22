@@ -50,7 +50,7 @@ test('unit:tmp-reclaim-zero-escalates — over three days of standing zero-remov
     for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycles}: ${check.invariant} — ${check.reading}`);
     mostRows = Math.max(mostRows, Object.keys(state.actions).filter(key => key.startsWith('reclaim:tmp:')).length);
     const row = state.actions[standingTmpKey];
-    if (now === erring) erred.push(row?.state ?? 'missing', row?.faultClass ?? 'no fault');
+    if (now === erring) erred.push(row?.state ?? 'missing');
     if (row?.attempts === attemptsMax && !atBound) atBound = row.detail;
   }
   assert.deepEqual(violations, [], 'every system invariant holds after every cycle');
@@ -75,7 +75,7 @@ test('unit:tmp-reclaim-zero-escalates — over three days of standing zero-remov
   assert.match(current.detail, /top consumers: \/tmp\/leaker/);
   assert.equal(current.state, 'done', 'a later clean pass leaves the run done');
   // The erring pass failed the run's row while it was the latest, and its fault is the resources row's alone.
-  assert.deepEqual(erred, ['failed', 'no fault'], 'the erring pass failed the /tmp row without a fault of its own');
+  assert.deepEqual(erred, ['failed'], 'the erring pass failed the /tmp row');
   assert.equal(Object.values(state.actions).filter(action => action.kind === 'reclaim' && action.state === 'failed').length, 1, 'only the resources row still records the failure');
 });
 

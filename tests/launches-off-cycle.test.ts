@@ -134,7 +134,7 @@ test('unit:slow-cycle-attention — a 90 s cycle raises a liveness attention nam
   const items = slowCycleAttention(summary);
   assert.equal(items.length, 1, 'a cycle past 60 s raises a liveness attention');
   const [attention] = items;
-  assert.equal(attention.subject, 'loop'); assert.equal(attention.kind, 'loop-liveness'); assert.equal(attention.role, 'master');
+  assert.equal(attention.subject, 'loop'); assert.equal(attention.role, 'master');
   assert.equal(attention.text, 'Cycle 40 took 90s, past the 60s cycle bound (p50 10s, p95 19s over the last 30 minutes), and every merge, decision and close in it waited that long; slowest steps: dispatch 41s, launches 30s, decisions 12s');
   assert.match(attention.next, /shorten the dispatch step/);
   assert.equal(slowCycleMs, 60_000);

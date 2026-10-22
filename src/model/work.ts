@@ -20,7 +20,7 @@ import type { Closure } from './closure.js';
 import type { PendingFollowUps, TriageRecord } from './machine-backlog.js';
 import { proofSchema } from './proof.js';
 import { closedQuestionsSchema } from './closed-question.js';
-import { workOriginSchema, type WorkOrigin } from './interventions.js';
+import { workOriginSchema } from './machine-backlog.js';
 import { demand } from './refusal.js';
 
 export const CHECK_NAME = 'Graphyard / merge', LANDABLE_CHECK = 'graphyard/landable'; // GY-887: both are Graphyard's own, never CI inputs to the verdict
@@ -71,8 +71,7 @@ export const createSchema = z.object({
   // responder against the bound candidate state instead of launching a producer session, and
   // records the answer as evidence. See model/closed-question.ts.
   closedQuestions: closedQuestionsSchema.optional(),
-  // Where Graphyard itself opened the item from feedback (GY-98): a recurring intervention
-  // pattern with its linked instances, or an operator's judgement about delivered work.
+  // Where Graphyard itself opened the item: the parent a review follow-up collects findings for.
   origin: z.lazy(() => workOriginSchema).optional(),
   // A system-driven item moves only through the loop: the master CLI refuses the hand actions the
   // loop owns for it (src/cli/hand-actions.ts). New items take the shipped default; an item

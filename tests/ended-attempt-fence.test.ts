@@ -10,7 +10,6 @@ import { agentRequestSchema, leaseHeldRequestTypes } from '../src/model/agent-re
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema, leaseLapsedEnding, type ContainmentVerification } from '../src/quarantine.js';
 import { endWorkerAttempt } from '../src/daemon/cycle-resume.js';
 import { settleDue, settleEndedAttemptFence, transientSettlementRefusal } from '../src/daemon/cycle-reclaim.js';
-import { workFaults } from '../src/model/fault-classes.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { SupervisorProbeReport } from '../src/containment-probe.js';
 import type { Work } from '../src/model.js';
@@ -112,8 +111,7 @@ async function loop(effects: Partial<DaemonEffects>, snapshot: () => Work[]) {
     recordDeployment: async () => {}, closeSession: () => {}, persist: async () => {},
     ...effects,
   } as DaemonEffects;
-  // Every cycle's faults pass observes afresh, so a fence left standing is seen on the cycle it stands.
-  const run = () => { state.faults.observedAt = undefined; return runCycle(config, state, all); };
+  const run = () => runCycle(config, state, all);
   return { config, state, run, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
 
@@ -122,9 +120,8 @@ function cycleFor(state: DaemonState, config: MasterConfig, effects: Partial<Dae
   return { config, state, effects: effects as DaemonEffects, now: Date.now, snapshot: { work: [item], now: iso(0) }, clock: Date.now(), clockOffset: { min: 0, max: 0 },
     performed: [], isolate: async (_kind: string, _item: unknown, _key: string, fn: () => Promise<unknown>) => fn(), agents: [], open: [item] } as unknown as Cycle;
 }
-const containmentFaults = (state: DaemonState, key: string) => state.faults.instances.filter(instance => instance.faultClass === 'containment' && instance.subject === key);
 
-test('unit:ended-attempt-fence-settled-at-once — an attempt the loop ends has its fence settled in that action, judged on the record the ending wrote, so the item is claimable at once and no containment fault stands', async () => {
+test('unit:ended-attempt-fence-settled-at-once — an attempt the loop ends has its fence settled in that action, judged on the record the ending wrote, so the item is claimable at once', async () => {
   // Idle with its lease live (and so credential-blocked too: both end through endWorkerAttempt).
   // The snapshot still shows the lease live and nothing of the ending; the plane holds the record.
   const { plane, supervisor, effects } = world(attempt());
@@ -141,9 +138,6 @@ test('unit:ended-attempt-fence-settled-at-once — an attempt the loop ends has 
     assert.equal(item.containmentQuarantine, null, 'the cycle reads the fence gone for its later steps');
     assert.equal(harness.state.actions['settle:work-1155:3']?.state, 'done');
     assert.equal(plane.item.sessions?.find(handle => handle.id === 'worker-a:3')?.state, 'finished', 'the loop recorded its close of the handle the plane accepts');
-    assert.deepEqual(workFaults(plane.item, Date.now()).filter(fault => fault.kind === 'containment'), [], 'no containment fault can be observed of the epoch');
-    await harness.run();
-    assert.deepEqual(containmentFaults(harness.state, 'GY-1155'), [], 'and the next faults pass records none');
   } finally { await harness.cleanup(); }
 
   // The orphaned supervisor: a lease that keeps renewing with no agent behind it is ended on the
@@ -163,7 +157,6 @@ test('unit:ended-attempt-fence-settled-at-once — an attempt the loop ends has 
     assert.equal(renewing.plane.item.containmentQuarantine, null);
     assert.equal(renewing.plane.item.lease, null);
     assert.equal(orphaned.state.actions['settle:work-1155:3']?.state, 'done');
-    assert.deepEqual(containmentFaults(orphaned.state, 'GY-1155'), [], 'the faults pass of that cycle saw no fence');
   } finally { await orphaned.cleanup(); }
 });
 
@@ -289,7 +282,6 @@ test('unit:supervisor-settle-failure-recorded-and-settled — a supervisor that 
     assert.equal(plane.item.sessions?.find(handle => handle.id === 'worker-a:16')?.state, 'finished', 'the loop closed the submitted attempt\'s session');
     assert.equal(plane.item.containmentQuarantine, null, 'and settled its standing fence in the same cycle, 30s into its grace window');
     assert.match(cycle.actions.find(action => action.kind === 'close' && action.work === 'GY-1155')?.detail ?? '', /its containment fence was settled/);
-    assert.deepEqual(containmentFaults(harness.state, 'GY-1155'), [], 'no standing fence is seen by the faults pass');
   } finally { await harness.cleanup(); }
 
   // Closed on an earlier cycle and the fence still standing (the supervisor was still exiting

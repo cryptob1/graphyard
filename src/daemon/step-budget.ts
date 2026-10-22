@@ -98,8 +98,8 @@ export function callIdentity(arg: unknown): unknown {
 }
 /** The arguments that name a call's identity: free text — a reason, a prompt, a message, an outcome — is left out, so a re-worded retry still joins its call; a call that takes none, or only this cycle's reading of the world (an inventory, a snapshot), is one call however the reading moved. */
 const identityArguments: Partial<Record<keyof DaemonEffects, number[]>> = {
-  promptSession: [0], withdraw: [0, 1], withdrawReview: [0, 1], endRegistrySession: [0], endSession: [0], decide: [0, 1, 3], withdrawTriage: [0, 1],
-  blockDispatch: [0], holdAccount: [0], endEscalation: [0], markEscalation: [0], relaunchEscalation: [0], stopSupervisor: [0, 1], recordSession: [], reportCapacity: [0], settleContainment: [0], containment: [0],
+  promptSession: [0], withdraw: [0, 1], withdrawReview: [0, 1], endRegistrySession: [0], endSession: [0], decide: [0, 1, 3],
+  holdAccount: [0], endEscalation: [0], markEscalation: [0], relaunchEscalation: [0], stopSupervisor: [0, 1], recordSession: [], reportCapacity: [0], settleContainment: [0], containment: [0],
   reclaim: [], reclaimResources: [], panes: [], herdr: [], roleHealth: [], escalationSessions: [], launchedSessions: [], approverLaunches: [], planeHealth: [], hostMemory: [], reconcileSessions: [],
 };
 /**
@@ -267,13 +267,13 @@ export async function recordCarried(cycle: CarriedCycle, key: string, row: Carri
   oweCarried(key, error); // the row owes the call's answer to its retry, kept until that retry consumes it
   // A `started` row already counted this attempt, and a call never sent (a join, or a spent budget) takes that count off again; a row of any other state counts it here, unless nothing was sent.
   const attempts = previous?.state === 'started' ? Math.max(0, previous.attempts - (carriedCallSent(error) ? 0 : 1)) : !previous ? (carriedCallSent(error) ? 1 : 0) : carriedCallSent(error) ? previous.attempts + 1 : previous.attempts;
-  performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: wording.slice(0, 2000), attempts, cycle: state.cycle, ...(row.owed ? { owed: row.owed } : {}) }, now(), effects.persist, null));
+  performed.push(await record(state, key, { kind: row.kind, work: row.work, principal: row.principal ?? null, epoch: row.epoch ?? null, state: 'waiting', detail: wording.slice(0, 2000), attempts, cycle: state.cycle, ...(row.owed ? { owed: row.owed } : {}) }, now(), effects.persist));
 }
 /** Retire a carried row once its call answered, or its handling ran through without it: the row is done, with the carried attempts it counted, so nothing stays carried past the answer, and an answer the row still owed is released to the cycle keep. */
 export async function retireCarried(cycle: CarriedCycle, key: string, previous: DaemonAction, detail: string) {
   const { state, now, performed, effects } = cycle;
   if (state.actions[key] !== previous) return; // recorded anew meanwhile: carried again, or settled by the caller's own row
-  performed.push(await record(state, key, { kind: previous.kind, work: previous.work, principal: previous.principal, epoch: previous.epoch, state: 'done', detail: detail.slice(0, 2000), attempts: previous.attempts, cycle: state.cycle }, now(), effects.persist, null));
+  performed.push(await record(state, key, { kind: previous.kind, work: previous.work, principal: previous.principal, epoch: previous.epoch, state: 'done', detail: detail.slice(0, 2000), attempts: previous.attempts, cycle: state.cycle }, now(), effects.persist));
   releaseOwed(state, key);
 }
 

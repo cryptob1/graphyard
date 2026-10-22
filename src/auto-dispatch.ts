@@ -26,9 +26,8 @@ import { answeredByPendingSession, independentProducerProfiles, launchProducer, 
 import { currentEvidence } from './model/evidence.js';
 import { judgeHostMemory, memoryDeferral, readHostMemory, reclaimResources, type HostMemoryReading } from './master-resources.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
-import { classified, launchWaitKind, launchWaitWording } from './model/fault-classes.js';
-import { planeWideFailure } from './model/blocker-class.js';
-import { planeUnavailableText } from './model/refusal.js';
+/** The fixed wording of review launch-wait reasons (GY-1175). */
+const launchWaitWording = { busy: 'every reviewer profile is busy', settles: 'the control plane settles the request once it reads that verdict' } as const;
 export { hostMemoryHold, loopMemoryAttention } from './master-resources.js';
 
 /**
@@ -1570,7 +1569,7 @@ export function tickWaits(waiting: DispatchWait[]) {
 export const reviewLaunchWaitAttentionMs = 15 * 60_000;
 /** `answeredAt` is when a reviewer's verdict answered the request (GY-1429): the wait is then the verdict's settlement, aged from it. */
 export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string; answeredAt?: string;
-  /** GY-2176/2177: a normal-risk control-plane head's designed post-merge wait (GY-1525), whatever its tick entry reports — the fault decision reads this mark, not the reason's wording. */
+  /** GY-2176/2177: a normal-risk control-plane head's designed post-merge wait (GY-1525), whatever its tick entry reports — the attention reads this mark, not the reason's wording. */
   postMergeWait?: true }
 /**
  * Every launch still waiting (GY-710, GY-1067), as `master status` reports it: each request the control
@@ -1610,17 +1609,11 @@ const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000
  * GY-1067 follow-up 1: raises attention for any review waiting over 15 minutes, intentionally including capacity
  * and bot waits so prolonged stalls are always visible to operators rather than silently hidden.
  * GY-2085: a normal-risk control-plane head's designed post-merge wait (GY-1525) launches no reviewer by design,
- * so it is no session-liveness fault: launchWaits keeps reporting it and only the fault is dropped.
- * GY-2176/2177: the drop reads the wait's mark, not its reason's wording — matching the exact recorded
- * reason still faulted the same designed wait wherever the wording differed: an entry the tick lost
- * (a restart boundary, a failed tick, the launchWaitLimit cap) falls back to 'waiting for dispatch',
- * so the class went on recurring on GY-2164, GY-2097 and GY-2173.
- * Each carries the fault kind its reason names (GY-1175), so the line never files as unclassified.
+ * so it raises nothing: launchWaits keeps reporting it. GY-2176/2177: the drop reads the wait's mark, not its reason's wording.
  */
 export function launchWaitAttention(waits: LaunchWait[]): AttentionItem[] {
   return waits.filter(wait => wait.kind === 'review' && !wait.postMergeWait && wait.reason !== postMergeWaitReason && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
     text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.answeredAt ? `its verdict at ${wait.answeredAt}, requested ${wait.requestedAt}` : wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
-    ...classified(launchWaitKind(wait.reason)),
     ...agentOwner('master', `Fix what the wait names, or launch it with graphyard master review ${wait.work}`) }));
 }
 
@@ -1667,9 +1660,8 @@ function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSucc
   const persisted = failure.field ? ` The tick could not persist ${failure.field}${failure.request ? `, composed for the ${failure.kind} request ${failure.request} on ${failure.work}` : ''}.` : '';
   // GY-1344: ticks failing on a control plane that does not answer are that outage, not the dispatcher's own fault.
   // GY-1345: so are ticks failing on any plane-wide shape (a 502-504 body, a call run into its timeout): never a
-  // dispatch-failures loop fault; the tick is retried on its backoff and the dispatcher recovers once the plane answers.
+  // loop fault; the tick is retried on its backoff and the dispatcher recovers once the plane answers.
   return [{ subject: 'dispatch', text: `The dispatcher has failed ${failures} ticks in a row (last at ${failure.at}; last successful tick ${dispatch.lastSuccessAt ?? 'none since it started'}), so no reviewer or producer session is being launched for any item: ${failure.reason}${persisted}`,
-    ...(!failure.field && (planeUnavailableText(failure.reason) || planeWideFailure(failure.reason)) ? { kind: 'plane-unavailable' as const } : {}),
     ...agentOwner('master', failure.field
       ? 'graphyard master restart re-reads and repairs the dispatch cursor; a tick that still cannot persist names the field above, and the request it was composed for is the one to look at'
       : 'Fix what the reason names — the control plane URL and coordinator credential in .graphyard/master.json, or Herdr — then graphyard master restart if the loop does not recover on its own') }];

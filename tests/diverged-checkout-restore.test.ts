@@ -1,21 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import * as restoreAct from '../src/cli/master-checkout-restore.js';
 import * as loopRun from '../src/daemon/run.js';
 import { fileCheckoutRestoreRequest, readCheckoutRestoreRequest, restoreInProcess, serveCheckoutRestore, checkoutRestoreRefPrefix } from '../src/cli/master-checkout-restore.js';
 import { coordinatorCheckoutGuard } from '../src/daemon/run.js';
-import { doctorPrompt, routineRemedies } from '../src/daemon/doctor.js';
-import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
-import { emptyHeldDecisions } from '../src/daemon/decision-reads.js';
-import { Launcher, type Cycle } from '../src/daemon/cycle.js';
-import { Timings } from '../src/master/timings.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { emptyDaemonState } from '../src/master-daemon.js';
+import { masterConfigSchema } from '../src/master.js';
 import { readCoordinatorCheckout } from '../src/master/profiles.js';
-import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Namespace imports: a run without this change still loads the file, and its cases fail instead of the import.
@@ -23,8 +18,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-1745: a coordinator checkout whose detached HEAD carries commits that are not on the base branch
 // had no automatic remedy — the loop stayed behind for two days and four items parked asking the
 // operator to move their own commits. The restore act saves such a HEAD under a ref and detaches the
-// checkout at the serving release; the doctor files the request itself; and a loop running under a
-// supervisor unit records .graphyard/units.json from that unit.
+// checkout at the serving release; the loop files the request itself.
 
 const clock = Date.parse('2030-01-01T00:00:00Z');
 const noQuiesce = async () => ({ thaw: () => {} });
@@ -87,7 +81,7 @@ test('unit:diverged-checkout-saved-and-moved — a clean detached HEAD neither o
   assert.equal(git('rev-parse', served!.ref!), diverged);
 });
 
-test('unit:diverged-checkout-doctor-files-request — the escalation for a diverged HEAD names the restore the installation runs itself, with no human answer, and the doctor\'s dirty-checkout remedy names and files that request', async () => {
+test('unit:diverged-checkout-escalation — the escalation for a diverged HEAD names the restore the installation runs itself, with no human answer', async () => {
   const { root, diverged, loaded, inputs } = await fixture('diverged-escalation');
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.cred', 'master.token'), cliPath: join(root, 'bin', 'graphyard.mjs'),
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
@@ -107,42 +101,4 @@ test('unit:diverged-checkout-doctor-files-request — the escalation for a diver
   execFileSync('git', ['-C', root, 'checkout', '-q', '--detach', inputs.serving]);
   const merged = (await guard.betweenCycles()).refusal;
   assert.ok(merged && !merged.includes('This HEAD is diverged'), merged ?? 'no refusal');
-
-  // The resolver's charter keeps the restore one command away; the recipe prose (the diverged-HEAD
-  // handling, the named refs) lives in the command, not in the prompt (GY-2004 deleted it).
-  const prompt = doctorPrompt({ repository: 'owner/project', cliPath: '/cli/graphyard.mjs' }, { items: [], faults: [] });
-  assert.match(prompt, /master checkout-restore with a quoted reason/);
-  assert.doesNotMatch(prompt, /diverged-\*/, 'the checkout-restore recipe prose is gone from the prompt; the command carries it');
-});
-
-test('unit:units-file-recorded-from-running-unit — with .graphyard/units.json absent and the loop running under a supervisor unit that runs the checkout, the loop records the file from that unit; with no unit it records the waiting row as today', async () => {
-  const root = await temporaryDirectory('diverged-units-', tmpdir()), units = await temporaryDirectory('diverged-units-dir-', tmpdir());
-  execFileSync('git', ['init', '-q', root]);
-  const config: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(root, '.cred', 'master.token'), cliPath: join(root, 'bin/graphyard.mjs'),
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  const master = perInstallUnits('owner/project').master;
-  writeFileSync(join(units, master), `[Unit]\nDescription=Graphyard master\n\n[Service]\nWorkingDirectory=${root}\nExecStart=/usr/bin/node ${root}/bin/graphyard.mjs master run\n`);
-  const cycle = (harness: NonNullable<DaemonEffects['harness']>): Cycle => {
-    const observedAt = new Date(clock).toISOString();
-    const effects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [], now: observedAt }), persist: async () => {}, harness } as unknown as DaemonEffects;
-    return { config, state: emptyDaemonState(config), effects, now: () => clock, snapshot: { work: [], now: observedAt }, clock, clockOffset: { min: 0, max: 0 },
-      performed: [], agents: [], credentials: {}, open: [], owns: () => false, heldBy: () => null, timings: new Timings(() => clock),
-      launcher: new Launcher(Number.POSITIVE_INFINITY), launch: () => false, detached: false, heldDecisions: emptyHeldDecisions(), closedPanes: new Set(),
-      isolate: async (_kind, _item, _name, body) => await body(), baseFailed: new Map(), exhaustedProofs: async () => [] } as Cycle;
-  };
-  // No unit: the waiting row, as today, and nothing recorded.
-  const waiting = cycle({ unitDirectory: units });
-  await routineRemedies(waiting);
-  const row = waiting.state.actions['remedy:harness:claude']!;
-  assert.equal(row.state, 'waiting', row.detail);
-  assert.ok(row.detail.includes(`records no units (${installUnitsFile} is absent)`), row.detail);
-  assert.equal(existsSync(join(root, installUnitsFile)), false);
-  // The loop runs under the unit that runs the checkout, though a leftover legacy-named unit runs it too (which makes the proposal the legacy alias): the file is recorded from the serving unit.
-  writeFileSync(join(units, 'graphyard-master.service'), readFileSync(join(units, master), 'utf8'));
-  const running = cycle({ unitDirectory: units, servingUnit: master });
-  await routineRemedies(running);
-  const recorded = running.state.actions['remedy:harness:claude']!;
-  assert.equal(recorded.state, 'done', recorded.detail);
-  assert.ok(recorded.detail.startsWith(`Recorded this install's units (${master}, `), recorded.detail);
-  assert.deepEqual(JSON.parse(readFileSync(join(root, installUnitsFile), 'utf8')), perInstallUnits('owner/project'));
 });

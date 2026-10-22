@@ -1,6 +1,5 @@
 // Concern: what an interrupted attempt leaves behind — the cursor record of it, and the preservation of its partial work for the next attempt.
 import type { Work } from '../model.js';
-import type { FaultKind } from '../model/fault-classes.js';
 import type { WorkerProfile } from '../master.js';
 import { type DaemonAction, type DaemonState, message, storeAction } from './state.js';
 import { readyToRetry } from './sessions.js';
@@ -8,9 +7,9 @@ import { planeWideRefusal } from '../model/blocker-class.js';
 import type { DaemonEffects } from './effects.js';
 // step-budget imported lazily below
 
-/** Put an action on the cursor, through storeAction, which bounds it and notes it against the fault record (GY-173). */
-export async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch' | 'faultClass'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist'], faultKind?: FaultKind | null) {
-  const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() }, faultKind);
+/** Put an action on the cursor, through storeAction, which bounds it. */
+export async function record(state: DaemonState, key: string, action: Omit<DaemonAction, 'at' | 'epoch'> & { at?: string; epoch?: number | null }, now: number, persist: DaemonEffects['persist']) {
+  const entry = storeAction(state, key, { epoch: null, ...action, at: action.at ?? new Date(now).toISOString() });
   await persist(state);
   return entry;
 }
@@ -50,6 +49,6 @@ export async function preserveInterruptedAttempt(state: DaemonState, effects: Da
     // (GY-1344, applied to the close by GY-1375): the row stays for the retry, which is what puts
     // the partial work on the record once the plane answers.
     const unanswered = planeWideRefusal(error);
-    return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'failed', detail: `${item.key} attempt ${epoch} ${observed}, but its partial work could not be put on the record${unanswered ? ' (the control plane did not answer, so it is preserved on the next try)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined)) - 1];
+    return performed[performed.push(await record(state, key, { kind: 'preserve', work: item.key, principal, epoch, state: 'failed', detail: `${item.key} attempt ${epoch} ${observed}, but its partial work could not be put on the record${unanswered ? ' (the control plane did not answer, so it is preserved on the next try)' : ''}: ${message(error)}`, attempts, cycle: state.cycle }, now(), effects.persist)) - 1];
   }
 }

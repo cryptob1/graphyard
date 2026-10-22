@@ -19,10 +19,7 @@ import { repositoryPolicy } from '../../model/repository-policy.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment, leadTimeReport } from '../../flow-analytics.js';
 import { boardFromStatus } from '../../model/board.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
-import { doctorRoute, doctorRunEvent } from '../doctor-route.js';
 import { snapshotPage } from '../../store/paged-snapshot.js';
-// The doctor's ledger kinds, read from here as they always were (GY-711).
-export { doctorFindingEvent, doctorRunEvent } from '../doctor-route.js';
 
 
 /** Control-plane status and the work reads every client polls. */
@@ -68,9 +65,6 @@ export const statusRoutes = defineRoutes('status', [
         // quota and reset time. `?host=` (or the executor-host header) judges placement for that
         // executor. It names hosts and login homes, so implementers and producers do not read it.
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
-        // The pipeline doctor's last runs (GY-711): what each found, did and filed. The loop
-        // posts one summary per run, so the dashboard's Doctor panel reads them from here.
-        doctor: actor.role === 'operator-agent' ? null : (await engine.store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq DESC LIMIT 20', [doctorRunEvent])).rows.map((row: any) => row.payload),
         // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
         directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // The merge writer (merger-mode.ts): always the control plane.
@@ -122,7 +116,6 @@ export const statusRoutes = defineRoutes('status', [
       return { productionEnvironment: environment, recorded: true };
     },
   },
-  doctorRoute,
   {
     method: 'GET', path: '/api/work-snapshot',
     async handle({ actor, req, url, services, operatorVisible }) {

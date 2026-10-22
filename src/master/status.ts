@@ -19,7 +19,6 @@ import type { HerdrAgent } from './herdr.js';
 import { type ContainmentAssessment, containmentHold, containmentPhase } from './containment.js';
 import { containmentInMotion } from '../model/containment.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
-import { classified } from '../model/fault-classes.js';
 import { launchFailedBeforeStart } from '../model/escalation.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
 import { maxInFlight, requestRemedy } from '../model/dispatch.js';
@@ -171,7 +170,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const installation = controlPlaneAttention(controlPlane), registry = fleetStatus(controlPlane?.fleet);
   // Per-role concurrency (GY-107): sessions against the declared limit, and the queue at the gate.
   const concurrency = roles ? [roleConcurrency('reviewer', roles.reviewers, snapshot.work, agents, reviews, sessions, now), roleConcurrency('producer', roles.producers, snapshot.work, agents, sessions.producers, sessions, now)] : [];
-  const concurrencyItems: AttentionItem[] = concurrencyAttention(concurrency).map(item => ({ ...item, ...classified('concurrency-starved') }));
+  const concurrencyItems: AttentionItem[] = concurrencyAttention(concurrency);
   const workerSessions = profiles.map(profile => {
     const agent = agents.find(candidate => candidate.name === profile.agentName);
     const credential = credentialHealth[profile.name] ?? { available: true, reason: null };
@@ -334,7 +333,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const latest = waiting.map(work => standingCapacity(work, role)[0]).sort((a, b) => Date.parse(b.at) - Date.parse(a.at))[0];
     return [{ role, since: latest.at, retryAt: latest.retryAt, accounts: latest.accounts, waiting: waiting.map(work => work.key), line: `${describeCapacity(role, latest.accounts)}; waiting: ${waiting.map(work => work.key).join(', ')}` }];
   });
-  const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line, ...classified('role-capacity'),
+  const capacityItems: AttentionItem[] = capacity.map(entry => ({ subject: `${entry.role} capacity`, text: entry.line,
     ...agentOwner('master', `Nothing to run before ${entry.retryAt ?? 'an account reports quota again'}: the loop resumes ${entry.role} launches on its own. To restore capacity sooner, log another account in and add it with graphyard master environments --apply and graphyard master config accounts:PROFILE=…; buying quota or opening a provider account is the human's decision`) }));
   const humanRequests = openHumanRequests(snapshot.work, now);
   // The fleet's concurrency beside its idle workers: every open item in flight or dispatchable may
@@ -347,7 +346,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle; the dispatcher starts new work while fewer than ${maxInFlight} ${inFlightCount === 1 ? 'item is' : 'items are'} in flight${atCapClause(inFlightCount)}` };
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
   const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
-  const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text, ...classified('unrunnable-remedy'),
+  const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
     ...agentOwner('master', `Create a work item that lets the ${entry.role} run \`${entry.command}\` (or has the control plane perform it); the ${entry.role} harness rule ${entry.rule} denies it`) }));
   return { observedAt: snapshot.now,
     counts: { open: rows.length, ready: rows.filter(row => row.stage === 'ready' && !row.observing).length, waiting: rows.filter(row => row.observing).length, active: rows.filter(row => row.owner).length, attention: rows.filter(row => row.attention).length + remedyItems.length + capacityItems.length + concurrencyItems.length + installation.attention.length + registry.attentionItems.length, proofAuthorityGaps: rows.filter(row => row.proofGaps.length).length, mergeable: rows.filter(row => row.mergeable).length, reviewsPending: reviews.pending.length, producersPending: sessions.producers.pending.length,
@@ -362,7 +361,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
       // Closed without delivery (model/closure.ts): never open, never delivered, counted only here.
       closed: snapshot.work.filter(isClosed).length },
     // Every attention item with the role that resolves it and the next command, work items first.
-    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner, ...classified(causes.get(row.key) ?? 'gate') }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
+    attentionItems: [...rows.flatMap(row => row.attention && row.attentionOwner ? [{ subject: row.key, text: row.attention, ...row.attentionOwner }] : []), ...remedyItems, ...capacityItems, ...concurrencyItems, ...installation.attentionItems, ...registry.attentionItems] as AttentionItem[],
     // Who reviews and merges (GY-1501): one line in supervised mode, null in autonomous mode.
     supervision: supervised,
     // What waits on the human, longest first, with how to answer; the roles out of capacity; each

@@ -6,7 +6,6 @@ import { formatAge } from '../../src/model/duration';
 import { groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
 import { releaseView, servedFor } from '../../src/model/release';
 import { stalledCards } from '../../src/model/actionless';
-import { groupFaults, statusFaults, workFaults } from '../../src/model/fault-classes';
 import { backlogCounts } from '../../src/model/machine-backlog';
 import type { Dashboard } from './dashboard';
 
@@ -36,13 +35,6 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   const byGroup = Object.fromEntries(groups.map(group => [group, board ? rowsOf(board.groups[group]) : []])) as Record<OpenGroup, Work[]>;
   const counts = Object.fromEntries(groups.map(group => [group, byGroup[group].length])) as Record<OpenGroup, number>;
   const stalls = new Map(stalledCards(work.filter(w => w.stage !== 'done' && !isClosed(w)), now).map(card => [card.item.id, card]));
-  // Open problems by fault class (GY-173): one count per shared cause, read from each open item's
-  // own record the same way the master loop reads it, and from the control plane's status — the
-  // App permissions, integration jobs and GitHub pause its notices show — so a
-  // cause behind several items or notices reads as one. A single problem is already its own row
-  // or notice, so the grouping is drawn once there are two to group.
-  const problems = [...work.filter(w => w.stage !== 'done' && !isClosed(w)).flatMap(w => workFaults(w, now)), ...statusFaults(status)];
-  const faults = problems.length > 1 ? groupFaults(problems) : [];
   // Shipped this week: delivered and served by the release, dated from when it was seen live.
   const recent = shippedThisWeek(work, now, release);
   // The latest is the newest merge: most real deliveries carry no release record, so ordering by
@@ -72,17 +64,6 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       <div className="heading-tools"><label className="search"><input aria-label="Search work" placeholder="Search by key or title" value={query} onChange={e => setQuery(e.target.value)}/></label>
         {admin && <button type="button" onClick={() => setCreating(true)}>＋ New work item</button>}</div></div>
     {status?.jobs?.length > 0 && <div className="notice danger">{status.jobs.length} integration update(s) failed: {status.jobs[0].error}</div>}
-    {/* Drawn whether or not any work exists: status-level faults stand without an item. */}
-    {faults.length > 0 && <section className="fault-classes" aria-label="Problems by class">
-      <h2>Problems by class <small>one cause, counted once per class</small></h2>
-      <ul>{faults.map(group => <li key={group.faultClass} data-fault-class={group.faultClass} title={group.meaning}><span className="mono">{group.faultClass}</span> <strong>{group.count}</strong> <small>{group.subjects.join(', ')}</small></li>)}</ul>
-    </section>}
-    {/* The pipeline doctor (GY-711): its last runs, newest first, as /api/status serves them. */}
-    {!!status?.doctor?.length && <section className="fault-classes" aria-label="Doctor" data-doctor-panel>
-      <h2>Doctor <small>finds and fixes stuck work every few minutes</small></h2>
-      <ul>{status.doctor.slice(0, 5).map((run: any) => <li key={run.at} data-doctor-run={run.at} data-doctor-state={run.state}>
-        <span className="mono">{String(run.at).slice(0, 16).replace('T', ' ')}</span> <strong>{run.findings?.length ?? 0}</strong> found · <strong>{run.actions?.length ?? 0}</strong> acted · <strong>{run.filed?.length ?? 0}</strong> filed <small>{run.state === 'reported' ? String(run.detail ?? '').slice(0, 140) : run.state}</small></li>)}</ul>
-    </section>}
     {work.length === 0 ? <div className="empty"><h2>No work yet.</h2><p>Create a work item, say what must be true when it is done, and an agent will pick it up.</p>{admin && <button type="button" onClick={() => setCreating(true)}>Create the first work item</button>}</div> : <>
       <div role="group" aria-label="Filter by group" className="tiles">{groups.map(group => <button type="button" key={group} className={`tile group-${group}${only === group ? ' selected' : ''}${counts[group] === 0 ? ' empty-tile' : ''}`} aria-pressed={only === group} data-tile={group} onClick={() => setOnly(only === group ? null : group)}>
         <span className="tile-label"><GroupDot group={group}/>{groupLabel[group]}</span><strong>{counts[group]}</strong><small>{group === 'up-next' ? upNextTile(board ? board.groups['up-next'].filter(match) : []) : groupMeaning[group]}</small>

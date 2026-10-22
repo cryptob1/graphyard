@@ -9,15 +9,13 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { cycleFaults, emptyDaemonState } from '../src/master-daemon.js';
-import { faultClassOf, workFaults } from '../src/model/fault-classes.js';
+import { emptyDaemonState } from '../src/master-daemon.js';
 import { leaseLapseCause } from '../src/model/escalation.js';
-import { doctorBounds, doctorPrompt } from '../src/daemon/doctor.js';
 import { preserveInterruptedAttempt } from '../src/daemon/effects.js';
 import { preservePartialWork } from '../src/master/launch.js';
 import { childRunner } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-07 clock is the explicit now handed to workFaults, cycleFaults and unsubmittedAttempt over fixtures derived from it; the DB tests build stamps relative to Date.now().
+// Time-bomb allowance (GY-1694): the 2026-10-07 clock is the explicit now handed to unsubmittedAttempt over fixtures derived from it; the DB tests build stamps relative to Date.now().
 
 // GY-1462: the 60-minute worker no-submission bound, enforced. An attempt that holds its lease past
 // the bound with no submission for its epoch is a stalled-gate fault however its lease renews (the
@@ -62,49 +60,29 @@ async function bound() {
   assert.equal(typeof declared.noSubmissionRenewalRefused, 'function', 'the server reads the bound to refuse renewal');
   return declared;
 }
-const unsubmittedFaults = <T extends { kind: string }>(faults: T[]) => faults.filter(fault => fault.kind === 'unsubmitted-attempt');
 
-test('unit:unsubmitted-attempt-fault — an attempt past the no-submission bound with no submission is a stalled-gate fault naming the item and epoch, however recently its lease renewed', async () => {
-  const { workerSubmissionBoundMs, unsubmittedAttempt } = await bound();
+test('unit:unsubmitted-attempt-fault — an attempt past the no-submission bound with no submission is named with the item and epoch, however recently its lease renewed', async () => {
+  const { workerSubmissionBoundMs, unsubmittedAttempt, unsubmittedAttemptText } = await bound();
   assert.equal(workerSubmissionBoundMs, 60 * minute, 'the bound is 60 minutes');
-  assert.equal(faultClassOf('unsubmitted-attempt'), 'stalled-gate', 'the kind is catalogued, not unclassified');
   // GY-1457 epoch 1: 60 m 11 s held, its lease renewed seconds ago.
   const late = held(60 * minute + 11_000);
-  const [fault, ...rest] = unsubmittedFaults(workFaults(late, clock));
-  assert.ok(fault && !rest.length, 'one fault for the attempt');
-  assert.equal(fault.faultClass, 'stalled-gate');
-  assert.equal(fault.subject, 'GY-1457');
-  assert.match(fault.text, /GY-1457 epoch 1 \(graphyard-claude-1\) has held its lease 0 minutes past the 60-minute worker bound without a submission/);
-  assert.match(fault.text, new RegExp(`lease renewed to ${late.lease!.expiresAt.replace(/[.]/g, '\\.')}`), 'the renewal does not hide it');
-  // Inside the bound, no lease, or a claim the record cannot date: no fault.
-  assert.deepEqual(unsubmittedFaults(workFaults(held(59 * minute), clock)), []);
-  assert.deepEqual(unsubmittedFaults(workFaults(held(2 * 60 * minute, { lease: null }), clock)), []);
+  const attempt = unsubmittedAttempt(late, clock);
+  assert.ok(attempt, 'the attempt is past the bound');
+  assert.equal(attempt.key, 'GY-1457');
+  const text = unsubmittedAttemptText(attempt);
+  assert.match(text, /GY-1457 epoch 1 \(graphyard-claude-1\) has held its lease 0 minutes past the 60-minute worker bound without a submission/);
+  assert.match(text, new RegExp(`lease renewed to ${late.lease!.expiresAt.replace(/[.]/g, '\\.')}`), 'the renewal does not hide it');
+  // Inside the bound, no lease, or a claim the record cannot date: no attempt.
+  assert.equal(unsubmittedAttempt(held(59 * minute), clock), null);
+  assert.equal(unsubmittedAttempt(held(2 * 60 * minute, { lease: null }), clock), null);
   assert.equal(unsubmittedAttempt(held(2 * 60 * minute, { lastAssignment: undefined }), clock), null);
   // The pipeline timeline dates the claim when the assignment does not name the epoch.
   const timeline = { ...held(0, { lastAssignment: undefined }), pipeline: { attempts: [{ epoch: 1, claimedAt: iso(-61 * minute) }] } } as unknown as Work;
-  assert.equal(unsubmittedFaults(workFaults(timeline, clock)).length, 1);
+  assert.ok(unsubmittedAttempt(timeline, clock));
   // An earlier epoch's candidate is no candidate for this epoch.
   const reworked = held(61 * minute, { epoch: 2, lease: { owner: 'graphyard-claude-1', epoch: 2, expiresAt: iso(110_000) }, lastAssignment: { owner: 'graphyard-claude-1', epoch: 2, claimedAt: iso(-61 * minute) },
     submission: { epoch: 1, pr: 40 } as Work['submission'], candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 40, branch: 'graphyard/gy-1457-1', author: 'graphyard-claude-1' } });
-  assert.match(unsubmittedFaults(workFaults(reworked, clock))[0]?.text ?? '', /GY-1457 epoch 2/);
-});
-
-test('integration:cycle-faults-unsubmitted-attempt — the loop\'s faults step records the unsubmitted attempt past the reclaim bound while its lease renews and its session reports activity, and leaves one inside that bound to the reclaim it promises', async () => {
-  const { workerReclaimBoundMs } = await bound();
-  const session = { id: 'graphyard-claude-1:1', kind: 'implementation', principal: 'graphyard-claude-1', epoch: 1, runtime: 'claude', host: 'machine-a', workspace: null, tab: null,
-    pane: 'w1:p1', agentName: 'graphyard-claude-1', role: null, head: null, attach: 'herdr pane attach w1:p1', transcript: null, subject: 'GY-1457', state: 'running',
-    observed: 'working', observedAt: iso(-5_000), outcome: null, startedAt: iso(-61 * minute), updatedAt: iso(-5_000), endedAt: null };
-  const item = held(workerReclaimBoundMs + 11_000, { sessions: [session] } as Partial<Work>);
-  const observed = unsubmittedFaults(cycleFaults(emptyDaemonState(config()), [item], clock, { config: config() }));
-  assert.equal(observed.length, 1, 'the faults step records it');
-  assert.equal(observed[0]!.faultClass, 'stalled-gate');
-  assert.match(observed[0]!.text, /GY-1457 epoch 1 .* has held its lease 60 minutes past the 60-minute worker bound/);
-  // GY-1557: inside the reclaim bound the fault is the record's to name (workFaults, master status) and the loop's reclaim step to end, not the faults step's to count;
-  // a minute inside the worker bound it is the ordinary pace of work for both.
-  const named = held(60 * minute + 11_000, { sessions: [session] } as Partial<Work>);
-  assert.equal(unsubmittedFaults(workFaults(named, clock)).length, 1, 'master status names it from the worker bound');
-  assert.deepEqual(unsubmittedFaults(cycleFaults(emptyDaemonState(config()), [named], clock, { config: config() })), [], 'the loop counts it only once its own remedy is overdue');
-  assert.deepEqual(unsubmittedFaults(cycleFaults(emptyDaemonState(config()), [held(59 * minute, { sessions: [session] } as Partial<Work>)], clock, { config: config() })), []);
+  assert.match(unsubmittedAttemptText(unsubmittedAttempt(reworked, clock)!), /GY-1457 epoch 2/);
 });
 
 test('unit:renew-lease-nosubmission-refusal — the server refuses renewal ten minutes past the loop\'s reclaim bound unsubmitted, not before, and not while submission progress is fresh', async () => {
@@ -130,29 +108,15 @@ test('unit:nosubmission-bound-moot-after-submit — an epoch with a submission i
   const submitted = held(5 * 60 * minute, { submission: { epoch: 1, pr: 41 } as Work['submission'] });
   assert.equal(unsubmittedAttempt(submitted, clock), null);
   assert.equal(noSubmissionRenewalRefused(submitted, clock), false);
-  assert.deepEqual(unsubmittedFaults(workFaults(submitted, clock)), []);
   assert.equal(leaseLapseCause(submitted, { epoch: 1, expiresAt: iso(0) })?.cause, 'submitted', 'its lapse is the submission\'s, never the bound\'s');
 });
 
-test('unit:doctor-worker-bound-matches-product — the doctor\'s worker bound is the product bound, and its prompt names it', async () => {
-  const { workerSubmissionBoundMs } = await bound();
-  assert.equal(doctorBounds.workerMinutes * minute, workerSubmissionBoundMs);
-  const prompt = doctorPrompt({ repository: 'owner/project', cliPath: launcher }, { items: [], faults: [] });
-  assert.ok(prompt.includes(`more than ${workerSubmissionBoundMs / minute} min without a submission`), 'the doctor checklist names the product bound');
-});
-
-test('unit:single-nosubmission-bound — one module declares the no-submission bound, one predicate faults and stops renewing, and the doctor reads that declaration', async () => {
+test('unit:single-nosubmission-bound — one module declares the no-submission bound, one predicate names the attempt and stops renewing', async () => {
   const declared = await bound();
-  const doctor = await import('../src/daemon/doctor.js');
-  assert.equal(doctor.doctorBounds.workerMinutes * minute, declared.workerSubmissionBoundMs, 'the doctor bound and the product bound are one value');
   const source = new URL('../src/', import.meta.url);
   const files = (await readdir(source, { recursive: true })).filter(file => file.endsWith('.ts')).map(file => file.replaceAll('\\', '/'));
   const texts = new Map(await Promise.all(files.map(async file => [file, await readFile(new URL(file, source), 'utf8')] as const)));
   const home = 'model/attempt-bound.ts';
-  // The doctor's worker bound is read from the declaration, never restated as a literal.
-  const doctorText = texts.get('daemon/doctor.ts')!;
-  assert.match(doctorText, /import \{[^}]*\bworkerSubmissionBoundMs\b[^}]*\} from '\.\.\/model\/attempt-bound\.js'/, 'the doctor imports the product bound');
-  assert.match(doctorText, /workerMinutes: workerSubmissionBoundMs \/ 60_000/, 'the doctor derives workerMinutes from it');
   // No second bound constant: every no-submission, submission-bound or reclaim-bound declaration lives in attempt-bound.ts.
   const boundDeclaration = /\b(?:const|let|var)\s+(\w*(?:[Nn]oSubmission|[Ss]ubmissionBound|[Ww]orkerReclaim|[Uu]nsubmitted)\w*)\s*[:=]/g;
   const boundFunction = /\bfunction\s+(\w*(?:[Nn]oSubmission|[Ss]ubmissionBound|[Uu]nsubmitted)\w*)\s*\(/g;
@@ -167,16 +131,12 @@ test('unit:single-nosubmission-bound — one module declares the no-submission b
     assert.match(texts.get(home)!, new RegExp(`export (?:const|function) ${name}\\b`), `${home} declares ${name}`);
   assert.equal(declared.workerReclaimBoundMs, 2 * declared.workerSubmissionBoundMs);
   assert.equal(declared.workerNoSubmissionRefusalMs, declared.workerReclaimBoundMs + 10 * minute);
-  // One fault path: the unsubmitted-attempt fault is observed in one place, from the one predicate.
-  const faultSites = [...texts].flatMap(([file, text]) => [...text.matchAll(/'unsubmitted-attempt'/g)].map(() => file));
-  assert.deepEqual(faultSites.sort(), ['model/fault-classes.ts', 'model/fault-classes.ts'], 'the kind is catalogued once and observed once');
-  assert.match(texts.get('model/fault-classes.ts')!, /observe\('unsubmitted-attempt', work\.key, unsubmittedAttemptText\(unsubmitted\)\)/);
   // One stop-renewing path: the loop's end and the server's refusal both judge the attempt by unsubmittedAttempt.
   assert.match(texts.get('daemon/cycle-reclaim.ts')!, /unsubmittedAttempt\(item, clock\)/, 'the loop ends the attempt from the one predicate');
   assert.match(texts.get('engine.ts')!, /noSubmissionRenewalRefused\(work, now\.getTime\(\)\)/, 'the server refuses renewal from the one predicate');
-  assert.match(texts.get(home)!, /function noSubmissionRenewalRefused[^{]*\{\s*const attempt = unsubmittedAttempt\(work, now\)/, 'the refusal reads the same predicate the fault and the end read');
+  assert.match(texts.get(home)!, /function noSubmissionRenewalRefused[^{]*\{\s*const attempt = unsubmittedAttempt\(work, now\)/, 'the refusal reads the same predicate the end reads');
   const callers = [...texts].filter(([file, text]) => file !== home && /\bunsubmittedAttempt\(/.test(text)).map(([file]) => file).sort();
-  assert.deepEqual(callers, ['daemon/cycle-reclaim.ts', 'model/fault-classes.ts'], 'only the fault and the loop\'s end read the predicate directly');
+  assert.deepEqual(callers, ['daemon/cycle-reclaim.ts'], 'only the loop\'s end reads the predicate directly');
 });
 
 // The server side: renewal refused, lapse, reclaim, branch kept.
@@ -212,14 +172,14 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
 test('integration:unsubmitted-attempt-reclaimed — past two bounds unsubmitted the server refuses renewal, the lease lapses, and the item goes to a fresh attempt', async () => {
-  await bound();
+  const { unsubmittedAttempt } = await bound();
   let work = await claimed('unsubmitted-reclaimed');
   const epoch = work.epoch;
-  // One bound past: the fault stands, the lease still renews.
+  // One bound past: the attempt is named, the lease still renews.
   work = await age(work, 61 * minute);
   work = await heartbeat(work);
   assert.equal(work.lease?.epoch, epoch, 'renewed inside the second bound');
-  assert.equal(unsubmittedFaults(workFaults(work, Date.now())).length, 1);
+  assert.ok(unsubmittedAttempt(work, Date.now()));
   // Past the backstop: refused, as a renewal after submission is (a 409 the supervisor reads as definite).
   await age(work, 130 * minute + minute);
   await assert.rejects(heartbeat(work), (error: Error & { status?: number }) =>
@@ -237,7 +197,7 @@ test('integration:unsubmitted-attempt-reclaimed — past two bounds unsubmitted 
   work = await engine.execute(replacement, 'claim', work.id, {}, id());
   assert.equal(work.epoch, epoch + 1);
   assert.equal(work.lease?.owner, replacement.id);
-  assert.deepEqual(unsubmittedFaults(workFaults(work, Date.now())), [], 'the fresh attempt starts its own clock');
+  assert.equal(unsubmittedAttempt(work, Date.now()), null, 'the fresh attempt starts its own clock');
 });
 
 test('integration:unsubmitted-end-keeps-branch — the ended attempt\'s work is committed on its branch by the existing preserve path and its workspace stays on the record', async () => {

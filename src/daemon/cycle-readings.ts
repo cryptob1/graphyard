@@ -1,10 +1,10 @@
 // Concern: step 7c — the loop's own due readings of loop-owned observation items on the serving release (GY-1779): taken, recorded as trusted evidence, closed on a pass, escalated on a fail.
-import { followUpRequest, patternOfProof, type PatternProjection, type PatternReader } from '../model/observation-window.js';
-import { loopObservation, loopObservationProofs, postDeployProofPrefix, postDeployProofs, type Work } from '../model.js';
+import { followUpRequest } from '../model/observation-window.js';
+import { loopObservation, loopObservationProofs, postDeployProofPrefix, type Work } from '../model.js';
 import { loopReadingOn, observationPass } from '../model/loop-observation.js';
 // Types only: master-verification.ts imports the daemon, so the filer itself arrives through the effects.
 import type { PostDeployFiler } from '../master-verification.js';
-import type { PostDeployReader, PostDeployReading, ProjectionRead } from '../master/post-deploy-readings.js';
+import type { PostDeployReader, PostDeployReading } from '../master/post-deploy-readings.js';
 import { type DaemonAction, type DaemonState, message } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged } from './decisions.js';
@@ -23,8 +23,6 @@ export interface ReadingEffects {
   closeObservation?: (work: Work, release: string, reason: string, key: string) => Promise<unknown>;
   /** The post-deploy-checks filer verify-deployment uses (`localPostDeployChecks`): the parent's check for the proof on the serving release. Without it the parent's own record is not consulted. */
   postDeployFiler?: PostDeployFiler;
-  /** The intervention report's reading for a pattern (GY-1698), for the filer's projections. */
-  readPattern?: PatternReader;
   /** The live reading of a proof this host can take, or why it cannot (master/post-deploy-readings.ts). */
   readPostDeploy?: PostDeployReader;
 }
@@ -45,22 +43,6 @@ const short = (sha: string) => sha.slice(0, 12);
  * read costs one ask per backoff step rather than one per cycle, and a loop failure on its own.
  */
 export const readingDue = (previous: DaemonAction | undefined, cycle: number) => readyToRetry(previous?.state === 'waiting' ? { ...previous, state: 'failed' } : previous, cycle);
-
-/**
- * The report's projections for the parent's pattern proofs, read once per item as filePostDeployFollowUps
- * reads them, and threaded through to the filer and the proof's reader so the report is read once: a
- * reader that fails leaves the proof without one for the filer and names the failure to the reader.
- */
-async function projections(parent: Pick<Work, 'criteria'>, patterns?: PatternReader): Promise<{ filer: Record<string, PatternProjection | null>; reader: Record<string, ProjectionRead> }> {
-  const filer: Record<string, PatternProjection | null> = {}, reader: Record<string, ProjectionRead> = {};
-  if (!patterns) return { filer, reader };
-  for (const proof of new Set(parent.criteria.flatMap(postDeployProofs))) {
-    const pattern = patternOfProof(proof);
-    if (!pattern) continue;
-    try { filer[proof] = await patterns(pattern); reader[proof] = { read: filer[proof] }; } catch (error) { filer[proof] = null; reader[proof] = { error: message(error) }; }
-  }
-  return { filer, reader };
-}
 
 /** The item proof a follow-up is filed with for a parent's post-deploy proof (master-verification's filer). */
 const followUpItemProof = (parentProof: string) => `manual:${parentProof.slice(postDeployProofPrefix.length).replace(/\//g, '-')}-on-serving-release`;
@@ -126,7 +108,7 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     // failure itself is noted under the reading action, where GY-1779 records what a pass ended in.
     const pace = async (detail: string) => {
       const key = readingCloseKey(item, release);
-      await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'failed', detail: detail.slice(0, 2000), attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist, null);
+      await record(state, key, { kind: 'deployment', work: item.key, principal: null, state: 'failed', detail: detail.slice(0, 2000), attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist);
     };
     if (!effects.closeObservation) {
       const detail = `Recorded ${item.key}'s passing reading on release ${short(release)}, and this loop cannot close it: it runs without the coordinator's close effect`;
@@ -175,14 +157,13 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     if (request && !carried(parent.key)) return note('waiting', `${item.key}'s reading is due, and the release the control plane serves (${short(release)}) is not observed carrying ${parent.key}'s merge ${short(parent.delivery!.mergeSha)}; the loop reads it on a release that does`);
     const baseSha = request ? parent.delivery!.mergeSha : release;
     const proofs = loopObservationProofs(item) ?? [];
-    // The reads — the report once, then the parent's own check through the filer and the proof's reader —
+    // The reads — the parent's own check through the filer, then the proof's reader —
     // under the step's budget (GY-1354): a production coordinator read can take 30 s, so one left running
     // at the bound is deferred to the cycle that finds it settled, never awaited past the deadline.
     const take = async (): Promise<Taken[]> => {
       const readings: Taken[] = [];
-      const read = await projections(parent, effects.readPattern);
       const servedAt = served!.at ? { servedAt: served!.at } : {};
-      const checks = effects.postDeployFiler ? await effects.postDeployFiler({ work: parent, release, now: new Date(now()).toISOString(), projections: read.filer, ...servedAt }) : [];
+      const checks = effects.postDeployFiler ? await effects.postDeployFiler({ work: parent, release, now: new Date(now()).toISOString(), ...servedAt }) : [];
       for (const proof of proofs) {
         if (loopReadingOn(item, proof, release)?.result === 'pass') { readings.push({ proof, reading: { result: 'pass', detail: 'already recorded' } }); continue; }
         // A follow-up item proof reads through the parent post-deploy proof it was filed for (the request's own, or one added later with its own parent check); a proof no parent proof stands behind is never read as another.
@@ -192,7 +173,7 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
         // The parent's own check first: the filer verify-deployment uses reads whether the parent already carries a trusted passing observation of the proof on this release.
         const check = checks.find(entry => entry.proof === parentProof);
         if (check?.result === 'observed') { readings.push({ proof, reading: { result: 'pass', detail: `the post-deploy-checks filer reads ${parent.key} ${check.criterion}'s ${parentProof} observed on release ${short(release)}: a trusted passing record is bound there` } }); continue; }
-        const reading = effects.readPostDeploy ? await effects.readPostDeploy({ proof: parentProof, parent, item, criterion, release, now: new Date(now()), ...(parentProof in read.reader ? { projection: read.reader[parentProof] } : {}) })
+        const reading = effects.readPostDeploy ? await effects.readPostDeploy({ proof: parentProof, parent, item, criterion, release, now: new Date(now()) })
           : { unavailable: `no reader of ${parentProof} is configured on this loop` };
         readings.push({ proof, reading });
       }

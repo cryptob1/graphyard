@@ -1,12 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { daemonEffects, emptyDaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/master-daemon.js';
 import { loadedRevision, nameReclaimBoundMs, readReclaimState, readResources, reclaimResources, resourceAttention, selfUpgradeBoundMs, unownedPaneConfirmMs, type ResourceInputs } from '../src/master-resources.js';
 import { resourceStatus } from '../src/master-status.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-08 snapshot, session and reflog instants are replayed against the explicit `now`/`clock` of the same snapshot; the one Date.now() case builds its own relative start and reflog.
@@ -45,8 +44,8 @@ const minute = 60_000;
 const config = (overrides: Record<string, unknown> = {}): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent/coordinator.token',
   cliPath: '/nonexistent/graphyard.mjs', repository: 'cryptob1/graphyard', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-graphyard',
   autoMerge: true, mergeMethod: 'merge', workers: [], ...overrides });
-/** The resources faults on one resource's subjects, classified as the loop classifies them; the host's own /tmp or disk state never decides a replay. */
-const resourceFaults = (items: { subject: string; text: string }[], resource: string) => classifyAttention(items as any).filter(item => item.faultClass === 'resources' && item.subject.startsWith(`resource:${resource}`)).map(item => item.subject);
+/** The resources attention on one resource's subjects; the host's own /tmp or disk state never decides a replay. */
+const resourceFaults = (items: { subject: string; text: string }[], resource: string) => items.filter(item => item.subject.startsWith(`resource:${resource}`)).map(item => item.subject);
 
 // ---- Instance 1: agent-names:claude-secondary, a pane launched after the snapshot ----------------
 const claudeSecondary = { name: 'claude-secondary', principal: 'graphyard-claude-2', agentName: 'graphyard-claude-2', mode: 'launch', kind: 'claude', credentialFile: '/nonexistent/graphyard-claude-2.token', agentArgs: [], environment: {} };
@@ -77,20 +76,7 @@ const inputs = (overrides: Partial<ResourceInputs>): ResourceInputs => ({ now: s
   profiles: { workers: [claudeSecondary as ResourceInputs['profiles']['workers'][number]], reviewers: [], producers: [] }, ...overrides });
 const faults = (input: ResourceInputs, resource = 'agent-names') => resourceFaults(resourceAttention(readResources(input)), resource);
 const nameReading = (input: ResourceInputs) => readResources(input).find(entry => entry.id === 'agent-names:claude-secondary')!;
-/** The loop's own wiring of the report-only attention, as faultStep reads it: the snapshot's work and instant, Herdr as read later in the cycle. */
-async function loopReport(work: Work[], agents: HerdrAgent[], seen: Record<string, string> = {}) {
-  const root = await temporaryDirectory('gy-1547-root');
-  const token = join(root, 'coordinator.token');
-  await writeFile(token, 'coordinator-token-'.padEnd(48, 'c'), { mode: 0o600 });
-  if (Object.keys(seen).length) {
-    await mkdir(join(root, '.graphyard'), { recursive: true, mode: 0o700 });
-    await writeFile(join(root, '.graphyard', 'resource-reclaims.json'), JSON.stringify({ version: 1, reports: [], seen }), { mode: 0o600 });
-  }
-  const fetcher = (async () => new Response(JSON.stringify({}), { status: 200 })) as unknown as typeof fetch;
-  const effects = daemonEffects(root, config({ credentialFile: token, workers: [claudeSecondary] }), { snapshot: async () => ({ work, now: iso(snapshotAt) }), mutate: async () => { throw new Error('not used'); }, executor: { principal: 'coordinator', instance: 'gy-1547' }, fetcher } as any);
-  const { items } = await effects.reportedAttention!(work, { github: true } as any, { agents, available: true, approvals: [], loop: null as any, now: iso(snapshotAt) });
-  return resourceFaults(items, 'agent-names');
-}
+const loopReport = async (work: Work[], agents: HerdrAgent[], seen: Record<string, string> = {}) => faults(inputs({ work, agents, reclaimSeen: seen }));
 
 test('manual:fault-class-resources — GY-1547 agent-names:claude-secondary: a pane launched after the cycle\'s snapshot, which no session in it names, is no fault while the reclaim pass has not judged it', async () => {
   assert.deepEqual(await loopReport(snapshotWork(), [pM77()]), [], 'REPRODUCE: the base settled the new pane from the principal\'s sessions on other panes (last active 08:20Z) and read it overdue at once');

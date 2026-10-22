@@ -21,8 +21,7 @@ import { decisionKey } from '../daemon/reconcile.js';
  * the loop's to withdraw, never reworked. It stays open where the loop sends the master: to answer a refusal
  * (`--precedent`), when the loop withholds the round because the stopped worker is unverified, when
  * the loop has no operator-agent identity to request decisions, and on any ground the loop does not
- * read. A hand request never carries a grounds binding: that is how the intervention report tells
- * the two apart.
+ * read. A hand request never carries a grounds binding: that is what tells the two apart.
  *
  * One more is refused whatever it answers: a rework for a head whose producer requests were spent
  * without any session acting — every launch refused on an account's quota, never started (GY-1153).
@@ -69,7 +68,7 @@ const refused = (work: Work, why: string) => `${work.key} is system-driven: ${wh
 /** Why a hand rework restates the loop's own round, or null when it is the master's to request. */
 export function loopRework(work: Work, action: string, input: unknown, config: ReviewCapConfig, loop: HandReworkLoop): string | null {
   if (action !== 'rework') return null;
-  // The binding marks the loop's own request (GY-407), which the intervention report reads as its round.
+  // The binding marks the loop's own request (GY-407).
   if ((input as { binding?: unknown } | null)?.binding !== undefined) return `${work.key}: a grounds binding marks the loop's own rework request; a hand rework carries none, and is recorded as the master's`;
   if (!systemDriven(work) || !loop.requestsDecisions) return null;
   const needed = neededDecision(work, config, loop.baseFailed ?? undefined, loop.exhausted ?? [], loop.mechanical ?? []);

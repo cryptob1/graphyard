@@ -7,11 +7,7 @@ import { fileURLToPath } from 'node:url';
 import * as master from '../src/master.js';
 import { dispatchReserved, dispatchWork, masterConfigSchema, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { blockerEscalateMs } from '../src/daemon/cycle-blockers.js';
 import { profileHealth } from '../src/daemon/sessions.js';
-import * as failures from '../src/daemon/dispatch-failures.js';
-import { dispatchFailureBlockAfter, dispatchFailureBlocker, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
-import { classifyBlocker, environmentalBlockerClasses } from '../src/model/blocker-class.js';
 import { workerSlotWait } from '../src/model/action-kinds.js';
 import type { Work } from '../src/model.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
@@ -22,12 +18,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Herdr session reporting idle or done, profileHealth read every profile as unlaunchable, and both
 // dispatchers refused every item ("No worker profile can take …") until a person closed the panes.
 // A finished session no live assignment owns now frees its profile: the dispatch closes it, bounded,
-// and launches as on a profile with no agent. Fleet-idle refusals never count toward a dispatch-
-// failure blocker, and a dispatch-failure blocker clears once a profile can take a launch again.
+// and launches as on a profile with no agent.
 
 // Reached through their modules, so this file loads on a base without them and each case fails on its own.
 const reclaimableAgent = (...args: Parameters<typeof master.reclaimableAgent>): boolean => master.reclaimableAgent(...args);
-const fleetIdleCause: typeof failures.fleetIdleCause = cause => failures.fleetIdleCause(cause);
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const workerToken = 'worker-token-'.padEnd(40, 'x');
@@ -153,55 +147,6 @@ test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a f
   assert.deepEqual(dispatched, ['GY-1310:one'], 'a working fleet takes nothing');
 });
 
-test('unit:dispatch-blocker-clears-on-fleet-recovery — fleet-idle failures never reach the bound, and a dispatch-failure blocker clears once a profile can launch', async () => {
-  // No blocker accumulates while the sole cause is the fleet: across spent epochs the count stays at zero.
-  const counted: DaemonState = emptyDaemonState(config(fleet));
-  const idle = 'no worker profile can take GY-1310: one (Herdr agent agent-one is idle); two (Herdr agent agent-two is done)';
-  for (const epoch of [0, 1, 2, 3, 4]) assert.equal(noteDispatchFailure(counted, { id: 'id-GY-1310', key: 'GY-1310', epoch }, idle, observedAt).count, 0);
-  assert.deepEqual(counted.dispatchFailures, {}, 'no run is kept, so the bound is never reached');
-  for (const cause of [idle, 'Launch profile agent name agent-one is already visible in Herdr; pick another profile', 'Herdr agent agent-one is idle with no live assignment, and its bounded close failed: timeout'])
-    assert.ok(fleetIdleCause(cause), cause);
-  // An item's own cause still counts and still blocks.
-  const own = 'fatal: a branch named graphyard/gy-1310-1 already exists';
-  let run = noteDispatchFailure(counted, { id: 'id-GY-1310', key: 'GY-1310', epoch: 0 }, own, observedAt);
-  for (const epoch of [1, 2]) run = noteDispatchFailure(counted, { id: 'id-GY-1310', key: 'GY-1310', epoch }, own, observedAt);
-  assert.equal(run.count, dispatchFailureBlockAfter);
-
-  // A recorded dispatch-failure blocker is its own environmental class, whatever its cause quotes.
-  const blocker = `${dispatchFailureBlocker({ ...run, cause: `${idle} HTTP 502 Permission denied` })} [attempts 1, 2, 3 each ended without a submission]`;
-  assert.equal(classifyBlocker(blocker).class, 'dispatch-failure');
-  assert.ok(environmentalBlockerClasses.includes('dispatch-failure'));
-  // An item's own cause is not the fleet's: no launchable profile resolves it, so it stays for the operator (GY-1078).
-  assert.notEqual(classifyBlocker(dispatchFailureBlocker(run)).class, 'dispatch-failure');
-
-  // The loop's blocker step probes it from this cycle's Herdr: failing while the fleet is busy, passing once a profile can launch.
-  const probes: { result: string; detail: string }[] = [];
-  let agents: HerdrAgent[] = drained().map(agent => ({ ...agent, agent_status: 'working' }));
-  const blocked = work('GY-1310', { blocker, epoch: 3 });
-  // The cycle reads its clock from the snapshot, so a later cycle is a later snapshot.
-  let elapsed = 0;
-  const cycle = (ms: number) => { elapsed = ms; return runCycle(config(fleet), state, effects, () => clock + ms); };
-  const effects: DaemonEffects = {
-    agents: async () => agents, herdr: () => ({ agents, available: true }), stopSupervisor: () => {},
-    credentials: async configured => available(configured), snapshot: async () => ({ work: [blocked], now: new Date(clock + elapsed).toISOString() }),
-    closeSession: () => {}, dispatch: async () => ({}), recordDeployment: async () => {}, persist: async () => {},
-    recordBlockerProbe: async (item, probe) => { probes.push(probe); return item; },
-    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
-  };
-  const state = emptyDaemonState(config(fleet));
-  await cycle(0);
-  assert.equal(probes.at(-1)?.result, 'fail', 'no profile can take a launch while every session works');
-  assert.match(probes.at(-1)!.detail, /one \(Herdr agent agent-one is working\)/);
-  // A fleet that stays busy past the escalation bound is reported to the master once, like every environmental class.
-  await cycle(blockerEscalateMs);
-  await cycle(blockerEscalateMs + 20_000);
-  assert.equal(Object.values(state.actions).filter(action => /GY-1310 is blocked \(dispatch-failure\) and its probe has failed since .*reported to the master/.test(action.detail ?? '')).length, 1);
-  agents = drained();
-  await cycle(blockerEscalateMs + 40_000);
-  assert.deepEqual([probes.at(-1)?.result, probes.at(-1)?.detail], ['pass', 'profile one is launchable'], 'the fleet drained into launchable profiles, so the blocker clears without graphyard unblock');
-  assert.ok(Object.values(state.actions).some(action => /Cleared GY-1310's dispatch-failure blocker/.test(action.detail ?? '')));
-});
-
 test('unit:dispatch-refusal-names-agent-remedy — the per-profile reason names the agent state and, for a finished session, the remedy', async () => {
   const [reason] = health(drained(), [work('GY-1308', { lease: liveLease('one-principal') })]).map(entry => entry.reason);
   assert.equal(reason, "Herdr agent agent-one is idle under GY-1308's live lease; remedy: bounded close or relaunch once that lease ends, or herdr pane close pane-one on the host");
@@ -221,7 +166,5 @@ test('unit:dispatch-refusal-names-agent-remedy — the per-profile reason names 
     const failed = await dispatchWork(fixture.root, work('GY-2'), one, herdr.agents.map(agent => ({ ...agent })), herdr.run, [work('GY-2')], claims.prepare, claims.release, 1, new Date().toISOString(),
       { closePane: async () => { throw new Error('Herdr still reports pane pane-stuck after close'); } }).then(() => null, error => error as Error);
     assert.match(failed?.message ?? '', /^Herdr agent agent-one is done with no live assignment, and its bounded close failed: Herdr still reports pane pane-stuck after close; remedy: close pane pane-stuck on the host \(herdr pane close pane-stuck\) or relaunch Herdr$/);
-    assert.ok(fleetIdleCause(failed!.message), 'and it never counts toward a dispatch-failure blocker');
-    assert.equal(claims.claims.size, 0, 'nothing was claimed');
   } finally { await fixture.cleanup(); }
 });
