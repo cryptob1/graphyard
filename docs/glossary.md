@@ -23,7 +23,7 @@ A running agent instance. **Canonical usage:** *session*; host: *runtime*.
 
 ### 6. Independent reviewer and proof producer
 
-*Reviewer*: non-author identity approving exact head; *proof producer*: `producer` granted named proofs. Neither implements. **Canonical usage:** *reviewer*, *proof producer*.
+*Reviewer*: non-author identity approving exact head; *proof producer*: `producer` whose roster entry names proofs. Neither implements. **Canonical usage:** *reviewer*, *proof producer*.
 
 ### 7. Graphyard control plane
 
@@ -42,12 +42,12 @@ Role | Held by | May | Never
 | `coordinator` | Master loop | Dispatch, reconcile merges | Implement, prove
 | `slice-lead` | Slice lead | Rule, hold | Implement, merge
 | `worker` | Worker | Claim, heartbeat, register, submit | Satisfy acceptance
-| `producer` | CI, runner, observer | Report granted proofs | Prove own work
+| `producer` | CI, runner, observer | Report roster proofs | Prove own work
 | `reader` | Dashboards | Read | Mutate
 
 ## Who decides
 
-Master applies `release`, `unblock`, `requirements`, `rework`, `close`, `grant` and `attest` at once under its operator-agent identity. Human keeps goals and priorities, money and accounts, credentials for people; those [park](master-agent-reference.md#items-and-human-waits).
+Master applies `release`, `unblock`, `requirements`, `rework`, `close` and `attest` at once under its operator-agent identity. Human keeps goals and priorities, money and accounts, credentials for people; those [park](master-agent-reference.md#items-and-human-waits).
 
 ## Diagram legend
 

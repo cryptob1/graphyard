@@ -63,8 +63,8 @@
 <text x="32" y="930.2" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">One identity the master</text>
 <text x="32" y="948.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">uses: applies release,</text>
 <text x="32" y="967.2" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">unblock, requirements,</text>
-<text x="32" y="985.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">rework, close, grant and</text>
-<text x="32" y="1004.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">attest at once.</text>
+<text x="32" y="985.7" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">rework, close and attest at</text>
+<text x="32" y="1004.1" font-size="14" font-weight="400" fill="#e1f3c8" text-anchor="start">once.</text>
 <rect x="32" y="1020.9200000000001" width="125.2" height="24" rx="12" fill="#111714" stroke="#c5e69b" stroke-width="1.5" stroke-dasharray="3 3"/>
 <text x="40" y="1038.5" font-size="13" font-weight="400" fill="#c5e69b" text-anchor="start" font-family="ui-monospace, SFMono-Regular, Menlo, monospace">operator-agent</text>
 <rect x="304" y="881.4000000000001" width="236" height="125.7" rx="4" fill="#182a36" stroke="#8fc1e6" stroke-width="2"/>

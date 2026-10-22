@@ -16,7 +16,7 @@ No endpoint sets lifecycle state.
 
 ## Reads
 
-`GET /healthz` (unauthenticated); `/api/status`: principal, integrations, jobs, `mergeWriter`, `leadTime`, clock; `/api/github/*` answers 404. `GET /api/work/ID|KEY`: one item; `/api/work`: the fleet (open items whole, settled deliveries summarized), `?pr=N` only the item whose candidate or submission carries that legacy number (else `[]`).
+`GET /healthz` (unauthenticated); `/api/status`: principal, integrations, jobs, `mergeWriter`, clock; `/api/github/*` answers 404. `GET /api/work/ID|KEY`: one item; `/api/work`: the fleet (open items whole, settled deliveries summarized), `?pr=N` only the item whose candidate or submission carries that legacy number (else `[]`).
 
 ## Leases, evidence, pipeline
 
@@ -38,7 +38,7 @@ Claims last 120s, renewed every ≤30s; owner mutations carry epoch. Register br
 
 ### Evidence and pipeline
 
-`POST /api/work/UUID/evidence` (`proof`, `sha`, `baseSha`, `policyRevision`, `result`, `executed`): the server sets identity, time, trust; ungranted proofs store untrusted; later failures supersede passes; `POST /api/work/:id/revoke` (`admin`) withdraws one tuple's records. Lifecycle commands append to each item's `pipeline`, never moving a gate.
+`POST /api/work/UUID/evidence` (`proof`, `sha`, `baseSha`, `policyRevision`, `result`, `executed`): the server sets identity, time, trust; proofs outside the roster's `--proof` patterns store untrusted; later failures supersede passes; `POST /api/work/:id/revoke` (`admin`) withdraws one tuple's records. Lifecycle commands append to each item's `pipeline`, never moving a gate.
 
 ## Other commands and routes
 

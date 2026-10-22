@@ -7,24 +7,18 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 1. **Ready**: released, unblocked, criteria name proofs.
 2. **Build**: worker claims lease and worktree, submits the exact commit, pushes nothing.
-3. **Review**: independent reviewer approves the exact commit.
+3. **Review**: a [sensitive](#the-one-review-rule) commit waits for one independent approval.
 4. **Test**: the merge writer trial-merges onto base, runs build and tests.
-5. **Acceptance**: granted producers report the [lane](#risk-lanes) proofs.
+5. **Acceptance**: roster producers report the criteria's proofs.
 6. **Done**: Graphyard rechecks gates, pushes base, observes.
 
 ## From intent to work items
 
 The master files items (`master create`) and releases backlog itself (`master release`); an item of any size is dispatched whole. Review follow-ups are ordinary backlog items.
 
-## Risk lanes
+## The one review rule
 
-**Risk lane** (`low`/`medium`/`high`) is set by paths.
-
-- **High** (4h): store, auth, server, principals, public API, operator agent, proof grants, install, deploy. Producer proofs, `manual:` attestations.
-- **Medium** (60min): remainder.
-- **Low** (30min): test-only, docs-only, single-module. Required CI, one approval.
-
-**Risk class** (`sensitive`/`normal`; unknown: sensitive): delta paths vs `graphyard.json` `risk.sensitive` (generic default), in `graphyard status`. **Review timing**: sensitive before merge, normal after unless `review.normalChanges: pre-merge` ([delivery](delivery.md)).
+A head whose merge delta touches a `graphyard.json` `risk.sensitive` path (generic default; unknown delta: sensitive) waits for one independent approval before the merge writer merges it. Any other head merges on its passing trial and is reviewed after the merge; a blocking finding becomes a follow-up item.
 
 ## Who holds which authority
 

@@ -29,4 +29,4 @@ The control plane is every install's only merge writer: nothing sets another, an
 
 ## Measures
 
-Weekly: defects reaching production (escapes), merge-queue wait, human touches. Deferred until one demands it: pre-merge review for medium risk, a per-test flake ledger.
+None is recorded: Graphyard keeps no throughput, lead-time or latency reading (GY-2876).

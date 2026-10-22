@@ -31,8 +31,8 @@ Unacted producer requests relaunch on untried profile.
 
 ## Merge trial
 
-The merge writer's trial, the only trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in a sticky tmp-reclaimed `TMPDIR`, killed after 20 minutes.
+The merge writer's trial, the only trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in its own `TMPDIR`, killed after 20 minutes; its checkout is removed when it ends.
 
-## Pipeline speed
+## Step budget
 
-Target: submit→merge p50 ≤30min, p90 ≤60min (`scripts/measure-pipeline-speed.mjs`). `leadTime` (top bar, `master status`): median released→merged, last 10 merges. Steps calling a session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none.
+Steps calling a session budget two-fifths of the interval (30s floor), each call 10s or what's left; a slower one is carried (`waiting`, no fault), retried next cycle, joining it or consuming its answer, kept while its row stands; spent, it starts none.

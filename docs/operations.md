@@ -35,7 +35,7 @@ Never attest a stop you have not confirmed.
 
 ## Resources and disk
 
-`resourceRegistry` bounds resources ([remedies](#control-plane-resources)); `disk` attention under `run.diskThresholdGb` is answered (reported only) while the latest worktree-reclaim pass is ≤30 min old and out of reach (nothing disposable now, no backlog or error, its removals included); ≤ half the threshold, or ENOSPC/EDQUOT, always raises.
+The loop removes an assignment worktree (`git worktree remove`, never forced) once its attempt ends; a settled session removes its checkout, the merge writer its trial checkout. ENOSPC/EDQUOT names the path.
 
 ## Master coordination loop
 
@@ -53,9 +53,9 @@ Leases expire 120s after last heartbeat (plane stall: 30s `stallRenewalWindowMs`
 
 Stop worker; [rework](#recovery-recipes) `--previous-worker-stopped`; next resubmits.
 
-## Proof authority grants
+## Proof authority
 
-Only `admin` grants/revokes, to `producer` principals.
+A principal proves exactly its roster entry's `--proof` patterns (`graphyard principal add ID --role producer --proof PATTERN`); nothing is granted at runtime.
 
 ## Credentials
 
@@ -83,9 +83,9 @@ Graphyard observes no remote thread, check run or commit status; no request budg
 
 ## Control-plane resources
 
-Remedies: `graphyard master run --once`, `herdr pane close PANE`, raise a role's `concurrency`, grow `GRAPHYARD_DATABASE_MAX_BYTES`, code moves for `loaded-revision`.
+`/healthz` fails writes refused or the database at `GRAPHYARD_DATABASE_MAX_BYTES`; grow it.
 
-## Withdrawal, credentials, grants
+## Withdrawal and credentials
 
 Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A merge outside the gates is a permanent violation: never bypass; a delivered item with a failed smoke proof stays Done.
 

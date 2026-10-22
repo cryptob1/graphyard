@@ -26,7 +26,7 @@ graphyard up --agent
 6. A failed check rolls the release back and hands the change back to a worker with the failure attached.
 7. Only Graphyard writes to main.
 
-graphyard.json sets sensitive paths (`risk.sensitive`) and normal-change review timing (`review.normalChanges`): [delivery](docs/delivery.md).
+graphyard.json sets sensitive paths (`risk.sensitive`), reviewed before merge: [delivery](docs/delivery.md).
 
 ```mermaid
 flowchart LR

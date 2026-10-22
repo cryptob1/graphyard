@@ -25,7 +25,7 @@ Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign]
 
 An environment registers `{"kind":"environment","services":[…]}`; an observer `{"kind":"registration","role":"observer"}`.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`; `review.normalChanges` `post-merge`/`pre-merge`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed `GRAPHYARD_REPOSITORY_POLICY`.
+**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed `GRAPHYARD_REPOSITORY_POLICY`.
 
 `POST /api/delivery/build` records a build:
 
@@ -37,7 +37,7 @@ An environment registers `{"kind":"environment","services":[…]}`; an observer 
 
 ## Observe and verify
 
-`POST /api/delivery/observe` carries every service's instances with digests measured by host attestation, never a self-report. `POST /api/delivery/observe-sha` marks contained merges Deployed: every service and an exact 40-hex `sha`. Smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` runs per `freshnessSeconds`. `master status` `delivery` reports `readyToMerged`/`mergedToProduction`/`stages` p50/p90; a merge counts as served from the loop's first verified deploy of a main commit containing it. `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined`.
+`POST /api/delivery/observe` carries every service's instances with digests measured by host attestation, never a self-report. `POST /api/delivery/observe-sha` marks contained merges Deployed: every service and an exact 40-hex `sha`. Smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` runs per `freshnessSeconds`. `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined`.
 
 ## Rollback
 

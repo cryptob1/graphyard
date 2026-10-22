@@ -133,7 +133,7 @@ function rolesAndAuthority() {
   const worker = c.box({ x: 32, y: lead.bottom + 10, w: 296, kind: 'agent', title: 'Worker', body: 'Claims one item, edits only its assigned worktree, commits, submits the exact head. Pushes nothing. Stops on lease loss.', tags: ['worker', 'lease · epoch', 'worktree'] });
   c.container(index, { x: 20, y: herdrTop, w: 320, h: worker.bottom + 12 - herdrTop, kind: 'herdr', title: 'Herdr runtime hosts the sessions' });
   const reviewer = c.box({ x: 352, y: herdrTop, w: 188, kind: 'agent', title: 'Reviewer', body: 'Launched by the control plane; posts its verdict on the exact head to the API.', tags: ['reviewer'] });
-  const producer = c.box({ x: 352, y: reviewer.bottom + 10, w: 188, kind: 'agent', title: 'Proof producer', body: 'CI workflow or trusted runner. Submits evidence bound to head, base, and policy revision.', tags: ['producer', 'grant'] });
+  const producer = c.box({ x: 352, y: reviewer.bottom + 10, w: 188, kind: 'agent', title: 'Proof producer', body: 'CI workflow or trusted runner. Submits evidence bound to head, base, and policy revision.', tags: ['producer', 'proofs'] });
   const opAgent = c.box({ x: 352, y: producer.bottom + 10, w: 188, kind: 'agent', title: 'Operator agent', body: 'Optional, scoped. Adds intent and requirements; never removes them.', tags: ['operator-agent'] });
   const sessionsBottom = Math.max(worker.bottom + 12, opAgent.bottom);
   // The two upward arrows carry their labels on opposite outer sides so the lines never share a column.
@@ -145,7 +145,7 @@ function rolesAndAuthority() {
   c.legend(y + 16);
   return c.render({
     title: 'Who holds which authority in Graphyard',
-    desc: 'The human operator, holding an admin credential declared human, makes the human-only decisions and sends them to the Graphyard control plane. Below the control plane, the Herdr runtime hosts three agent sessions, each with one credential: the master (coordinator), the slice lead (slice-lead), and the worker (worker credential, lease epoch, and assigned worktree). Beside them are the reviewer (launched by the control plane, posting its verdict to the API), the proof producer (producer credential with a grant), and the optional scoped operator agent. Sessions send authenticated commands to Graphyard; the worker submits its exact commit and pushes nothing; the reviewer posts its verdict on that head to Graphyard. The merge writer trial-merges a head whose gates passed and pushes the base branch to the git remote with its deploy key.',
+    desc: 'The human operator, holding an admin credential declared human, makes the human-only decisions and sends them to the Graphyard control plane. Below the control plane, the Herdr runtime hosts three agent sessions, each with one credential: the master (coordinator), the slice lead (slice-lead), and the worker (worker credential, lease epoch, and assigned worktree). Beside them are the reviewer (launched by the control plane, posting its verdict to the API), the proof producer (producer credential with roster proofs), and the optional scoped operator agent. Sessions send authenticated commands to Graphyard; the worker submits its exact commit and pushes nothing; the reviewer posts its verdict on that head to Graphyard. The merge writer trial-merges a head whose gates passed and pushes the base branch to the git remote with its deploy key.',
   });
 }
 
@@ -165,7 +165,7 @@ function bootstrapVersusNormal() {
   const human2 = c.box({ x: 20, y, w: 520, kind: 'human', title: 'Human operator', body: 'Keeps goals and priorities, money and accounts, and credentials for people.', tags: ['admin', 'sessionKind: human'] });
   c.arrow(120, human2.bottom, 120, human2.bottom + 44, { label: 'goals', labelSide: 'right' });
   c.arrow(440, human2.bottom, 440, human2.bottom + 44, { label: 'human-only decisions', labelSide: 'left' });
-  const op = c.box({ x: 20, y: human2.bottom + 46, w: 236, kind: 'agent', title: 'Master operator agent', body: 'One identity the master uses: applies release, unblock, requirements, rework, close, grant and attest at once.', tags: ['operator-agent'] });
+  const op = c.box({ x: 20, y: human2.bottom + 46, w: 236, kind: 'agent', title: 'Master operator agent', body: 'One identity the master uses: applies release, unblock, requirements, rework, close and attest at once.', tags: ['operator-agent'] });
   const gy2 = c.box({ x: 304, y: human2.bottom + 46, w: 236, kind: 'graphyard', title: 'Graphyard control plane', body: 'Ownership, candidates, evidence, gates. Unchanged from phase 1.' });
   c.arrow(op.x + op.w + 4, op.y + 34, gy2.x - 4, gy2.y + 34);
   const rowY = Math.max(op.bottom, gy2.bottom) + 50;

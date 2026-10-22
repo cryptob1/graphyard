@@ -25,4 +25,4 @@ A merge trial whose failing tests fail on the base tip too: no rework, no filed 
 
 ## Documentation
 
-`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files-and-speed) exempts them from the regression guard. One topic per page: a documented command exists, its links resolve, and the page stays current (`tests/docs-glossary.test.ts`, `scripts/check-docs.mjs`).
+`docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files) exempts them from the regression guard. One topic per page: a documented command exists, its links resolve, and the page stays current (`tests/docs-glossary.test.ts`, `scripts/check-docs.mjs`).

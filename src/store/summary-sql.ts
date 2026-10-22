@@ -30,7 +30,7 @@ export const summarySessionWindowMs = 24 * 3_600_000;
 export const summaryOmitted = ['description', 'researchBrief', 'humanRequests', 'sessions', 'pipeline'] as const;
 
 const array = (path: string) => `(CASE WHEN jsonb_typeof(${path}) = 'array' THEN ${path} ELSE '[]'::jsonb END)`;
-/** The timeline `p` as the speed report reads it (pipelineSpeed in src/pipeline-speed.ts). */
+/** The timeline `p` as the item summary reads it (src/pipeline-speed.ts). */
 const compactPipeline = (p: string) => `jsonb_build_object('submittedAt', ${p}->'submittedAt', 'reworkRounds', ${p}->'reworkRounds', 'interventions', ${p}->'interventions', 'backfill', ${p}->'backfill',
   'attempts', (SELECT COALESCE(jsonb_agg(jsonb_build_object('claimedAt', a.entry->'claimedAt', 'endedAt', a.entry->'endedAt') ORDER BY a.position), '[]'::jsonb) FROM jsonb_array_elements(${array(`${p}->'attempts'`)}) WITH ORDINALITY AS a(entry, position)))`;
 const recentSessions = (sessions: string) => `(SELECT COALESCE(jsonb_agg(s.entry ORDER BY s.position), '[]'::jsonb) FROM jsonb_array_elements(${array(sessions)}) WITH ORDINALITY AS s(entry, position)

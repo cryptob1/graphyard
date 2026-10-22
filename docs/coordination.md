@@ -13,7 +13,7 @@ A failed dispatch is retried next cycle, never blocked.
 
 ## Review gate: verdicts, not threads
 
-Exact-head approval lands; remote threads and reviews are never read or resolved. A `BLOCKING:` finding reworks the item once per submission, uncapped. Sensitive ([`pre-merge`](delivery.md#managed-repositories): any) needs exact-head approval; normal merges, post-merge review files `BLOCKING:` bugs. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions, budget-test blockers.
+Exact-head approval lands; remote threads and reviews are never read or resolved. A `BLOCKING:` finding reworks the item once per submission, uncapped. A sensitive delta needs exact-head approval; a normal one merges, and its post-merge review files `BLOCKING:` bugs. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions, budget-test blockers.
 
 `Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Mechanical findings hold approval until the round window or the loop's clear; the loop requests bot `rework`, one commit, only those files. `Rejected bot commit: SHA — reason` rejects it.
 
@@ -23,8 +23,8 @@ Exact-head approval lands; remote threads and reviews are never read or resolved
 
 Workers build, run `graphyard verify GY-N` (own proofs; CI: all), submit on pass, naming out-of-scope sandbox failures. `leftToCi` (exit 0, `passing`): all passed, abnormal end; failed/skipped/unexecuted block.
 
-### Generated files and speed
+### Generated files
 
 `GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md` paths are `generated`: only deletion refuses; `sync` regenerates.
 
-[Speed](master-agent-reference.md#pipeline-speed), CI proofs. `graphyard diagnose GY-N` names holds. Permanent installation-level stall reasons raise setup attention: `Deployment endpoint answered 4xx` → fix `deploymentUrl`; a credential-401 refusal → its remedy; a refused reviewer launch → repair the reviewer identity (GY-2008).
+`graphyard diagnose GY-N` names holds. Permanent installation-level stall reasons raise setup attention: `Deployment endpoint answered 4xx` → fix `deploymentUrl`; a credential-401 refusal → its remedy; a refused reviewer launch → repair the reviewer identity (GY-2008).
