@@ -7,8 +7,8 @@ import { fileConflicts, resourceConflicts } from './coordination.js';
 import { workIdByRef } from './store/locked-read.js';
 import { laneOnlyProducer } from './server/principals.js';
 
-export interface DelegationLimits { maxLeads: number; maxEngineersPerLead: number; minReviewers: number; maxReviewers: number }
-export const defaultDelegationLimits: DelegationLimits = { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 };
+export interface DelegationLimits { maxLeads: number; minReviewers: number; maxReviewers: number }
+export const defaultDelegationLimits: DelegationLimits = { maxLeads: 3, minReviewers: 1, maxReviewers: 2 };
 export const slices = [
   { id: 'product', name: 'Product' },
   { id: 'infrastructure', name: 'Infrastructure' },
@@ -52,9 +52,9 @@ async function once<T>(store: Store, actor: Principal, key: string, fingerprintI
 }
 
 /** The environment variables the limits are read from, in the order an installer sets them. */
-export const delegationLimitVariables = ['GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS'] as const;
+export const delegationLimitVariables = ['GRAPHYARD_MAX_SLICE_LEADS', 'GRAPHYARD_MIN_REVIEWERS', 'GRAPHYARD_MAX_REVIEWERS'] as const;
 export type DelegationLimitVariable = typeof delegationLimitVariables[number];
-const limitDefaults: Record<DelegationLimitVariable, number> = { GRAPHYARD_MAX_SLICE_LEADS: 3, GRAPHYARD_MAX_ENGINEERS_PER_LEAD: 2, GRAPHYARD_MIN_REVIEWERS: 1, GRAPHYARD_MAX_REVIEWERS: 2 };
+const limitDefaults: Record<DelegationLimitVariable, number> = { GRAPHYARD_MAX_SLICE_LEADS: 3, GRAPHYARD_MIN_REVIEWERS: 1, GRAPHYARD_MAX_REVIEWERS: 2 };
 const countLeads = (principals: Roster) => principals.filter(p => p.role === 'slice-lead').length;
 type Roster = readonly Pick<Principal, 'id' | 'role' | 'grants' | 'proofs' | 'deploymentProviders'>[];
 // A reviewer slot is held only by a producer whose roster entry carries proof patterns (GY-1879): a
@@ -74,7 +74,6 @@ export function requiredDelegationLimits(principals: Roster, deployed: Record<st
   };
   return {
     GRAPHYARD_MAX_SLICE_LEADS: widened('GRAPHYARD_MAX_SLICE_LEADS', countLeads(principals)),
-    GRAPHYARD_MAX_ENGINEERS_PER_LEAD: widened('GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 0),
     GRAPHYARD_MIN_REVIEWERS: widened('GRAPHYARD_MIN_REVIEWERS', 0),
     GRAPHYARD_MAX_REVIEWERS: widened('GRAPHYARD_MAX_REVIEWERS', countProducers(principals)),
   };
@@ -113,7 +112,7 @@ export function delegationLimits(env: NodeJS.ProcessEnv = process.env, principal
     if (env[name] === undefined) return Math.max(limitDefaults[name], derived);
     const value = Number(env[name]); demand(Number.isInteger(value) && value > 0, `${name} must be a positive integer`, 500); return value;
   };
-  const result = { maxLeads: integer('GRAPHYARD_MAX_SLICE_LEADS', countLeads(principals)), maxEngineersPerLead: integer('GRAPHYARD_MAX_ENGINEERS_PER_LEAD', 0), minReviewers: integer('GRAPHYARD_MIN_REVIEWERS', 0), maxReviewers: integer('GRAPHYARD_MAX_REVIEWERS', countProducers(principals)) };
+  const result = { maxLeads: integer('GRAPHYARD_MAX_SLICE_LEADS', countLeads(principals)), minReviewers: integer('GRAPHYARD_MIN_REVIEWERS', 0), maxReviewers: integer('GRAPHYARD_MAX_REVIEWERS', countProducers(principals)) };
   demand(result.minReviewers <= result.maxReviewers, 'Reviewer minimum cannot exceed maximum', 500);
   return result;
 }
@@ -177,8 +176,7 @@ export function producerIndependenceRefusal(actor: Principal, work: Work, roster
   return null;
 }
 
-// Capacity is measured in engineers. Two items held by one worker are two worker
-// rows but a single occupied seat under the slice lead.
+// A slice's engineers: two items held by one worker are two worker rows but one engineer.
 export function activeEngineers(work: Work[], slice: SliceId, now: number): Set<string> {
   return new Set(work.filter(w => w.slice === slice && w.lease && Date.parse(w.lease.expiresAt) > now).map(w => w.lease!.owner));
 }
@@ -202,12 +200,6 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
         .map(w => ({ key: w.key, reason: w.blocker ?? leadHoldRefusal(w) ?? w.gates.find(g => !g.passed)?.reasons[0] ?? 'Awaiting a gate decision' })) };
   // The snapshot lists every producer that is not lane-only; the reviewer limits count only proof holders.
   }), reviewers: principals.filter(p => p.role === 'producer' && !laneOnlyProducer(p)).map(p => identify(p.id)) };
-}
-
-export function enforceLeadCapacity(actor: Principal, work: Work[], now: number, limits: DelegationLimits) {
-  demand(actor.role === 'slice-lead' && actor.slice, 'Slice lead permission required', 403);
-  const engineers = activeEngineers(work, actor.slice!, now);
-  demand(engineers.size < limits.maxEngineersPerLead, `Engineer limit for ${actor.slice} exceeded: ${engineers.size}/${limits.maxEngineersPerLead}`);
 }
 
 export async function recordLeadRuling(store: Store, actor: Principal, id: string, input: unknown, key: string) {

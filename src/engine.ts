@@ -13,7 +13,7 @@ import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, ass
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
-import { activeEngineers, delegationLimits, implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
+import { implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { onto } from './model/base-refresh.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './model/merge-authorization.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
@@ -1002,7 +1002,7 @@ export class Engine {
           work.lease = null;
         }
         // Eligibility against the requirements: ready, dependencies, exclusive
-        // resources and slice capacity are all derived from the document the new attempt will hold.
+        // and resources are all derived from the document the new attempt will hold.
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
         // GY-1735: the observation window holds the claim itself, so no loop or launcher that predates it (GY-1722, GY-1725) can start an attempt that can only escalate.
         await adoptFollowUpWindow(db, work);
@@ -1011,14 +1011,6 @@ export class Engine {
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
         const resources = resourceConflicts(work, all, now.getTime());
         demand(!resources.length, `Exclusive resources held: ${resources.map(r => `${r.resource} by ${r.key}`).join(', ')}`);
-        if (work.slice) {
-          // Capacity is a count of engineers, not of leases: one engineer holding
-          // two items in the slice still occupies one of the lead's seats.
-          const engineers = activeEngineers(all.filter(item => item.id !== work!.id), work.slice, now.getTime());
-          engineers.delete(actor.id);
-          const limit = delegationLimits().maxEngineersPerLead;
-          demand(engineers.size < limit, `Engineer limit for ${work.slice} exceeded: ${engineers.size}/${limit}`);
-        }
         work.epoch++;
         expireAgentRequests(work, now, `epoch ${work.epoch} claimed the item; a request from an attempt that ended is asked afresh`);
         work.implementers = [...new Set([...implementerIdentities(work), actor.id])];

@@ -13,7 +13,6 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider com
 | --- | ---
 | `GRAPHYARD_PRINCIPALS` | Principals JSON (`role`, `sessionKind`: operator `human`, AI `admin` `ai`)
 | `GRAPHYARD_MAX_SLICE_LEADS` | Slice leads (3)
-| `GRAPHYARD_MAX_ENGINEERS_PER_LEAD` | Engineers per lead (2)
 | `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (1)
 | `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (2)
 

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import {
-  activeEngineers, classifyIntake, defaultDelegationLimits, delegationLimits, delegationSnapshot, enforceLeadCapacity, humanOnlyIntakeOrigins, implementerIdentities,
+  activeEngineers, classifyIntake, defaultDelegationLimits, delegationLimits, delegationSnapshot, humanOnlyIntakeOrigins, implementerIdentities,
   leadMay, leadPermittedActions, leadRulingActions, mergeOrder, producerIndependenceRefusal, recordIntake, recordLeadRuling,
   routineIntakeOrigins, sessionKind, slices, validateDelegationPrincipals,
 } from '../src/delegation.js';
@@ -122,7 +122,7 @@ test('unit:slice-model — formal slices are first-class objects with data-drive
   assert.equal(unlabelled.reviewers[0].sessionKind, 'undeclared');
 });
 
-test('integration:slice-lead-principals — distinct AI lead credentials and server-enforced per-lead concurrency', async () => {
+test('integration:slice-lead-principals — distinct AI lead credentials and uncapped claims per slice', async () => {
   const configured = [{ ...admin, token: 'o'.repeat(32) }, { ...lead, token: 'p'.repeat(32) }, { ...infraLead, token: 'i'.repeat(32) }, { ...docsLead, token: 'd'.repeat(32) }, { ...reviewer, token: 'r'.repeat(32) }];
   validateDelegationPrincipals(configured);
   assert.throws(() => validateDelegationPrincipals([...configured, { id: 'extra', role: 'slice-lead', slice: 'product', sessionKind: 'ai', token: 'e'.repeat(32) }]), /limit exceeded/);
@@ -131,20 +131,16 @@ test('integration:slice-lead-principals — distinct AI lead credentials and ser
   assert.throws(() => validateDelegationPrincipals([lead, { ...lead, id: 'second-product-lead' }, reviewer]), /product already has a lead/);
   // A shared bearer token is not a distinct credential.
   assert.throws(() => validateDelegationPrincipals([{ ...lead, token: 's'.repeat(32) }, { ...infraLead, token: 's'.repeat(32) }, { ...reviewer, token: 'r'.repeat(32) }]), /distinct principals and credentials/);
-  // Concurrency is decided by the server from live leases, not asserted by a client.
-  const items: Work[] = [];
-  for (const name of ['concurrency-one', 'concurrency-two', 'concurrency-three']) {
-    let item = await engine.execute(admin, 'create', null, input(name, 'product'), id());
+  // GY-2876: claims are not capped per slice: six ready items in one slice go to six distinct workers.
+  const items: Work[] = [], six = Array.from({ length: 6 }, (_, index): Principal => ({ id: `engineer-${index + 1}`, role: 'worker', sessionKind: 'ai' }));
+  for (const engineer of six) {
+    const item = await engine.execute(admin, 'create', null, input(`concurrency-${engineer.id}`, 'product'), id());
     items.push(await engine.execute(admin, 'ready', item.id, {}, id()));
   }
-  await engine.execute(workerA, 'claim', items[0].id, {}, id());
-  await engine.execute(workerB, 'claim', items[1].id, {}, id());
-  await assert.rejects(engine.execute(workerC, 'claim', items[2].id, {}, id()), /Engineer limit for product exceeded: 2\/2/);
-  const snapshot = delegationSnapshot(roster, await store.list(), Date.now());
-  const product = snapshot.slices.find(s => s.id === 'product')!;
-  assert.deepEqual(product.workers.map(w => w.id).sort(), ['engineer-a', 'engineer-b']);
-  assert.ok(product.workers.every(w => w.sessionKind === 'ai'));
-  for (const item of items.slice(0, 2)) await engine.execute(item.id === items[0].id ? workerA : workerB, 'release', item.id, { epoch: 1 }, id());
+  for (const [index, engineer] of six.entries()) await engine.execute(engineer, 'claim', items[index].id, {}, id());
+  const product = delegationSnapshot(roster, await store.list(), Date.now()).slices.find(s => s.id === 'product')!;
+  assert.deepEqual(product.workers.map(w => w.id).sort(), six.map(engineer => engineer.id));
+  for (const [index, engineer] of six.entries()) await engine.execute(engineer, 'release', items[index].id, { epoch: 1 }, id());
   // Capacity counts engineers, not leases: one worker holding two items in the
   // slice is two worker rows but a single occupied seat under the lead.
   const seats: Work[] = [];
@@ -158,10 +154,9 @@ test('integration:slice-lead-principals — distinct AI lead credentials and ser
   assert.deepEqual(docs.engineers.map(engineer => engineer.id), ['engineer-a']);
   assert.deepEqual(docs.workers.map(worker => worker.id), ['engineer-a', 'engineer-a']);
   assert.ok(docs.engineers.every(engineer => engineer.sessionKind === 'ai'));
-  // A second distinct engineer still fits the two-seat default; a third is refused.
   await engine.execute(workerB, 'claim', seats[2].id, {}, id());
-  await assert.rejects(engine.execute(workerC, 'claim', seats[3].id, {}, id()), /Engineer limit for docs-experience exceeded: 2\/2/);
-  for (const [index, actor] of [workerA, workerA, workerB].entries())
+  await engine.execute(workerC, 'claim', seats[3].id, {}, id());
+  for (const [index, actor] of [workerA, workerA, workerB, workerC].entries())
     await engine.execute(actor, 'release', seats[index].id, { epoch: seats[index].epoch + 1 }, id());
 });
 
@@ -726,10 +721,10 @@ test('unit:dynamic-merge-ordering — order follows dependencies and current con
 });
 
 test('unit:delegation-limits — configured capacity is server-enforced and refused with an explicit reason', () => {
-  assert.deepEqual(defaultDelegationLimits, { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 });
+  assert.deepEqual(defaultDelegationLimits, { maxLeads: 3, minReviewers: 1, maxReviewers: 2 });
   assert.deepEqual(delegationLimits({}), defaultDelegationLimits);
-  assert.deepEqual(delegationLimits({ GRAPHYARD_MAX_SLICE_LEADS: '2', GRAPHYARD_MAX_ENGINEERS_PER_LEAD: '5', GRAPHYARD_MIN_REVIEWERS: '2', GRAPHYARD_MAX_REVIEWERS: '4' }),
-    { maxLeads: 2, maxEngineersPerLead: 5, minReviewers: 2, maxReviewers: 4 });
+  assert.deepEqual(delegationLimits({ GRAPHYARD_MAX_SLICE_LEADS: '2', GRAPHYARD_MIN_REVIEWERS: '2', GRAPHYARD_MAX_REVIEWERS: '4' }),
+    { maxLeads: 2, minReviewers: 2, maxReviewers: 4 });
   for (const value of ['0', '-1', '1.5', 'many', '']) assert.throws(() => delegationLimits({ GRAPHYARD_MAX_SLICE_LEADS: value }), /GRAPHYARD_MAX_SLICE_LEADS must be a positive integer/);
   assert.throws(() => delegationLimits({ GRAPHYARD_MIN_REVIEWERS: '3', GRAPHYARD_MAX_REVIEWERS: '2' }), /Reviewer minimum cannot exceed maximum/);
   assert.throws(() => validateDelegationPrincipals([lead, infraLead, docsLead, { id: 'fourth-lead', role: 'slice-lead', slice: 'product', sessionKind: 'ai' }, reviewer]), /Slice lead limit exceeded: 4\/3/);
@@ -737,12 +732,10 @@ test('unit:delegation-limits — configured capacity is server-enforced and refu
   assert.throws(() => validateDelegationPrincipals([lead, { ...reviewer, id: lead.id }]), /cannot also hold slice-lead authority/);
   assert.throws(() => validateDelegationPrincipals([lead, { ...reviewer, slice: 'product' }]), /must remain independent of every slice/);
   assert.throws(() => validateDelegationPrincipals([lead]), /requires at least 1 independent review\/proof agent/);
-  // The lead-facing capacity check counts the same seats the claim path does.
+  // A slice's engineers count distinct lease owners.
   const held = (key: string, owner: string, slice: SliceId) => ({ key, slice, lease: { owner, epoch: 1, expiresAt: new Date(Date.now() + 60_000).toISOString() } }) as unknown as Work;
   const twoItemsOneEngineer = [held('GY-101', 'engineer-a', 'product'), held('GY-102', 'engineer-a', 'product')];
-  enforceLeadCapacity(lead, twoItemsOneEngineer, Date.now(), defaultDelegationLimits);
   assert.deepEqual([...activeEngineers(twoItemsOneEngineer, 'product', Date.now())], ['engineer-a']);
-  assert.throws(() => enforceLeadCapacity(lead, [...twoItemsOneEngineer, held('GY-103', 'engineer-b', 'product')], Date.now(), defaultDelegationLimits), /Engineer limit for product exceeded: 2\/2/);
   // Expired leases free the seat they held.
   assert.deepEqual([...activeEngineers(twoItemsOneEngineer, 'product', Date.now() + 120_000)], []);
   // Two leads and one reviewer remain inside the shared-reviewer defaults.
