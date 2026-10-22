@@ -48,14 +48,14 @@ export { overlongSessionAttention } from './overlong-sessions.js';
 export { unansweredRequestAttention, unansweredRequestOwner, unobtainableReviewAttention } from './unanswered-requests.js';
 
 /** The `master status` report: work truth joined with Herdr session health, the ledgers, the dispatch schedule and the candidates' conflict sets. */
-export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; now?: () => number; reportReadBoundMs?: number } = {}) {
+export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; now?: () => number } = {}) {
   // Every phase is timed, server reads of a second or more named with route and phase, under `timings` (GY-377).
   const timings = new Timings(dependencies.now);
   const report = await withTimings(timings, () => buildStatusReport(root, master, timedApi(masterApi), coordinator, cli, dependencies));
   return { ...report, timings: timings.report() };
 }
 
-async function buildStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost; reportReadBoundMs?: number }) {
+async function buildStatusReport(root: string, master: MasterConfig, masterApi: (path: string, credential?: string, timeoutMs?: number) => Promise<any>, coordinator: any, cli: { commit: string | null }, dependencies: { supervisorHost?: LoopSupervisorHost }) {
   const runtime = await timedStep('herdr', () => observeHerdrAgents());
   const credentials = await timedStep('credentials', () => inspectWorkerCredentials(root, master.workers));
   const { snapshot, clockOffset } = await coordinationStep(run => timedStep('snapshot', run), masterApi);

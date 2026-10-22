@@ -19,7 +19,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // while nothing moved. progressAttention replaces it with two pure judgements over the snapshot
 // and the release reading the cursor already keeps: one line when nothing has progressed, one
 // when merges have not reached the running release. Thresholds are module constants, the lines
-// carry no fault class (the fault step files nothing for them), and nothing is persisted.
+// are pure and persist nothing.
 //
 // NOW is this file's only clock: every instant below is derived from it and handed to
 // progressAttention or the report builder as a parameter, so no wall-clock call runs anywhere in
@@ -121,15 +121,9 @@ test('unit:progress-watchdog-release-lag — one line counts the merges past the
 
   // The bound is the module constant, not a setting.
   assert.equal(releaseLagMs, 90 * minute);
-
-  // Neither watchdog line carries a fault class: the fault step files and counts nothing for them.
-  for (const line of [...progressAttention([item('GY-3', { stageEnteredAt: at(-200) })], release(240), NOW), ...progressAttention([delivered('GY-1', 150)], release(240), NOW)]) {
-    assert.equal(line.kind, undefined);
-    assert.equal(line.faultClass, undefined);
-  }
 });
 
-test('unit:progress-watchdog-master-status — master status lists both watchdog lines in its loop attention, ahead of the work, each without a fault class', async () => {
+test('unit:progress-watchdog-master-status — master status lists both watchdog lines in its loop attention, ahead of the work', async () => {
   const directory = await temporaryDirectory('progress-watchdog');
   const credentialFile = join(directory, 'coordinator.token');
   await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -144,7 +138,7 @@ test('unit:progress-watchdog-master-status — master status lists both watchdog
   await writeDaemonState(master, cursor);
   const work = [item('GY-2', { stageEnteredAt: at(-180) }), delivered('GY-1', 120)];
   const masterApi = async (path: string) => path === 'work-snapshot' ? { work, now: new Date(NOW).toISOString() } : { decisions: [] };
-  const status = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { now: () => NOW }) as { attentionItems: { subject: string; text: string; kind?: string; faultClass?: string }[]; faults: { subjects: string[]; count: number }[] };
+  const status = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { now: () => NOW }) as { attentionItems: { subject: string; text: string }[] };
   const stall = status.attentionItems.findIndex(line => /^Nothing has progressed for \d+ minutes \(since /.test(line.text));
   const lag = status.attentionItems.findIndex(line => /^1 merged change\(s\) have not reached the running release for /.test(line.text));
   assert.ok(stall >= 0, `the no-progress line is listed: ${status.attentionItems.slice(0, 6).map(line => line.text).join(' | ')}`);
@@ -152,13 +146,6 @@ test('unit:progress-watchdog-master-status — master status lists both watchdog
   assert.match(status.attentionItems[stall].text, /: GY-2 has been in build since /);
   assert.match(status.attentionItems[lag].text, /the oldest is GY-1 merged at /);
   assert.match(status.attentionItems[lag].text, /; the release last moved at /);
-  // Both ride the loop attention, ahead of every work item, and reach the final report as they
-  // were built: no kind, no fault class, and in no fault group, so nothing files or counts them.
+  // Both ride the loop attention, ahead of every work item.
   assert.ok(stall < 4 && lag < 4, `both lines sit in the report's loop attention (stall ${stall}, lag ${lag})`);
-  for (const index of [stall, lag]) {
-    assert.equal(status.attentionItems[index].kind, undefined);
-    assert.equal(status.attentionItems[index].faultClass, undefined);
-  }
-  assert.ok(!status.faults.some(group => group.subjects.includes('release')), 'no fault group names the release-lag line');
-  assert.equal(status.faults.reduce((total, group) => total + group.count, 0), status.attentionItems.filter(line => line.faultClass).length, 'the fault groups count only the classified lines');
 });

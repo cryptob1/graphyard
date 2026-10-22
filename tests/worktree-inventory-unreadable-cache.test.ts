@@ -78,7 +78,7 @@ test('unit:master-status-unreadable-disk-unanswered — master status never answ
   state.reclaim = { at: new Date().toISOString(), scanned: 0, trees: 0, treeBacklog: 0, removed: 0, kept: 0, freedBytes: 0, freeBytes: 1, errors: [], checkouts: 0, checkoutsOffVolume: 0, rootFreeBytes: null };
   await writeDaemonState(master, state);
   const status = async (path: string) => path.startsWith('work-snapshot') ? { work: [], now: new Date().toISOString() } : path === 'status' ? { actor: { id: 'coordinator-1', role: 'coordinator' } } : path === 'actions' ? { executors: undefined } : {};
-  const read = () => masterStatusReport(root, master, status as never, { actor: { id: 'coordinator-1' } }, { commit: null }, { reportReadBoundMs: 300 });
+  const read = () => masterStatusReport(root, master, status as never, { actor: { id: 'coordinator-1' } }, { commit: null });
   // A readable, empty directory under its drained cache: the reading is answered.
   await mkdir(worktreesDirectory(root), { recursive: true });
   await writeWorktreeInventoryCache(root, { at: new Date().toISOString(), entries: [], held: [] });

@@ -85,7 +85,7 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
     const masterName = config.masterAgentName!;
     let now = start, deaf = true;
     const agents: HerdrAgent[] = [{ name: masterName, pane_id: 'w1V:pQ35', agent: 'claude', agent_status: 'idle' }];
-    const launched: string[] = [], closed: string[] = [], ended: string[] = [], endReasons: string[] = [], accepted: number[] = [], opened: number[] = [], boundHeld: number[] = [];
+    const launched: string[] = [], closed: string[] = [], ended: string[] = [], endReasons: string[] = [], accepted: number[] = [], boundHeld: number[] = [];
     const effects: DaemonEffects = {
       agents: () => [],
       herdr: () => ({ agents, available: true }),
@@ -109,7 +109,6 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
     Object.assign(state.master, { agentName: masterName, pane: 'w1V:pQ35', runtime: 'claude', account: 'claude-master', session: 'master-registry-0',
       startedAt: new Date(start - 10 * minute).toISOString(), adopted: true, rotations: 0, misses: 0 });
     const violations: string[] = [];
-    const instancesBefore = () => state.faults.instances.filter(entry => entry.kind === 'action:wake').length;
     const boundFailedAt: number[] = [], boundAttempts: number[] = [];
 
     // Cycles 1-11: the master is woken every other cycle and answers deaf every time. The first
@@ -117,12 +116,9 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
     // wake at cycle 11 is the one a session finally accepts.
     for (let cycle = 1; cycle <= 11; cycle++, now += cycleMs) {
       if (cycle === 11) deaf = false; // the wake at cycle 11 is the one a session finally accepts
-      const flying = instancesBefore();
       await runCycle(config, state, effects, () => now);
       pruneDaemonState(state);
       for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
-      const instances = instancesBefore();
-      if (instances > flying) opened.push(cycle);
       if (deafStreak(state.master) >= masterDeafRotationBound) boundHeld.push(cycle);
       const record = state.actions[masterWakeKey];
       if (record?.state === 'failed' && record.at === new Date(now).toISOString()) { boundFailedAt.push(cycle); boundAttempts.push(record.attempts); }
@@ -137,32 +133,25 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
     assert.equal(state.master.rotations, masterDeafRotationBound, 'the launch count is the deaf end count');
     assert.equal(state.master.lastEnd?.cause, 'deaf');
     assert.match(state.master.lastEnd!.detail, new RegExp(`${masterDeafRotationBound} consecutive deaf ends without an accepted wake`));
-    // While the pane stayed deaf, the bound held the wake failed as the class's one standing
-    // instance — opened at the bound, never once per cycle, never during the rotations.
+    // While the pane stayed deaf, the bound held the wake failed — one standing record, never once per cycle.
     assert.deepEqual(boundFailedAt, [7, 8, 9, 10], `every deaf wake past the bound restates the standing record, never a new one: ${JSON.stringify(boundFailedAt)}`);
     assert.ok(boundAttempts.at(-1)! >= 2, `every deaf wake past the bound restates the standing record (${boundAttempts.join(', ')} attempts)`);
     const bound = state.actions[masterWakeKey];
     assert.ok(bound && bound.state === 'done' && /accepted its wake/.test(bound.detail), `the accepted wake closed the bound's record: ${JSON.stringify(bound?.detail)}`);
-    assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:wake').length, 1, 'one action:wake instance for the whole episode');
-    assert.deepEqual(opened, [7], `the instance opened when the bound was reached, not before or per cycle: ${JSON.stringify(opened)}`);
     assert.ok(boundHeld.length >= 1, 'the bound was read on the cycles that needed it');
-    assert.deepEqual(state.faults.failing[masterWakeKey], undefined, 'the accepted wake closed the standing failure');
     assert.deepEqual(accepted.length, 1, 'exactly the cycle-11 wake was accepted while the pane stayed deaf');
 
     // A later deaf end starts a fresh count: the rotation is the remedy again, once.
     const launchesBefore = launched.length, rotationsBefore = state.master.rotations;
     for (let cycle = 12; cycle <= 14; cycle++, now += cycleMs) {
       if (cycle === 13) deaf = true;
-      const flying = instancesBefore();
       await runCycle(config, state, effects, () => now);
       pruneDaemonState(state);
       for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
-      if (instancesBefore() > flying) opened.push(cycle);
     }
     assert.deepEqual(violations.join('\n'), '', 'every system invariant holds after the recovery too');
     assert.equal(state.master.rotations, rotationsBefore + 1, 'a deaf end after an accepted wake is rotated once more');
     assert.equal(launched.length, launchesBefore + 1, "and replaced once, back at the bound's pace");
-    assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:wake').length, 1, 'the recovery closed the episode; the record keeps its one instance');
 
     // Two more simulated days of the same deaf episode beside ordinary work: every cycle resolves
     // more unrelated actions than the cursor keeps, so pruning retires the episode's rotation rows
@@ -176,11 +165,9 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
     for (let cycle = 1; cycle <= cycles; cycle++, now += cycleMs) {
       for (let row = 0; row < 120; row++, traffic++) state.actions[`traffic:${traffic}`] = { kind: 'refresh', work: `work-T-${traffic}`, principal: null, state: 'done',
         detail: `refreshed T-${traffic}`, attempts: 1, epoch: null, cycle: state.cycle, at: new Date(now).toISOString() };
-      const flying = instancesBefore();
       await runCycle(config, state, effects, () => now);
       pruneDaemonState(state);
       for (const check of state.invariants.report) if (!check.holds) violations.push(`day cycle ${cycle}: ${check.invariant} — ${check.reading}`);
-      if (instancesBefore() > flying) opened.push(14 + cycle);
       if (!Object.values(state.actions).some(action => action.kind === 'failover' && /\(deaf\)/.test(action.detail))) prunedRotations = true;
       assert.ok(deafEnds() - deafBefore <= masterDeafRotationBound - 1, `day cycle ${cycle}: no deaf replacement past the bound (${deafEnds()} deaf ends)`);
     }
@@ -190,8 +177,6 @@ test('soak:session-liveness — a persistently deaf master is rotated at most th
     assert.ok(endReasons.filter(reason => /\(budget\)/.test(reason)).length - budgetBefore >= days * 2 - 1, 'the session budget still rotated the deaf session over the days');
     assert.equal(deafStreak(state.master), masterDeafRotationBound, 'each budget replacement inherited the streak');
     assert.equal(state.actions[masterWakeKey]?.state, 'failed', 'the wake still stands failed on the bound');
-    assert.ok(state.faults.failing[masterWakeKey], 'the standing failure is kept through pruning');
-    assert.deepEqual(state.faults.instances.filter(entry => entry.kind === 'action:wake').length, 2, 'the second episode opened its one instance, never one per cycle or per pruning');
     deaf = false;
     for (let cycle = 1; cycle <= 2; cycle++, now += cycleMs) { await runCycle(config, state, effects, () => now); pruneDaemonState(state); }
     assert.equal(state.actions[masterWakeKey]?.state, 'done', 'an accepted wake ends the standing failure');
@@ -247,20 +232,14 @@ test('soak:session-liveness — the finished-session line waits for the orphan w
     };
     const state = emptyDaemonState(config);
     const violations: string[] = [];
-    const sessionInstances = () => state.faults.instances.filter(entry => entry.kind === 'session');
-    let backInstances = 0;
     // Cycle 1: all three sessions are gone from Herdr; every line stands against live machinery.
     // Cycle 2: the preserve ends GY-A's attempt; GY-B's session is seen again, so its absence never
     // establishes and the line counts; GY-C's lease advanced, so the orphan is established and stopped.
     for (let cycle = 1; cycle <= 5; cycle++, now += cycleMs) {
       if (cycle === 2) listed.add(returning.agentName);
-      const before = sessionInstances().length;
       await runCycle(config, state, effects, () => now);
       pruneDaemonState(state);
       for (const check of state.invariants.report) if (!check.holds) violations.push(`cycle ${cycle}: ${check.invariant} — ${check.reading}`);
-      const after = sessionInstances();
-      const keys = after.filter(entry => !['work-GY-B'].includes(entry.subject)).map(entry => entry.subject);
-      assert.deepEqual(keys, [], `cycle ${cycle}: no session-liveness instance outside the returned session (${keys.join(', ')})`);
       if (cycle === 1) {
         assert.ok(state.absences['work-GY-A'] && state.absences['work-GY-B'], 'the gone-worker watch holds both absences');
         assert.ok(state.orphans['work-GY-C'], 'the orphan watch holds the supervisor');
@@ -270,15 +249,12 @@ test('soak:session-liveness — the finished-session line waits for the orphan w
         assert.ok(preserved.has('work-GY-A'), 'the establishing absence ended its attempt through the preserve');
         assert.ok(state.absences['work-GY-B'] === undefined, "the returned session's absence stood down");
         assert.match(String(state.orphans['work-GY-C']?.establishedAt ?? ''), /^20\d\d-/, 'the advancing lease established the orphan');
-        backInstances = after.length - before;
       }
       if (cycle >= 4) assert.ok(state.orphans['work-GY-C'] === undefined, `cycle ${cycle}: the stopped supervisor's lapsed lease cleared the orphan record`);
     }
     assert.deepEqual(violations.join('\n'), '', 'every system invariant holds after every cycle');
     assert.deepEqual(stops, [{ key: 'work-GY-C', signal: 'SIGTERM' }], "the established orphan's supervisor was stopped once, through its scope");
-    assert.ok(sessionInstances().some(entry => entry.subject === 'work-GY-B' && entry.faultClass === 'session-liveness'), 'the absence that never established counts the finished session it left behind');
-    assert.equal(backInstances, 1, 'the line counted exactly once, when the machinery stood down under it');
-    // The establishing absence: the attempt is ended on the record and the line counted nothing, ever.
+    // The establishing absence: the attempt is ended on the record.
     const kept = state.actions[`preserve:work-GY-A:1`];
     assert.ok(kept && kept.state === 'done' && /work-GY-A attempt 1 ended without submitting/.test(kept.detail), `the preserve stands done: ${JSON.stringify(kept?.detail)}`);
   } finally { await rm(directory, { recursive: true, force: true }); }

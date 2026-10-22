@@ -8,7 +8,7 @@
 
 ## Incident decision tree
 
-- **Item not moving**: fix the refusal's cause; `master status` flags no progress 60min. Never weaken requirements. Escalation: a declared human runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](master-agent-reference.md#recovery)). Expired unsubmitted: [lost worker](#lost-worker-before-submission); retry: [rework](#submitted-implementation-needs-rework); fenced: [quarantine](#supervisor-died-leaving-a-containment-quarantine). Late-fault waits (30min/10min/15min): a queue-held trial, push or `base failure` refusal is the writer's motion. A failed producer-runnable manual proof returns to worker, never to an operator escalation.
+- **Item not moving**: fix the refusal's cause; `master status` flags no progress 60min. Never weaken requirements. Escalation: a declared human runs `graphyard resolve GY-N TRIGGER "reason"` ([settling](master-agent-reference.md#recovery)). Expired unsubmitted: [lost worker](#lost-worker-before-submission); retry: [rework](#submitted-implementation-needs-rework); fenced: [quarantine](#supervisor-died-leaving-a-containment-quarantine). A failed producer-runnable manual proof returns to worker, never to an operator escalation.
 
 ## Recovery recipes
 
@@ -37,11 +37,11 @@ Never attest a stop you have not confirmed.
 
 ## Resources and disk
 
-`resourceRegistry` bounds resources ([remedies](#control-plane-resources)); `disk` attention under `run.diskThresholdGb` is answered (reported, faultless) while the latest worktree-reclaim pass is ≤30 min old and out of reach (nothing disposable now, no backlog or error, its removals included; no fault standing); ≤ half the threshold, or ENOSPC/EDQUOT, always raises; a standing low reading holds to a tenth of the threshold above it, whatever the pass answers. Otherwise `escalation:dirty-checkout`.
+`resourceRegistry` bounds resources ([remedies](#control-plane-resources)); `disk` attention under `run.diskThresholdGb` is answered (reported only) while the latest worktree-reclaim pass is ≤30 min old and out of reach (nothing disposable now, no backlog or error, its removals included); ≤ half the threshold, or ENOSPC/EDQUOT, always raises. Otherwise `escalation:dirty-checkout`.
 
 ## Master coordination loop
 
-`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`; `daemon.stepStalls` names one verified remedy per signature.
+`master status` `daemon`: health, `cycleTime` (30-minute p50/p95); cycles >60s raise `loop`; a step that throws is one log line and runs again next cycle.
 
 ## Lost worker before submission
 
@@ -50,10 +50,6 @@ Leases expire 120s after last heartbeat (plane stall: 30s `stallRenewalWindowMs`
 ## Supervisor died leaving a containment quarantine
 
 [`master settle-containment`](#recovery-recipes) verifies nothing survives; refused: confirm stop, then rework, or `recover-containment`.
-
-## Retro synthesis
-
-Minutely scan (`GET /api/interventions`) raises each crossed pattern as attention, never an item; a non-drafting operator agent approves. The merge writer reruns a trial's failing files; a pass lands, filing nothing (no job log is read, GY-2010).
 
 ## Accepted evidence turns out to be wrong
 

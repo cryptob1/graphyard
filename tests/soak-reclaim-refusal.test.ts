@@ -71,6 +71,5 @@ test('unit:soak-invariants-hold — over three days a standing worktree refusal 
     assert.ok(asked.length >= 3 && asked.length <= days + 1, `retried about once a day, not every cycle: ${asked.length}`);
     for (const [index, at] of asked.slice(1).entries()) assert.ok(at - asked[index] >= worktreeRefusalRetryMs, 'two retries are at least the bound apart');
     assert.deepEqual(reports.flatMap(report => report.removed.map(entry => entry.key)).sort(), ['GY-301', 'GY-302']);
-    assert.equal(state.faults.instances.filter(entry => entry.faultClass === 'resources').length, 1, 'one resources fault in three days');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });

@@ -12,7 +12,7 @@ All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#th
 - `rework`, `recover` (delivered quarantine): `{"reason":…,"previousWorkerStopped":true}`; `repair` (coordinator/admin) rebuilds a head carrying another item's unlanded commits.
 - `claim` `{}`; `heartbeat`; `release` `{"epoch":1}` (`"cause"` or `"failure":{…}` → `workspace.failed`); `blocked` `{"epoch":1,…}` (reason releases, null clears); `blocker-probe` (`pass` clears a routine [blocker](#blocked-work-unblocks-itself)); `review-launch`/`review-verdict`/`review-withdraw` ([review](../coordination.md#review-gate-verdicts-not-threads)); `workspace` `{epoch, host, path, branch}`.
 - `submit`: `{"epoch":1,"head":SHA}` (`complete GY-N EPOCH --head [SHA]`; nothing is pushed): the control plane, the only [merger](../delivery-redesign.md#the-merger), allocates one change number per head into `candidate.pr`/`submission.pr`; the older `{"epoch":1,"pr":123}` form answers only pre-merge-writer changes. complete first re-runs the failing tests the latest `trial failed: tests …` refusal names, refusing while one fails. `409` if applied retro check fails.
-- `deployment`, `triage` `{judgement}` (coordinator); `POST /api/retro/synthesize` and `POST /api/retro/ID/approve|refuse` ([retro artefacts](../operations.md#retro-synthesis)).
+- `deployment`, `triage` `{judgement}` (coordinator).
 
 No endpoint sets lifecycle state.
 
@@ -48,4 +48,4 @@ Over `run.decomposition` bounds a read-only Pi session (`run.research`) proposes
 
 ## Other commands and routes
 
-`graphyard help` lists commands. Routes: `/api/actions[/claim]`, `/api/assignments/claim`, `/api/agent-registry[/apply|select|observe|document|history|connect]`, `/api/validation/[analytics|capacity|definitions|artifacts|replay|reuse|collection-authority|cancel|settle|retry]`, `/api/delivery/[observations|select|sweep]`, `/api/direct-merges[/on|off]`, `/api/events/stats`, `/api/human-requests`, `/api/intake`, `/api/judgements`, `/api/operator-agents`, `/api/principals`, `/api/production-environment`, `/api/scenarios`, and pattern routes under `/api/work/ID` and `/api/agent-registry`.
+`graphyard help` lists commands. Routes: `/api/actions[/claim]`, `/api/assignments/claim`, `/api/agent-registry[/apply|select|observe|document|history|connect]`, `/api/validation/[analytics|capacity|definitions|artifacts|replay|reuse|collection-authority|cancel|settle|retry]`, `/api/delivery/[observations|select|sweep]`, `/api/direct-merges[/on|off]`, `/api/events/stats`, `/api/human-requests`, `/api/intake`, `/api/operator-agents`, `/api/principals`, `/api/production-environment`, `/api/scenarios`, and pattern routes under `/api/work/ID` and `/api/agent-registry`.

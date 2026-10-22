@@ -10,13 +10,8 @@ import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
 import { masterConfigSchema, prepareWorkerLaunch, saveWorkerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { dispatchFailureBlockAfter, dispatchFailureCause, noteDispatchFailure } from '../src/daemon/dispatch-failures.js';
 import { branchHolders, reclaimBranchHolders } from '../src/worktree-holders.js';
-import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
-import { Engine } from '../src/engine.js';
-import type { Principal, Work } from '../src/model.js';
+import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1078: GY-859 waited 5.4 hours through about forty failed dispatches because a session worktree
@@ -137,7 +132,7 @@ test('unit:worktree-failure-names-git-error — a failing git worktree add repor
     await runCycle(config, state, effects.effects, () => effects.clock());
     const recorded = state.actions['dispatch:item-7:0'];
     assert.equal(recorded.state, 'failed');
-    assert.match(recorded.detail, /^Dispatch of GY-7 to one failed: Worker launch failed: .*fatal: '.*GY-7-3' already exists.* \(failure 1 of 3 with this cause\)$/);
+    assert.match(recorded.detail, /^Dispatch of GY-7 to one failed: Worker launch failed: .*fatal: '.*GY-7-3' already exists.*; it is retried next cycle$/);
   } finally { await plane.close(); await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); }
 });
 
@@ -184,78 +179,18 @@ function ready(overrides: Partial<Work> = {}): Work {
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides } as Work;
 }
-/** The loop's effects over one item the control plane holds; `blockDispatch` writes the blocker the way the `dispatchblock` command does. */
+/** The loop's effects over one item the control plane holds. */
 function loopEffects(work: Work[], dispatch: DaemonEffects['dispatch']) {
   let offsetMs = 0;
-  const blocked: string[] = [];
   const effects: DaemonEffects = {
     agents: () => [], credentials: async items => Object.fromEntries(items.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: structuredClone(work), now: new Date(Date.now() + offsetMs).toISOString() }),
     closeSession: () => {}, dispatch,
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, persist: async () => {},
-    blockDispatch: async (target, reason) => { blocked.push(reason); work.find(entry => entry.id === target.id)!.blocker = reason; },
   };
-  return { effects, blocked, clock: () => Date.now() + offsetMs, advance: (ms: number) => { offsetMs += ms; } };
+  return { effects, clock: () => Date.now() + offsetMs, advance: (ms: number) => { offsetMs += ms; } };
 }
-
-test('unit:repeated-dispatch-failure-blocks — after three consecutive dispatch failures with one cause the loop records a blocker naming it and dispatches the item no further until it clears', async () => {
-  const directory = await temporaryDirectory('gy-1078-loop');
-  try {
-    const credential = join(directory, 'coordinator.token'); await writeFile(credential, coordinatorToken, { mode: 0o600 });
-    const config = loopConfig(credential), state = emptyDaemonState(config);
-    const items = [ready()];
-    let attempts = 0, failing = true;
-    // Each attempt claims a fresh epoch and releases it, as the launcher does, and fails on the
-    // same held branch: the epoch, its path and the command line differ, the cause does not.
-    const loop = loopEffects(items, async target => {
-      attempts++;
-      const epoch = ++items[0].epoch;
-      if (!failing) return { pane: null, reclaimed: ['/repo/.graphyard/worktrees/GY-7-2: aborted the rebase and removed the worktree'] };
-      const error = Object.assign(new Error(`Command failed: node cli worktree GY-7 ${epoch} ${'c'.repeat(40)}\nGit worktree creation failed: git worktree add /repo/.graphyard/worktrees/GY-7-${epoch} graphyard/gy-7-1 failed (exit 128): fatal: 'graphyard/gy-7-1' is already used by worktree at '/repo/.graphyard/worktrees/GY-7-2'`), { target });
-      throw new Error(`Worker launch failed: the worktree for GY-7 epoch ${epoch} could not be created: ${error.message.split('\n')[1]}`);
-    });
-    const cycle = async () => { await runCycle(config, state, loop.effects, loop.clock); loop.advance(15 * 60_000); };
-
-    for (let n = 1; n <= dispatchFailureBlockAfter; n++) {
-      await cycle();
-      assert.equal(attempts, n, `cycle ${n} dispatches once`);
-      if (n < dispatchFailureBlockAfter) assert.equal(state.dispatchFailures['item-7'].count, n, 'the run counts across epochs');
-    }
-    assert.equal(loop.blocked.length, 1, 'the third identical failure records the blocker');
-    assert.match(loop.blocked[0], /^Dispatch failed 3 consecutive times with the same cause since .*, so the master loop stopped redispatching GY-7: Worker launch failed: the worktree for GY-7 epoch N could not be created: .*fatal: 'graphyard\/gy-7-N' is already used by worktree at '\/repo\/\.graphyard\/worktrees\/GY-7-N'/);
-    assert.equal(items[0].blocker, loop.blocked[0]);
-    assert.equal(state.dispatchFailures['item-7'], undefined, 'the run is retired once the blocker is recorded');
-    const escalation = Object.entries(state.actions).find(([key]) => key.startsWith('escalation:dispatch-failures:item-7:'))![1];
-    assert.equal(escalation.state, 'done'); assert.match(escalation.detail, /^Recorded the blocker on GY-7: Dispatch failed 3 consecutive times/);
-
-    for (let n = 0; n < 3; n++) await cycle();
-    assert.equal(attempts, dispatchFailureBlockAfter, 'a blocked item is dispatched no further');
-
-    // The operator clears the blocker once the cause is fixed: the next cycle dispatches it, and it lands.
-    items[0].blocker = null; failing = false;
-    await cycle();
-    assert.equal(attempts, dispatchFailureBlockAfter + 1, 'dispatch resumes once the blocker clears');
-    assert.match(Object.values(state.actions).find(action => action.kind === 'dispatch' && action.state === 'done')?.detail ?? '', /; freed its branch by reclaiming \/repo\/\.graphyard\/worktrees\/GY-7-2: aborted the rebase and removed the worktree$/, 'the dispatch record names what the launch reclaimed');
-    assert.equal(state.dispatchFailures['item-7'], undefined);
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test('a changed cause starts a new run, and the run outlives the epochs its failures spent', () => {
-  const failure = (epoch: number, holder: string) => `Command failed: node cli worktree GY-859 ${epoch} ${'a'.repeat(40)}\nfatal: 'graphyard/gy-859-1' is already used by worktree at '/r/.graphyard/worktrees/GY-859-${holder}' (epoch ${epoch})`;
-  assert.equal(dispatchFailureCause({ key: 'GY-859' }, failure(113, '2')), dispatchFailureCause({ key: 'GY-859' }, failure(154, '2')));
-  assert.equal(dispatchFailureCause({ key: 'GY-859' }, 'no worker profile can take GY-859'), 'no worker profile can take GY-859');
-  assert.notEqual(dispatchFailureCause({ key: 'GY-859' }, failure(113, '2')), dispatchFailureCause({ key: 'GY-859' }, 'fatal: not a git repository'));
-});
-
-test('a repeated failure that spent no epoch, refused before any claim, never reaches the bound', () => {
-  const state = { dispatchFailures: {} } as Parameters<typeof noteDispatchFailure>[0];
-  const work = { id: 'item-7', key: 'GY-7', epoch: 4 };
-  for (let n = 0; n < 5; n++) noteDispatchFailure(state, work, 'Dispatch blocked by exclusive resources: db held by GY-8', new Date(n * 60_000).toISOString());
-  assert.equal(state.dispatchFailures['item-7'].count, 1, 'the snapshot epoch never moved, so the run stays at its first failure');
-  for (const epoch of [5, 6]) noteDispatchFailure(state, { ...work, epoch }, 'Dispatch blocked by exclusive resources: db held by GY-8', new Date().toISOString());
-  assert.equal(state.dispatchFailures['item-7'].count, dispatchFailureBlockAfter, 'failures that each followed a spent epoch count');
-});
 
 // GY-1082: follow-ups from the review of GY-1078.
 
@@ -344,60 +279,4 @@ test('the record of a deleted session worktree is removed on a first attempt, an
       assert.throws(() => git(foreign, 'symbolic-ref', '--short', 'HEAD'));
     } finally { git(root, 'worktree', 'remove', '--force', foreign); }
   } finally { await rm(root, { recursive: true, force: true }); }
-});
-
-test('a failure run is retired when the snapshot shows the item blocked, claimed by another dispatcher, or past an epoch this loop did not spend', async () => {
-  const directory = await temporaryDirectory('gy-1082-loop');
-  try {
-    const credential = join(directory, 'coordinator.token'); await writeFile(credential, coordinatorToken, { mode: 0o600 });
-    const config = loopConfig(credential);
-    const run = (epoch: number, count: number) => ({ key: 'GY-7', cause: 'Worker launch failed: fatal: held', count, epoch, firstAt: new Date().toISOString(), lastAt: new Date().toISOString() });
-    const cases: [string, Partial<Work>, number][] = [
-      // The loop recorded the blocker and stopped before forgetting the run: the unblock must not re-record it.
-      ['blocked', { epoch: 3, blocker: 'Dispatch failed 3 consecutive times' }, 3],
-      ['claimed by another executor', { epoch: 4, lease: { owner: 'executor', epoch: 4, expiresAt: new Date(Date.now() + 600_000).toISOString() } }, 3],
-      ['launched by a hand dispatch in between', { epoch: 4 }, 2],
-    ];
-    for (const [name, overrides, count] of cases) {
-      const state = emptyDaemonState(config);
-      state.dispatchFailures['item-7'] = run(2, count);
-      let dispatched = 0;
-      const loop = loopEffects([ready(overrides)], async () => { dispatched++; return { pane: null }; });
-      await runCycle(config, state, loop.effects, loop.clock);
-      assert.equal(state.dispatchFailures['item-7'], undefined, `${name}: the run is retired`);
-      assert.deepEqual(loop.blocked, [], `${name}: no blocker is recorded from the stale run`);
-      if (!overrides.blocker && !overrides.lease) assert.equal(dispatched, 1, `${name}: the item is dispatched afresh`);
-    }
-    // A run the last failure spent the epoch of stands.
-    const state = emptyDaemonState(config);
-    state.dispatchFailures['item-7'] = run(2, 2);
-    const loop = loopEffects([ready({ epoch: 3 })], async () => { throw new Error('Worker launch failed: fatal: held'); });
-    await runCycle(config, state, loop.effects, loop.clock);
-    assert.equal(loop.blocked.length, 1, 'consecutive failures still reach the bound');
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test('dispatchblock is refused off a dispatchable stage, over a standing blocker, or without failed attempts on the record, and names the attempts it verified', async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1082;
-  const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy-1082-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
-  try {
-    await store.init();
-    const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' }, worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' }, loop: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
-    const engine = new Engine(store, 120, 'owner/project'); engine.principals = [human, worker, loop];
-    const refused = (work: Work, pattern: RegExp) => assert.rejects(engine.execute(loop, 'dispatchblock', work.id, { reason: 'fatal: held' }, randomUUID()), pattern);
-    let work = await engine.execute(human, 'create', null, { title: 'held', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
-    await refused(work, /not awaiting a dispatch/);
-    work = await engine.execute(human, 'ready', work.id, {}, randomUUID());
-    await refused(work, /did not each end without a submission/);
-    for (let n = 0; n < dispatchFailureBlockAfter; n++) {
-      work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
-      if (n < dispatchFailureBlockAfter - 1) await refused(work, /is held by engineer-a/);
-      work = await engine.execute(worker, 'release', work.id, { epoch: work.epoch }, randomUUID());
-    }
-    work = await engine.execute(loop, 'dispatchblock', work.id, { reason: 'Dispatch failed 3 consecutive times: fatal: held' }, randomUUID());
-    assert.equal(work.blocker, 'Dispatch failed 3 consecutive times: fatal: held [attempts 1, 2, 3 each ended without a submission]');
-    await refused(work, /already carries a blocker/);
-  } finally { await store.close(); await database.stop(); }
 });

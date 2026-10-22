@@ -31,4 +31,3 @@ A merge trial whose failing tests fail on the base tip too: no rework, no filed 
 
 Conflicts only in `docs/**/*.md` get docs-sync, not rework: base merges in keeping both sides; on system-driven items the rework is the loop's round, due 10 minutes after the conflict's first record.
 
-`src/interventions.ts` only re-exports per-concern modules under `src/interventions/`: append a self-contained rule, never reword shared sentences.

@@ -266,8 +266,6 @@ test('unit:orphan-status-two-observations a stop the loop could not carry out ke
     // failed incident among them — leaves the orphan named.
     assert.ok(harness.state.orphans['work-83'].establishedAt, 'the loop marked its observation established');
     for (let index = 0; index <= retainedActions; index++) harness.state.actions[`filler:${index}`] = { kind: 'session', work: 'GY-1', principal: null, state: 'done', detail: 'filler', epoch: null, attempts: 1, cycle: 0, at: at(60_000 + index) };
-    // Its failing run has ended (endFailingRuns retires it), so nothing holds the failed row back from the bound.
-    for (const key of Object.keys(harness.state.faults.failing)) delete harness.state.faults.failing[key];
     pruneDaemonState(harness.state);
     assert.ok(!Object.keys(harness.state.actions).some(key => key.startsWith('incident:orphan-supervisor:')), 'the incident was pruned');
     const pruned = nameOrphanSupervisors(status(held), [held], [worker], { agents: [], available: true }, Date.parse(observedAt), harness.state);

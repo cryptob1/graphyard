@@ -138,9 +138,8 @@ test('integration:control-plane-local-head-trial — a head present only in the 
   assert.equal(trials[0]!.key, w.key);
   assert.ok(trials[0]!.proofs.includes('unit:app-works'), 'the trial retains the candidate\'s proof gates');
   assert.ok(records.some(entry => entry.kind === 'intent' || entry.kind === 'trial'), `the writer recorded trial progress: ${JSON.stringify(records)}`);
-  // No step of either cycle fetched the unpublished worker ref, and no stall stands to hold the writer's admission.
+  // No step of either cycle fetched the unpublished worker ref.
   assert.ok(fetches.every(args => !args.some(arg => arg.includes(branch))), `no fetch names the worker assignment branch: ${JSON.stringify(fetches)}`);
-  assert.deepEqual(Object.values(state.stepStalls).filter(run => run.stalledAt), [], 'no stall holds merge-writer admission');
   const steps = state.metrics.flatMap(metric => metric.timings?.steps.map(entry => entry.step) ?? []);
   assert.ok(steps.includes('merge writer') && !steps.includes('shadow gate'), `the loop runs the writer's trial and no shadow trial: ${steps.join(', ')}`);
   assert.equal(git(origin, 'for-each-ref', '--format=%(refname)', 'refs/heads').trim(), 'refs/heads/main', 'origin still holds only the base branch');

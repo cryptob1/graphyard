@@ -220,8 +220,6 @@ export interface LatencyBudget {
   reworkRequest: { count: number; worstMs: number; breaches: { work: string; ms: number }[] };
   met: boolean | null; reasons: string[];
 }
-/** Retired (GY-1980): the progress watchdog replaced the silence record, so this reports nothing; it stands only while src/daemon/doctor.ts still calls it. */
-export const silenceReport = (_retired: unknown, _now: number): null => null;
 
 /**
  * The four budgets over the samples the cursor holds. `met` is null while fewer than ten

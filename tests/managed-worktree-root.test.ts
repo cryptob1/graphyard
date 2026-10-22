@@ -9,12 +9,10 @@ import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { classifyAttention, trackFaults, type FaultRecord } from '../src/model/fault-classes.js';
 import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, worktreeRootAttention, writeFailure, masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { daemonSummary } from '../src/daemon/run.js';
-import { cycleFaults } from '../src/daemon/faults.js';
 import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { hostMemoryAttention, hostMemoryFloor, memoryConsumers, memoryRecoveryMarginBytes, type HostMemoryReading } from '../src/master-resources.js';
@@ -641,7 +639,7 @@ function submitted(): Work {
   return item;
 }
 
-test('unit:dispatch-defers-on-host-memory — below the memory floor the loop defers new launches with a recorded reason, raises one resources attention item naming the top consumers, and resumes once memory recovers', async () => {
+test('unit:dispatch-defers-on-host-memory — below the memory floor the loop defers new launches with a recorded reason, raises one attention item naming the top consumers, and resumes once memory recovers', async () => {
   assert.equal(hostMemoryFloor(62 * GiB), 62 * GiB * 0.1, '10% of total on a large host');
   assert.equal(hostMemoryFloor(16 * GiB), 4 * GiB, '4 GB on a small one');
   let memory = low;
@@ -656,22 +654,10 @@ test('unit:dispatch-defers-on-host-memory — below the memory floor the loop de
   assert.equal(state.memory?.low, true);
   assert.equal(daemonSummary(state, at, 30_000, 'machine-a').memory?.low, true, 'master status reads it from the loop');
 
-  // One `resources` attention item, naming the top consumers, from master status and from the loop's fault tracking.
-  const attention = classifyAttention(hostMemoryAttention(state.memory));
+  // One attention item, naming the top consumers, from master status.
+  const attention = hostMemoryAttention(state.memory);
   assert.equal(attention.length, 1);
-  assert.equal(attention[0].faultClass, 'resources');
   assert.match(attention[0].text, /top consumers: node 14\.0 GB, claude 5\.7 GB/);
-  const faults = cycleFaults(state, [ready], at, { config }).filter(fault => fault.faultClass === 'resources');
-  assert.deepEqual(faults.map(fault => fault.kind), ['memory-pressure']);
-  // The fault stands as one instance for the whole dip even as the consumers' ranking moves between
-  // cycles (GY-612): a fault is its wording, so the fault's wording carries no consumer list — the
-  // attention item keeps it — and trackFaults opens nothing new on the reshuffle.
-  const record: FaultRecord = { instances: [], open: {}, failing: {} };
-  trackFaults(record, faults, iso(at));
-  state.memory = { ...state.memory!, consumers: [...state.memory!.consumers].reverse() };
-  const opened = trackFaults(record, cycleFaults(state, [ready], at + 60_000, { config }).filter(fault => fault.faultClass === 'resources'), iso(at + 60_000));
-  assert.deepEqual(opened.map(instance => instance.kind), [], 'the moved consumer ranking reopens nothing');
-  assert.equal(record.instances.length, 1, 'one memory-pressure instance stands for the whole dip');
 
   // Still low: still deferred, and the crossing is not recorded again.
   await runCycle(config, state, loopEffects(log, () => memory));

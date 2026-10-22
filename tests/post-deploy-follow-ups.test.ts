@@ -34,7 +34,6 @@ const delivered = (overrides: Partial<Work> = {}): Work => ({
   scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
   delivery: { mergeSha, mergedAt, evidenceAsOf: mergedAt, authorizationRevision: 334 } as never, ...overrides,
 } as Work);
-const projection = { since: null, projected: '2026-10-17T14:31:37.000Z' };
 const iso = (ms: number) => new Date(ms).toISOString();
 
 // GY-1727: on 2026-10-12 master verify-deployment filed GY-1721 (GY-1684 AC-1, a rate per 7 days) and
@@ -54,17 +53,11 @@ const gy1700 = delivered({ id: 'e03bc94f-82f4-481d-a443-4b4e6abe9eb6', key: 'GY-
 /** The follow-up inputs postDeployChecks computes for `item`'s owed checks, the release observed serving at `at`. */
 const owedInputs = async (item: Work, at: string) => {
   const { postDeployChecks } = await modules();
-  return postDeployChecks(item, serving, new Date(Date.parse(at) + 2_000), {}, new Date(at)).map(check => check.followUp!.input as any);
+  return postDeployChecks(item, serving, new Date(Date.parse(at) + 2_000), new Date(at)).map(check => check.followUp!.input as any);
 };
 
-test('unit:post-deploy-follow-up-observation-window — a windowed follow-up records the earliest instant its reading can exist, from the report\'s projection or the merge plus the criterion\'s window, readable on the item and in master status', async () => {
-  const { buildMasterStatus, createSchema, criterionHoldDays, criterionWindowDays, observationWindowFor, observationWindowHold, patternOfProof, patternReader, postDeployChecks } = await modules();
-  // The declared proof names the report's pattern; the kinds carry hyphens of their own.
-  assert.deepEqual(patternOfProof(patternProof), { kind: 'escalation', stage: 'build' });
-  assert.deepEqual(patternOfProof('manual:post-deploy/intervention-pattern-scope-widening-build'), { kind: 'scope-widening', stage: 'build' });
-  assert.deepEqual(patternOfProof('manual:post-deploy/intervention-pattern-human-only-decision-none'), { kind: 'human-only-decision', stage: 'none' });
-  assert.equal(patternOfProof(hold.proofs[0]), null, 'a hand-named proof is no pattern row');
-  assert.equal(patternOfProof('manual:post-deploy/harness-drift-cleared'), null);
+test('unit:post-deploy-follow-up-observation-window — a windowed follow-up records the earliest instant its reading can exist, from the merge plus the criterion\'s window, readable on the item and in master status', async () => {
+  const { buildMasterStatus, createSchema, criterionHoldDays, criterionWindowDays, observationWindowFor, observationWindowHold, postDeployChecks } = await modules();
   // The criterion's window: a per-7-days rate, a 14-consecutive-days hold over 7-day windows, none.
   assert.equal(criterionWindowDays(rate.text), 7);
   assert.equal(criterionWindowDays(hold.text), 14);
@@ -75,59 +68,26 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
   assert.equal(criterionHoldDays(hold.text), 14);
   assert.equal(criterionHoldDays(regression.text), null);
 
-  // AC-1's rule. GY-1689 as filed: since null, the streak projected to 2026-10-17T14:31Z — earlier than the
-  // merge plus the 7-day window the criterion names, so the reading can first exist at the merge bound.
+  // AC-1's rule. GY-1689 as filed: the merge plus the 7-day window the criterion names.
   const merge7 = mergedMs + 7 * day;
-  const filed = observationWindowFor(delivered(), rate, patternProof, projection)!;
+  const filed = observationWindowFor(delivered(), rate)!;
   assert.equal(filed.notBefore, iso(merge7));
   assert.equal(filed.basis, 'criterion-window');
-  assert.match(filed.detail, /GY-1685 merged at 2026-10-11T03:11:02.000Z and AC-1 names a 7-day window, so the reading can first exist at 2026-10-18T03:11:02.000Z \(the intervention report's projection for the escalation reading at the build stage, 2026-10-17T14:31:37.000Z, is earlier\)/);
-  // A rate's projection past the merge bound is the instant: the report says the rate reading cannot exist before the streak begins.
-  const later = observationWindowFor(delivered(), rate, patternProof, { since: null, projected: '2026-10-20T00:00:00.000Z' })!;
-  assert.deepEqual([later.notBefore, later.basis], ['2026-10-20T00:00:00.000Z', 'intervention-report']);
-  assert.match(later.detail, /not yet under its threshold \(since null\) and projects the streak to begin at 2026-10-20T00:00:00.000Z/);
-  // A consecutive-day hold: `projected` is the streak's start, so the reading exists only hold-days later
-  // (review of 3717dcd8cb0b): merge Oct 11, streak projected Oct 30 → Nov 13, not Oct 30.
-  const holdProjected = '2026-10-30T00:00:00.000Z';
-  const holdReady = iso(Date.parse(holdProjected) + 14 * day);
-  const held = observationWindowFor(delivered({ criteria: [hold] }), hold, hold.proofs[0], { since: null, projected: holdProjected })!;
-  assert.deepEqual([held.notBefore, held.basis], [holdReady, 'intervention-report']);
-  assert.equal(held.notBefore, '2026-11-13T00:00:00.000Z');
-  assert.match(held.detail, /projects the streak to begin at 2026-10-30T00:00:00.000Z, and AC-2 names a 14-consecutive-day hold, so the reading can first exist at 2026-11-13T00:00:00.000Z/);
-  // A streak already begun: since plus the criterion's window, when that is the later bound.
-  const since = observationWindowFor(delivered(), rate, patternProof, { since: '2026-10-12T00:00:00.000Z', projected: null })!;
-  assert.deepEqual([since.notBefore, since.basis], ['2026-10-19T00:00:00.000Z', 'intervention-report']);
-  assert.match(since.detail, /under its threshold since 2026-10-12T00:00:00.000Z, and AC-1 names a 7-day window, so the reading can first exist at 2026-10-19T00:00:00.000Z; GY-1685 merged at/);
-  const early = observationWindowFor(delivered(), rate, patternProof, { since: '2026-10-05T00:00:00.000Z', projected: null })!;
-  assert.deepEqual([early.notBefore, early.basis], [iso(merge7), 'criterion-window'], 'a streak begun before the merge still waits for the post-ship window');
-  // No report reading: the merge plus the window. A 14-consecutive-days hold is at least the merge plus 14 days.
-  const unread = observationWindowFor(delivered(), rate, patternProof, null)!;
-  assert.deepEqual([unread.notBefore, unread.basis], [iso(merge7), 'criterion-window']);
-  assert.match(unread.detail, /holds no reading for the escalation reading at the build stage/);
-  const fourteen = observationWindowFor(delivered({ criteria: [hold] }), hold, hold.proofs[0], undefined)!;
+  assert.match(filed.detail, /GY-1685 merged at 2026-10-11T03:11:02.000Z and AC-1 names a 7-day window, so the reading can first exist at 2026-10-18T03:11:02.000Z/);
+  // A 14-consecutive-days hold is at least the merge plus 14 days.
+  const fourteen = observationWindowFor(delivered({ criteria: [hold] }), hold)!;
   assert.deepEqual([fourteen.notBefore, fourteen.basis], [iso(mergedMs + 14 * day), 'criterion-window']);
   // A reading no window bounds carries none: an ordinary follow-up.
-  assert.equal(observationWindowFor(delivered(), { id: 'AC-3', text: "'master status' on the live install reports harnessDrift null" }, 'manual:post-deploy/harness-drift-cleared', undefined), undefined);
+  assert.equal(observationWindowFor(delivered(), { id: 'AC-3', text: "'master status' on the live install reports harnessDrift null" }), undefined);
 
   // The owed check's input carries the window and says so.
-  const input = postDeployChecks(delivered(), release, new Date('2026-10-11T03:36:11.661Z'), { [patternProof]: projection })[0].followUp!.input;
+  const input = postDeployChecks(delivered(), release, new Date('2026-10-11T03:36:11.661Z'))[0].followUp!.input;
   assert.deepEqual(input.observationWindow, filed);
   assert.match(input.description, /\n\nObservation window: the reading can first exist at 2026-10-18T03:11:02.000Z — GY-1685 merged at .*\. The item is not dispatched before then\.\n\nGY-1685 AC-1:/);
   const { reason: _reason, ...created } = input;
   const parsed = createSchema.parse(created);
   assert.deepEqual(parsed.observationWindow, filed);
   assert.equal(createSchema.safeParse({ ...created, observationWindow: { notBefore: 'soon', basis: 'criterion-window', detail: '' } }).success, false, 'the instant is an ISO instant');
-  const withoutReader = postDeployChecks(delivered(), release)[0].followUp!.input;
-  assert.deepEqual([withoutReader.observationWindow!.notBefore, withoutReader.observationWindow!.basis], [iso(merge7), 'criterion-window']);
-  assert.equal(postDeployChecks(delivered({ criteria: [{ id: 'AC-3', text: "'master status' on the live install reports harnessDrift null", proofs: ['manual:post-deploy/harness-drift-cleared'] }] }), release)[0].followUp!.input.observationWindow, undefined);
-  // The reader over GET /api/interventions: the pattern's row, or null when the report holds none.
-  const report = { patterns: [{ kind: 'escalation', stage: 'build', underThreshold: { ...projection, days: 0, holdDays: 14, peak: 3, reach: '2026-10-10T14:31:37.000Z', established: '2026-10-17T14:31:37.000Z' } }] };
-  const paths: string[] = [];
-  const read = patternReader(async path => { paths.push(path); return report; });
-  assert.deepEqual(await read({ kind: 'escalation', stage: 'build' }), projection);
-  assert.equal(await read({ kind: 'rework', stage: 'build' }), null);
-  assert.deepEqual(paths, ['interventions', 'interventions']);
-
   // Readable on the item and in master status: the row names the instant and whether it still holds.
   const followUp = { ...delivered(), ...parsed, id: 'c0ffee00-0000-4000-8000-000000001689', key: 'GY-1689', stage: 'ready', ready: true, delivery: undefined, submission: null, workspaces: [], gates: [], createdAt: '2026-10-11T03:36:11.661Z', stageEnteredAt: '2026-10-11T06:39:00.000Z' } as unknown as Work;
   const status = buildMasterStatus({ work: [delivered(), followUp], now: '2026-10-11T06:40:00.000Z' }, [], []);
@@ -153,10 +113,10 @@ test('unit:post-deploy-follow-up-observation-window — a windowed follow-up rec
   assert.deepEqual(createSchema.parse((({ reason: _r, ...rest }) => rest)(gy1724)).observationWindow, gy1724.observationWindow);
   // Already recorded as serving: a later re-run keeps the first observation, never restarting the window.
   const recorded = { ...gy1700, delivery: { ...gy1700.delivery!, deployment: { sha: serving, mergeSha: gy1700.delivery!.mergeSha, source: 'endpoint', observedAt: '2026-10-12T07:33:40.939Z', at: '2026-10-12T07:33:47.795Z', observer: 'graphyard-master', covers: 'descendant' } } } as Work;
-  assert.equal(postDeployChecks(recorded, serving, new Date('2026-10-12T09:00:00.000Z'), {}, new Date('2026-10-12T08:59:58.000Z'))[0].followUp!.input.observationWindow!.notBefore, '2026-10-13T07:33:40.939Z');
+  assert.equal(postDeployChecks(recorded, serving, new Date('2026-10-12T09:00:00.000Z'), new Date('2026-10-12T08:59:58.000Z'))[0].followUp!.input.observationWindow!.notBefore, '2026-10-13T07:33:40.939Z');
   // With no serving observation the merge anchors it; a day window past the hour window still decides.
-  assert.equal(observationWindowFor(gy1700, gy1700.criteria[0], gy1700.criteria[0].proofs[0], undefined)!.notBefore, '2026-10-12T15:08:24.000Z');
-  assert.equal(observationWindowFor(gy1700, { id: 'AC-9', text: 'per 7 days, in any 24-hour window' }, 'manual:post-deploy/x', undefined, Date.parse('2026-10-12T07:33:40.939Z'))!.notBefore, '2026-10-18T15:08:24.000Z');
+  assert.equal(observationWindowFor(gy1700, gy1700.criteria[0])!.notBefore, '2026-10-12T15:08:24.000Z');
+  assert.equal(observationWindowFor(gy1700, { id: 'AC-9', text: 'per 7 days, in any 24-hour window' }, Date.parse('2026-10-12T07:33:40.939Z'))!.notBefore, '2026-10-18T15:08:24.000Z');
 });
 
 test('unit:observation-window-holds-dispatch — a released follow-up is not dispatched before its recorded instant and is dispatched by the loop once it passes; before the fix GY-1689 was dispatched at once', async () => {
@@ -164,7 +124,7 @@ test('unit:observation-window-holds-dispatch — a released follow-up is not dis
   const gy1685 = delivered();
   const notBefore = iso(mergedMs + 7 * day);
   // GY-1689 as the loop files it now: GY-1685's follow-up, carrying the window, released at 06:39Z.
-  const { reason: _reason, ...input } = postDeployChecks(gy1685, release, new Date('2026-10-11T03:36:11.661Z'), { [patternProof]: projection })[0].followUp!.input;
+  const { reason: _reason, ...input } = postDeployChecks(gy1685, release, new Date('2026-10-11T03:36:11.661Z'))[0].followUp!.input;
   const released = (at: string, overrides: Partial<Work> = {}): Work => {
     const item = { ...gy1685, ...createSchema.parse(input), id: 'c0ffee00-0000-4000-8000-000000001689', key: 'GY-1689', stage: 'ready', revision: 3, ready: true, delivery: undefined, submission: null, workspaces: [], lease: null, epoch: 0,
       createdAt: '2026-10-11T03:36:11.661Z', updatedAt: at, stageEnteredAt: '2026-10-11T06:39:00.000Z', gates: [], ...overrides } as unknown as Work;
@@ -286,12 +246,12 @@ test('unit:criterion-window-hours — an hour-denominated window is read like a 
   assert.equal(criterionWindowHours('the 3 hosts report healthy'), null);
   const merged = gy1700.delivery!.mergedAt, mergedMs24 = Date.parse(merged) + day;
   for (const text of ['Zero failed webhook deliveries over 24 hours', 'The attention row clears within 24 hours']) {
-    const hours = observationWindowFor(gy1700, { id: 'AC-2', text }, 'manual:post-deploy/x', undefined)!;
-    const days = observationWindowFor(gy1700, { id: 'AC-2', text: text.replace('24 hours', '1 day') }, 'manual:post-deploy/x', undefined)!;
+    const hours = observationWindowFor(gy1700, { id: 'AC-2', text })!;
+    const days = observationWindowFor(gy1700, { id: 'AC-2', text: text.replace('24 hours', '1 day') })!;
     assert.equal(criterionWindowDays(text.replace('24 hours', '1 day')), 1);
     assert.deepEqual([hours.notBefore, hours.basis], [iso(mergedMs24), 'criterion-window'], `${text}: merge plus 24 hours`);
     assert.equal(hours.notBefore, days.notBefore, `${text}: the same instant as the one-day window`);
     const servedAt = Date.parse('2026-10-12T07:33:40.939Z');
-    assert.equal(observationWindowFor(gy1700, { id: 'AC-2', text }, 'manual:post-deploy/x', undefined, servedAt)!.notBefore, iso(servedAt + day), `${text}: first observed serving plus 24 hours`);
+    assert.equal(observationWindowFor(gy1700, { id: 'AC-2', text }, servedAt)!.notBefore, iso(servedAt + day), `${text}: first observed serving plus 24 hours`);
   }
 });

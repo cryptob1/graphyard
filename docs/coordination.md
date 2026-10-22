@@ -9,13 +9,13 @@ Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit
 
 Dispatch never locks paths: `sync` and the merge writer's trial integrate overlaps (`master status`: `overlap.concurrent` on observed files, `merge-tree` failures); only `exclusiveResources` hold dispatch. A session gets the `verification/AREA.md` maps whose `Paths:` cover a path its item's criteria or description name.
 
-**3** single-cause dispatch failures, fleet-idle and release-skew excluded: `dispatchblock` until `graphyard unblock GY-N REASON`. Release-skew, marked post-merge waits: no fault.
+A failed dispatch is retried next cycle, never blocked.
 
 ## Review gate: verdicts, not threads
 
 Exact-head approval lands; remote threads and reviews are never read or resolved. Past cap (default 3) only `BLOCKING:` holds; repeats escalate (`master decide rework`). Sensitive ([`pre-merge`](delivery.md#managed-repositories): any) needs exact-head approval; normal merges, post-merge review files `BLOCKING:` bugs. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions, budget-test blockers, normal-risk rework approvers.
 
-`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Mechanical findings hold approval until the round window or the loop's clear; the loop requests bot `rework`, one commit, only those files. `Rejected bot commit: SHA — reason` records `misclassified-finding` ([intervention](operations.md#retro-synthesis)).
+`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Mechanical findings hold approval until the round window or the loop's clear; the loop requests bot `rework`, one commit, only those files. `Rejected bot commit: SHA — reason` rejects it.
 
 ## Scope is a plan, not a lock
 

@@ -2,12 +2,10 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { classifyAttention } from '../src/model/fault-classes.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 // Namespace imports: on a tree without these exports each case still runs, and fails as a case.
 import { maxDecisionRequests, neededDecision } from '../src/daemon/decisions.js';
-import { cycleFaults } from '../src/daemon/faults.js';
 import { decisionKey } from '../src/daemon/reconcile.js';
 import { approvalWatchSchema } from '../src/daemon/state.js';
 import * as owedReport from '../src/cli/owed-report.js';
@@ -25,7 +23,6 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 const clock = Date.parse('2030-01-01T12:00:00Z');
 const minute = 60_000, hour = 60 * minute;
 const iso = (at: number) => new Date(at).toISOString();
-const policy = { threshold: 3, windowHours: 24 };
 const staleReleaseAttention: typeof owedReport.staleReleaseAttention = (...args) => owedReport.staleReleaseAttention(...args);
 const staleOutcome = 'Task revision changed; reload and request again; the decision was not applied';
 
@@ -57,10 +54,6 @@ test('unit:stale-release-stands-as-owed-attention — an item in backlog whose l
   assert.match(owed.text, /owed for 3h/);
   assert.equal(owed.role, 'master');
   assert.match(owed.next, /graphyard master release GY-1209/);
-  // It is classed as owed decision attention, the decision fault class, not an unclassified line.
-  const [classified] = classifyAttention([owed]);
-  assert.equal(classified.kind, 'owed-decision');
-  assert.equal(classified.faultClass, 'decision');
 
   // Nothing owed once a later release stands, the item left backlog, or the latest release applied.
   assert.equal(staleReleaseAttention(fixItem, [stale, { id: 'later', action: 'release', state: 'requested', requestedAt: iso(now) }], now), null);
@@ -80,15 +73,13 @@ test('unit:stale-release-stands-as-owed-attention — master status reads the de
   const report = await terminalDecisions(api, [{ ...item('GY-1289') }, { ...item('GY-7', { stage: 'build' } as Partial<Work>) }], { approvals: [], runtime: { available: false, agents: [] }, now });
   const owed = report.attentionItems.find(entry => entry.subject === 'GY-1289');
   assert.ok(owed, JSON.stringify(report.attentionItems));
-  assert.equal(classifyAttention([owed])[0].kind, 'owed-decision');
   assert.match(owed.text, /has been owed for 2h/);
   assert.equal(report.attentionItems.filter(entry => entry.subject === 'GY-1289').length, 1, 'named once');
-  assert.equal(classifyAttention([report.attentionItems.find(entry => entry.subject === 'GY-7')!])[0].kind, 'decision-stale');
+  assert.doesNotMatch(report.attentionItems.find(entry => entry.subject === 'GY-7')?.text ?? '', /has been owed/);
 });
 
 type Row = { id: string; work: string; action: string; state: string; input: Record<string, unknown>; requestedAt: string; outcome: string | null; approvedBy: string | null; approvedAt?: string | null; reason?: string };
-// GY-1315: four decision faults in 24 hours, each a decision the loop was itself still carrying,
-// counted as a fault before the loop's own next step. Each case replays one listed instance.
+// GY-1315: decisions the loop was itself still carrying. Each case replays one listed instance.
 const gy1315 = {
   // GY-1313 and GY-1314: diagnosed fixes whose releases went stale at 16:19:54; the owed lines counted at
   // 16:22:57 and the releases were asked again at 16:26.
@@ -110,7 +101,7 @@ function plainWorld(work: Work[], ledger: Row[], start: number) {
   const effects = {
     agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: work.map(entry => ({ ...entry })), now: iso(now) }),
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    faultClassPolicy: policy, persist: async () => {},
+    persist: async () => {},
     decide: async (target: Work, action: string, reason: string, input: Record<string, unknown> = {}) => {
       const id = `requested-${++sequence}`;
       ledger.push({ id, work: target.key, action, state: 'requested', input: { expectedRevision: target.revision, ...input }, requestedAt: iso(now), outcome: null, approvedBy: null, reason });
@@ -125,8 +116,6 @@ function plainWorld(work: Work[], ledger: Row[], start: number) {
 }
 const staleRow = (release: typeof gy1315.releases[number]): Row => ({ id: release.decision, work: release.key, action: 'release', state: 'stale', input: { expectedRevision: 1 }, requestedAt: release.requestedAt,
   outcome: gy1315.staleOutcome, approvedBy: null, reason: `Release ${release.key}, the root-cause fix the diagnostician found, at priority 1.` });
-const owedFaults = (key: string, line: ReturnType<typeof staleReleaseAttention>, work: Work[], at: number) =>
-  cycleFaults(emptyDaemonState(config()), work, at, { config: config(), reported: line ? [line] : [] }).filter(fault => fault.kind === 'owed-decision' && fault.subject === key);
 
 for (const release of gy1315.releases) {
   test(`unit:stale-release-re-requested-by-the-loop — ${release.key} (${release.instance}): a stale release requested outside a diagnosis is asked again against the current revision, and its approver launched`, async () => {
@@ -143,21 +132,6 @@ for (const release of gy1315.releases) {
     // Asked once: the next cycle finds a release standing, not a stale one.
     w.at(Date.parse(release.instance) + minute); await w.cycle();
     assert.equal(ledger.filter(entry => entry.action === 'release').length, 2);
-  });
-
-  test(`unit:stale-release-in-motion-not-a-fault — ${release.key} (${release.instance}): the owed line of a stale release the loop is still re-requesting is shown, not counted, until the wait bound or the request bound is spent`, () => {
-    const fixItem = item(release.key, { revision: 6, priority: 1 } as Partial<Work>);
-    const at = Date.parse(release.instance), ledger = [staleRow(release)];
-    const line = staleReleaseAttention(fixItem, ledger, at);
-    assert.ok(line, 'master status still names the stale release as owed');
-    assert.match(line.text, /has been owed for 5m/);
-    assert.deepEqual(owedFaults(release.key, line, [fixItem], at), [], 'the instance does not recur: the loop is asking again');
-    // Past the wait bound it counts.
-    const bound = owedReport.staleReleaseWaitBoundMs ?? 30 * minute, late = Date.parse(release.requestedAt) + bound + minute;
-    assert.equal(owedFaults(release.key, staleReleaseAttention(fixItem, ledger, late), [fixItem], late).length, 1, 'a stale release owed past the bound is a fault');
-    // Once every request is spent the loop asks no more, and it counts at once.
-    const spent = Array.from({ length: maxDecisionRequests }, (_, index) => ({ ...staleRow(release), id: `${release.decision}-${index}` }));
-    assert.equal(owedFaults(release.key, staleReleaseAttention(fixItem, spent, at), [fixItem], at).length, 1, 'a release the loop stopped asking for is a fault');
   });
 }
 
@@ -200,7 +174,6 @@ test(`unit:superseded-decision-re-request-not-a-fault — GY-949 (${gy1315.super
   assert.match(ended.detail, /ended superseded \(Superseded: approved for head 5d78667000f3.*still needs it, so it is requested again/);
   assert.equal(ended.state, 'done', 'the re-request is the loop\'s next step, not a failed action');
   assert.equal(ledger.filter(entry => entry.action === 'close' && entry.state === 'requested').length, 1, 'and it is requested again in the same cycle');
-  assert.deepEqual(w.state.faults.instances.filter(fault => fault.kind === 'action:decision' && fault.subject === 'GY-949'), [], 'no decision fault is noted for it');
 });
 
 test(`unit:approved-unapplied-not-an-approver-wait — GY-949 (${gy1315.superseded.unanswered}): an approved decision awaiting its apply, approver gone, is never named as waiting for an approver to judge it`, async () => {
@@ -221,5 +194,4 @@ test(`unit:approved-unapplied-not-an-approver-wait — GY-949 (${gy1315.supersed
   // silence measure the instance was filed under.)
   const watch = Object.values(w.state.approvals)[0];
   assert.ok(watch?.approvedAt && watch.approvedBy, JSON.stringify(watch));
-  assert.ok(!Object.values(w.state.faults.instances).some(fault => fault.kind === 'decision-unanswered' && fault.subject === 'GY-949'), JSON.stringify(w.state.faults.instances.filter(fault => fault.subject === 'GY-949')));
 });

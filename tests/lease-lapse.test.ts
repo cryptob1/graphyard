@@ -7,8 +7,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, readAttestations } from '../src/engine.js';
 import { attestationFor, attestationsFromLedger, classifyLeaseLapse, leaseLapseCause, leaseLossAutoSettlement, leaseLossReason, leaseLossSettlementNote, settleableLeaseLoss, standingEscalations, type Attestation, type Escalation, type Principal, type Work } from '../src/model.js';
-import { readInterventionReport } from '../src/interventions.js';
-import { interventionPolicyFromEnv } from '../src/model/interventions.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -380,8 +378,6 @@ test('integration:lease-loss-superseded-settled: reconciliation settles a contro
     { epoch: lostEpoch, cause: 'superseded', note: `auto-settled: superseded — epoch ${lostEpoch + 1} is held by ${replacement.id}, so nothing from epoch ${lostEpoch} can act or merge` });
   assert.equal((await events(work, 'escalation.resolved')).length, 0);
   assert.equal((await events(work, 'decision.requested')).length, 0);
-  const report = await readInterventionReport(store, interventionPolicyFromEnv({}), { days: 7, work: work.id });
-  assert.deepEqual(report.interventions.filter(entry => entry.kind === 'escalation'), [], 'an auto-settled lease-loss is no intervention');
 
   // The superseding attempt lapsing silently in turn raises its own concern; it is not hidden behind the first.
   work = await overwrite(work, document => { document.lease = { ...document.lease!, expiresAt: '2000-01-01T00:00:00Z' }; });

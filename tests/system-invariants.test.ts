@@ -5,7 +5,7 @@ import type { Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { candidateKey } from '../src/daemon/reconcile.js';
-import { checkInvariants, emptyInvariantRecord, followUpProof, invariantDefaults, invariantFaultClass, invariantFaultKind, invariantFaults, systemInvariants, type InvariantInput, type SystemInvariant } from '../src/model/invariants.js';
+import { checkInvariants, emptyInvariantRecord, followUpProof, invariantDefaults, systemInvariants, type InvariantInput, type SystemInvariant } from '../src/model/invariants.js';
 import { repeatingPaths, repetitionReviewSection, reviewPrompt } from '../src/reviewer.js';
 import { readFile } from 'node:fs/promises';
 
@@ -92,26 +92,19 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
   for (const invariant of systemInvariants) {
     const over = judge(fixtures[invariant].over), check = verdict(over, invariant);
     assert.equal(check.holds, false, `${invariant} over its threshold is violated: ${check.line}`);
-    const faults = invariantFaults(over);
-    assert.equal(faults.length, 1, `exactly one fault for ${invariant}, whatever number of items hold it: ${faults.map(fault => fault.kind).join(', ')}`);
-    assert.equal(faults[0].kind, invariantFaultKind(invariant));
-    assert.equal(faults[0].faultClass, invariantFaultClass[invariant]);
     assert.match(check.line, new RegExp(`^${invariant}: VIOLATED`));
     const at = verdict(judge(fixtures[invariant].at), invariant);
     assert.equal(at.holds, true, `${invariant} at its threshold holds: ${at.line}`);
-    assert.deepEqual(invariantFaults(judge(fixtures[invariant].at)), [], `${invariant} at its threshold reports nothing`);
   }
-  // Every invariant over its threshold at once: exactly one fault per invariant, each of its class.
+  // Every invariant over its threshold at once: each is violated.
   const all = judge([{ work: [], now: clock - 20 * minute, build: 'build-1', metrics: [] }, ...fixtures['refresh-churn'].over.map(input => ({ ...input, now: clock - 20 * minute + (input.now - clock), build: 'build-1' })),
     { work: [refreshed('GY-8', 4), mergeable('GY-10')], now: clock - 12 * minute, build: 'build-2' },
     { work: [parent, followUp('GY-2', parent), followUp('GY-3', parent), delivered('GY-5', 31 * minute, [session('reviewer-5')]), refreshed('GY-8', 4), mergeable('GY-10'), untriaged('GY-12', 25 * hour), leaseLost('GY-14', -10 * minute)],
       now: clock, metrics: metrics(31), agents: [{ name: 'reviewer-5' }], build: 'build-2' }]);
-  const faults = invariantFaults(all);
-  assert.deepEqual(faults.map(fault => fault.kind).sort(), systemInvariants.map(invariantFaultKind).sort(), all.filter(check => check.holds).map(check => check.line).join('\n'));
-  for (const fault of faults) assert.equal(fault.faultClass, invariantFaultClass[fault.subject.slice('invariant:'.length) as SystemInvariant]);
+  assert.deepEqual(all.filter(check => !check.holds).map(check => check.invariant).sort(), [...systemInvariants].sort(), all.filter(check => check.holds).map(check => check.line).join('\n'));
   // A source that could not be read is not observed, never violated.
   const blind = checkInvariants(emptyInvariantRecord(), { work: [delivered('GY-5', 2 * hour, [session('reviewer-5')])], now: clock, agents: null });
-  assert.equal(verdict(blind, 'lingering-sessions').observed, false); assert.deepEqual(invariantFaults(blind), []);
+  assert.equal(verdict(blind, 'lingering-sessions').observed, false);
   // A gate still failing is a recorded refusal: the stall bound does not apply.
   const refusal = emptyInvariantRecord(), stalled = mergeable('GY-10');
   checkInvariants(refusal, { work: [stalled], now: clock });
@@ -142,7 +135,7 @@ function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
     recordDeployment: async () => {}, persist: async () => {}, ...overrides };
 }
 
-test('unit:system-invariants-checked — the loop checks every invariant each cycle, a violation is one standing fault of its class, and master status prints a line per invariant', async () => {
+test('unit:system-invariants-checked — the loop checks every invariant each cycle, master status prints a line per invariant', async () => {
   const parent = item('GY-1', { stage: 'done' });
   let cycle = 0;
   const world = () => {
@@ -158,16 +151,9 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
     snapshot: async () => { const { now, work } = world(); return { work, now: new Date(now).toISOString() }; },
     agents: () => [{ name: 'reviewer-5', pane_id: 'pane-reviewer-5' }],
     herdr: () => ({ agents: [{ name: 'reviewer-5', pane_id: 'pane-reviewer-5' }], available: true }),
-    controlPlane: async () => ({ build: { commit: index < 2 ? 'build-1' : 'build-2', protocol: 1 } }) as any,
-    faultClassPolicy: { threshold: 1, windowHours: 24 },
+    observeDeployment: async () => ({ source: 'unavailable', sha: index < 2 ? 'build-1' : 'build-2', at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
   });
   for (; cycle < 6; cycle++) await runCycle(config(), state, loop(cycle), () => clock + cycle * 3 * minute);
-  // Seven invariants, each violated: one fault instance each, standing across the cycles rather than reopened.
-  const instances = state.faults.instances.filter(instance => instance.kind.startsWith('invariant:'));
-  assert.deepEqual(instances.map(instance => instance.kind).sort(), systemInvariants.map(invariantFaultKind).sort(), instances.map(instance => `${instance.kind} ${instance.text}`).join('\n'));
-  for (const instance of instances) assert.equal(instance.faultClass, invariantFaultClass[instance.kind.slice('invariant:'.length) as SystemInvariant]);
-  // GY-2186: nothing is filed for a class the invariants report into; the instances stay standing.
-  assert.ok(state.faults.instances.filter(instance => instance.kind.startsWith('invariant:')).every(instance => instance.linkedTo === null), 'no invariant instance is linked to an item');
   // master status: one line per invariant, with its threshold and reading.
   const summary = daemonSummary(state, clock + 6 * 3 * minute, 30_000, 'machine-a');
   assert.equal(summary.invariants.lines.length, systemInvariants.length);

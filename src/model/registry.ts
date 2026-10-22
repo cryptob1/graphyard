@@ -117,12 +117,10 @@ export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; 
 /** The roles a configured registry is expected to name. The master role (GY-898) is never proposed by setup: the operator names its accounts. */
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'approver', 'escalation-handler', 'master'] as const;
 /**
- * Every role the registry may define: the proposed ones, the diagnostician (GY-439), which turns a
- * recurring-fault item into its root cause and a fix item, and the doctor (GY-711), which finds
- * stuck and overdue work and fixes it through its sanctioned commands, and the acceptance role
- * (GY-1417), which turns a goal into customer outcomes and required E2E cases, and the planner
- * (GY-1418), which plans its work items. Each runs headless on Pi from `run.diagnostician`/
- * `run.doctor` until an operator names accounts for it here, so none is proposed nor reported missing.
+ * Every role the registry may define: the proposed ones, the acceptance role (GY-1417), which turns
+ * a goal into customer outcomes and required E2E cases, and the planner (GY-1418), which plans its
+ * work items; neither is proposed nor reported missing. The diagnostician (GY-439) and the doctor
+ * (GY-711) are retired; a registry still naming them keeps parsing.
  */
 export const registryRoles = [...fleetRoles, 'diagnostician', 'doctor', 'acceptance', 'planner'] as const;
 export type FleetRoleName = typeof registryRoles[number];

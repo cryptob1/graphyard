@@ -36,7 +36,7 @@ export function listTestFiles(root = repositoryRoot) {
  * (`affected`) leaves them out, and the loop runs them once after each merge. GitHub's CI selection
  * (`select`) still runs them.
  */
-export const advisoryTests = ['tests/interventions-hotspot-split.test.ts'];
+export const advisoryTests = [];
 export const isAdvisoryTest = file => advisoryTests.includes(file);
 
 // ---- Shards ------------------------------------------------------------------------------------

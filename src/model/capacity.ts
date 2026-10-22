@@ -190,14 +190,6 @@ export function headlessTimeoutLimit(
 ): ExhaustionSignal | null {
   return headlessTimeoutLimitCharge(attempts, now)?.limit ?? null;
 }
-export const doctorLimitUntilMarker = 'provider limit until ';
-export function doctorLimitRetryAt(runs: readonly { state: string; detail: string }[], clock: number): string | null {
-  const last = runs.at(-1);
-  if (!last || last.state === 'running') return null;
-  const until = last.detail.includes(doctorLimitUntilMarker)
-    ? last.detail.slice(last.detail.indexOf(doctorLimitUntilMarker) + doctorLimitUntilMarker.length).split(/[\s;]/)[0] : null;
-  return until && Date.parse(until) > clock ? until : null;
-}
 
 /** How an interrupted attempt's uncommitted work was kept, or that there was none to keep. */
 export const partialWorkStates = ['committed', 'discarded', 'clean', 'not-applicable'] as const;

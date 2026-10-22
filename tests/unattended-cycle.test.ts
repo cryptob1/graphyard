@@ -587,7 +587,6 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   assert.equal(attention[0].subject, 'GY-400');
   assert.match(attention[0].text, /Nothing has progressed for \d+ minutes \(since \d{4}-.*\): GY-400 has been in build since/);
   assert.equal(attention[0].human, false);
-  assert.equal(attention[0].kind, undefined, 'the watchdog line carries no fault class');
 
   // The credential comes back: the same subject is acted on, and the watchdog's oldest-open-item
   // instant moves with it.

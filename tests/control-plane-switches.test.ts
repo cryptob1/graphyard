@@ -99,7 +99,7 @@ test('unit:landability-github-snapshot — a github-observed candidate keeps the
 });
 
 test('unit:advisory-tests-selection — scripts/ci-tests.mjs exports the advisory budget tests; the trials\' affected selection leaves them out, `advisory` lists them, and the github CI selection still runs them', () => {
-  assert.deepEqual(advisoryTests, ['tests/interventions-hotspot-split.test.ts']);
+  assert.deepEqual(advisoryTests, []);
   const cli = (...args: string[]) => execFileSync('node', ['scripts/ci-tests.mjs', ...args], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
   const affected = cli('affected', 'package.json');
   assert.match(affected[0]!, /^full: /);

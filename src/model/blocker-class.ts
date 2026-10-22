@@ -132,7 +132,7 @@ const decisionWait = /\b(?:needs?|await\w*|waits?|waiting|requested|pending|laun
 export const masterRoleBlocker = /\.graphyard\/master\.json does not exist|\bno master role\b|\bmaster-role session\b/i;
 const uuidToken = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
-/** How every blocker the loop records for repeated dispatch failures opens (dispatchFailureBlocker, src/daemon/dispatch-failures.ts). */
+/** How every blocker the loop recorded for repeated dispatch failures opens (GY-1078; the loop records none since GY-2873, one still standing reads here). */
 const dispatchFailureBlocker = /^Dispatch failed \d+ consecutive times with the same cause since \S+, so the master loop stopped redispatching /;
 /**
  * Whether a dispatch failure's cause is the fleet's, not the item's (GY-1322): no worker profile

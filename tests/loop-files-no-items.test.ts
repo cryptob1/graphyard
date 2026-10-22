@@ -112,9 +112,6 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
   assert.equal(logs.length, 1, JSON.stringify(logs));
   assert.match(logs[0]!, /The advisory budget tests failed on .*they are advisory, so nothing is refused, reverted or filed/);
   assert.deepEqual(Object.values(state.actions).filter(action => /advisory/i.test(action.detail) && action.work), [], 'the advisory failure files nothing');
-
-  // The recurring classes the cycle saw stand as recorded instances, never items.
-  assert.ok(Object.values(state.actions).every(action => action.kind !== 'fault' || !/^Filed /.test(action.detail)), 'no fault item is filed');
 });
 
 test('unit:no-flake-or-advisory-items — a test that fails then passes on rerun, and an advisory test that fails after a merge, file no work item and are at most one line each', async t => {
@@ -155,7 +152,6 @@ test('unit:no-flake-or-advisory-items — a test that fails then passes on rerun
   assert.match(logs[0]!, /The advisory budget tests failed on .*they are advisory, so nothing is refused, reverted or filed/);
   const advisoryActions = Object.values(state.actions).filter(action => /advisory/i.test(action.detail));
   assert.deepEqual(advisoryActions.filter(action => action.work), [], 'an advisory failure files no work item');
-  assert.ok(advisoryActions.every(action => action.state !== 'failed' || action.faultClass === undefined), 'and no fault instance either');
 });
 
 test('unit:loop-files-no-items — the loop exposes no filing effect at all', async t => {
@@ -174,7 +170,7 @@ test('unit:loop-files-no-items — the loop exposes no filing effect at all', as
   }
 });
 
-test('unit:diagnostician-removed-cursor-loads — a cursor still carrying diagnoses, linked fault instances, advisory entries or base-failure item keys loads, and the retired keys drop on read', async t => {
+test('unit:diagnostician-removed-cursor-loads — a cursor still carrying diagnoses, advisory entries or base-failure item keys loads, and the retired keys drop on read', async t => {
   const root = await temporaryDirectory('diagnostician-cursor');
   execFileSync('git', ['init', '-q'], { cwd: root });
   const directory = await temporaryDirectory('diagnostician-cursor-credentials');
@@ -190,8 +186,6 @@ test('unit:diagnostician-removed-cursor-loads — a cursor still carrying diagno
     // The diagnostician's records, per recurring item and invariant instance.
     diagnoses: { 'GY-1682': { subject: 'GY-1682', kind: 'recurring', faultClass: 'scope', work: 'GY-1682', state: 'answered', startedAt: iso(-hour), updatedAt: iso(-minute),
       runs: [{ runtime: 'pi', model: 'zai/glm-5.3-flash', startedAt: iso(-hour), endedAt: iso(-minute), result: 'diagnosed', detail: 'Diagnosed' }], diagnosis: null, fix: 'GY-1683', decision: null, answeredBy: 'GY-1683', refusedAt: null, retryAt: null, detail: 'answered' } },
-    // Instance linking, and the instances themselves still carrying a link.
-    faults: { ...base.faults, linked: { 'GY-1682': iso(-hour) }, instances: [{ id: 'blocker|GY-1|' + iso(-minute), kind: 'blocker', faultClass: 'stalled-gate', subject: 'GY-1', text: 'blocked', at: iso(-minute), lastSeenAt: iso(-minute), linkedTo: 'GY-1682' }] },
     // The advisory run ledger and a base-failure record naming the item an older loop filed for it.
     mergeWriter: { ...emptyMergeWriterState(), advisory: { since: iso(-2 * hour), due: [], ran: [{ key: 'GY-87', mergeSha: sha('merged'), deliveredAt: iso(-hour) }] } },
     baseFailures: { 'trial:work-100:abc': { test: 'tests/flaky.test.ts', check: 'trial', baseSha: tip40(), jobId: null, url: null, raisedAt: iso(-hour), blocks: [{ key: 'GY-100', id: 'work-100', sha: sha('candidate'), jobId: null, url: null }], item: 'GY-999', cleared: null } },
@@ -200,16 +194,12 @@ test('unit:diagnostician-removed-cursor-loads — a cursor still carrying diagno
   const loaded = await readDaemonState(root, master);
   // Everything the loop still reads survived; the retired keys did not.
   assert.equal((loaded as unknown as Record<string, unknown>).diagnoses, undefined, 'the diagnoses record is dropped on read');
-  assert.equal(loaded.faults.instances.length, 1, 'the recorded instances stay');
-  assert.equal(loaded.faults.instances[0]!.linkedTo, 'GY-1682', 'an old link rides on its instance, read but never followed');
-  assert.equal((loaded.faults as { linked?: unknown }).linked, undefined, 'the linked map is dropped on read');
   assert.equal(loaded.mergeWriter.advisory?.ran.length, 1, 'the advisory run ledger loads');
   assert.equal(Object.values(loaded.baseFailures)[0]!.item, 'GY-999', 'a base-failure record with its old item key loads');
   // And it round-trips: the next read loads the written-back cursor without the retired keys.
   await writeFile(file, JSON.stringify({ ...loaded }));
   const again = JSON.parse(await readFile(file, 'utf8'));
   assert.equal(again.diagnoses, undefined);
-  assert.equal(again.faults.linked, undefined);
 });
 
 function tip40() { return sha('basetip'); }

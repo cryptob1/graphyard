@@ -259,28 +259,23 @@ test('integration:loop-records-due-observation-reading — a recorded pass whose
   assert.equal(run.closed.length, 2);
 });
 
-test('integration:loop-records-due-observation-reading — the reads run under the deployment step\'s budget: a reading still running at the bound is deferred, left in flight and recorded by the cycle that finds it settled; the report is read once per item for the filer and the reader together', async () => {
+test('integration:loop-records-due-observation-reading — the reads run under the deployment step\'s budget: a reading still running at the bound is deferred, left in flight and recorded by the cycle that finds it settled', async () => {
   const { readingsStep } = await import('../src/daemon/cycle-readings.js');
-  const { postDeployReader } = await import('../src/master/post-deploy-readings.js');
-  // A pattern proof: the reader takes it from the intervention report's row the filer's projection already read.
-  const patternProof = 'manual:post-deploy/intervention-pattern-escalation-build', ownPattern = 'manual:intervention-pattern-escalation-build-on-serving-release';
-  const patternParent = { ...parent, id: '44444444-4444-4444-8444-444444444444', key: 'GY-1744', criteria: [{ id: 'AC-2', text: 'The intervention report shows the escalation rate at the build stage below 3 per 1 days after it ships', proofs: [patternProof] }] } as Work;
-  const item = followUp(1745, { description: `Post-deploy follow-up: post-deploy:${patternParent.id}:AC-2:${patternProof}:${filed}\n\nowed`, criteria: [{ id: 'AC-1', text: 'From this head against the serving release: the escalation rate at the build stage stays below 3 per 1 days', proofs: [ownPattern] }] });
+  const item = followUp(1745);
   let release: (() => void) | null = null;
   const reads: string[] = [];
-  const readPattern = async (pattern: { kind: string; stage: string }) => { reads.push(`${pattern.kind}-${pattern.stage}`); await new Promise<void>(resolve => { release = resolve; }); return { since: iso(now - 3 * 24 * hour), projected: null }; };
-  const made = await makeCycle([patternParent, item], await temporaryDirectory('loop-readings-budget'), postDeployReader(readPattern as never), now, { readPattern: readPattern as never });
+  const reader = async () => { reads.push(item.key); await new Promise<void>(resolve => { release = resolve; }); return { result: 'pass', detail: 'read' }; };
+  const made = await makeCycle([parent, item], await temporaryDirectory('loop-readings-budget'), reader as never, now);
   // The report read does not settle within the 5 ms left: the reading is deferred, nothing is noted, and the read is left in flight.
   assert.equal(await readingsStep(made.cycle, made.served() as never, now + 5), 1);
   assert.deepEqual([made.recorded.length, made.state.actions[`reading:${item.id}`]], [0, undefined]);
-  assert.deepEqual(reads, ['escalation-build'], 'the report was read once, for the filer');
-  // The read settles; the next cycle records the reading from it — the reader took the projection the filer read, never the report again — and closes the item.
+  assert.deepEqual(reads, ['GY-1745'], 'the reading was started once');
+  // The read settles; the next cycle records the reading from it and closes the item.
   release!();
   made.next();
   assert.equal(await readingsStep(made.cycle, made.served() as never, now + 5), 0);
-  assert.deepEqual(reads, ['escalation-build'], 'the reader took the projection already read');
+  assert.deepEqual(reads, ['GY-1745'], 'the settled read was taken, not started again');
   assert.deepEqual(made.recorded.map(entry => [entry.key, entry.reading.result]), [['GY-1745', 'pass']]);
-  assert.match(String(made.recorded[0].reading.detail), /under its threshold since 2026-10-10T12:00:00.000Z, 3.0 days at 2026-10-13T12:00:00.000Z, which meets the 1-day window on release bbbbbbbbbbbb/);
   assert.deepEqual(made.closed.map(entry => [entry.key, entry.release]), [['GY-1745', serving]]);
 });
 

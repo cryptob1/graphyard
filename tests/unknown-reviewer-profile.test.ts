@@ -72,7 +72,7 @@ test('unit:unknown-profile-escalates — three review launches refused for an un
   assert.equal(counted?.refusals, 3);
   assert.equal(counted?.at, new Date(clock).toISOString());
 
-  // One configuration attention: the profile named, the command that writes the profiles named, owned by the master, classified setup/configuration.
+  // One configuration attention: the profile named, the command that writes the profiles named, owned by the master.
   const [attention] = reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config));
   assert.ok(attention, 'the attention stands at the limit');
   assert.match(attention.subject, /review-codex/);
@@ -80,8 +80,6 @@ test('unit:unknown-profile-escalates — three review launches refused for an un
   assert.equal(attention.next, 'Run graphyard master environments --apply; it writes the reviewer and worker profiles, and the loop\'s next review launch succeeds and clears this');
   assert.equal(attention.role, 'master');
   assert.equal(attention.human, false);
-  assert.equal(attention.kind, 'setup');
-  assert.equal(attention.faultClass, 'configuration');
   // Before the limit it stands down: the dispatcher's first widening retries are answer enough.
   assert.deepEqual(reviewerProfileRefusalAttention({ version: 1, profile: 'review-codex', refusals: 2, at: counted!.at, profiles: counted!.profiles }), []);
   // The profiles changed since the refusals (the missing one written, no launch yet to clear the record): the stale record raises nothing.

@@ -12,10 +12,8 @@ import {
   projectMemoryWordBudget,
   recordChangeInMemory,
   recordDecisionInMemory,
-  recordPitfallInMemory,
   retainedMemoryChanges,
   retainedMemoryDecisions,
-  retainedMemoryPitfalls,
   updateProjectMemoryFromWork,
   type MemoryDecision,
   type ProjectMemory,
@@ -28,7 +26,7 @@ import {
 } from '../src/project-memory.js';
 import type { Work } from '../src/model/work.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-01 `at` values only order fixture decisions, pitfalls and merges, and the 2026-10-03 `now` is handed explicitly to checkAgentEnvironment; Date.now() stamps other fixtures on the real clock.
+// Time-bomb allowance (GY-1694): the 2026-10-01 `at` values only order fixture decisions and merges, and the 2026-10-03 `now` is handed explicitly to checkAgentEnvironment; Date.now() stamps other fixtures on the real clock.
 
 test('unit:review-followups-triaged — decisions are retained strictly by answer time rather than work-item order (Finding 2)', () => {
   const memory = emptyProjectMemory();
@@ -178,29 +176,7 @@ test('unit:review-followups-triaged — loop continues on oversized entry instea
   assert.ok(digestDec.includes('GY-101'));
   assert.ok(docsWords(digestDec) <= 60);
 
-  // 2. Pitfalls: First pitfall has an oversized remedy, second pitfall is short.
-  // Under the old 'break', pitfall 2 would be dropped. Under 'continue', pitfall 2 is included.
-  const memoryPitfalls = emptyProjectMemory();
-  recordPitfallInMemory(memoryPitfalls, {
-    faultClass: 'scope',
-    count: 10,
-    remedy: Array.from({ length: 50 }, () => 'verydetailedremedyinstruction').join(' '),
-    at: '2026-10-01T12:00:00.000Z',
-  });
-  recordPitfallInMemory(memoryPitfalls, {
-    faultClass: 'configuration',
-    count: 5,
-    remedy: 'short remedy',
-    at: '2026-10-01T11:00:00.000Z',
-  });
-
-  // Budget of 25: cannot fit 50-word scope remedy, but can fit configuration remedy
-  const digestPit = projectMemoryDigest(memoryPitfalls, 'worker', { wordBudget: 25 });
-  assert.ok(digestPit.includes('configuration (5 recurrences): short remedy'));
-  assert.ok(!digestPit.includes('verydetailedremedyinstruction'));
-  assert.ok(docsWords(digestPit) <= 25);
-
-  // 3. Merges: First merge has many files and exceeds budget, second merge has 1 file.
+  // 2. Merges: First merge has many files and exceeds budget, second merge has 1 file.
   const memoryMerges = emptyProjectMemory();
   recordChangeInMemory(memoryMerges, {
     key: 'GY-201',
@@ -238,13 +214,6 @@ test('unit:review-followups-triaged — syncProjectMemory caps retention and cha
       at: new Date(Date.now() + i * 1000).toISOString(),
     });
   }
-  for (let i = 1; i <= 30; i++) {
-    recordPitfallInMemory(memory, {
-      faultClass: `fault-${i}`,
-      count: i,
-      at: new Date(Date.now() + i * 1000).toISOString(),
-    });
-  }
   for (let i = 1; i <= 40; i++) {
     recordChangeInMemory(memory, {
       key: `GY-M-${i}`,
@@ -256,14 +225,12 @@ test('unit:review-followups-triaged — syncProjectMemory caps retention and cha
 
   // Retention caps must be enforced
   assert.equal(memory.decisions.length, retainedMemoryDecisions); // 20
-  assert.equal(memory.pitfalls.length, retainedMemoryPitfalls);   // 20
   assert.equal(memory.changes.length, retainedMemoryChanges);     // 30
 
   // Write to disk and read back
   await writeProjectMemory(root, memory);
   const fromDisk = await readProjectMemory(root);
   assert.equal(fromDisk.decisions.length, retainedMemoryDecisions);
-  assert.equal(fromDisk.pitfalls.length, retainedMemoryPitfalls);
   assert.equal(fromDisk.changes.length, retainedMemoryChanges);
 
   // Change-only persistence, driven through the loop's real persist (GY-1180): the mirror file is
