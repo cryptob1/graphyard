@@ -78,8 +78,7 @@ export function trialRefusalHeld(candidate: Work['candidate'], state: MergeLedge
 /**
  * The control-plane candidates owed a merge, hotfixes and base-failure repairs first then the oldest item (by `createdAt`, ties by submission) first: submitted (a candidate the
  * control plane observed itself, GY-1523), not done, not returned to a worker, with the `build`
- * and `review` gates passed as the control plane served them: its review gate fails a delta reviewed before
- * merge (a sensitive one, or any under a repository declaring `review.normalChanges: pre-merge`) until its
+ * and `review` gates passed as the control plane served them: its review gate fails a sensitive delta until its
  * approval, and passes a normal one reviewed after merge (GY-1525). A head the writer's own
  * trial already refused (`trial failed`, GY-1524 AC-3) waits for its rework rather than a second
  * trial; one refused `base moved N times` is queued again. An item whose ledger holds an open intent

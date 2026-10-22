@@ -64,7 +64,6 @@ const rawJson = /[{[]\s*"[^"]+"\s*:/;
 const pages = [
   { tab: 'Agents', heading: 'Agents' },
   { tab: 'Test cases', heading: 'Test-case library' },
-  { tab: 'Proof authority', heading: 'Proof authority' },
   { tab: 'Operator automation', heading: 'Operator automation' },
 ] as const;
 

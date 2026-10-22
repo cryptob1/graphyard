@@ -15,8 +15,6 @@ async function serveBoard(page: Page, route: Route) {
 
 // Browser-only API fixtures: no production requests, credentials, or writes.
 const work = { dependencies: [], scenarioRequirements: [], id: 'fixture-work', key: 'GY-1', title: 'Browser fixture', description: 'Isolated UI audit', type: 'feature', priority: 1, stage: 'review', stageEnteredAt: '2026-01-01T00:00:00Z', ready: true, policy: { review: true, reviewProvider: 'github', checks: ['test'] }, policyRevision: 1, revision: 1, violations: [], workspaces: [], criteria: [{ id: 'AC-1', text: 'Observable behavior', proofs: ['manual:browser'] }], evidence: [], gates: [{ name: 'review', passed: false, reasons: ['Independent review required'] }], submission: { epoch: 1 }, candidate: { pr: 1, sha: 'abcdef1234567890abcdef1234567890abcdef12' } };
-const proofGrants = { authorities: [{ principalId: 'ci', role: 'producer', patterns: ['integration:*'], source: 'grant' }, { principalId: 'operator', role: 'admin', patterns: ['manual:*'], source: 'role' }],
-  grants: [{ principalId: 'ci', role: 'producer', patterns: ['integration:*'], revision: 3, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-02T00:00:00Z', seededFrom: ['integration:claim-safety'], lastMutation: { kind: 'grant', actor: 'operator', at: '2026-01-02T00:00:00Z', reason: 'CI produces integration proof', patterns: ['integration:*'] } }] };
 async function fixture(page: Page, role = 'admin') {
   const state = { offline: false, unauthorized: false, writes: 0, pause: false };
   await page.route('**/api/**', async route => {
@@ -26,7 +24,7 @@ async function fixture(page: Page, role = 'admin') {
     if (route.request().method() !== 'GET') state.writes++;
     const path = new URL(route.request().url()).pathname;
     if (path.endsWith('/board')) return serveBoard(page, route);
-    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : path === '/api/proof-grants' ? proofGrants : [] });
+    return route.fulfill({ json: path.endsWith('/status') ? { actor: { id: 'fixture', role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github','codex'], repository: 'fixture/repository', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 }, slices: [{ id: 'product', name: 'Product', lead: { id: 'product-lead', displayName: 'Pine', role: 'slice-lead', sessionKind: 'ai' }, engineers: [{ id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }], workers: [{ key: 'GY-1', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }, { key: 'GY-2', id: 'human-pair', displayName: 'Rivera', role: 'worker', sessionKind: 'human' }, { key: 'GY-3', id: 'engineer-a', displayName: 'Atlas', role: 'worker', sessionKind: 'ai' }], bottlenecks: [{ key: 'GY-1', reason: 'Independent review required' }] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [{ id: 'reviewer-a', displayName: 'Rowan', role: 'producer', sessionKind: 'ai' }, { id: 'legacy-proof', displayName: null, role: 'producer', sessionKind: 'undeclared' }] } } : path.endsWith('/work-snapshot') ? {work:[work],now:'2026-01-01T00:00:00Z'} : path.endsWith('/work') ? [work] : [] });
   });
   await page.goto('/'); return state;
 }
@@ -35,7 +33,7 @@ async function fixture(page: Page, role = 'admin') {
 const cardSelect = (page: Page) => page.getByRole('button', { name: /Browser fixture.*GY-1/ });
 
 async function login(page: Page, value = 'browser-fixture') { await page.getByLabel('Access token').fill(value); await page.getByRole('button', { name: 'Open control plane' }).click(); }
-// The one navigation (GY-161): the sidebar holds Work, Workers, Shipped, Tests, Insights and
+// The one navigation (GY-161): the sidebar holds Work, Workers, Shipped, Tests and
 // Settings; the other pages are sub-page links under one of them. On a phone the sidebar folds into
 // a Menu button. An open work item is a page of its own, left with "← Back".
 const workHeading = (page: Page) => page.getByRole('heading', { name: 'Work', exact: true, level: 1 });
@@ -49,12 +47,6 @@ async function openPage(page: Page, section: 'Shipped' | 'Settings', tab: string
   await sidebarEntry(page, section);
   await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: tab, exact: true }).click();
 }
-/** Insights is one page (GY-168): the shipping pulse and flow analytics are under its one Show details. */
-async function openInsightsDetails(page: Page) {
-  await sidebarEntry(page, 'Insights');
-  await page.locator('.insight-details > summary').click();
-}
-const pulse = (page: Page) => page.locator('.pulse');
 const itemPage = (page: Page, name?: string) => name ? page.getByRole('article', { name }) : page.locator('article.item-page');
 const technicalDetails = (page: Page) => itemPage(page).getByText('Technical details', { exact: true }).click();
 const fullHistory = (page: Page) => itemPage(page).locator('.full-history > summary').click();
@@ -366,95 +358,6 @@ test('mobile sign out is reachable and removes the session', async ({ page }) =>
   expect(await page.evaluate(() => sessionStorage.getItem('graphyard-token'))).toBeNull();
 });
 
-const pulseFixture = (overrides: Record<string, unknown> = {}) => ({ generatedAt: new Date().toISOString(), range: { start: '2026-06-29T00:00:00.000Z', end: new Date().toISOString(), weeks: 12, semantics: 'repository-utc-inclusive' }, completeness: 'complete', truncated: false, counts: { days7: 3, days30: 8 }, intentToMerge: { medianHours: 12.5, sampleSize: 7, excluded: 1 }, prToProduction: { averageHours: 30, medianHours: 24, p90Hours: 48, sampleSize: 6, eligible: 8, excluded: 2, coveragePercent: 75, sparse: false, exclusions: { 'no-verifiable-production-deployment': 2 }, split: { prToMergeAverageHours: 18, mergeToProductionAverageHours: 12 } }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: index % 4 })), recent: [{ key: 'GY-9', title: 'Exact delivery', pullRequest: 42, mergeSha: 'abcdef1234567890abcdef1234567890abcdef12', mergedAt: '2026-09-15T12:00:00.000Z', quality: { passingProofs: 4, requiredProofs: 4, violations: [] } }], ...overrides });
-
-for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: 'mobile', width: 390, height: 844 }]) test(`shipping pulse exposes exact metrics, links and chart text on ${viewport.name}`, async ({ page }) => {
-  await page.setViewportSize(viewport); await fixture(page);
-  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture() }));
-  await login(page); await openInsightsDetails(page);
-  await expect(page.getByRole('heading', { name: 'Shipping pulse' })).toBeVisible();
-  await expect(page.getByLabel('Delivery metrics')).toContainText('3');
-  await expect(page.getByText('12.5h')).toBeVisible(); await expect(page.getByText('7 included · 1 excluded')).toBeVisible();
-  await expect(page.getByLabel('Pull request to production metrics')).toContainText('30h');
-  await expect(page.getByText('6 included of 8')).toBeVisible();
-  await expect(page.getByRole('list', { name: 'Weekly delivery counts' }).getByRole('listitem')).toHaveCount(12);
-  await expect(page.getByRole('link', { name: /PR #42/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/pull/42');
-  await expect(page.getByRole('link', { name: /Commit abcdef12/ })).toHaveAttribute('href', 'https://github.com/fixture/repository/commit/abcdef1234567890abcdef1234567890abcdef12');
-  // Deployment times are the provider's clock carried onto the repository clock with the
-  // bracket the collector measured. The method note must say that rather than describe the
-  // durations as exact, which would overstate values known only to that precision.
-  await expect(page.locator('.pulse-method')).toContainText('carried onto the repository clock at ingestion using the offset bracket the collector measured');
-  await expect(page.getByText('EXACT VERIFIED CONTAINMENT')).toHaveCount(0);
-  const shell = page.locator('.shell'); expect((await shell.evaluate(element => element.scrollWidth <= element.clientWidth))).toBe(true);
-});
-
-test('shipping pulse labels sparse and unavailable production samples without fabricating zero', async ({ page }) => {
-  await fixture(page);
-  // The second delivery's authorizing snapshot cannot be resolved, so its proof totals are
-  // unknown. An unknown total must never be drawn as 0/0, which would read as a clean record.
-  const unresolved = { key: 'GY-10', title: 'Unretained authorization', pullRequest: 43, mergeSha: 'bcdef01234567890abcdef1234567890abcdef12', mergedAt: '2026-09-14T12:00:00.000Z', quality: { passingProofs: null, requiredProofs: null, violations: [], unavailableReason: 'The immutable snapshot that authorized this delivery is no longer in the retained ledger, so recorded proof totals are unknown.' } };
-  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: 1, excluded: 1, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': 1 }, split: { prToMergeAverageHours: null, mergeToProductionAverageHours: null } }, recent: [...pulseFixture().recent, unresolved] }) }));
-  await login(page); await openInsightsDetails(page);
-  await expect(page.getByText('Sparse sample.')).toBeVisible();
-  await expect(page.getByLabel('Pull request to production metrics')).toContainText('Unavailable');
-  await page.getByText('Why records were excluded').click();
-  await expect(page.getByText('no verifiable production deployment: 1')).toBeVisible();
-  const entry = page.locator('.delivery-list article').filter({ hasText: 'GY-10' });
-  await expect(entry).toContainText('Recorded proof totals unavailable');
-  await expect(entry).toContainText('no longer in the retained ledger');
-  await expect(entry).not.toContainText('0/0');
-  await expect(page.locator('.delivery-list article').filter({ hasText: 'GY-9' })).toContainText('4/4 recorded proofs passed');
-});
-
-test('shipping pulse distinguishes loading, unavailable, empty, partial, and stale data', async ({ page }) => {
-  await fixture(page); let mode = 'loading'; let release!: () => void; const pending = new Promise<void>(resolve => { release = resolve; });
-  await page.route('**/api/shipping-pulse', async route => {
-    if (mode === 'loading') { await pending; return route.abort(); }
-    if (mode === 'unavailable') return route.abort();
-    if (mode === 'empty') return route.fulfill({ json: pulseFixture({ recent: [], counts: { days7: 0, days30: 0 }, weeks: Array.from({ length: 12 }, (_, index) => ({ start: new Date(Date.UTC(2026, 5, 29 + index * 7)).toISOString(), end: new Date(Date.UTC(2026, 6, 5 + index * 7)).toISOString(), count: 0 })) }) });
-    return route.fulfill({ json: pulseFixture({ completeness: 'partial', partialReason: 'More production observations matched a merge than the query cap reads.' }) });
-  });
-  await login(page); await openInsightsDetails(page);
-  await expect(page.getByRole('status').filter({ hasText: 'Loading shipping pulse' })).toBeVisible();
-  mode = 'unavailable'; release(); await expect(page.getByRole('alert').filter({ hasText: 'Shipping pulse unavailable' })).toContainText('unavailable');
-  mode = 'empty'; await openWork(page); await openInsightsDetails(page);
-  await expect(page.getByText('No deliveries in this window')).toBeVisible(); await expect(page.getByLabel('Delivery metrics')).toHaveCount(0);
-  mode = 'partial'; await openWork(page); await openInsightsDetails(page);
-  await expect(page.getByText('Partial history.')).toBeVisible(); await expect(page.getByText('More production observations matched a merge than the query cap reads.')).toBeVisible();
-  // Partial at the production cap does not truncate the delivery sample, so the durations
-  // are not labelled as sampled here; only the delivery cap does that.
-  await expect(page.getByText('Sampled durations:')).toHaveCount(0);
-  // Staleness is measured from this browser's own last successful read, so it appears
-  // when a refresh fails while data is on screen - never from a repository/browser clock gap.
-  mode = 'unavailable'; await pulse(page).getByRole('button', { name: 'Refresh' }).click();
-  await expect(page.getByText('Data is stale.')).toBeVisible();
-  await expect(page.getByText('Partial history.')).toBeVisible();
-});
-
-test('truncated history labels durations as newest-delivery samples, never as bounds', async ({ page }) => {
-  await fixture(page);
-  // The delivery cap makes counts lower bounds but leaves the durations a sample of the
-  // newest work, so every duration group must say so rather than read as a bound.
-  await page.route('**/api/shipping-pulse', route => route.fulfill({ json: pulseFixture({ completeness: 'partial', truncated: true, partialReason: 'More than 1000 exact deliveries occurred in the bounded window; only the newest 1000 were read. The counts are lower bounds. The durations are not bounds.' }) }));
-  await login(page); await openInsightsDetails(page);
-  await expect(page.getByText('Partial history.')).toBeVisible();
-  await expect(page.getByText('The counts are lower bounds. The durations are not bounds.')).toBeVisible();
-  const sampled = page.getByText('Sampled durations:');
-  await expect(sampled).toHaveCount(2);
-  await expect(sampled.first()).toContainText('they are not lower bounds');
-});
-
-test('the analytics pages are not offered to operator agents whose scoped API cannot serve them, nor are their routes read', async ({ page }) => {
-  const analytics: string[] = [];
-  page.on('request', request => { if (/\/api\/analytics\//.test(request.url())) analytics.push(request.url()); });
-  await fixture(page, 'operator-agent'); await login(page);
-  const primary = page.getByRole('navigation', { name: 'Primary' });
-  await expect(primary.getByRole('button', { name: 'Work', exact: true })).toBeVisible();
-  // Insights reads analytics/flow*, and it is the section's one page (GY-168), so the entry is gone.
-  await expect(primary.getByRole('button', { name: 'Insights', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: /Shipping pulse|Flow analytics/ })).toHaveCount(0);
-  expect(analytics).toEqual([]);
-});
 
 async function checkDialog(page: Page, trigger: ReturnType<Page['getByRole']>) {
   await trigger.click(); const dialog = page.getByRole('dialog'); await expect(dialog).toBeVisible();
@@ -994,36 +897,4 @@ test('the Tests panel lists each criterion proof with its result from the merge 
   await expect(waiting.locator('[data-case="a"]')).toContainText('○ not run yet unit:a');
   await expect(waiting.locator('[data-case="b"]')).toContainText('○ not run yet integration:b');
   await expect(waiting.getByText(/Merge trial of/)).toHaveCount(0);
-});
-
-test('proof authority shows the live grant set, its source, and unproducible required proof', async ({ page }) => {
-  await fixture(page); await login(page);
-  await openPage(page, 'Settings', 'Proof authority');
-  await expect(page.getByRole('heading', { name: 'Proof authority' })).toBeVisible();
-  // The fixture item requires manual:browser, which the operator role covers, so the only
-  // honest report is that nothing is unproducible.
-  await expect(page.getByText('Every required proof name has at least one authorized producer.')).toBeVisible();
-  await expect(page.getByText('ci · integration:*')).toBeVisible();
-  await expect(page.getByText(/Source: Graphyard grant record .* revision 3 .* CI produces integration proof/)).toBeVisible();
-  await expect(page.getByText(/bootstrap seed only/)).toBeVisible();
-});
-
-test('an operator grants authority through the dashboard and a reader cannot', async ({ page }) => {
-  const state = await fixture(page); await login(page);
-  await openPage(page, 'Settings', 'Proof authority');
-  let body: any;
-  await page.route('**/api/proof-grants/acceptance/grant', async route => { body = route.request().postDataJSON(); await route.fulfill({ json: proofGrants.grants[0] }); });
-  const form = page.locator('form.grant-form').first();
-  await form.getByLabel('Producer principal').fill('acceptance');
-  await form.getByLabel('Patterns', { exact: true }).fill('manual:gy-43/*, unit:*');
-  await form.getByLabel('Audit reason').fill('Designated acceptance witness');
-  await form.getByRole('button', { name: 'Grant authority' }).click();
-  await expect.poll(() => body).toBeTruthy();
-  expect(body).toEqual({ patterns: ['manual:gy-43/*', 'unit:*'], reason: 'Designated acceptance witness' });
-  expect(state.writes).toBe(0);
-  await page.getByRole('button', { name: 'Sign out' }).click();
-  await fixture(page, 'reader'); await login(page);
-  await openPage(page, 'Settings', 'Proof authority');
-  await expect(page.getByText('ci · integration:*')).toBeVisible();
-  await expect(page.locator('form.grant-form')).toHaveCount(0);
 });
