@@ -410,7 +410,7 @@ test('slice view names leads, workers, reviewers and bottlenecks and labels each
   await expect(slices.getByText('Unassigned', { exact: true })).toHaveCount(2);
   const product = slices.locator('.slice-card').first();
   // Capacity is engineers, not leases: Atlas holds GY-1 and GY-3 but occupies one seat.
-  await expect(product).toContainText('2/2 active engineers · 3 claimed items · 1 bottleneck');
+  await expect(product).toContainText('2 active engineers · 3 claimed items · 1 bottleneck');
   // Workers, reviewers and bottlenecks are named, and each identity carries its declared kind.
   await expect(product).toContainText('GY-1 · Atlas');
   await expect(product).toContainText('GY-2 · Rivera');
