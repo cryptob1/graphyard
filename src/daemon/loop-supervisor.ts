@@ -3,10 +3,6 @@
 // re-applying the unit before the loop re-executes through it — with its ExecStart following the
 // held-cli pin (GY-1790). Split out of upgrade.ts, which re-exports it.
 import { readFileSync } from 'node:fs';
-import type { MasterConfig } from '../master.js';
-import { alignLoopUnit, loopUnitOf } from '../supervisor.js';
-import { heldLauncherOf } from './held-cli.js';
-import { loopCodeRoot } from './checkout-state.js';
 
 /** The supervisor unit the loop itself runs under, when systemd supervises it: read from the process's own cgroup, like an executor's. */
 export const loopUnitPattern = /^graphyard-master(?:[@.-][A-Za-z0-9@._:-]*)?\.service$/;
@@ -55,21 +51,4 @@ export async function awaitSupervisorRestart(restart: () => unknown, host: Signa
     if (signalled && !stopped) await new Promise<void>(resolve => { const timer = setTimeout(resolve, graceMs); wake = () => { clearTimeout(timer); resolve(); }; });
     throw error && typeof error === 'object' ? Object.assign(error, { supervisorStop: stopped }) : error;
   } finally { host.removeListener('SIGTERM', onStop); }
-}
-
-/**
- * The running loop's unit brought back to its configuration before it re-executes through it
- * (GY-916): its watchdog window follows run.intervalSeconds. Only the packaged unit name is
- * rewritten, and only when the loop runs under it.
- */
-export async function alignRunningLoopUnit(root: string, config: MasterConfig, unit = detectLoopSupervisorUnit(), align = alignLoopUnit) {
-  const own = loopUnitOf(root);
-  if (unit !== own) return { wrote: 'none', reason: `this loop does not run under ${own}` };
-  // GY-1790: while the pin stands the unit's ExecStart names the launcher held in the snapshot, so
-  // the restart that follows starts that launcher, never one the checkout holds dirty.
-  // GY-1899: the pin lives under the checkout the running CLI comes from, where the upgrade's
-  // holdCliAt wrote it — never under the managed root, whose HEAD names the managed project; the
-  // unit itself stays this install's, owned by the managed root (root), which keeps its ownership.
-  const codeRoot = loopCodeRoot(config.cliPath, root);
-  return align({ root, codeRoot, cliPath: config.cliPath, repository: config.repository, intervalSeconds: config.run.intervalSeconds, heldLauncher: heldLauncherOf(codeRoot) });
 }

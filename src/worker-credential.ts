@@ -24,9 +24,6 @@ const genericAuthenticationFailures = [/HTTP 401\b/i, /\bBad credentials\b/i, /R
 const githubContext = /github\.com|api\.github|\bgh (?:pr|api|auth|repo|run|release)\b|\bgit (?:push|fetch|pull|clone|ls-remote)\b/i;
 export const credentialFailure = (text: string | null | undefined) => !!text && (credentialFailures.some(pattern => pattern.test(text))
   || (genericAuthenticationFailures.some(pattern => pattern.test(text)) && githubContext.test(text)));
-
-/** The loop's record of ending an attempt blocked on a credential failure (GY-999), once per epoch. */
-export const credentialBlockedKey = (item: Pick<Work, 'id'>, epoch: number) => `resume:credential:${item.id}:${epoch}`;
 /**
  * The marker a credential-blocked attempt's end carries in its capacity record. The retry ladder
  * (GY-885) reads it back: such an end counts as a failed attempt, so a failure a fresh mint does

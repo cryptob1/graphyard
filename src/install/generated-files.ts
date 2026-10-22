@@ -85,30 +85,3 @@ export function generatedFilesAssignment(root: string): GeneratedFilesAssignment
     : '--list printed nothing usable';
   throw new Error(`The generated-file manifest did not parse: ${generatedManifestScript} --manifest printed ${printed} and ${listedNote}`);
 }
-
-const sameFiles = (a: readonly string[], b: readonly string[]) => {
-  const left = [...a].sort(), right = [...b].sort();
-  return a.length === b.length && left.every((entry, index) => entry === right[index]);
-};
-
-/**
- * The drift between the deployed `GRAPHYARD_GENERATED_FILES` value and the repository manifest,
- * as the exact sentences master status raises: each names the value to set, so the attention
- * owner resolves the one command that fixes the deployment. A repository without a manifest
- * never drifts — unset is its correct deployment state.
- */
-export function generatedFilesDrift(deployed: string | null | undefined, manifest: GeneratedFilesAssignment | null): string[] {
-  if (!manifest) return [];
-  let declared: string[] | null;
-  try { declared = deployed == null || deployed === '' ? [] : parseGeneratedFiles(deployed); }
-  catch { declared = null; }
-  if (declared && sameFiles(declared, manifest.files)) return [];
-  const report = deployed === undefined
-    ? `The deployment does not report ${generatedFilesVariable} (deploy main first), so the regression guard may treat every file as owned`
-    : declared === null
-      ? `${generatedFilesVariable} on the deployment does not parse (${JSON.stringify(deployed)}) and the server refuses it at start-up`
-      : declared.length
-        ? `${generatedFilesVariable}=${declared.join(',')} on the deployment no longer matches the repository manifest`
-        : `${generatedFilesVariable} is unset on the deployment, so the regression guard treats every file as owned`;
-  return [`${report}; the repository manifest declares ${manifest.value}. Set ${manifest.line} on the deployment.`];
-}

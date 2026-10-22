@@ -88,25 +88,6 @@ export function loopCodeRoot(cliPath: string | null | undefined, repositoryRoot:
   return repositoryRoot;
 }
 
-/**
- * The release the loop records, corrected to the commit its code checkout stands at when the
- * recorded commit could not be code this process loaded: it names a commit this checkout's
- * repository does not hold, so a startup read of the managed repository's HEAD wrote it (GY-1899).
- * A commit the repository holds is left alone, whether the checkout still stands there or moved on
- * after the load (GY-1464) — that gap is the restart the pass owes, never rewritten away — and a
- * read that fails corrects nothing. Null when the recorded release stands.
- */
-export async function reconcileLoadedRelease(codeRoot: string, release: { commit: string | null; dirty: boolean | null } | null | undefined, run: ChildRun): Promise<{ commit: string; dirty: boolean | null } | null> {
-  if (!release?.commit) return null;
-  const standing = await checkoutState(codeRoot, run);
-  if (!standing.commit || standing.commit === release.commit) return null;
-  // git answers exit 1, and nothing else, for a well-formed commit the repository does not hold; every other
-  // failure — a stub that cannot answer it included — leaves the recorded release standing.
-  try { await run('git', ['-C', codeRoot, 'cat-file', '-e', release.commit]); return null; }
-  catch (error: any) { if (error?.status !== 1) return null; }
-  return { commit: standing.commit, dirty: standing.dirty };
-}
-
 export async function checkoutState(root: string, run: ChildRun): Promise<CheckoutState> {
   const git = (...args: string[]) => run('git', ['-C', root, ...args]);
   let commit: string | null;

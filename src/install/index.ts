@@ -3,7 +3,7 @@ import { existsSync, readFileSync, statSync } from 'node:fs';
 import { link, readFile, rename, rm, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
-import { dirname, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
@@ -24,6 +24,7 @@ import { localTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
 import { localPaths } from './local-runtime.js';
 import { durableCheckoutPreflight, underTestRunner } from '../supervisor.js';
+import { deployUnitOf, perInstallUnits, proposedInstallUnits, userUnitDirectory } from './units.js';
 import { installIdFor, providers, REDACTED, SERVER_PORT, type EnvValue, type InstallInputs, type InstallPlan, type PlanAction, type PlanDrift, type PlanValue, type PreflightItem, type Provider } from './types.js';
 
 export * from './types.js';
@@ -645,6 +646,13 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
     held({ id: 'local.herdr', target: 'local', title: "Link and enable Herdr's graphyard plugin for this repository" }, 'Herdr is left untouched'));
   else {
     actions.push({ id: 'local.profiles', target: 'local', state: record?.profiles.length ? 'satisfied' : 'create', title: 'Register master, reviewer, and worker profiles for authenticated agent runtimes on this machine' });
+    // GY-2877: the master loop and the continuous deploy run in two user units, both installed by master init.
+    if (context.provider === 'compose' || context.provider === 'local') {
+    const units = (() => { try { return proposedInstallUnits(session.root, session.inputs.repository, userUnitDirectory()); } catch { return perInstallUnits(session.inputs.repository); } })();
+    actions.push({ id: 'local.units', target: 'local', state: existsSync(join(userUnitDirectory(), deployUnitOf(units))) ? 'satisfied' : 'create',
+      title: 'Run the master loop under graphyard-master.service (master run) and the continuous deploy under graphyard-deploy.service (upgrade --watch: each new base tip built, restarted, health-checked, rolled back on failure); master init installs both',
+      values: [{ name: 'graphyard-master.service', value: units.master, secret: false }, { name: 'graphyard-deploy.service', value: deployUnitOf(units), secret: false }] });
+    }
     actions.push(herdrAction(session, herdr, herdrRelink, herdrTarget));
     if (herdrRelink) drift.push({ action: 'local.herdr', field: 'Herdr graphyard plugin url', expected: herdrTarget ?? 'this installation', observed: herdrRelink });
   }

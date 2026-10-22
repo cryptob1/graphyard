@@ -16,14 +16,6 @@ export function criterionWindowDays(text: string): number | null {
   return days.length ? Math.max(...days) : null;
 }
 /**
- * The consecutive-day hold a criterion names, or null when it names none: "for 14 consecutive days".
- * Distinct from a rate window ("per 7 days").
- */
-export function criterionHoldDays(text: string): number | null {
-  const days = [...text.matchAll(/\b(\d{1,3})\s+consecutive\s+days?\b/gi)].map(match => Number(match[1])).filter(value => value > 0);
-  return days.length ? Math.max(...days) : null;
-}
-/**
  * The live window a criterion's reading needs, in hours, or null when it names none: "a 24-hour
  * window of live activity", "during 24h of live activity". Unlike a day window, counted from the
  * merge, an hour window is live activity on the serving release (GY-1727).
@@ -52,8 +44,6 @@ export function observationWindowFor(work: Pick<Work, 'key' | 'delivery'>, crite
     : `${work.key}'s serving release was first observed at ${iso(live!)} and ${criterion.id} names a ${windowHours}-hour live window`;
   return { notBefore: iso(fromMerge), basis: 'criterion-window', detail: `${origin}, so the reading can first exist at ${iso(fromMerge)}`.slice(0, 2000) };
 }
-
-export const postDeployFollowUpId = (work: Pick<Work, 'id'>, criterion: string, proof: string, release: string) => `post-deploy:${work.id}:${criterion}:${proof}:${release}`;
 export const postDeployMarker = 'Post-deploy follow-up: ';
 export const followUpOf = (item: Pick<Work, 'description'>) => item.description?.startsWith(postDeployMarker) ? item.description.slice(postDeployMarker.length).split('\n', 1)[0] : null;
 /** A follow-up's request id read back into what it was filed for, or null for any other item. */

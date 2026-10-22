@@ -7,14 +7,12 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, loadStoredMasterConfig, markReprompted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { sessionSlotsGrant } from './master/harness.js';
-import type { AttentionItem } from './master/attention.js';
 import { sessionConfinement } from './master/launch.js';
 import { underTestRunner } from './supervisor.js';
 import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type SandboxExec } from './worker-sandbox.js';
 import { withVerificationPath } from './master/verification-slots.js';
-import { clientErrorStatus, retryStopAttention } from './retry-stop.js';
 import { findingLocation } from './review-cap.js';
 import { writeReviewBinding } from './review-post.js';
 import type { FleetProbe } from './fleet.js';
@@ -26,7 +24,7 @@ import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { sessionLiveness, type RuntimeSession, type SessionHandle } from './model/sessions.js';
 import { repeatingPaths as loopRepeatingPaths, touchesRepeatingPath } from './model/repeating-paths.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
-import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, planMechanicalFix, type FreshReadRecord } from './mechanical-findings.js';
+import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, mechanicalFixRecordSchema, mechanicalFixRequests, type FreshReadRecord } from './mechanical-findings.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from './verification-maps.js';
 import { namedPaths } from './model/documentation-glob.js';
@@ -193,8 +191,6 @@ export class SessionLedgerFullError extends Error {
   }
 }
 export const sessionLedgerRemedy = (spec: SessionLedgerSpec) => `settle the live sessions — graphyard master status reconciles every pending record against its session and GitHub, and a session gone from Herdr is marked idle by the first pass that finds it gone and failed by the first pass after its ${spec.idleGraceMs / 60_000}-minute idle grace, not on the same one — and the next write reaps them, as it reaps a request's records once the control plane stops requesting it; ${spec.path} is read-only diagnostics otherwise`;
-/** Matches a ledger refusal wherever its text was recorded: an action row, a dispatch failure, a launch error. */
-export const sessionLedgerRefusal = /The (review|producer) ledger \((\S+)\) refused the write: its bound is (\d+) records and (\d+) are live/;
 
 /**
  * After a launch whose record could not be written, stop the pane it created. When Herdr cannot
@@ -246,11 +242,6 @@ export function releaseClosedRequests(records: LedgerRecord[], work: Work[], now
     if (record.verdict && !record.headReleasedAt && !current) { record.headReleasedAt = now.toISOString(); released++; }
   }
   return released;
-}
-/** What `master status` reports per ledger: where it lives, its bound and retention, and the room left for live sessions. */
-export function sessionLedgerHeadroom(records: LedgerRecord[], spec: SessionLedgerSpec) {
-  const running = records.filter(live).length, pinned = pinnedSessionRecords(records).size;
-  return { ledger: spec.name, path: spec.path, bound: sessionLedgerBound, retention: sessionLedgerRetention, records: records.length, live: running, pinned, terminal: records.length - running, headroom: Math.max(0, sessionLedgerBound - running - pinned) };
 }
 
 const ledgerFile = (root: string) => resolve(root, reviewLedgerSpec.path);
@@ -467,29 +458,6 @@ export async function removeReviewerProfile(root: string, name: string) {
   return { removed: name, agentName: removed.agentName, reviewers: reviewers.length, clearedAutomatic,
     automatic: run.reviewerProfile ?? (reviewers.length === 1 ? reviewers[0].name : null),
     next: reviewers.length ? 'master run adopts the change on its next tick' : 'No reviewer profile remains; review requests wait until one is added with master reviewer add' };
-}
-
-/** The file `master reviewer setup` registers the reviewer App into before it is bound. */
-export const reviewerRegistrationFile = (config: Pick<MasterConfig, 'credentialFile' | 'repository'>) => resolve(reviewerCredentialDirectory(config), `${config.repository.replace('/', '-')}-registration.json`);
-/**
- * A reviewer App that exists but is not the bound identity: registered by `master reviewer setup`
- * and never bound (the browser flow stopped before the installation was verified, or the bind
- * failed), or bound to a credential file that is gone. Only the App's public facts are read.
- */
-export async function reviewerBindingHealth(config: Pick<MasterConfig, 'credentialFile' | 'repository' | 'reviewer'>) {
-  const attention: string[] = [];
-  let registered: { appId?: unknown; slug?: unknown; installationId?: unknown } | null = null;
-  try { registered = JSON.parse(await readFile(reviewerRegistrationFile(config), 'utf8')); }
-  catch (error: any) { if (error.code !== 'ENOENT') attention.push(`The reviewer App registration ${reviewerRegistrationFile(config)} is unreadable: ${error instanceof Error ? error.message : 'unknown reason'}`); }
-  const app = registered && Number.isSafeInteger(registered.appId) ? { appId: registered.appId as number, slug: typeof registered.slug === 'string' ? registered.slug : null, installationId: Number.isSafeInteger(registered.installationId) ? registered.installationId as number : null } : null;
-  if (app && app.appId !== config.reviewer?.appId) {
-    attention.push(`Reviewer App ${app.slug ?? app.appId} (App ${app.appId}) is registered for ${config.repository} but not bound${config.reviewer ? `; the bound reviewer is App ${config.reviewer.appId}` : ''}. ${app.installationId ? 'Its installation is recorded: rerun master reviewer setup to bind it, or master reviewer bind FILE --key-stdin' : 'Install it on the repository, then rerun master reviewer setup to verify and bind it'}; until then no reviewer can be launched with it`);
-  }
-  if (config.reviewer) {
-    try { await privateFile(config.reviewer.credentialFile); }
-    catch (error: any) { attention.push(`The bound reviewer App ${config.reviewer.slug} has no usable credential at ${config.reviewer.credentialFile} (${error.code ?? (error instanceof Error ? error.message : 'unknown reason')}); rerun master reviewer bind`); }
-  }
-  return { registered: app, bound: config.reviewer ? { appId: config.reviewer.appId, slug: config.reviewer.slug } : null, attention };
 }
 
 // A launched reviewer reads one exact candidate. Everything a verdict is bound to is verified
@@ -933,23 +901,6 @@ export async function recordReviewerProfileRefusal(config: Pick<MasterConfig, 'c
 /** A launch got past the profile lookup: reviews launch again, so the fault is over. */
 export async function clearReviewerProfileRefusal(config: Pick<MasterConfig, 'credentialFile'>): Promise<void> {
   await rm(reviewerProfileRefusalPath(config), { force: true });
-}
-
-/**
- * One configuration attention while review launches are refused for the same unknown reviewer
- * profile `reviewerProfileRefusalLimit` times in a row with the profiles unchanged (GY-1850): the
- * dispatcher's retries only refused again, so master status names the profile and the one command
- * that writes the profiles instead of leaving the loop to knock.
- */
-export function reviewerProfileRefusalAttention(refusal: ReviewerProfileRefusal | null, current?: Pick<MasterConfig, 'workers' | 'reviewers'>): AttentionItem[] {
-  if (!refusal || refusal.refusals < reviewerProfileRefusalLimit) return [];
-  // The profiles changed since the refusals (the missing one written, say): the record is stale until the next launch clears it, so it raises nothing.
-  if (current && configuredProfileFingerprint(current) !== refusal.profiles) return [];
-  return [{ subject: `unknown reviewer profile ${refusal.profile}`,
-    text: `Review launches asking for reviewer profile ${refusal.profile} were refused ${refusal.refusals} times in a row, the last at ${refusal.at}: no configured reviewer profile carries that name, so no review can start. Run graphyard master environments --apply to write the reviewer and worker profiles from the logged-in environments; the next launch uses them and this clears`,
-    // The master fixes the launcher fault (agentOwner('master', …)); a missing profile is a setup step the installation lacks.
-    role: 'master', human: false, humanOnly: null,
-    next: 'Run graphyard master environments --apply; it writes the reviewer and worker profiles, and the loop\'s next review launch succeeds and clears this' }];
 }
 
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
@@ -1538,15 +1489,6 @@ function approvesCurrentHead(record: ReviewRecord, work: Work[]): boolean {
   const item = work.find(entry => entry.key === record.key);
   return !!item && item.stage !== 'done' && !item.observation?.merged && approvesFinalHead(record, work);
 }
-/**
- * Whether an approval's head is the item's open candidate, or the head a Graphyard-authored commit
- * carried the gate's approval from (GY-971): a queue tip or a base refresh that changed nothing reviewed.
- * The gate's carried approval may be another provider's of the same head, so the head decides, not the review id.
- */
-function approvalReachesCandidate(record: ReviewRecord, item: Work): boolean {
-  if (record.state !== 'completed' || record.verdict?.state !== 'APPROVED' || !item.candidate || item.candidate.pr !== record.pr || item.stage === 'done' || item.observation?.merged) return false;
-  return item.candidate.sha === record.sha || carriedApproval(item)?.originalSha === record.sha;
-}
 /** Whether a completed approval binds the item's last candidate, delivered or not: its nit threads are still answered after the merge. */
 function approvesFinalHead(record: ReviewRecord, work: Work[]): boolean {
   const verdict = record.verdict;
@@ -1622,15 +1564,6 @@ export function followUpThreadIds(records: ReviewRecord[], work: Work[], pending
 export const threadResolutionAttempts = 3;
 
 /**
- * One attention item per follow-up filing the loop stopped retrying (retry-stop.ts): the step, the
- * unchanged client error and the item. Raised while the stopped filing's approval is on the ledger.
- */
-export function stoppedFollowUpAttention(records: ReviewRecord[]) {
-  return records.filter(record => !!record.followUps?.stoppedAt && !record.followUps.releasedAt && clientErrorStatus(record.followUps.clientError?.error) !== null)
-    .map(record => retryStopAttention({ step: `follow-up filing for approval ${record.followUps!.reviewId} (PR #${record.pr})`, item: record.key, error: record.followUps!.clientError!.error, count: record.followUps!.clientError!.count, at: record.followUps!.stoppedAt! }));
-}
-
-/**
  * A settled reviewer whose pane the sweep could not close in `settledCloseAttempts` tries (GY-1072):
  * it still holds its agent name, and a launch that needs the name is refused at the bound. It is a
  * fault named with its pane, never a silent bound; it clears once the pane is gone.
@@ -1640,18 +1573,6 @@ export function heldNameAttention(records: ReviewRecord[]) {
     .map(record => ({ subject: record.key,
       text: `Settled reviewer session ${record.agentName} on ${record.key} (${record.state}, request ${record.requestId ?? record.id}) still holds its agent name in pane ${record.pane}: ${settledCloseAttempts} closes failed, the last with ${record.closeFailure}`.slice(0, 1000),
       next: `herdr pane close ${record.pane} (a pane that is already gone counts as closed); the next dispatch tick clears the failure` }));
-}
-
-export function summarizeReviews(records: ReviewRecord[]) {
-  const describe = (record: ReviewRecord) => ({ review: record.id, requestId: record.requestId ?? null, attempt: record.attempt ?? 1, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, profile: record.profile, agentName: record.agentName,
-    state: record.state, verdict: record.verdict?.state ?? null, requestedAt: record.requestedAt, tokenExpiresAt: record.tokenExpiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null,
-    // GY-100: which GitHub review the session settled on, so a reader can name the dismissed
-    // verdict every session of a request has settled on rather than reporting an ordinary wait.
-    reviewId: record.verdict?.reviewId ?? null,
-    // GY-93: how the request reached the session, and whether the session has taken it up.
-    delivery: record.delivery ?? null, activity: record.state === 'pending' ? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null, neverStarted: neverStarted(record),
-    ...(record.threadReadFailure ? { threadReadFailure: record.threadReadFailure } : {}), ...(record.threadResolution ? { threadResolution: record.threadResolution } : {}) });
-  return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
 }
 
 // Independent confirmation that the App is installed on the managed repository, using a token

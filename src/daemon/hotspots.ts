@@ -48,9 +48,3 @@ export function hotspots(items: Work[], now: number): Hotspot[] {
 
 /** The set of hot files, as dispatchOrder reads it. */
 export const hotFileSet = (items: Work[], now: number) => new Set(hotspots(items, now).map(entry => entry.file));
-
-/** The first hot file `item` touches and the live attempts already changing it, for the dispatch record; null when it touches none. */
-export function hotBeside(item: Work, hot: readonly Hotspot[]): { file: string; beside: string[] } | null {
-  const found = hot.find(entry => changedFiles(item).some(path => pathScopesOverlap(path, entry.file)));
-  return found ? { file: found.file, beside: found.claimedBy } : null;
-}

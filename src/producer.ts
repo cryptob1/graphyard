@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery, type SessionRetryReport } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery } from './master.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -267,12 +267,6 @@ export function sessionRetry(records: { requestId?: string; state: string; reque
   if (started >= sessionRetryLimit || unstarted.length >= unstartedRetryLimit || launched.length >= requestAttemptLimit) return { ...report, launch: false, settled: false, nextAt: null, exhausted: true };
   const nextAt = Date.parse(last.closedAt ?? last.requestedAt) + (lostRun(last) ? 0 : neverStarted(last) ? sessionRetryBaseMs : sessionRetryDelay(started));
   return { ...report, launch: now >= nextAt, settled: false, nextAt: new Date(nextAt).toISOString(), exhausted: false };
-}
-/** The retry schedule of every request whose latest session failed or expired, as master status reports it. */
-export function sessionRetries(records: { requestId?: string; state: string; requestedAt: string; closedAt?: string | null; resolution?: string | null }[], now: number): SessionRetryReport[] {
-  const requests = [...new Set(records.map(record => record.requestId).filter((id): id is string => !!id))];
-  return requests.map(id => sessionRetry(records, id, now)).filter(retry => retry.last && retriedStates.includes(retry.last.state))
-    .map(({ requestId, attempts, started, neverStarted: unstarted, lost, limit, unstartedLimit, nextAt, exhausted, last }) => ({ requestId, attempts, started, neverStarted: unstarted, lost, limit, unstartedLimit, nextAt, exhausted, last }));
 }
 
 // The request must still be the one the record holds for the exact current candidate; a session
@@ -745,14 +739,6 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
   changed += releaseClosedRequests(ledger.producers, work, now);
   if (changed) await saveProducerLedger(root, ledger);
   return { producers: ledger.producers, changed };
-}
-
-export function summarizeProducers(records: ProducerRecord[]) {
-  const describe = (record: ProducerRecord) => ({ producer: record.id, requestId: record.requestId, attempt: record.attempt, work: record.key, pr: record.pr, sha: record.sha, policyRevision: record.policyRevision, group: record.group, proofs: record.proofs,
-    profile: record.profile, principal: record.principal, agentName: record.agentName, state: record.state, outcome: record.outcome, requestedAt: record.requestedAt, expiresAt: record.expiresAt, closedAt: record.closedAt ?? null, resolution: record.resolution ?? null, attention: record.closeFailure ?? null,
-    // GY-93: how the request reached the session, and whether the session has taken it up.
-    delivery: record.delivery ?? null, activity: record.state === 'pending' ? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null, neverStarted: neverStarted(record) });
-  return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
 }
 
 /**

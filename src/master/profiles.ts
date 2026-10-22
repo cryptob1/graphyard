@@ -1,7 +1,6 @@
 // Concern: worker, reviewer and producer profiles, the master config schema, and profile session naming.
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
@@ -9,8 +8,6 @@ import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema }
 import { candidateSettingsSchema, mergeWriterSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 import { invariantThresholdsSchema } from '../model/invariants.js';
-import { runtimeSandboxes } from '../worker-sandbox.js';
-import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
 export { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory } from './checkout-git.js';
 
 const safeEnvironment = z.record(
@@ -547,15 +544,6 @@ export function checkoutGuardApplies(root: string): boolean {
   const directory = resolve(root);
   return temporaryDirectories().some(temporary => directory === temporary || directory.startsWith(`${temporary}${sep}`));
 }
-/** The dirty paths, for the work snapshot's live leases whose observed candidate changes them. */
-export interface DirtyCheckoutLease { key: string; epoch: number; owner: string; paths: string[] }
-export function dirtyCheckoutLeases(work: { key: string; lease?: { epoch: number; owner: string; expiresAt: string } | null; observation?: { files?: readonly string[] } | null }[], paths: readonly string[], now: number = Date.now()): DirtyCheckoutLease[] {
-  return work.flatMap(item => {
-    if (!item.lease || Date.parse(item.lease.expiresAt) <= now) return [];
-    const matched = paths.filter(path => (item.observation?.files ?? []).includes(path));
-    return matched.length ? [{ key: item.key, epoch: item.lease.epoch, owner: item.lease.owner, paths: matched }] : [];
-  });
-}
 /** Why `subject` refuses the checkout, or null when it is clean (or has no readable commit). */
 export function coordinatorCheckoutRefusal(checkout: CoordinatorCheckout, subject: string): string | null {
   const dirty = dirtyCheckoutPaths(checkout);
@@ -564,10 +552,6 @@ export function coordinatorCheckoutRefusal(checkout: CoordinatorCheckout, subjec
   const paths = `dirty path(s): ${named}${dirty.length > 8 ? `; and ${dirty.length - 8} more` : ''}`;
   return `${subject} refuses to start, self-upgrade or restart from the coordinator checkout at ${checkout.root}: it holds uncommitted work at ${checkout.commit.slice(0, 12)} — ${checkout.modified.length} modified and ${checkout.untracked.length} untracked source ${paths}. It keeps running the last clean code; clean or stash these paths, then restart ${subject}`;
 }
-/** The refusal as `master status` raises it: the escalation also names which live leases' changed files the dirty paths match. */
-export const dirtyCheckoutEscalation = (refusal: string, leases: DirtyCheckoutLease[]) => leases.length
-  ? `${refusal}. The paths match the changed files of ${leases.length === 1 ? 'one live lease' : `${leases.length} live leases`}: ${leases.map(lease => `${lease.key} epoch ${lease.epoch} (${lease.owner}): ${lease.paths.join(', ')}`).join('; ')}`
-  : refusal;
 
 // The OS-level confinement of the coordinator checkout (GY-888) lives in ./confinement.ts;
 // these re-export it, so every existing import keeps working.

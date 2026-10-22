@@ -248,11 +248,6 @@ export function livenessOf(work: Work, all: Work[], now: Date): Liveness {
   return { ...base, violation: null, obligation: { kind: session ? 'session' : 'wait', owner: wait.on, dueAt, detail: wait.detail } };
 }
 
-/** Every open item's violation, oldest first. */
-export function livenessViolations(all: Work[], now: Date): LivenessViolation[] {
-  return all.map(work => livenessOf(work, all, now).violation).filter((entry): entry is LivenessViolation => !!entry).sort((a, b) => b.ageMs - a.ageMs);
-}
-
 // ---- Repair -----------------------------------------------------------------------------------
 
 /** The ledger entry for a violation found at the start of a tick, judged against the item after it. */

@@ -621,25 +621,6 @@ const harnessPermissions = (settings: any) => settings.permissions && typeof set
 const staleRules = (plan: HarnessPlan, permissions: any) => (['allow', 'deny'] as const).flatMap(list =>
   (Array.isArray(permissions[list]) ? permissions[list] as unknown[] : []).filter((rule): rule is string => typeof rule === 'string' && !!plan.retired?.includes(rule)).map(rule => ({ list, rule })));
 
-/**
- * How the installed harness settings differ from the current plan: rules the plan generates that
- * are not installed, and retired rules an earlier Graphyard installed that are still there. Null
- * when nothing is installed or the runtime has no generated rules; `master status` reports the
- * rest as harness drift and `master harness --apply` repairs it.
- */
-export async function harnessDrift(root: string, plan: HarnessPlan) {
-  if (!plan.file) return null;
-  let settings: any;
-  try { settings = JSON.parse(await readFile(harnessFile(root, plan as HarnessPlan & { file: string }), 'utf8')); }
-  catch (error: any) { if (error.code === 'ENOENT') return null; throw error; }
-  const permissions = harnessPermissions(settings && typeof settings === 'object' ? settings : {});
-  const absent = [...missing(plan.allow, permissions.allow).map(entry => ({ list: 'allow' as const, rule: entry.rule })), ...missing(plan.deny, permissions.deny).map(entry => ({ list: 'deny' as const, rule: entry.rule }))];
-  const stale = staleRules(plan, permissions);
-  if (!absent.length && !stale.length) return null;
-  const named = [stale.length ? `stale ${stale.map(entry => `${entry.list} ${entry.rule}`).join(', ')}` : '', absent.length ? `missing ${absent.map(entry => `${entry.list} ${entry.rule}`).join(', ')}` : ''].filter(Boolean).join('; ');
-  return { file: plan.file, stale, missing: absent, text: `Harness drift in ${plan.file}: ${named}. Run graphyard master harness ${plan.harness} --apply to rewrite it.` };
-}
-
 export async function writeHarnessPermissions(root: string, plan: HarnessPlan, apply = false) {
   if (!plan.file) return { harness: plan.harness, file: null, applied: false, added: [], removed: [], manual: plan.manual, note: plan.note };
   const file = harnessFile(root, plan as HarnessPlan & { file: string });

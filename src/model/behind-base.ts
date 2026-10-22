@@ -46,19 +46,3 @@ export function observeBaseHold(work: Work, at: string) {
   if (!candidate || !behindBaseHold(work)) { if (work.baseHold) work.baseHold = null; return; }
   if (work.baseHold?.sha !== candidate.sha) work.baseHold = { sha: candidate.sha, at };
 }
-/**
- * When the hold the current head stands under was first sighted, or null when it stands under
- * none: the control plane's own confirmed conflict dates from its first conflict on this head
- * (`conflictSince`, GY-1200; `at` on records that predate it), GitHub's reading from the sighting
- * the observation write recorded. The bound an unhandled hold is counted against runs from here
- * (actorless-submissions.ts), not from the submission: on 8 October 2026 GY-1522 and GY-1526
- * counted as actorless 71s and 25m after their base tips moved, inside a bound their submissions
- * had consumed hours or minutes before the hold existed, while the loop's own sync rework was
- * requested 26s and 13s later.
- */
-export function baseHoldSightedAt(work: Held & Pick<Work, 'baseHold'>): string | null {
-  if (!work.candidate || !behindBaseHold(work)) return null;
-  const confirmed = confirmedConflict(work);
-  if (confirmed) return confirmed.conflictSince ?? confirmed.at;
-  return work.baseHold?.sha === work.candidate.sha ? work.baseHold.at : null;
-}

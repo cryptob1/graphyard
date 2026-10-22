@@ -18,10 +18,9 @@ import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
 import type { MergerMode } from '../merger-mode.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
-import { readReviewerProfileRefusal, reviewerProfileRefusalAttention, simplicityParagraph } from '../reviewer.js';
+import { simplicityParagraph } from '../reviewer.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
-import { agentOwner, type AttentionItem } from './attention.js';
 import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, type SharedDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
@@ -300,8 +299,6 @@ export const herdrAttach = (pane: string, workspace?: string | null) => `herdr p
  * failure: the account, its runtime and the start refusal are what master status names.
  */
 export interface AccountStartFailure { account: string; kind: string; reason: string; at: string }
-/** How many launches one account's runtime may fail to start in a row before master status raises one attention item naming the account and its runtime (GY-417). */
-export const accountStartFailureLimit = 3;
 const accountStartFailureSchema = z.object({ kind: z.string().min(1).max(40), failures: z.number().int().min(1), reason: z.string().min(1).max(500), at: z.string() }).strict();
 const accountStartFailureLogSchema = z.object({ version: z.literal(1), accounts: z.record(z.string(), accountStartFailureSchema).default({}) }).strict();
 export type AccountStartFailures = z.infer<typeof accountStartFailureLogSchema>['accounts'];
@@ -330,31 +327,6 @@ export async function clearAccountStartFailures(config: Pick<MasterConfig, 'cred
 /** The fallback line a dispatch that fell forward reads as: every account that failed, then the one launched on. */
 export const describeStartFailures = (failures: readonly AccountStartFailure[], launchedOn: string | null) =>
   `${failures.map(failure => `${failure.account} failed to start: ${failure.reason}`).join('; ')}; launched on ${launchedOn ?? 'no named account'}`;
-/**
- * What each launch profile's last worker dispatch recorded, joined onto its `master status` row
- * (GY-417): the runtime and account the session runs on — a slot is named by what runs in it,
- * never by the profile's name alone — and, when the preferred account's runtime failed to start,
- * one `fallback` line naming that account and the one launched on.
- */
-export function workerLaunchRows(profiles: { name: string }[], records: Record<string, ProfileLaunchRecord>): Record<string, { runtime: string | null; account: string | null; fallback: string | null }> {
-  const rows: Record<string, { runtime: string | null; account: string | null; fallback: string | null }> = {};
-  for (const profile of profiles) {
-    const record = records[profile.name];
-    if (record) rows[profile.name] = { runtime: record.runtime, account: record.account, fallback: record.failedAccounts.length ? describeStartFailures(record.failedAccounts, record.account) : null };
-  }
-  return rows;
-}
-/**
- * One attention item per account whose runtime failed to start `accountStartFailureLimit` launches
- * in a row (GY-417): every launch fell back to the profile's next account, so no session, no item
- * and no refused launch would otherwise show that this runtime never starts at all.
- */
-export function accountStartFailureAttention(failures: AccountStartFailures, cliPath: string): AttentionItem[] {
-  return Object.entries(failures).filter(([, entry]) => entry.failures >= accountStartFailureLimit).map(([account, entry]) => ({
-    subject: `${account} never starts`,
-    text: `Worker account ${account} (runtime ${entry.kind}) failed to start ${entry.failures} launches in a row; each launch fell back to the profile's next account, so no session shows the failure. Last refusal at ${entry.at}: ${entry.reason}`,
-    ...agentOwner('master', `Re-check the account with node ${cliPath} master environments --apply and log its runtime in, or drop it from the profiles' account order with node ${cliPath} master config accounts:PROFILE=… until it starts`) }));
-}
 /** What a profile's last worker dispatch recorded, as master status reads it (GY-417). */
 export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; failedAccounts: AccountStartFailure[] }
 const profileLaunchRecordSchema = z.object({
@@ -371,12 +343,6 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
     catch { /* no launch of this profile has been recorded yet */ }
   }
   return records;
-}
-/** Everything `master status` shows of worker launches (GY-417): each profile's row fields and the never-starting accounts. */
-export async function workerLaunchStatus(root: string, config: Pick<MasterConfig, 'credentialFile' | 'cliPath' | 'workers'> & Partial<Pick<MasterConfig, 'reviewers'>>) {
-  const failures = await readAccountStartFailures(config);
-  // GY-1850: and the one configuration attention an unknown reviewer profile's consecutive refusals raise.
-  return { rows: workerLaunchRows(config.workers, await readProfileLaunchRecords(root, config.workers)), items: [...accountStartFailureAttention(failures, config.cliPath), ...reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config), config.reviewers ? { workers: config.workers, reviewers: config.reviewers } : undefined)] };
 }
 
 export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
@@ -597,15 +563,6 @@ export async function releaseWorkerLaunch(root: string, key: string, epoch: numb
   await readWorkerCredential(root, profile.credentialFile);
   await run(process.execPath, [config.cliPath, 'unclaim', key, String(epoch)], { cwd: root, env: workerEnvironment(config, profile) });
 }
-
-/**
- * GY-860 AC-2: whether a dispatch failure names the item's own workspace — the host's git state a
- * repair or a redispatch can clear — rather than the profile. Such a failure cools off no profile:
- * the worktree command itself releases the claim with its git message, which hands the epoch back,
- * so the failure costs no attempt, and the item's dispatch record keeps the message.
- */
-export const workspaceDispatchFailure = (reason: string) =>
-  /Git worktree creation failed|already has a workspace|Branch or host\/path is already reserved|already linked PR branch|Submitted PR branch changed/.test(reason);
 
 /**
  * `claimBy` is a hand dispatch's deadline on this host's clock (GY-175): it is checked again

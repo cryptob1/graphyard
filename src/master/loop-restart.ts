@@ -7,7 +7,6 @@ import { localDirectory } from '../onboarding.js';
 import { loopStopTimeoutSeconds, loopUnitDirectory, loopUnitOf, type LoopSupervisorHost } from '../supervisor.js';
 import type { MasterConfig } from './profiles.js';
 import { coordinatorCheckoutRoot } from './profiles.js';
-import { agentOwner } from './attention.js';
 import { atomicPrivateText } from './config.js';
 import { defaultChildRun } from '../child-runner.js';
 import { knownGoodCli, knownGoodState } from './known-good.js';
@@ -214,20 +213,4 @@ export async function recordingLockRefusal<T>(root: string, held: LoopLock | nul
 }
 export async function readLockRefusal(root: string): Promise<LockRefusal | null> {
   try { return JSON.parse(await readFile(await refusalFile(root), 'utf8')) as LockRefusal; } catch { return null; }
-}
-
-/**
- * The attention item for a loop holding the lock outside this install's unit while the unit's own
- * `master run` is refused on it: the unit restarts into the same refusal every RestartSec and the
- * holder runs with no watchdog, which is silent unless named here. Judged on the live lock and unit,
- * so a holder that is gone, or that is the unit's own MainPID, raises nothing.
- */
-export function unsupervisedHolderAttention(input: { refusal: LockRefusal | null; lock: LoopLock | null; hostId: string; unit: SupervisingUnit | null; alive?: (pid: number) => boolean }) {
-  const { refusal, lock, unit } = input;
-  if (!refusal || !lock || !unit || lock.host !== input.hostId || lock.pid !== refusal.holder.pid || lock.pid === unit.mainPid) return null;
-  if (!(input.alive ?? alive)(lock.pid)) return null;
-  const started = lock.startedAt ?? refusal.holder.startedAt ?? 'an unknown time';
-  return { subject: 'loop',
-    text: `An unsupervised master loop (pid ${lock.pid} on ${lock.host}, started ${started}) holds this repository's lock outside ${unit.unit}, whose own master run has been refused on it ${refusal.count} time(s), last at ${refusal.refusedAt}: the unit crash-loops while the holder runs with no watchdog`,
-    ...agentOwner('master', `graphyard master restart (stops pid ${lock.pid}, then restarts ${unit.unit}); by hand: kill -TERM ${lock.pid} && systemctl --user restart ${unit.unit}`) };
 }

@@ -122,10 +122,6 @@ function findExhaustion(output: string, now: number, retrying: boolean): Exhaust
 export function detectExhaustion(output: string, now: number): ExhaustionSignal | null {
   return findExhaustion(output, now, false);
 }
-/** Working session stuck on a spent account: limit notice plus runtime retry marker (GY-1223). */
-export function detectRetryingExhaustion(output: string, now: number): ExhaustionSignal | null {
-  return findExhaustion(output, now, true);
-}
 /** Leading or status-named 429; not a 429 inside an id or echoed body (GY-1245). */
 const providerStatus429 = /^(?:(?:\w+\s+)?error:?\s*)?429\b(?![\d.])|\b(?:http(?:\/[\d.]+)?|status(?:\s*code)?|code)["']?\s*[:=]?\s*["']?429\b(?![\d.])/i;
 /** Provider quota/rate refusal in a headless error (GY-1092); never agent prose. */
@@ -133,17 +129,6 @@ export function providerLimit(error: string, now: number): ExhaustionSignal | nu
   const text = error.replace(/\s+/g, ' ').trim();
   if (!text || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
   return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
-}
-
-/** GY-1705 silent `done` pane (still untouched / no reader): assumed-reset hold. Idle is not this. */
-export const silentPaneExhaustionReason =
-  'session ended without working, without an outcome and without a readable provider limit notice; account treated as spent until an assumed reset';
-export function silentPaneExhaustion(input: {
-  listed: boolean; everWorking: boolean; hasOutcome: boolean; notice: ExhaustionSignal | null;
-  pastStartBound: boolean; ended: boolean;
-}): ExhaustionSignal | null {
-  if (!input.listed || !input.ended || input.everWorking || input.hasOutcome || input.notice || !input.pastStartBound) return null;
-  return { reason: silentPaneExhaustionReason, resetsAt: null };
 }
 
 /** Headless run event for limit detection (GY-1705); only string errors are limit text. */

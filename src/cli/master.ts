@@ -10,9 +10,7 @@ import { closeHelp } from './master-close.js';
 import { openMasterSession, unhandled } from './master/session.js';
 import { intentCommand } from './master/intent.js';
 import { fleetCommand } from './master/fleet.js';
-import { confinedMaster, operationsCommand, postDeployChecksCommand } from './master/operations.js';
-import { checkoutRestoreServeFlag } from './checkout-restore-release.js';
-import { serveCheckoutRestoreAct } from './checkout-restore-serve.js';
+import { confinedMaster, operationsCommand } from './master/operations.js';
 import { loopCommand } from './master/loop.js';
 
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
@@ -51,22 +49,15 @@ export const masterCommands = defineCommands([
       '  master browser fixtures       List the redacted Confirm-access captures earlier flows saved,',
       '                                by flow and time, with the latest of each method',
       '  master harness [KIND] [--apply]  Generate the master\'s own harness permissions',
-      '  master status                 Graphyard work truth joined with Herdr session health, the',
-      '                                dispatch order, overlaps and merge conflicts',
+      '  master status                 One page: the serving commit against main, open items, the',
+      '                                merge writer, live sessions and free worker profiles',
       '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab',
-      '  master checkout-restore REASON  Have the loop save every dirty path of the coordinator',
-      '                                checkout under refs/graphyard/checkout-restore/, return them to',
-      '                                HEAD and restart through graphyard-master.service (a clean',
-      '                                checkout at a moved HEAD: restart onto it); the act runs from',
-      '                                the serving release\'s own snapshot',
       '  master merge                  Say that GitHub merges; Graphyard runs no merge of its own',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
       '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
-      '  master reading GY-N pass|fail DETAIL',
-      '                                Record by hand a loop-owned observation reading the loop could not take',
       '  master run [--once] [--interval SECONDS]',
-      '                                The durable coordination loop: launches reviewers and producers',
-      '                                for every submitted head',
+      '                                The durable coordination loop: snapshot, close, dispatch,',
+      '                                merge writer, persist',
       '  master autonomy [--admin-token-stdin --apply]  Provision the master identity',
       '  master promote --admin-token-stdin  Promote a supervised install to autonomy once its reviewer',
       '                                App and profile are independent of you and every worker; audited',
@@ -84,21 +75,11 @@ export const masterCommands = defineCommands([
     ],
     async run(context) {
       const { id } = context;
-      // GY-1732: the observed release's own post-deploy filer, run by the loop's readings from an isolated checkout of
-      // that release; it opens no session and takes no root — the delivered item and readings arrive on stdin.
-      if (id === 'post-deploy-checks') return postDeployChecksCommand();
       const root = context.repositoryRoot();
       // The master's role instructions lead the guide; the guide file's first line is its docs-index entry, not guide body.
       if (id === 'guide') return console.log(`${masterInstructions}\n` + (await readFile(fileURLToPath(new URL('../../docs/master-agent.md', import.meta.url)), 'utf8')).replace(/^<!-- page:[^\n]*\n/, ''));
       if (id === 'init') return masterInit(context, root);
       if (id === 'setup') return masterSetupCommand(context, root, await loadStoredMasterConfig(root));
-      // GY-1680: the serve entry the loop runs in a snapshot of the serving release — the quiesce-and-restore itself.
-      // It opens no session and takes no root: it serves only a grant signed with the coordinator credential
-      // (its path in this process's environment), which names the checkout, the reason and the standing
-      // request, and which the entry verifies against that checkout's own installation — its credential,
-      // its cursor's lock, its request file — and its own ancestry before anything is touched. A confined
-      // master, a worker or a hand holds no credential to sign one and is refused; they file master checkout-restore REASON.
-      if (id === 'checkout-restore' && context.args[0] === checkoutRestoreServeFlag) return context.print(await serveCheckoutRestoreAct(context.args.slice(1)));
       const session = await openMasterSession(context, root);
       // Each concern under ./master/ answers its own subcommands; the first that knows the id handles it.
       // A confined master's `restart` is operations' loop request (GY-1658), not an act on the host's systemd it cannot reach.

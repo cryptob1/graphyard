@@ -210,12 +210,10 @@ export type RuntimeStates = (runtime: string) => readonly string[];
 export interface LivenessOptions { states?: RuntimeStates }
 const defaultStates: RuntimeStates = () => endedRuntimeStates;
 /**
- * How long a handle the runtime no longer reports is left alone, and the bound a vanished record
- * closes within: the grace plus one sweep. A listing is not instantaneous — a session recorded at
- * launch appears in its runtime's inventory a moment later — so a young handle is left be.
+ * How long a handle the runtime no longer reports is left alone. A listing is not instantaneous — a
+ * session recorded at launch appears in its runtime's inventory a moment later — so a young handle is left be.
  */
-export const sessionReconcileIntervalMs = 30_000, sessionVanishGraceMs = 60_000;
-export const sessionClosureBoundMs = sessionVanishGraceMs + sessionReconcileIntervalMs;
+export const sessionVanishGraceMs = 60_000;
 /** The slot a session occupies: what its launcher registered, else its kind. One item holds one live session per slot and head. */
 export const sessionRole = (handle: Pick<SessionHandle, 'kind' | 'role'>) => handle.role ?? handle.kind;
 /** The runtime entry that is this session, matched on the coordinates its launcher recorded. */
@@ -276,8 +274,6 @@ export interface OverlongSession {
   ageMs: number; maximumMs: number; idleMs: number; lastActivityAt: string; liveness: Liveness; live: boolean | null;
   attach: string; subject: string; outcome: string | null;
 }
-/** One reader's line per overlong session, and what to do about it; `next` never names a command that ends a session. */
-export interface OverlongSessionLine { subject: string; text: string; next: string }
 export type OverlongOptions = LivenessOptions & { maximums?: Partial<Record<SessionKind, number>>;
   /** This host, when the reader has one: a session another host launched is not judged against this host's runtime listing. */
   hostId?: string | null };
@@ -301,19 +297,4 @@ export function overlongSessions(all: Work[], runtime: RuntimeSession[] | null, 
       liveness, live: liveness === 'live' ? true : liveness === 'ended' || liveness === 'vanished' ? false : null,
       attach: attachCommand(handle), subject: handle.subject, outcome: handle.outcome }];
   })).sort((a, b) => b.ageMs - a.ageMs);
-}
-/** Each of those as a line: its age against the maximum, its last observed activity, what the runtime says now, and what shows it. */
-export function overlongSessionLines(all: Work[], runtime: RuntimeSession[] | null, now: Date, options: OverlongOptions = {}): OverlongSessionLine[] {
-  const bound = `${Math.round(sessionClosureBoundMs / 1000)}s`;
-  return overlongSessions(all, runtime, now, options).map(session => {
-    const observed = session.live === true ? `the ${session.runtime} runtime on ${session.host} still reports it live`
-      : session.live === false ? `the runtime no longer reports it live (${session.liveness}), so the liveness sweep closes its record within ${bound}`
-      : options.hostId && session.host !== options.hostId
-        ? `whether it is still live is unknown: it runs on ${session.host}, and this host's runtime inventory does not answer for it`
-        : 'whether it is still live is unknown, because the runtime inventory could not be read';
-    return { subject: session.key,
-      text: `${session.role} session ${session.id} on ${session.key} (${session.principal}) has run ${elapsed(session.ageMs)}, past the ${elapsed(session.maximumMs)} maximum for its role; last observed activity ${elapsed(session.idleMs)} ago at ${session.lastActivityAt}, and ${observed}. It holds its role slot while it stands${session.outcome ? `; last recorded outcome: ${session.outcome}` : ''}`,
-      next: session.live === false ? 'graphyard master run --once reconciles the record; no session has to be closed by hand'
-        : `${session.attach} shows what it is doing; stop it there if it is stuck and the liveness sweep closes the record within ${bound}` };
-  });
 }

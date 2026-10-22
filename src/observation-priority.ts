@@ -1,34 +1,12 @@
-import type { Observation, Work } from './model.js';
+import type { Work } from './model.js';
 import { nextAction } from './model/next-action.js';
 import { mergeAuthorized } from './model/merge-authorization.js';
-import { agentOwner, type AttentionItem } from './master/attention.js';
-import type { IntegrationJob } from './coordination.js';
-
-/**
- * What the observation scheduler serves first, and how stale each band may grow (GY-492, GY-1114).
- *
- * Two steps read GitHub through an observation with a bound: merge candidates are read every two
- * minutes so GitHub's merge is recorded promptly (no gate refuses an old one since GY-1235), and a
- * review request is held to readings under thirty — not refused by the reviewer
- * launch, which binds the head rather than the age (GY-710), but kept there by this scheduler. On 2026-10-02, with ~95 open items,
- * the fleet's steady-state interval had stretched to an hour, so 43 review-requested items aged
- * past thirty minutes behind the starved backlog while 19 reviewer slots idled and nothing merged
- * for 80 minutes. Here every open item is placed in a band — `merge` (every gate passes and GitHub
- * may merge it), `review` (the next action is the review request) or `steady` —
- * and the bands with a bound are claimed ahead of the backlog before they reach it.
- */
-
-/** How stale a merge candidate's reading may grow before the scheduler serves it (the publication guard's bound too); no gate refuses on it (GY-1235). */
-export const observationFreshnessMs = 120_000;
 /**
  * How old the reading of a review-requested head may grow (GY-1114): the scheduler's own bound, which
  * no launch enforces (`assertReviewCandidate` binds the head, not the age, GY-710), so a requested
  * head that moved on GitHub is noticed, and the request superseded, within it.
  */
 export const reviewObservationFreshnessMs = 30 * 60_000;
-export type FreshnessBand = 'merge' | 'review' | 'steady';
-/** Each band's freshness bound; steady items have none and wait behind the others. */
-export const observationFreshnessBounds: Record<FreshnessBand, number | null> = { merge: observationFreshnessMs, review: reviewObservationFreshnessMs, steady: null };
 /**
  * A review-requested item is polled at least this often however far the fleet's steady-state
  * interval stretches: a third of its bound, so two missed polls still leave a launchable reading.
@@ -51,8 +29,6 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date(), ki
   // claimed only after every named starved job, and under a paced budget never (2026-09-26: GY-393, GY-430 for 3 h).
   return kind === 'request-rework' || kind === 'request-review' || (kind === 'resync' && !firstObservationOwed(work));
 }
-/** Whether the item's next action is the review request, whose reading the scheduler keeps under the review bound. */
-export const reviewRequested = (work: Work, all: Work[], now = new Date()) => work.stage !== 'done' && nextAction(work, all, now)?.kind === 'request-review';
 
 /** The merge path's ids (GY-567): every item GitHub may merge now, whose merge is recorded from its next reading. */
 function mergePath(all: Work[]): string[] {
@@ -97,60 +73,3 @@ export function observationClaim(all: Work[], now = Date.now(), tight = false) {
 }
 /** The claim order alone (GY-492): see `observationClaimPlan`. */
 export const observationClaimOrder = (all: Work[], now = Date.now(), tight = false) => observationClaim(all, now, tight).order;
-
-/** The band an open submitted item's observation lag is reported in; null for one with nothing to observe. */
-export function freshnessBand(work: Work, all: Work[], merging: ReadonlySet<string>, now: Date): FreshnessBand | null {
-  if (work.stage === 'done' || !work.submission) return null;
-  if (merging.has(work.id)) return 'merge';
-  return reviewRequested(work, all, now) ? 'review' : 'steady';
-}
-/** How long a lag is, in the unit a reader reads: a minute and change, or seconds. */
-export const observationLag = (ms: number) => ms >= 60_000 ? `${Math.floor(ms / 60_000)}m${Math.round(ms % 60_000 / 1000)}s` : `${Math.round(ms / 1000)}s`;
-
-/**
- * Observation lag per band (GY-1114), for `master status`: how many items each band holds, the
- * oldest reading in it, its bound, and how many items are past it. A bounded band with any item
- * past its bound raises one attention item naming the band, the oldest item and its lag. The merge
- * band holds the items the workers claim with the merge path (GY-1178).
- */
-export function observationBandLag(all: Work[], now: number) {
-  const merging = new Set(mergePath(all)), date = new Date(now);
-  const bands = (['merge', 'review', 'steady'] as FreshnessBand[]).map(band => ({ band, boundMs: observationFreshnessBounds[band], items: 0, pastBound: 0, oldest: null as string | null, lagMs: null as number | null, stale: null as { key: string; lagMs: number } | null }));
-  for (const work of all) {
-    const band = freshnessBand(work, all, merging, date);
-    if (!band) continue;
-    const entry = bands.find(row => row.band === band)!;
-    entry.items++;
-    const lag = work.observation?.at ? Math.max(0, now - Date.parse(work.observation.at)) : Infinity;
-    if (entry.boundMs !== null && lag > entry.boundMs) { entry.pastBound++; if (!entry.stale || lag > entry.stale.lagMs) entry.stale = { key: work.key, lagMs: lag }; }
-    if (entry.lagMs === null || lag > entry.lagMs) { entry.lagMs = lag; entry.oldest = work.key; }
-  }
-  const report = bands.map(({ stale: _stale, ...entry }) => ({ ...entry, lagMs: entry.lagMs === Infinity ? null : entry.lagMs, unobserved: entry.lagMs === Infinity }));
-  const attention: AttentionItem[] = bands.filter(entry => entry.boundMs !== null && entry.stale).map(entry => ({ subject: 'github',
-    text: `The ${entry.band} band has ${entry.pastBound} of ${entry.items} item(s) observed longer ago than its ${observationLag(entry.boundMs!)} bound (oldest ${entry.stale!.key}, ${entry.stale!.lagMs === Infinity ? 'never observed' : observationLag(entry.stale!.lagMs)}): ${entry.band === 'merge' ? 'their merges and deliveries are recorded late' : 'their review requests may name heads that have since moved'} until the observation workers reach them`,
-    ...agentOwner('control plane', 'Nothing to run: the workers claim these bands ahead of the backlog; if the lag persists, raise GRAPHYARD_OBSERVATION_CONCURRENCY with GRAPHYARD_DATABASE_POOL_SIZE (workers at most half the pool) and restart the server') }));
-  return { bands: report, attention };
-}
-
-/** When the item's current submission was made: when its stage was entered. */
-const submittedAt = (work: Work) => work.stageEnteredAt;
-
-/**
- * Each band's observation lag (GY-492, GY-1114), read from the jobs and items in the work snapshot.
- * A band whose readings fall past its bound is raised as attention naming the band, its oldest item
- * and its lag. The control plane observes every head from its own checkout, so no request budget is read.
- */
-export function observationThroughputStatus(snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
-  const oldestDueJobMs = (snapshot.jobs ?? []).reduce<number | null>((oldest, job) => {
-    const locked = job.locked_until !== null && Date.parse(job.locked_until) > now, held = job.held_until != null && Date.parse(job.held_until) > now;
-    if (locked || held) return oldest;
-    const available = Date.parse(job.available_at);
-    return oldest === null ? Math.max(0, now - available) : Math.min(oldest, Math.max(0, now - available));
-  }, null);
-  // The oldest submission never observed (GY-567): nothing can review or prove it until it is read once.
-  const unobserved = snapshot.work.filter(firstObservationOwed).map(work => ({ key: work.key, pr: work.submission!.pr, submittedAt: submittedAt(work) }))
-    .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
-  const oldestUnobservedSubmission = unobserved[0] ? { ...unobserved[0], ageMs: Math.max(0, now - Date.parse(unobserved[0].submittedAt)), count: unobserved.length } : null;
-  const lag = observationBandLag(snapshot.work, now);
-  return { oldestDueJobMs, oldestUnobservedSubmission, bands: lag.bands, attention: lag.attention };
-}

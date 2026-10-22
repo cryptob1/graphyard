@@ -22,15 +22,6 @@ type Observed = Pick<Work, 'systemDriven' | 'criteria' | 'evidence' | 'stage' | 
 const newest = <T extends { at: string }>(entries: readonly T[]) => entries.reduce<T | null>((best, entry) => !best || Date.parse(entry.at) >= Date.parse(best.at) ? entry : best, null);
 
 /**
- * GY-1779: the loop's newest own reading of `proof` on `release` (`reading`, recorded through the
- * coordinator's `reading` command): trusted, unrevoked, at the item's current policy revision. A
- * close that failed is retried on it without a second record, and a result it already gives is not
- * recorded twice; the hand path records the proof without one.
- */
-export const loopReadingOn = (work: Pick<Work, 'evidence' | 'policyRevision'>, proof: string, release: string): Reading | undefined =>
-  newest(work.evidence.filter(entry => entry.proof === proof && entry.trusted && !entry.revocation && !!entry.reading && entry.sha === release && entry.policyRevision === work.policyRevision)) ?? undefined;
-
-/**
  * GY-1779: the recorded passing readings that end a loop-owned observation item's wait, one per
  * proof, all taken on one release — the release its `delivered-observation` closure names and the
  * loop closes it on — or null while the wait stands or for any other item. Only a passing, unexpired,
