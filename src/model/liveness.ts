@@ -5,7 +5,6 @@ import type { ActionAccount, ActionWait } from './action-account.js';
 import { producerGroupDecisions } from './mechanical-proofs.js';
 import { roleSessionMaximumMs } from './sessions.js';
 import type { Work } from './work.js';
-import { stallRemedy } from '../stall-remedies.js';
 
 /**
  * The liveness invariant (GY-201): every open item always has exactly one owned next step with a
@@ -98,22 +97,19 @@ function failureRun(work: Work, id: string) {
  * passed. A lifted conversion retries the action once: an identical failure escalates it again at
  * once, anything else ends the run. So an escalated action is still attempted on the widest
  * backoff, and a condition that clears — a deployment incident ending — is found by the retry.
- *
- * A reason the registry binds to a remedy (src/stall-remedies.ts) is escalated with that remedy named.
+
  */
 function stalledConversion(work: Work, action: NextAction, now: Date): NextAction | null {
   if (action.kind === 'escalate') return null;
   const id = actionId(action.kind, work.id, action.binding);
   const run = failureRun(work, id);
   if (!run) return null;
-  const bound = stallRemedy(run.reason);
   if (run.failures < livenessRetryLimit || now.getTime() - Date.parse(run.lastAt) >= actionStallMaxMs) return null;
   const binding = `stalled:${id}:${run.reason}`;
   const answered = latestRow(work, actionId('escalate', work.id, binding));
   if (answered?.result === 'done' && Date.parse(answered.resolvedAt!) >= Date.parse(run.lastAt)) return null;
-  const remedy = bound ? `. Remedy: ${bound.remedy}` : '';
-  return escalate(work, 'stalled-action', `${work.key}'s ${action.kind} failed ${run.failures} times in a row for one unchanged reason and is escalated rather than retried until ${iso(Date.parse(run.lastAt) + actionStallMaxMs)}: ${run.reason}${remedy}`,
-    `${action.kind} failed ${run.failures} times since ${run.since}: ${run.reason}${remedy}`, binding, action.gate, action.refusal);
+  return escalate(work, 'stalled-action', `${work.key}'s ${action.kind} failed ${run.failures} times in a row for one unchanged reason and is escalated rather than retried until ${iso(Date.parse(run.lastAt) + actionStallMaxMs)}: ${run.reason}`,
+    `${action.kind} failed ${run.failures} times since ${run.since}: ${run.reason}`, binding, action.gate, action.refusal);
 }
 
 /**

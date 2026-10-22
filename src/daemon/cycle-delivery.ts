@@ -199,7 +199,7 @@ export function throughputEscalatedAt(actions: Record<string, DaemonAction>, own
  */
 function settleThroughputEscalations(state: DaemonState) {
   for (const [key, action] of Object.entries(state.actions)) {
-    if (key.startsWith('escalation:throughput:') && action.state === 'waiting') storeAction(state, key, { ...action, state: 'done' }, null);
+    if (key.startsWith('escalation:throughput:') && action.state === 'waiting') storeAction(state, key, { ...action, state: 'done' });
   }
 }
 
@@ -209,9 +209,9 @@ async function noteDeploymentBudget(cycle: Pick<Cycle, 'state' | 'effects' | 'no
   const { state, effects, now, performed } = cycle, key = 'deployment:deferred', standing = state.actions[key];
   const within = 'The deployment step verified within its budget';
   if (!deferred.length) {
-    if (standing && !standing.detail.startsWith(within)) performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'done', attempts: standing.attempts + 1, cycle: state.cycle, detail: `${within}; nothing is left in flight` }, now(), effects.persist, null));
+    if (standing && !standing.detail.startsWith(within)) performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'done', attempts: standing.attempts + 1, cycle: state.cycle, detail: `${within}; nothing is left in flight` }, now(), effects.persist));
     return;
   }
   performed.push(await record(state, key, { kind: 'deployment', work: null, principal: null, state: 'done', attempts: (standing?.attempts ?? 0) + 1, cycle: state.cycle,
-    detail: `The deployment step spent its ${Math.round(budgetMs / 1000)}s budget before ${deferred.join(' and ')} finished, so the last verified observation stands and a later cycle resumes: it takes the answer of the read still in flight once it lands rather than starting another` }, now(), effects.persist, null));
+    detail: `The deployment step spent its ${Math.round(budgetMs / 1000)}s budget before ${deferred.join(' and ')} finished, so the last verified observation stands and a later cycle resumes: it takes the answer of the read still in flight once it lands rather than starting another` }, now(), effects.persist));
 }

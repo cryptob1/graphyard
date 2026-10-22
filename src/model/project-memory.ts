@@ -1,33 +1,11 @@
 import { z } from 'zod';
 import { docsWords } from './documentation.js';
-import { faultClasses, type FaultClass } from './fault-classes.js';
 import type { Work } from './work.js';
 
 export const retainedMemoryDecisions = 20;
-export const retainedMemoryPitfalls = 20;
 export const retainedMemoryChanges = 30;
 export const recentChangesWindowMs = 24 * 3_600_000;
 export const projectMemoryWordBudget = 500;
-
-export const sanctionedRemedies: Record<string, string> = {
-  'scope': 'Change only what the criteria need; never weaken requirements, revert shipped work or rebase.',
-  'configuration': 'Worker tokens cannot edit .github/workflows; do not touch workflow files or request changes to them.',
-  'merge': 'Do not guess at blocked merges or force-push; use graphyard sync GY-N to reconcile cleanly with base.',
-  'session-liveness': 'Avoid commands triggering interactive prompts (no unresolvable rm/mv globs); keep work within lease time.',
-  'proof': 'Ensure test titles start with the exact proof name; verify with graphyard verify GY-N before completing.',
-  'review-convergence': 'Address review findings directly with code commits or explanations; do not dismiss reviews manually.',
-  'decision': 'Two-party decisions require independent approver review; cite context and precedent, never self-approve.',
-  'capacity': 'Wait for provider quota reset or switch profiles; do not retry exhausted accounts in a loop.',
-  'human-decision': 'Park with graphyard park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why SENTENCE -- REASON when human-only goals, money or credentials are required.',
-  'resources': 'Clean up unneeded temporary files under managed root; do not exceed disk and ledger bounds.',
-  'containment': 'Ensure previous session processes are stopped and containment fences settled before proceeding.',
-  'deployment': 'Verify deployed commits match release expectations; follow rollback guidance on smoke failure.',
-  'overlap-hold': 'Wait for the item holding the same exclusive resource to complete.',
-  'observation': 'Wait for GitHub observation updates; do not proceed on stale PR status readings.',
-  'loop': 'Ensure master daemon is running and cycling within interval; restart if stuck.',
-  'stalled-gate': 'Check gate failure reasons and address the blocking requirement instead of waiting.',
-  'unclassified': 'Investigate attention line and classify shared cause in fault catalogue.',
-};
 
 export const memoryDecisionSchema = z.object({
   id: z.string(),
@@ -38,14 +16,6 @@ export const memoryDecisionSchema = z.object({
   at: z.string(),
 }).strict();
 export type MemoryDecision = z.infer<typeof memoryDecisionSchema>;
-
-export const memoryPitfallSchema = z.object({
-  faultClass: z.string(),
-  count: z.number().int().nonnegative(),
-  remedy: z.string(),
-  at: z.string(),
-}).strict();
-export type MemoryPitfall = z.infer<typeof memoryPitfallSchema>;
 
 export const memoryChangeSchema = z.object({
   key: z.string(),
@@ -60,13 +30,12 @@ export const projectMemorySchema = z.object({
   version: z.literal(1).default(1),
   updatedAt: z.string(),
   decisions: z.array(memoryDecisionSchema).max(100).default([]),
-  pitfalls: z.array(memoryPitfallSchema).max(100).default([]),
   changes: z.array(memoryChangeSchema).max(100).default([]),
-}).strict();
+}); // not strict: a memory written before GY-2873 carries `pitfalls`, which parsing drops
 export type ProjectMemory = z.infer<typeof projectMemorySchema>;
 
 export function emptyProjectMemory(now: string = new Date().toISOString()): ProjectMemory {
-  return { version: 1, updatedAt: now, decisions: [], pitfalls: [], changes: [] };
+  return { version: 1, updatedAt: now, decisions: [], changes: [] };
 }
 
 export type SessionRole = 'worker' | 'reviewer' | 'producer';
@@ -81,16 +50,6 @@ export function isDecisionRoleRelevant(decision: MemoryDecision, role: SessionRo
   return decisionRoles[role]?.includes(decision.action.toLowerCase()) ?? true;
 }
 
-/** Role relevance for recurring pitfalls: prioritizing fault classes each role commonly encounters. */
-const pitfallRoles: Record<SessionRole, string[]> = {
-  worker: ['scope', 'configuration', 'session-liveness', 'merge', 'human-decision'],
-  reviewer: ['review-convergence', 'merge', 'decision', 'scope'],
-  producer: ['proof', 'configuration', 'session-liveness'],
-};
-export function isPitfallRoleRelevant(pitfall: MemoryPitfall, role: SessionRole): boolean {
-  return pitfallRoles[role]?.includes(pitfall.faultClass) ?? true;
-}
-
 /** Record an approved/settled decision in project memory. Never updates from an agent's unreviewed claim. */
 export function recordDecisionInMemory(memory: ProjectMemory, decision: { id: string; key: string; action: string; reason: string; state: string; approvedBy?: string | null; at: string }): boolean {
   // Only settled / applied / approved decisions and operator answers, never unreviewed agent claims.
@@ -102,18 +61,6 @@ export function recordDecisionInMemory(memory: ProjectMemory, decision: { id: st
     .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
     .slice(0, retainedMemoryDecisions);
   memory.updatedAt = memory.decisions[0]?.at ?? entry.at;
-  return true;
-}
-
-/** Record a recurring fault class pitfall with its sanctioned remedy in project memory. */
-export function recordPitfallInMemory(memory: ProjectMemory, pitfall: { faultClass: string; count: number; remedy?: string; at: string }): boolean {
-  const remedy = pitfall.remedy || sanctionedRemedies[pitfall.faultClass] || `Address root cause of ${pitfall.faultClass} fault.`;
-  const entry: MemoryPitfall = { faultClass: pitfall.faultClass, count: pitfall.count, remedy, at: pitfall.at };
-  const filtered = memory.pitfalls.filter(p => p.faultClass !== entry.faultClass);
-  memory.pitfalls = [entry, ...filtered]
-    .sort((a, b) => b.count - a.count || Date.parse(b.at) - Date.parse(a.at))
-    .slice(0, retainedMemoryPitfalls);
-  memory.updatedAt = entry.at;
   return true;
 }
 
@@ -197,14 +144,6 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
     return Date.parse(b.at) - Date.parse(a.at);
   });
 
-  // Filter and prioritize pitfalls: role-relevant first, then highest count
-  const pitfalls = [...memory.pitfalls].sort((a, b) => {
-    const aRel = isPitfallRoleRelevant(a, role) ? 1 : 0;
-    const bRel = isPitfallRoleRelevant(b, role) ? 1 : 0;
-    if (aRel !== bRel) return bRel - aRel;
-    return b.count - a.count || Date.parse(b.at) - Date.parse(a.at);
-  });
-
   // Filter changes: if baseSha provided, those since session base (or all recent in window)
   const baseSha = options?.baseSha;
   let changes = [...memory.changes];
@@ -214,7 +153,7 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
   if (baseMerge) changes = changes.filter(c => c.sha !== baseMerge.sha && Date.parse(c.mergedAt) > Date.parse(baseMerge.mergedAt));
   changes.sort((a, b) => Date.parse(b.mergedAt) - Date.parse(a.mergedAt));
 
-  if (!decisions.length && !pitfalls.length && !changes.length) return '';
+  if (!decisions.length && !changes.length) return '';
 
   const parts: string[] = ['Shared project memory:'];
 
@@ -244,19 +183,6 @@ export function projectMemoryDigest(memory: ProjectMemory | null | undefined, ro
       // GY-1125 follow-up finding 5: continue to allow later shorter decisions to be considered
     }
     if (decisionLines.length) parts.push('Recent decisions:', decisionLines.join(' '));
-  }
-
-  // Add pitfalls with sanctioned remedies
-  if (pitfalls.length) {
-    const pitfallLines: string[] = [];
-    for (const p of pitfalls) {
-      const line = `- ${p.faultClass} (${p.count} recurrence${p.count === 1 ? '' : 's'}): ${p.remedy}`;
-      const candidate = [...parts, 'Recurring pitfalls and remedies:', ...pitfallLines, line].join(' ');
-      // GY-1125 follow-up finding 5: continue instead of break so later shorter entries are not hidden
-      if (docsWords(candidate) > budget) continue;
-      pitfallLines.push(line);
-    }
-    if (pitfallLines.length) parts.push('Recurring pitfalls and remedies:', pitfallLines.join(' '));
   }
 
   // Add merges since base

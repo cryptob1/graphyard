@@ -11,9 +11,7 @@ import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, escalationTriggers, raiseEscalation, releaseLeadHold, resolveEscalation, standingEscalations, attestationFor, attestationKinds, attestationsFromLedger, leaseLapseCause, leaseLossEpoch, leaseLossReason, settleableLeaseLoss, stallCovering, submittedEpoch, type Attestation, type PlaneStall, type PlaneDeploy, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type EvidenceAttestation, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
-import { filedFollowUpWindow, followUpRequest, patternOfProof, type PatternProjections, type PatternReader } from './model/observation-window.js';
-import { readInterventionReport } from './interventions/report.js';
-import { interventionPolicyFromEnv } from './model/interventions.js';
+import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { containmentAttestation, containmentSettlementRefusals, containmentVerificationSchema } from './quarantine.js';
@@ -24,8 +22,6 @@ import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './model
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { protectedCasePrefix, protectedCaseRefusals, readProtectingGoals } from './model/goal.js';
-import { retroCheckRefusals } from './model/retro-synthesis.js';
-import { readAppliedRetroChecks } from './retro-synthesis.js';
 import { buildIdentity } from './protocol-version.js';
 import { configuredDocumentation, documentationObligation, recordDocumentationSubmission, type DocumentationPolicy } from './model/documentation.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
@@ -47,7 +43,6 @@ import { observeBaseHold } from './model/behind-base.js';
 import { blockedAttemptMarker, partialWorkSchema, retainedExhaustions, type ExhaustionRecord } from './model/capacity.js';
 import { credentialBlockedReason, credentialFailure } from './worker-credential.js';
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
-import { dispatchFailureBlockAfter } from './daemon/dispatch-failures.js';
 import { loopOwnedRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
 import { assertDecisionAuthority, foldDecisions, liveLeaseRevisionRefusal, ownerHoldRefusal, quarantinedRevisionRefusal, requiredDecisionCapabilities, type Decision, type HeldApplication } from './model/approval.js';
@@ -131,10 +126,6 @@ const commands = {
   // GY-1740: the master's (or the loop's) hold of an unleased post-deploy follow-up on the instant its
   // reading can first exist: the observation window `defer` sets, with no lease, and the recorded blocker cleared.
   window: z.object({ notBefore: z.string().datetime({ offset: true }), reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive() }).strict(),
-  // The master loop recording that dispatching the item keeps failing for one unchanged cause
-  // (GY-1078): the cause becomes the item's blocker, so nothing dispatches it again until an
-  // operator clears it. It needs no lease — no attempt is running — and is refused while one is.
-  dispatchblock: z.object({ reason: z.string().trim().min(1).max(2000) }).strict(),
   // `scopeFiles` is the producer's declaration of what the proof depends on, in the planned-files
   // scope syntax; a base refresh carries a proof across its own authored merge only inside it.
   evidence: z.object({ proof: proofSchema, sha, baseSha: sha, policyRevision: z.number().int().positive(), result: z.enum(['pass', 'fail']), executed: z.number().int().min(0), skipped: z.number().int().min(0), url: publicArtifactUrl.optional(), artifacts: z.array(evidenceArtifact).max(30).optional(), scenarioRevision: z.number().int().positive().optional(), environment: z.string().min(1).max(100).optional(),
@@ -802,14 +793,12 @@ export function configuredReconcileFullMs(value = process.env.GRAPHYARD_RECONCIL
 /**
  * GY-1735: a post-deploy follow-up filed without its observation window takes the one its filing owed
  * it; one already recorded stands. The delivered item is read as its document: a settled stand-in
- * need not carry its criteria or deployment. `projections` is the intervention report's reading for
- * the proof's pattern, read before the transaction (`followUpProjections`), so the window is never
- * earlier than the report's bound, as the filer derives it.
+ * need not carry its criteria or deployment.
  */
-async function adoptFollowUpWindow(db: Queryable, work: Work, projections: PatternProjections) {
+async function adoptFollowUpWindow(db: Queryable, work: Work) {
   const request = work.observationWindow ? null : followUpRequest(work);
   const delivered: Work | undefined = request ? (await db.query('SELECT document FROM work_items WHERE id=$1', [request.work])).rows[0]?.document : undefined;
-  const window = delivered ? filedFollowUpWindow(work, [delivered], projections) : undefined;
+  const window = delivered ? filedFollowUpWindow(work, [delivered]) : undefined;
   if (window) work.observationWindow = window;
 }
 export class Engine {
@@ -840,22 +829,6 @@ export class Engine {
   /**
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
-  /**
-   * GY-1735: reads the intervention report's projection for a pattern, which a window-less follow-up's
-   * derived window is bounded by. Left undefined, this store's own report under the environment's
-   * policy; null reads none, and the window is the criterion's bound alone.
-   */
-  followUpPatterns: PatternReader | null | undefined = undefined;
-  /** The report's projection for the proof a window-less follow-up owes, read outside any coordination transaction; a failed read is no reading, as the filer treats it. */
-  private async followUpProjections(item: Pick<Work, 'description' | 'observationWindow'> | undefined): Promise<PatternProjections> {
-    const request = item && !item.observationWindow ? followUpRequest(item) : null, pattern = request && patternOfProof(request.proof);
-    const read = this.followUpPatterns === undefined ? async ({ kind, stage }: { kind: string; stage: string }) => {
-      const row = (await readInterventionReport(this.store, interventionPolicyFromEnv())).patterns.find(entry => entry.kind === kind && entry.stage === stage);
-      return row ? { since: row.underThreshold.since ?? null, projected: row.underThreshold.projected ?? null } : null;
-    } : this.followUpPatterns;
-    if (!request || !pattern || !read) return {};
-    try { return { [request.proof]: await read(pattern) }; } catch { return {}; }
-  }
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
   // by the transaction that persists it. Keyed by the object, so a probe clone records nothing.
   private dispatchTransitions = new WeakMap<Work, DispatchTransition[]>();
@@ -1140,9 +1113,6 @@ export class Engine {
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
     const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
-    // GY-1735: a command that may derive a legacy follow-up's window reads the report's projection first; a claim reads the item on its lease pool.
-    const projections = command === 'create' ? await this.followUpProjections(data) : command === 'ready' || command === 'unblock' || command === 'claim'
-      ? await this.followUpProjections((await (command === 'claim' ? this.store.leasePool : this.store.pool).query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document) : {};
     // GY-1735: a claim the observation window refuses rolls its transaction back, so the window a legacy follow-up
     // derives is recorded first, on its own: coordination then holds the item instead of dispatching refused claims.
     // Only a claim the main transaction would judge writes it: a caller without claim authority, or a key that
@@ -1152,7 +1122,7 @@ export class Engine {
       const all = await lockedWork(db, [id]);
       const work = all.find(w => w.id === id || w.key === id);
       if (!work || work.stage === 'done' || work.observationWindow) return;
-      await adoptFollowUpWindow(db, work, projections);
+      await adoptFollowUpWindow(db, work);
       if (!work.observationWindow) return;
       this.evaluate(work, all, now);
       await this.recordDispatch(db, work, now);
@@ -1204,7 +1174,7 @@ export class Engine {
         // repository configures (GY-215); nobody writes it into the ticket.
         const documentation = documentationObligation(data.type, this.documentation);
         if (documentation) work!.documentation = documentation;
-        await adoptFollowUpWindow(db, work!, projections);
+        await adoptFollowUpWindow(db, work!);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
         all.push(work!);
@@ -1279,8 +1249,8 @@ export class Engine {
         work.observation = null; work.mergeAuthorization = null; work.reviewRequest = null;
       }
       if (command === 'requirements') await this.reviseRequirements(db, actor, work, all, data, key, now);
-      if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; await adoptFollowUpWindow(db, work, projections); }
-      if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; await adoptFollowUpWindow(db, work, projections); }
+      if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; await adoptFollowUpWindow(db, work); }
+      if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; await adoptFollowUpWindow(db, work); }
       if (command === 'resolve') {
         // Resolution is a human judgement: no lead, worker, producer, or scoped
         // operator agent may clear the escalation that refuses its own delivery.
@@ -1373,7 +1343,7 @@ export class Engine {
         // resources and slice capacity are all derived from the document the new attempt will hold.
         demand(work.ready && !work.blocker, 'Task is not ready or has a blocker');
         // GY-1735: the observation window holds the claim itself, so no loop or launcher that predates it (GY-1722, GY-1725) can start an attempt that can only escalate.
-        await adoptFollowUpWindow(db, work, projections);
+        await adoptFollowUpWindow(db, work);
         const window = observationWindowHold(work, now);
         demand(!window, `${work.key} waits for its observation window: the reading it owes can first exist at ${window?.notBefore} (${window?.detail})`, 409);
         demand(work.dependencies.every(dep => all.find(w => w.id === dep)?.stage === 'done'), 'Unfinished dependencies');
@@ -1490,22 +1460,6 @@ export class Engine {
         demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; its worker defers it with defer GY-N EPOCH NOT-BEFORE REASON`, 409);
         observationHold(work, data.notBefore, now, 'operator-hold', `${actor.id} held it until then: ${data.reason}`);
         work.blocker = null;
-      }
-      if (command === 'dispatchblock') {
-        demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-        demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), `${work.key} is held by ${work.lease?.owner} under epoch ${work.lease?.epoch}; a dispatch failure is recorded only while no attempt holds the item`, 409);
-        // GY-1082: only an item awaiting a dispatch can fail one, and a standing blocker is never
-        // overwritten. The failures are not taken on the caller's word: the item's own attempt
-        // record must show its last `dispatchFailureBlockAfter` attempts each claimed and ended
-        // without a submission. The loop supplies only the cause in git's words, which no other
-        // record holds; the blocker names the attempts the control plane verified.
-        demand(work.ready && (!work.submission || work.reworkRequested), `${work.key} is not awaiting a dispatch; a dispatch failure is recorded only on ready work with no submission or with rework requested`, 409);
-        demand(!work.blocker, `${work.key} already carries a blocker; clear it before recording a dispatch failure`, 409);
-        const failed = pipelineTimeline(work).attempts.slice(-dispatchFailureBlockAfter);
-        demand(failed.length === dispatchFailureBlockAfter && failed.every(attempt => attempt.endedAt && (attempt.end === 'released' || attempt.end === 'expired')),
-          `${work.key}'s last ${dispatchFailureBlockAfter} attempts did not each end without a submission; a dispatch failure is recorded only after that many failed attempts in a row`, 409);
-        const verified = ` [attempts ${failed.map(attempt => attempt.epoch).join(', ')} each ended without a submission]`;
-        work.blocker = `${data.reason.slice(0, 2000 - verified.length)}${verified}`; recordIntervention(work, 'blocked');
       }
       if (command === 'session') {
         demand(['worker', 'producer', 'coordinator', 'admin'].includes(actor.role), 'Worker, producer or coordinator permission required', 403);
@@ -1639,9 +1593,6 @@ export class Engine {
         if (observed) {
           demand(observed.candidate.pr === number, 'Observed pull request does not match the submission');
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
-          // Checks registered by approved retro artefacts (GY-970) run against the observed candidate.
-          const retroChecks = retroCheckRefusals(work, observed, await readAppliedRetroChecks(db));
-          demand(!retroChecks.length, `Submission refused for ${work.key}: ${retroChecks.join('; ')}`);
           // The required cases and contract bindings a merged acceptance pull request protects (GY-1417).
           const protectedCases = protectedCaseRefusals(work, observed, await readProtectingGoals(db));
           demand(!protectedCases.length, `Submission refused for ${work.key}: ${protectedCases.join('; ')}`);

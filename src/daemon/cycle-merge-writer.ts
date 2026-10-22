@@ -227,7 +227,7 @@ export async function advisoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now
       advisory.ran = ran.slice(-advisoryKeptRuns);
       if ('error' in running.settled) {
         performed.push(storeAction(state, `merge-writer-advisory:${merge.mergeSha}`, { kind: 'merge', work: merge.key, principal: null, state: 'failed', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
-          detail: `The advisory budget tests could not run on ${merge.mergeSha} (${message(running.settled.error)}); they are advisory, so nothing is refused or reverted`.slice(0, 1900) }, null));
+          detail: `The advisory budget tests could not run on ${merge.mergeSha} (${message(running.settled.error)}); they are advisory, so nothing is refused or reverted`.slice(0, 1900) }));
       } else if (advisoryFailures(running.settled.failed).length) {
         // Advisory (GY-2086): a failing test files no work item — one log line, nothing more.
         console.error(`The advisory budget tests failed on ${merge.mergeSha}, merged for ${merge.key}: ${advisoryFailures(running.settled.failed).join(', ')}; they are advisory, so nothing is refused, reverted or filed`);
@@ -371,7 +371,7 @@ export async function replayUnconfirmed(cycle: Pick<Cycle, 'state' | 'now' | 'sn
   for (const pending of writer.unconfirmed) {
     const actionKey = `merge-writer-replay:${pending.key}:${pending.attempt}:${pending.write}`, kind = String(pending.event.kind);
     const item = snapshot.work.find(entry => entry.id === pending.id);
-    const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, actionKey, { kind: 'merge', work: pending.key, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts: pending.replays + 1, epoch: null, cycle: state.cycle, at: at() }, actionState === 'done' ? undefined : null));
+    const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, actionKey, { kind: 'merge', work: pending.key, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts: pending.replays + 1, epoch: null, cycle: state.cycle, at: at() }));
     const ledger = item?.mergeLedger ? `${item.mergeLedger.state}${item.mergeLedger.mergeSha ? ` ${item.mergeLedger.mergeSha.slice(0, 12)}` : ''}` : 'empty';
     const adopt = (why: string) => action('done', `The ${kind} record of ${pending.key} (attempt ${pending.attempt}, write ${pending.write}) ${why}; it is never sent again: the item's merge ledger (${ledger}) is adopted and the next merge runs under a new attempt id`);
     if (!item) { adopt('names an item the snapshot no longer holds'); continue; }
@@ -435,7 +435,7 @@ export async function requestPendingReworks(cycle: Pick<Cycle, 'state' | 'effect
     const key = mergeWriterReworkKey(pending.key, pending.head);
     const item = snapshot.work.find(entry => entry.key === pending.key);
     const applied = !item || item.stage === 'done' || item.reworkRequested || item.candidate?.sha.toLowerCase() !== pending.head;
-    const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, key, { kind: 'decision', work: pending.key, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts: pending.attempts + 1, epoch: null, cycle: state.cycle, at: at() }, actionState === 'done' ? undefined : null));
+    const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, key, { kind: 'decision', work: pending.key, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts: pending.attempts + 1, epoch: null, cycle: state.cycle, at: at() }));
     if (applied) { action('done', `The rework the merge writer's refusal of ${pending.key} head ${pending.head} grounds is applied: the snapshot shows the item ${!item || item.stage === 'done' ? 'done' : item.reworkRequested ? 'returned to a worker' : 'on a new head'}`); continue; }
     if (!effects.decide) { kept.push({ ...pending, attempts: pending.attempts + 1, lastError: 'this loop runs without the decision effects' }); action('failed', `The rework the merge writer's refusal of ${pending.key} head ${pending.head} grounds waits: this loop runs without the decision effects, so request it with graphyard master decide ${pending.key} rework '${JSON.stringify(trialFailureRework(item, pending.head, pending.reason).input)}' REASON`); continue; }
     const rework = trialFailureRework(item, pending.head, pending.reason);
@@ -490,7 +490,7 @@ export async function mergeWriterStep(cycle: Cycle) {
     for (const result of results) {
       const { key: itemKey, id } = result.work, head = result.work.candidate?.sha.toLowerCase() ?? flight.head;
       const key = mergeWriterActionKey(itemKey, head), attempts = (state.actions[key]?.attempts ?? 0) + 1;
-      const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, key, { kind: 'merge', work: itemKey, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at: at() }, actionState === 'done' ? undefined : null));
+      const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, key, { kind: 'merge', work: itemKey, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at: at() }));
       if ('error' in result) {
         const error = result.error;
         if (error instanceof TrialTimeoutError) {
@@ -562,7 +562,7 @@ export async function mergeWriterStep(cycle: Cycle) {
           writer.reworks = [...writer.reworks, { key: counted.key, id: counted.id, head: counted.head, reason: counted.reason.slice(0, 2000), refusedAt: at(), attempts: 0, lastError: null }].slice(-mergeWriterKeptReworks);
         }
         performed.push(storeAction(state, key, { kind: 'merge', work: counted.key, principal: null, state: 'failed', attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at(),
-          detail: `Merge of ${counted.key} head ${counted.head} timed out its trial ${counted.count} times while other heads' trials passed: refused (${counted.reason}); the refusal is recorded on the ledger and the rework it grounds is requested` }, null));
+          detail: `Merge of ${counted.key} head ${counted.head} timed out its trial ${counted.count} times while other heads' trials passed: refused (${counted.reason}); the refusal is recorded on the ledger and the rework it grounds is requested` }));
         counted.reason = null;
         changed = true;
       }

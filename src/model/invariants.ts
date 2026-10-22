@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import { isClosed } from './closure.js';
 import { standingEscalations } from './escalation.js';
-import type { FaultClass, FaultKind, FaultObservation } from './fault-classes.js';
 import type { Work } from './work.js';
 
 // ---------------------------------------------------------------------------
@@ -13,22 +12,13 @@ import type { Work } from './work.js';
 // candidates refreshed on every merge (GY-375), cycles growing to minutes (GY-377), merges stalled
 // on CLEAN and UNSTABLE pull requests (GY-344). Each was found by somebody reading the board hours
 // late. These are the properties the running system must keep. The loop checks every one of them
-// each cycle (src/daemon/faults.ts), reports each violation as a fault with its class — so a class
-// that recurs files one structural item, like any other fault — and `master status` prints one
-// line per invariant with its threshold and its reading. The soak suites (`tests/soak-*.test.ts`)
+// each cycle, and `master status` prints one line per invariant with its threshold and its reading. The soak suites (`tests/soak-*.test.ts`)
 // hold every one of them over simulated days of the real loop, so a change that breaks one fails CI.
 // ---------------------------------------------------------------------------
 
 export const systemInvariants = ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog', 'deploy-lease-loss'] as const;
 export type SystemInvariant = typeof systemInvariants[number];
 
-/** The fault class each invariant's violation is an instance of: its recurrence files one item for that class. */
-export const invariantFaultClass: Record<SystemInvariant, FaultClass> = {
-  'follow-ups-per-parent': 'review-convergence', 'lingering-sessions': 'session-liveness', 'refresh-churn': 'merge', 'merge-stall': 'merge',
-  'cycle-p90': 'loop', 'untriaged-backlog': 'stalled-gate', 'deploy-lease-loss': 'session-liveness',
-};
-/** The fault kind a violation is recorded under: `invariant:NAME`, one per invariant. */
-export const invariantFaultKind = (invariant: SystemInvariant) => `invariant:${invariant}` as FaultKind;
 
 /**
  * Each invariant's threshold, in master config under `invariants` (every field optional; these are
@@ -67,7 +57,7 @@ export const invariantRecordSchema = z.object({
   mergeable: z.record(z.string(), z.object({ sha: z.string().max(64), since: z.string() }).strict()).default({}),
   builds: z.array(z.object({ commit: z.string().max(64), firstSeenAt: z.string(), lastSeenAt: z.string() }).strict()).max(20).default([]),
   losses: z.array(z.object({ work: z.string().max(40), at: z.string(), epoch: z.number().int().min(0).nullable() }).strict()).max(200).default([]),
-  report: z.array(z.object({ invariant: z.enum(systemInvariants), faultClass: z.string().max(40), threshold: z.string().max(200), reading: z.string().max(500), holds: z.boolean(),
+  report: z.array(z.object({ invariant: z.enum(systemInvariants), /** Retired (GY-2873): a cursor written before keeps parsing. */ faultClass: z.unknown().optional(), threshold: z.string().max(200), reading: z.string().max(500), holds: z.boolean(),
     observed: z.boolean(), subjects: z.array(z.string().max(40)).max(20), line: z.string().max(700) }).strict()).default([]),
   at: z.string().nullable().default(null),
 }).strict();
@@ -122,7 +112,7 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   const checks: InvariantCheck[] = [];
   const judge = (invariant: SystemInvariant, threshold: string, reading: string, holds: boolean, subjects: string[] = [], observed = true) => {
     const line = `${invariant}: ${observed ? holds ? 'holds' : 'VIOLATED' : 'not observed'} — ${reading} (threshold: ${threshold})`;
-    checks.push({ invariant, faultClass: invariantFaultClass[invariant], threshold, reading: reading.slice(0, 500), holds: holds || !observed, observed, subjects: subjects.slice(0, 20), line: line.slice(0, 700) });
+    checks.push({ invariant, threshold, reading: reading.slice(0, 500), holds: holds || !observed, observed, subjects: subjects.slice(0, 20), line: line.slice(0, 700) });
   };
 
   // 1. At most one open follow-up item per parent (GY-402: 170 follow-ups for 40 parents).
@@ -242,16 +232,3 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
   return checks;
 }
 
-/**
- * The faults this cycle's checks report: exactly one per violated invariant, whatever number of
- * items it holds, so a violation that keeps standing is one fault instance and a class that
- * recurs files one item. The wording names the threshold, a count and the first subject only, so a
- * reading that moves while the violation stands does not read as a new fault; the reading itself is
- * on the invariant's `master status` line.
- */
-export function invariantFaults(checks: readonly InvariantCheck[]): FaultObservation[] {
-  return checks.filter(check => check.observed && !check.holds).map(check => ({
-    kind: invariantFaultKind(check.invariant), faultClass: check.faultClass as FaultClass, subject: `invariant:${check.invariant}`,
-    text: `System invariant ${check.invariant} is violated (threshold: ${check.threshold}) by ${check.subjects.length} subject(s)${check.subjects.length ? `, first ${check.subjects[0]}` : ''}`.slice(0, 500),
-  }));
-}

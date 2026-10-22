@@ -9,7 +9,6 @@ import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, loadStoredMasterConfig, markReprompted, neverStarted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionActivity, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { sessionSlotsGrant } from './master/harness.js';
-import { classified } from './model/fault-classes.js';
 import type { AttentionItem } from './master/attention.js';
 import { sessionConfinement } from './master/launch.js';
 import { underTestRunner } from './supervisor.js';
@@ -29,8 +28,7 @@ import { documentationReviewSection, type DocumentationObligation } from './mode
 import { repeatingPaths as loopRepeatingPaths, touchesRepeatingPath } from './model/repeating-paths.js';
 import { researchReviewSection } from './research.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
-import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, misclassificationAttempts, misclassificationSignal, planMechanicalFix, type FreshReadRecord } from './mechanical-findings.js';
-import type { InterventionRecordInput } from './model/interventions.js';
+import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, judgeFreshRead, mechanicalFixRecordSchema, mechanicalFixRequests, mechanicalRoundStartMs, planMechanicalFix, type FreshReadRecord } from './mechanical-findings.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from './verification-maps.js';
 import { namedPaths } from './model/documentation-glob.js';
@@ -1022,10 +1020,9 @@ export function reviewerProfileRefusalAttention(refusal: ReviewerProfileRefusal 
   if (current && configuredProfileFingerprint(current) !== refusal.profiles) return [];
   return [{ subject: `unknown reviewer profile ${refusal.profile}`,
     text: `Review launches asking for reviewer profile ${refusal.profile} were refused ${refusal.refusals} times in a row, the last at ${refusal.at}: no configured reviewer profile carries that name, so no review can start. Run graphyard master environments --apply to write the reviewer and worker profiles from the logged-in environments; the next launch uses them and this clears`,
-    // The master fixes the launcher fault (agentOwner('master', …)); a missing profile is a setup step the installation lacks (classified('setup'), the configuration class).
+    // The master fixes the launcher fault (agentOwner('master', …)); a missing profile is a setup step the installation lacks.
     role: 'master', approvedBy: null, human: false, humanOnly: null,
-    next: 'Run graphyard master environments --apply; it writes the reviewer and worker profiles, and the loop\'s next review launch succeeds and clears this',
-    ...classified('setup') }];
+    next: 'Run graphyard master environments --apply; it writes the reviewer and worker profiles, and the loop\'s next review launch succeeds and clears this' }];
 }
 
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {

@@ -9,10 +9,8 @@
 //
 // The classifier can be wrong. The fresh read therefore still reads the whole diff, the bot commit
 // named in it, and may reject that commit with one `Rejected bot commit:` line: the rejection is a
-// REQUEST_CHANGES like any other, and is recorded as a `misclassified-finding` intervention, so the
-// retro synthesis (the intervention report and its recurrence rule) sees every misclassification.
+// REQUEST_CHANGES like any other.
 import { z } from 'zod';
-import type { InterventionRecordInput } from './model/interventions.js';
 import type { Work } from './model.js';
 import { bindingApproval, carriedApproval } from './model/carry.js';
 import type { ChildRun } from './child-runner.js';
@@ -176,30 +174,18 @@ export function parseBotCommitRejection(body: unknown, sha: string): string | nu
 
 /**
  * The fresh read's verdict on the bot's head. An approval accepts the bot commit. A REQUEST_CHANGES
- * that rejects it returns the misclassification signal to record (`POST /api/interventions`); one
- * that does not is ordinary rework, and the bot commit stands. A verdict on another head says nothing.
+ * that rejects it is `rejected` with its reason; one that does not is ordinary rework, and the bot commit stands. A verdict on another head says nothing.
  */
 export function judgeBotCommit(commit: BotCommit, review: { state: string; commit_id: string; body: unknown; submitted_at?: string }, work: { key: string }):
-  { outcome: 'accepted' } | { outcome: 'rejected'; reason: string; signal: InterventionRecordInput } | { outcome: 'rework' } | { outcome: 'pending' } {
+  { outcome: 'accepted' } | { outcome: 'rejected'; reason: string } | { outcome: 'rework' } | { outcome: 'pending' } {
   if (review.commit_id !== commit.sha) return { outcome: 'pending' };
   if (review.state === 'APPROVED') return { outcome: 'accepted' };
   if (review.state !== 'CHANGES_REQUESTED') return { outcome: 'pending' };
   const reason = parseBotCommitRejection(review.body, commit.sha);
   if (reason === null) return { outcome: 'rework' };
-  return { outcome: 'rejected', reason, signal: misclassificationSignal(commit, work.key, reason) };
+  return { outcome: 'rejected', reason };
 }
 
-/** The intervention a rejected bot commit records: what was misclassified, by category, from the bot commit to the rejection. */
-export function misclassificationSignal(commit: BotCommit, key: string, reason: string): InterventionRecordInput {
-  const findings = commit.findings.map(finding => `${finding.path}${finding.line !== null ? `:${finding.line}` : ''} (${finding.category})`).join(', ');
-  return {
-    kind: 'misclassified-finding', work: key, stage: 'review',
-    blocked: `bot commit ${commit.sha.slice(0, 12)} fixing ${commit.findings.length} finding${commit.findings.length === 1 ? '' : 's'} classified mechanical: ${findings}`.slice(0, 2000),
-    trigger: [...new Set(commit.findings.map(finding => finding.category))].join('+').slice(0, 200),
-    since: commit.at,
-    resolution: `the independent reviewer rejected the bot commit: ${reason}`.slice(0, 2000),
-  };
-}
 
 
 // ---- The loop's step ---------------------------------------------------------------------------
@@ -215,7 +201,7 @@ export function misclassificationSignal(commit: BotCommit, key: string, reason: 
  * 4. launchReview verifies that head as the bot commit (`freshReadFor`) and records the fresh read
  *    on the new session's record; its prompt shows the bot commit and only the substantive findings.
  * 5. reconcileReviews judges the fresh read's verdict (`judgeFreshRead`): a `Rejected bot commit:`
- *    line is recorded as a `misclassified-finding` intervention (POST /api/interventions).
+ *    line rejects the bot commit.
  * A plan that never gets its bot commit falls back: delivered at the approved head, or resubmitted
  * unchanged, its findings stay ordinary follow-ups, as before.
  */
@@ -247,8 +233,6 @@ export const freshReadRecordSchema = z.object({
     failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50) }).strict().optional(),
 }).strict();
 export type FreshReadRecord = z.infer<typeof freshReadRecordSchema>;
-/** The most attempts at recording one misclassification before the loop stops retrying it. */
-export const misclassificationAttempts = 10;
 
 /** The plan an approval of `record.sha` records: `planned` with its findings when anything on it is mechanical, `none` otherwise. */
 export function planMechanicalFix(record: { key: string; pr: number; sha: string }, reviewId: number, body: unknown, epoch: number, at: string): MechanicalFixRecord {
@@ -404,8 +388,7 @@ export function freshReadSection(fresh: FreshReadRecord, sha: string) {
 }
 
 /**
- * The fresh read's verdict, judged against the bot commit: `accepted`, `rework`, or `rejected` with
- * the misclassification signal to record. Null when there is nothing to judge — no verified bot
+ * The fresh read's verdict, judged against the bot commit: `accepted`, `rework`, or `rejected`. Null when there is nothing to judge — no verified bot
  * commit, or no verdict on its head yet. The body is read only for a change request.
  */
 export async function judgeFreshRead(fresh: FreshReadRecord, verdict: { state: string; reviewId: number } | undefined, sha: string, key: string, readBody: (reviewId: number) => Promise<unknown>) {

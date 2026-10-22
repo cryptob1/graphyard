@@ -1,21 +1,20 @@
-// Concern: the master-session step (GY-898) — launch, adopt, supervise, rotate and wake the loop's own master session, and the loop-step stall's master wake (GY-1854, moved here from step-stalls.ts by GY-1980 as this wake's only consumer).
+// Concern: the master-session step (GY-898) — launch, adopt, supervise, rotate and wake the loop's own master session.
 import { detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer } from '../consent-prompt.js';
 import { detectExhaustion, detectRetryingExhaustion } from '../model/capacity.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEffects } from './effects.js';
-import { actionableSubjects, type ActionableSubject } from './metrics.js';
+import { actionableSubjects } from './metrics.js';
 import { detailChanged } from './decisions.js';
 import { message } from './state.js';
-import { emptyMasterSession, type DaemonAction, type DaemonState, type MasterSessionState, type StepStall } from './state.js';
+import { emptyMasterSession, type DaemonAction, type DaemonState, type MasterSessionState } from './state.js';
 import type { MasterConfig } from '../master.js';
 import { sessionCapMs } from '../model/registry-sessions.js';
 import { masterHandover, masterSessionBudgetMs, masterHeartbeatIntervalMs, masterWakeText, masterProfile } from '../master/master-session.js';
-import { stallCycleBound, stallSubjectKey } from './step-stalls.js';
 import { PromptNotAcceptedError } from '../master/launch.js';
 import { outputReadDue } from './cycle-sessions.js';
 import type { HerdrAgent } from '../master/herdr.js';
 import type { Cycle } from './cycle.js';
-import { boundedCalls, carriedCall, owedWrite, stepBudget, stepCallBoundMs, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
+import { boundedCalls, carriedCall, owedWrite, stepCallBoundMs, stepCallCarried, unboundedEffects, withinStepBudget } from './step-budget.js';
 
 /** The launcher key the master launch records its started entry under: one in flight at a time. */
 export const masterLaunchKey = 'master:launch';
@@ -33,37 +32,6 @@ export const masterDeafRotationBound = 3;
 export const masterWakeKey = 'master:wake';
 /** How long past its budget a rotation waits for a guarded merge in flight: never longer than this. */
 export const masterMergeDeferralMs = 30 * 60_000;
-
-/**
- * Whether a stall needs the master session: no remedy binds to it, or its one bound remedy was
- * refused or did not verify, or a verified remedy has stood through a second full run of failures —
- * otherwise the loop would back the call off indefinitely and nobody would be told.
- */
-export function stallNeedsMaster(stall: StepStall): boolean {
-  if (!stall.stalledAt) return false;
-  if (!stall.remedy) return true;
-  return stall.remedy.outcome === 'refused' || !stall.remedy.verified || stall.count >= 2 * stallCycleBound;
-}
-
-/**
- * The task an unbound stall wakes the master session with: the signature, the step, the stall's own
- * recording instant, and the remedy attempt when one was made (GY-1854 AC-1). Everything in it is
- * stable for as long as one run stands — the live count and last error stay on the cursor, where
- * `master status` reads them — so the digest machinery wakes the session once per run, never once
- * per cycle and never again per backed-off attempt of a standing stall.
- */
-export function stallWakeTask(stall: StepStall, cliPath: string): string {
-  const remedy = !stall.remedy ? ''
-    : stall.remedy.outcome === 'started' ? ` Its ${stall.remedy.kind} remedy was started once at ${stall.remedy.at} and never reported: ${stall.remedy.detail}`
-      : ` Its ${stall.remedy.kind} remedy was applied once at ${stall.remedy.at} and ${stall.remedy.outcome}${stall.remedy.verified ? ', verified' : ', unverified'}: ${stall.remedy.detail}`;
-  return `Loop-step stall: the ${stall.step} call failed with one signature on ${stallCycleBound} consecutive cycles and stands stalled since ${stall.stalledAt}.${remedy} Step: ${stall.step}. Signature: ${stall.signature}. The call is attempted at most once per five minutes while this stands. Run node ${cliPath} master status (daemon.stepStalls, subject ${stallSubjectKey(stall.signature)}) for the failing attempts so far, judge the cause, and clear it or file what does.`;
-}
-
-/** The stalls that need the master session, as master-wake subjects the digest machinery wakes once per changed task. */
-export function stallWakeSubjects(state: DaemonState, cliPath: string): ActionableSubject[] {
-  return Object.values(state.stepStalls).filter(stallNeedsMaster)
-    .map(stall => ({ key: stallSubjectKey(stall.signature), kind: 'wake' as const, work: null, detail: stallWakeTask(stall, cliPath) }));
-}
 
 /**
  * The master session (GY-898), one step of the cycle between close and dispatch. At most one runs:
@@ -155,9 +123,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
 
   // Launch: nothing live holds the role, so the handover is composed from control-plane truth and one launch handed over.
   if (!live.agentName && !live.launching && !listed(config.masterAgentName)) {
-    // GY-1854: the standing stalls that need the master ride the durable handover as subjects, so a
-    // replacement starts knowing them.
-    const subjects = [...actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals }), ...stallWakeSubjects(state, config.cliPath)];
+    const subjects = actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals });
     const handover = masterHandover({ cliPath: config.cliPath, work: snapshot.work, now: clock, approvals: Object.values(state.approvals), subjects });
     live.launching = true;
     await effects.persist(state);
@@ -180,7 +146,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
         await effects.persist(state);
         if ((error as { masterRoleUnconfigured?: boolean }).masterRoleUnconfigured) {
           const detail = message(error);
-          if (detailChanged(state.actions[masterSetupKey], detail)) sink.push(await record(state, masterSetupKey, { kind: 'config', work: null, principal: null, state: 'waiting', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist, null));
+          if (detailChanged(state.actions[masterSetupKey], detail)) sink.push(await record(state, masterSetupKey, { kind: 'config', work: null, principal: null, state: 'waiting', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
           return;
         }
         sink.push(await record(state, masterLaunchKey, { kind: 'session', work: null, principal: null, state: 'failed',
@@ -197,11 +163,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
   const runtimeGone = !!agent && !agent.agent && agent.agent_status === 'unknown';
   for (const key of Object.keys(live.subjects)) if (!agent || runtimeGone) delete live.subjects[key];
   if (agent && !runtimeGone && effects.promptSession && !launching) {
-    // GY-1854: an unbound stall wakes the session with the signature, last error, step and count as
-    // its task, keyed off its signature so a standing stall is never a second subject; the digest
-    // machinery below wakes once per changed task, and the 5-minute backoff bounds how often the
-    // failing call can move it.
-    const subjects = [...actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals }), ...stallWakeSubjects(state, config.cliPath)];
+    const subjects = actionableSubjects(config, snapshot.work, clock, { approvals: state.approvals });
     const causes = subjects.filter(subject => live.subjects[subject.key] !== promptDigest(subject.detail)).map(subject => subject.key);
     const reference = live.lastWake?.at ?? live.startedAt;
     const quietMs = reference ? Math.max(0, clock - Date.parse(reference)) : 0;
@@ -219,7 +181,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
       // recorded, as a consent hold is.
       const dialog = await masterWakeDialog(cycle, live.agentName!, agent);
       if (dialog.hold) {
-        if (detailChanged(state.actions[masterWakeHeldKey], dialog.detail)) performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'waiting', detail: dialog.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist, null));
+        if (detailChanged(state.actions[masterWakeHeldKey], dialog.detail)) performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'waiting', detail: dialog.detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
         return;
       }
       try {
@@ -263,7 +225,7 @@ async function masterSessionStepWithin(cycle: Cycle) {
       // A wake a dialog held is retired only now, once this delivery went through: a send that
       // failed after the dialog cleared leaves the hold standing, never a record of a wake that went.
       const held = state.actions[masterWakeHeldKey];
-      if (held?.state === 'waiting') performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'done', detail: 'The master wake went through once the dialog holding it was answered or closed', attempts: held.attempts, cycle: state.cycle }, now(), effects.persist, null));
+      if (held?.state === 'waiting') performed.push(await record(state, masterWakeHeldKey, { kind: 'wake', work: null, principal: null, state: 'done', detail: 'The master wake went through once the dialog holding it was answered or closed', attempts: held.attempts, cycle: state.cycle }, now(), effects.persist));
       // The accepted delivery also ends the bound's standing failure, so the class counts one
       // instance per deaf episode and the record reads the recovery, never a failure for ever.
       if (state.actions[masterWakeKey]?.state === 'failed')
@@ -354,56 +316,6 @@ async function adoptMasterSession(config: MasterConfig, state: DaemonState, effe
 }
 
 /**
- * The stall wake a failed cycle owes (GY-1854): the master-session step above runs after the
- * cycle's own reads (the snapshot, the agents, the credentials), so a stall of one of those reads
- * fails every cycle before the step that would deliver its wake, and the master would never
- * receive the signature as its task. Run beside a failed cycle, this delivers exactly that wake
- * through what a failed cycle still has: the live master session on the cursor (or the listed
- * session named for the role, adopted here as the step adopts it), the pane inventory, and the
- * prompt port. The same digest bookkeeping as the step's wake applies — a subject is woken once per
- * changed task, so a standing stall is never woken again per failed cycle, and a stall the
- * handover or an earlier wake already named is skipped. A working pane is left for the next
- * delivery, as the step leaves it. Answers the subject keys it woke the session for.
- */
-export async function wakeMasterForStalls(config: MasterConfig, state: DaemonState, raw: DaemonEffects, now: () => number): Promise<string[]> {
-  if (!raw.promptSession || !raw.masterSession) return [];
-  const clock = now(), live = state.master;
-  const subjects = stallWakeSubjects(state, config.cliPath).filter(subject => live.subjects[subject.key] !== promptDigest(subject.detail));
-  if (!subjects.length || live.launching) return [];
-  // The inventory read and the prompt wait under the master step's own per-call bound (GY-1774): a
-  // runtime that does not answer carries the wake to the next failed cycle, never holds the loop.
-  const budget = stepBudget(now, (config.run?.intervalSeconds ?? 20) * 1000);
-  const effects = boundedCalls(unboundedEffects(raw), state, now, budget.left, { step: 'master', calls: ['herdr', 'agents', 'sessionOutput', 'promptSession'] });
-  let herdr: { agents: HerdrAgent[]; available: boolean }, agent: HerdrAgent | undefined, keys: string[], quietMs: number;
-  try {
-    herdr = effects.herdr ? await effects.herdr() : { agents: await effects.agents(), available: true };
-    if (herdr.available === false) return [];
-    if (!live.agentName && herdr.agents.some(candidate => candidate.name === config.masterAgentName)) await adoptMasterSession(config, state, effects, herdr.agents, clock, clock);
-    agent = live.agentName ? herdr.agents.find(candidate => candidate.name === live.agentName && candidate.pane_id === live.pane) : undefined;
-    if (!agent || (!agent.agent && agent.agent_status === 'unknown') || agent.agent_status === 'working') return [];
-    // A pane stopped on any dialog would take the wake's keystrokes (GY-1872): the step answers or
-    // holds it, so this delivery leaves the wake to the step rather than typing into the dialog.
-    const screen = effects.sessionOutput ? await Promise.resolve().then(() => effects.sessionOutput!(agent!)).catch(error => { if (stepCallCarried(error)) throw error; return null; }) : null;
-    if (detectConsentPrompt(screen) || unanswerableDialog(live.agentName!, screen)) return [];
-    keys = subjects.map(subject => subject.key).slice(0, 20);
-    const reference = live.lastWake?.at ?? live.startedAt;
-    quietMs = reference ? Math.max(0, clock - Date.parse(reference)) : 0;
-    await effects.promptSession!(agent, masterWakeText(config.cliPath, keys, false, Math.round(quietMs / 60_000)));
-  } catch (error) {
-    if (stepCallCarried(error)) return [];
-    throw error;
-  } finally { budget.end(); }
-  const at = new Date(clock).toISOString();
-  live.lastWake = { at, causes: keys, heartbeat: false };
-  // Only the subjects the prompt named are acknowledged: a stall past the twenty it carried is woken by a later delivery.
-  const delivered = new Set(keys);
-  for (const subject of subjects) if (delivered.has(subject.key)) live.subjects[subject.key] = promptDigest(subject.detail);
-  await record(state, `wake:master:${state.cycle}`, { kind: 'wake', work: null, principal: null, state: 'done',
-    detail: `Woke master session ${live.agentName} for changed subjects: ${keys.join(', ')} — delivered beside the failed cycle, which ended before its master-session step`, attempts: 1, cycle: state.cycle }, clock, effects.persist);
-  return keys;
-}
-
-/**
  * GY-1863: how many consecutive `deaf` ends stand without a wake a master session accepted. The
  * count travels on the master session's own record, never on the action rows: pruneDaemonState
  * retires resolved rows oldest first, so a persistently deaf episode outlived by ordinary traffic
@@ -485,5 +397,5 @@ async function releaseOwedSessions(cycle: Cycle) {
     ? `The registry has not taken back master session(s) ${failures.join('; ')}; each is ended again next cycle, and the master role relaunches once its slot is free`
     : `The registry took back master session(s) ${ended.join(', ')} that an earlier rotation or failed launch could not end; the role's slot is free for the relaunch`;
   if (kept.length ? detailChanged(state.actions[masterReleaseKey], detail) : true)
-    performed.push(await record(state, masterReleaseKey, { kind: 'failover', work: null, principal: null, state: kept.length ? 'waiting' : 'done', detail, attempts: (state.actions[masterReleaseKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, null));
+    performed.push(await record(state, masterReleaseKey, { kind: 'failover', work: null, principal: null, state: kept.length ? 'waiting' : 'done', detail, attempts: (state.actions[masterReleaseKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
 }

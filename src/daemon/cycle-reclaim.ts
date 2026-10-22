@@ -3,7 +3,6 @@ import { describeReclaim, describeStandingTmpPass, tmpPassErrors, graphyardWorkt
 import { diskThresholdBytes, containmentPhase } from '../master.js';
 import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
 import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema, standingTmpKey } from './state.js';
-import { unboundedAttemptKey } from '../model/fault-classes.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged } from './decisions.js';
 import { launchAppearanceMs, preserveInterruptedAttempt, record } from './effects.js';
@@ -501,7 +500,7 @@ async function reclaimStepWithin(cycle: Cycle) {
         const passes = Math.min((run?.attempts ?? 0) + 1, actionAttemptsMax);
         const count = passes >= actionAttemptsMax ? `${actionAttemptsMax} or more passes in a row` : `Pass ${passes} in a row`;
         performed.push(await record(state, standingTmpKey, { kind: 'reclaim', work: null, principal: null, state: tmpPassErrors(report).length ? 'failed' : 'done',
-          detail: boundDetail(passes > 1 ? `${count}: ${standing}` : standing), attempts: passes, cycle: state.cycle }, now(), effects.persist, null));
+          detail: boundDetail(passes > 1 ? `${count}: ${standing}` : standing), attempts: passes, cycle: state.cycle }, now(), effects.persist));
       } else if (run && report.tmpPass) {
         state.actions[`reclaim:tmp:${run.at}`] = run;
         delete state.actions[standingTmpKey];
@@ -587,7 +586,7 @@ async function reclaimStepWithin(cycle: Cycle) {
 }
 
 /** The loop's record that it stopped renewing an attempt's lease (GY-1460). */
-export { unboundedAttemptKey };
+export const unboundedAttemptKey = (item: { id: string }, epoch: number) => `unbounded:${item.id}:${epoch}`;
 /**
  * 3a'. An attempt holding its lease past the reclaim bound (`workerReclaimBoundMs`: one further
  * worker bound after the stalled-gate fault) with still no submission and no submission progress

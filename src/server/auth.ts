@@ -18,7 +18,6 @@ import { assembleDelegationLimits } from './limits.js';
 import { Next, type Route, type RouteModule, type Services } from './routes.js';
 import { leaseCommandRequest } from './routes/work.js';
 import { signinClaimFromEnv } from './routes/signin.js';
-import { interventionPolicyFromEnv } from './routes/interventions.js';
 
 /**
  * Resolve the bearer token to a principal: a configured credential first, then a human session a
@@ -58,12 +57,6 @@ export const operatorAgentRouteGuard: Route = {
     if (actor.role === 'operator-agent') demand(
       url.pathname === '/api/status' || url.pathname === '/api/work-snapshot' || url.pathname === '/api/work' || url.pathname === '/api/events'
       || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+(?:\/[a-z]+)?)?$/.test(url.pathname)
-      // Judgement about delivered work is intent (GY-98): recording it and turning it into an item.
-      || /^\/api\/judgements(?:\/[^/]+\/work)?$/.test(url.pathname)
-      // The loop's pipeline-doctor run summaries (GY-711): a record of what the doctor found and did, posted as the master's identity.
-      || url.pathname === '/api/doctor'
-      // Retro artefacts are judged by an independent agent identity holding decision:approve (GY-970).
-      || /^\/api\/retro(?:\/standing|\/[0-9a-f-]{36}\/(?:approve|refuse))?$/.test(url.pathname)
       // E2E case recording (GY-1614): the registry and its run route, only for a holder of e2e:record.
       || (/^\/api\/scenarios(?:\/[^/]+\/runs)?$/.test(url.pathname) && !!actor.capabilities?.includes('e2e:record'))
       // A candidate's imported runs and hold (GY-1860): the promotion workflows read it, and seal a released one, as the release-filing identity; never import.
@@ -240,5 +233,5 @@ export function assembleServices(engine: Engine, credentials: Credential[], arti
   engine.principals = configured;
   let services: Services;
   const proofGrants = new SlotCountedProofGrants(engine.store, configured, () => services.limits.maxReviewers, () => refreshDelegationLimits(services, credentials, env, options.knownPrincipals));
-  return services = { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), interventionPolicy: interventionPolicyFromEnv(env), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  return services = { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
 }

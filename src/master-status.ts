@@ -1,7 +1,6 @@
 import { readDaemonState } from './daemon/state.js';
 import { agentOwner, buildMasterStatus, concurrencyAttention, inventoryWorktrees, roleConcurrency, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import type { ActionRow } from './model/actions.js';
-import { classified, classifyAttention, groupFaults } from './model/fault-classes.js';
 import type { Work } from './model.js';
 import { producerLedgerSpec, sessionRetries, summarizeProducers, type ProducerRecord } from './producer.js';
 import { reviewLedgerSpec, sessionLedgerRefusal, sessionLedgerRemedy, stoppedFollowUpAttention, heldNameAttention, summarizeReviews, type ReviewRecord } from './reviewer.js';
@@ -13,7 +12,6 @@ import { owedAttention } from './cli/owed-report.js';
 import type { MergeWriterSummary } from './daemon/cycle-merge-writer.js';
 import { stuckRequestReport } from './cli/stuck-requests.js';
 import { stalledItemAttention } from './cli/status-attention.js';
-import { stalledActionAttention } from './cli/stalled-actions.js';
 import { actorlessAttention } from './cli/actorless-submissions.js';
 import { overlongSessionAttention } from './cli/overlong-sessions.js';
 import { unansweredRequestAttention, unobtainableReviewAttention } from './cli/unanswered-requests.js';
@@ -167,18 +165,8 @@ export function attributeAttention(items: AttentionItem[], readings: ResourceRea
     if (item.subject.startsWith('resource:')) return item;
     const reading = attributionFor(item.text, readings);
     if (!reading) return item;
-    return { ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy, kind: 'resource-bound', resource: reading.id };
+    return { ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy, resource: reading.id };
   });
-}
-
-/**
- * The final attention list with every item's fault kind and class (GY-173), and the open problems
- * grouped by class with a count. It runs on the list as `master status` reports it — after the
- * ledger and resource attribution — so an item rewritten to name a resource is counted as one.
- */
-export function faulted(items: AttentionItem[]) {
-  const attentionItems = classifyAttention(items);
-  return { attentionItems, faults: groupFaults(attentionItems) };
 }
 
 /**
@@ -207,8 +195,6 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
   const actorless = actorlessAttention(snapshot, observed.approvals as Parameters<typeof actorlessAttention>[1]);
   // A request two verdicts answered (GY-124): neither is acted on until a fresh review resolves it.
   const conflicted = reviewConflictAttention(snapshot.work, observed.reviews).map(({ next, ...item }) => ({ ...item, ...agentOwner('control plane', next) }));
-  // A row that keeps failing for the same reason: owed, attempted, and going nowhere.
-  const stalled = stalledActionAttention(snapshot);
   // What waits on a judgment rather than on capacity, named once and counted apart (GY-104); the
   // merge writer's own summary lets a trial refusal it holds read as its motion (GY-2015).
   const owed = owedAttention(snapshot, rows as { key: string; attention: string | null }[], requests, observed.mergeWriter);
@@ -230,10 +216,9 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     host.push(...dispatchFailureAttention(dispatch), ...(await setupHealth(root, master)).attention);
     // A starved reviewer or producer role (GY-107), which the report's own buildMasterStatus raises from the role profiles.
     const sessions = { producers: summarizeProducers(observed.producers), failures: 'error' in dispatch ? [] : dispatch.failures, retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] };
-    host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)])
-      .map(item => ({ ...item, ...classified('concurrency-starved') })));
+    host.push(...concurrencyAttention([roleConcurrency('reviewer', master.reviewers, snapshot.work, observed.runtime.agents, reviews, sessions, now), roleConcurrency('producer', master.producers, snapshot.work, observed.runtime.agents, sessions.producers, sessions, now)]));
   }
   // GY-2010: no GitHub budget attention — the App request budget is gone with the API client.
-  return { requests, unobtainable, unanswered, stalledItems, actorless, conflicted, stalled, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
-    items: [...host, ...requests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...stalled, ...overlong, ...triage, ...owed.items] };
+  return { requests, unobtainable, unanswered, stalledItems, actorless, conflicted, owed, budget: [] as AttentionItem[], overlong, triage, backlog,
+    items: [...host, ...requests, ...unanswered, ...unobtainable, ...conflicted, ...stuck, ...heldNames, ...stoppedRetries, ...stalledItems, ...actorless, ...overlong, ...triage, ...owed.items] };
 }

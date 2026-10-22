@@ -150,8 +150,8 @@ function Accounts({ principals, setSelected }: { principals: PrincipalSummary[];
 }
 
 function ProjectMemorySection({ memory }: { memory?: any }) {
-  if (!memory || (!memory.decisions?.length && !memory.pitfalls?.length && !memory.changes?.length)) return null;
-  const count = (memory.decisions?.length ?? 0) + (memory.pitfalls?.length ?? 0) + (memory.changes?.length ?? 0);
+  if (!memory || (!memory.decisions?.length && !memory.changes?.length)) return null;
+  const count = (memory.decisions?.length ?? 0) + (memory.changes?.length ?? 0);
   return <details className="finished-sessions project-memory" data-project-memory open>
     <summary>Shared project memory <span className="count">{count}</span></summary>
     <div className="memory-content">
@@ -162,18 +162,6 @@ function ProjectMemorySection({ memory }: { memory?: any }) {
             {memory.decisions.map((d: any) => (
               <li key={d.id} data-decision={d.id}>
                 <span className="mono bold">{d.key}</span> ({d.action}): {d.reason} <span className="muted">· approved by {d.approvedBy}</span>
-              </li>
-            ))}
-          </ul>
-        </div>
-      ) : null}
-      {memory.pitfalls?.length ? (
-        <div className="memory-block">
-          <h3>Recurring pitfalls and remedies</h3>
-          <ul className="memory-list">
-            {memory.pitfalls.map((p: any) => (
-              <li key={p.faultClass} data-pitfall={p.faultClass}>
-                <span className="mono bold">{p.faultClass}</span> ({p.count} recurrence{p.count === 1 ? '' : 's'}): {p.remedy}
               </li>
             ))}
           </ul>

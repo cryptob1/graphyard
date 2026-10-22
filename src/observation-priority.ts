@@ -2,6 +2,7 @@ import type { Observation, Work } from './model.js';
 import { nextAction } from './model/next-action.js';
 import { mergeAuthorized } from './model/merge-authorization.js';
 import { agentOwner, type AttentionItem } from './master/attention.js';
+import type { IntegrationJob } from './coordination.js';
 
 /**
  * What the observation scheduler serves first, and how stale each band may grow (GY-492, GY-1114).
@@ -129,4 +130,27 @@ export function observationBandLag(all: Work[], now: number) {
     text: `The ${entry.band} band has ${entry.pastBound} of ${entry.items} item(s) observed longer ago than its ${observationLag(entry.boundMs!)} bound (oldest ${entry.stale!.key}, ${entry.stale!.lagMs === Infinity ? 'never observed' : observationLag(entry.stale!.lagMs)}): ${entry.band === 'merge' ? 'their merges and deliveries are recorded late' : 'their review requests may name heads that have since moved'} until the observation workers reach them`,
     ...agentOwner('control plane', 'Nothing to run: the workers claim these bands ahead of the backlog; if the lag persists, raise GRAPHYARD_OBSERVATION_CONCURRENCY with GRAPHYARD_DATABASE_POOL_SIZE (workers at most half the pool) and restart the server') }));
   return { bands: report, attention };
+}
+
+/** When the item's current submission was made: the documentation record's time for that PR, else when its stage was entered. */
+const submittedAt = (work: Work) => work.documentation?.submission?.pr === work.submission?.pr && work.documentation?.submission?.at ? work.documentation.submission.at : work.stageEnteredAt;
+
+/**
+ * Each band's observation lag (GY-492, GY-1114), read from the jobs and items in the work snapshot.
+ * A band whose readings fall past its bound is raised as attention naming the band, its oldest item
+ * and its lag. The control plane observes every head from its own checkout, so no request budget is read.
+ */
+export function observationThroughputStatus(snapshot: { work: Work[]; now: string; jobs?: IntegrationJob[] }, now = Date.parse(snapshot.now)) {
+  const oldestDueJobMs = (snapshot.jobs ?? []).reduce<number | null>((oldest, job) => {
+    const locked = job.locked_until !== null && Date.parse(job.locked_until) > now, held = job.held_until != null && Date.parse(job.held_until) > now;
+    if (locked || held) return oldest;
+    const available = Date.parse(job.available_at);
+    return oldest === null ? Math.max(0, now - available) : Math.min(oldest, Math.max(0, now - available));
+  }, null);
+  // The oldest submission never observed (GY-567): nothing can review or prove it until it is read once.
+  const unobserved = snapshot.work.filter(firstObservationOwed).map(work => ({ key: work.key, pr: work.submission!.pr, submittedAt: submittedAt(work) }))
+    .sort((a, b) => Date.parse(a.submittedAt) - Date.parse(b.submittedAt));
+  const oldestUnobservedSubmission = unobserved[0] ? { ...unobserved[0], ageMs: Math.max(0, now - Date.parse(unobserved[0].submittedAt)), count: unobserved.length } : null;
+  const lag = observationBandLag(snapshot.work, now);
+  return { oldestDueJobMs, oldestUnobservedSubmission, bands: lag.bands, attention: lag.attention };
 }

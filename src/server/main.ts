@@ -9,8 +9,6 @@ import { Delivery } from '../delivery.js';
 import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { projectFlow } from '../flow-analytics.js';
-import { LedgerRowCache, readScanWindow, startPatternScan } from '../interventions.js';
-import { startRetroIndexWatch, synthesizeRetro } from '../retro-synthesis.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, observationLine, productionProvider, resolvedWatchEnvironment, startProductionWatch } from '../production-watch.js';
@@ -36,12 +34,6 @@ export async function main(options: MainOptions = {}) {
   const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard', { max: capacity.poolMax });
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
   mark('store.init'); await store.init(); mark('store.init done');
-  // Built CONCURRENTLY beside startup, never awaited: a plain build in the migration would hold the ledger's writes (GY-1048).
-  // When another replica is building it re-checks periodically, and on error backs off, until present (follow-up 26, GY-1189).
-  const retroIndex = startRetroIndexWatch(store.pool, {
-    announce: outcome => console.log(`Retro index events_retro_id: ${outcome}`),
-    failed: error => console.error('Retro index events_retro_id was not built; will retry:', error instanceof Error ? error.message : 'unknown'),
-  });
   const engine = new Engine(store);
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
@@ -76,7 +68,6 @@ export async function main(options: MainOptions = {}) {
   // reconciliation tick retries it. 
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
-  let scanning: ReturnType<typeof startPatternScan> | null = null;
   let observing: ReturnType<typeof startObservationWorkers> | null = null;
   let validationTask: Promise<void> | null = null;
   const services: typeof http.services & { readiness?: boolean } = http.services;
@@ -128,16 +119,6 @@ export async function main(options: MainOptions = {}) {
     // recorded merger picks each claim's backend: the checkout while the control plane merges, else GitHub (GY-1675).
     observing = startObservationWorkers(engine, capacity.concurrency);
     console.log(`Observation workers: ${observing?.concurrency ?? 0} (database pool ${capacity.poolMax})`);
-    // The intervention window is scanned once a minute beside the tick for retro drafts (patterns are reported in master status, never filed as items),
-    // never in it (GY-1381): its ledger read held the whole tick on 2026-09-23. On unless
-    // GRAPHYARD_INTERVENTION_PATTERNS=0.
-    // The window is read once and shared by both, and the rows it projected are kept for the next scan (GY-1749).
-    const scanned = new LedgerRowCache();
-    scanning = startPatternScan(async () => {
-      const window = await readScanWindow(engine.store, http.services.interventionPolicy, { cache: scanned });
-      // The same window read by cause (GY-970): drafts for independent approval, never work items.
-      for (const artefact of (await synthesizeRetro(engine.store, http.services.interventionPolicy, { window })).drafted) console.log(`Drafted retro artefact ${artefact.id} (${artefact.kind}) for ${artefact.pattern.label}`);
-    }, { failed: error => console.error('intervention pattern scan failed', error instanceof Error ? error.message : 'unknown') });
   };
   const [handle] = http.listeners('request') as ((req: IncomingMessage, res: ServerResponse) => void)[];
   http.removeAllListeners('request');
@@ -170,7 +151,7 @@ export async function main(options: MainOptions = {}) {
   const close = async () => {
     closing = true;
     services.readiness = false;
-    reconciliation.stop(); stopPlaneBeat(); watching?.stop(); watching = null; await observing?.stop(); observing = null; await scanning?.stop(); scanning = null; retroIndex.stop();
+    reconciliation.stop(); stopPlaneBeat(); watching?.stop(); watching = null; await observing?.stop(); observing = null;
     process.off('SIGTERM', shutdown); process.off('SIGINT', shutdown);
     await new Promise<void>(resolve => http.close(() => resolve()));
     await store.close();

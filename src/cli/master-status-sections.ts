@@ -14,8 +14,6 @@ import { loopAttestations } from './hand-actions.js';
 import type { Work } from '../model/work.js';
 import { agentRequestReport } from './loop-report.js';
 import { timedStep } from '../master/timings.js';
-import { slowReportReader } from '../master/report-cache.js';
-import { interventionSummary, interventionSummaryRoute } from './intervention-status.js';
 import { terminalDecisions } from './decision-report.js';
 import { openThroughputOwner, throughputStatus } from '../throughput.js';
 import { throughputEscalatedAt } from '../daemon/cycle-delivery.js';
@@ -137,10 +135,6 @@ export async function assembleReportedAttention(
   context: { sections: ReportSections; generatedFiles: AttentionItem[]; overflow: any[] },
 ) {
   const { sections, generatedFiles, overflow } = context;
-  const reports = slowReportReader(master, masterApi, observed.reports, observed.reportBoundMs);
-  const summarized = await timedStep('attention: interventions', () => interventionSummary(reports.read));
-  if (summarized.summary.error) sections.mark('interventions', interventionSummaryRoute, summarized.summary.error);
-  const interventions = { ...summarized, summary: { ...summarized.summary, ...reports.freshness() } };
   const decisions = await timedStep('attention: decisions', () => sections.optional('decisions', 'GET /api/work/:id/decisions', async () => terminalDecisions(masterApi, snapshot.work, { approvals: observed.approvals, runtime: observed.runtime, now: Date.now(),
     // GY-1598: the launch records `master approver` judges a listed approver's age by, so the command status names succeeds.
     starts: { records: await readApproverLaunches(root).catch(() => []), boundMs: launchStartMs(master), read: agent => readSessionScreen(agent.pane_id ?? agent.name!, undefined, stallScreenLines) } }),
@@ -157,7 +151,7 @@ export async function assembleReportedAttention(
   const resources = await timedStep('attention: resources', () => resourceStatus(root, master, { reviews: observed.reviews, producers: observed.producers, agents: observed.runtime.available ? observed.runtime.agents : null, work: snapshot.work, loop: observed.loop }, Number.isFinite(at) ? { now: at } : {}));
   const derived = await timedStep('attention: derived', () => derivedAttention(root, master, masterApi, coordinator, snapshot, { ...observed, reviews: observed.reviews ?? [], producers: observed.producers ?? [], runtime: { available: observed.runtime.available, agents: observed.runtime.available ? observed.runtime.agents : [] } }));
   const launches = await timedStep('attention: launches', () => workerLaunchStatus(root, master));
-  const items = [...resources.attention, ...generatedFiles, ...overflow, ...interventions.attentionItems, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items, ...launches.items];
+  const items = [...resources.attention, ...generatedFiles, ...overflow, ...(throughput.attention ? [throughput.attention] : []), ...decisions.attentionItems, ...derived.items, ...launches.items];
   const attribute = (status: { work: any[]; attentionItems: AttentionItem[] }) => attributeAttention(ledgerRefusalAttention(status, snapshot.work).attentionItems, resources.readings);
-  return { generatedFiles, overflow, interventions, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
+  return { generatedFiles, overflow, decisions, throughput, resources, derived, items, attribute, unavailable: sections.unavailable };
 }

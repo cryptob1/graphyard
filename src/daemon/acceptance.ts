@@ -25,7 +25,6 @@ import { simplicityParagraph } from '../reviewer.js';
 import { type DaemonAction, message } from './state.js';
 import { record } from './effects.js';
 import { detailChanged } from './decisions.js';
-import { planeWideRefusal } from '../model/blocker-class.js';
 import type { Cycle } from './cycle.js';
 import { caseChangeStep, clearCaseChangeJudgements } from './case-change-judge.js';
 import { carriedIsolate, stepCallCarried } from './step-budget.js';
@@ -138,7 +137,7 @@ export async function draftsSettled() { await Promise.all([...live.values()]); }
 export function clearDrafts() { for (const store of [live, pending, retryAt, polledAt]) store.clear(); closedPulls.clear(); clearCaseChangeJudgements(); }
 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
-/** `caught` is the error a failed step met: only a plane-wide one (not text a result merely quotes) makes the failure the plane's. */
+/** `caught` is the error a failed step met. */
 type Note = (goal: Goal, outcome: DaemonAction['state'], detail: string, caught?: unknown) => Promise<void>;
 
 async function declared(cwd: string) {
@@ -224,9 +223,7 @@ export async function acceptanceStep(cycle: Cycle) {
   const note: Note = async (goal, outcome, detail, caught) => {
     const key = `acceptance:${goal.id}`;
     if (!detailChanged(state.actions[key], clip(detail, 1000))) return;
-    performed.push(await record(state, key, { kind: 'decision', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist,
-      // GY-1751: a control-plane step (never a GitHub or merge-writer one, whose 502 text is GitHub's) that met the plane's own outage or startup-readiness 503 asks again at its interval (GY-1375): the plane's, no decision fault.
-      outcome === 'failed' && caught !== undefined && !(caught instanceof ChildProcessError) && planeWideRefusal(caught) ? null : undefined));
+    performed.push(await record(state, key, { kind: 'decision', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
   };
   // GY-1774: a call carried past the step's bound is recorded waiting on its goal and retried next cycle, never noted as a failure.
   const isolate = carriedIsolate(cycle, 'triage');

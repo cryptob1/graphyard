@@ -4,7 +4,7 @@ import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, relative } from 'node:path';
 import { implementerIdentities, postDeployProofPrefix, postDeployProofs, type Create, type Work } from './model.js';
-import { observationWindowFor, postDeployFollowUpId, postDeployMarker, type PatternProjection, type PatternProjections, type PatternReader } from './model/observation-window.js';
+import { observationWindowFor, postDeployFollowUpId, postDeployMarker } from './model/observation-window.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
 import type { MasterConfig } from './master.js';
 import { repositoryFromRemote } from './onboarding.js';
@@ -93,9 +93,9 @@ export interface PostDeployCheck {
   followUp: { title: string; requestId: string; input: Pick<Create, 'title' | 'description' | 'type' | 'priority' | 'dependencies' | 'criteria' | 'observationWindow'> & { reason: string } } | null;
 }
 /** The window computation lives in model/observation-window.ts, where the control plane reads it too (GY-1735). */
-export { criterionHoldDays, criterionWindowDays, criterionWindowHours, observationWindowFor, patternOfProof, postDeployFollowUpId, type PatternProjection, type PatternProjections, type PatternReader } from './model/observation-window.js';
+export { criterionHoldDays, criterionWindowDays, criterionWindowHours, observationWindowFor, postDeployFollowUpId } from './model/observation-window.js';
 /** What a release's filer decides from (GY-1732): `master post-deploy-checks` reads it as JSON on stdin. */
-export interface PostDeployChecksInput { work: Work; release: string; now: string; projections: PatternProjections; servedAt?: string }
+export interface PostDeployChecksInput { work: Work; release: string; now: string; servedAt?: string }
 /** The code that decides a delivered item's post-deploy checks and their follow-ups: the observed release's own, wherever it differs from the coordinator's. */
 export type PostDeployFiler = (input: PostDeployChecksInput) => Promise<PostDeployCheck[]>;
 /**
@@ -113,7 +113,7 @@ export async function releasePostDeployFiler(config: MasterConfig, sha: string, 
 /** An isolated checkout that carries no filer: its filing is deferred, never done by the coordinator's code. */
 const noReleaseFiler: PostDeployFiler = async () => { throw new Error('the isolated release checkout carries no post-deploy filer'); };
 /** `postDeployChecks` over a filer's input: what this checkout's code decides, and what `master post-deploy-checks` prints. */
-export const localPostDeployChecks: PostDeployFiler = async input => postDeployChecks(input.work, input.release, new Date(input.now), input.projections ?? {}, input.servedAt ? new Date(input.servedAt) : undefined);
+export const localPostDeployChecks: PostDeployFiler = async input => postDeployChecks(input.work, input.release, new Date(input.now), input.servedAt ? new Date(input.servedAt) : undefined);
 /**
  * The check of a delivered item's declared post-deploy criteria (GY-1660)
  * on the serving release `release`: a proof is observed only by evidence the acceptance gate would
@@ -126,7 +126,7 @@ export const localPostDeployChecks: PostDeployFiler = async input => postDeployC
  * from its own head against that serving release — a pre-merge observation there, never itself
  * declared post-deploy.
  */
-export function postDeployChecks(work: Work, release: string, now = new Date(), projections: PatternProjections = {}, servedAt?: Date): PostDeployCheck[] {
+export function postDeployChecks(work: Work, release: string, now = new Date(), servedAt?: Date): PostDeployCheck[] {
   const implementers = implementerIdentities(work), mergedAt = work.delivery ? Date.parse(work.delivery.mergedAt) : NaN;
   // GY-1727: a live window runs from the earliest instant the release is known to serve the item — a
   // deployment already recorded at this release, else the observation filing now, else the filing clock.
@@ -147,23 +147,11 @@ export function postDeployChecks(work: Work, release: string, now = new Date(), 
     const text = `From this head against the serving release ${short} that carries ${work.key}'s merge ${work.delivery?.mergeSha.slice(0, 12) ?? ''}: ${criterion.text}`.slice(0, 2000);
     const requestId = postDeployFollowUpId(work, criterion.id, proof, release);
     // GY-1698: a windowed reading's earliest instant rides the follow-up, so nothing dispatches it before then.
-    const observationWindow = observationWindowFor(work, criterion, proof, projections[proof], served);
+    const observationWindow = observationWindowFor(work, criterion, served);
     return { criterion: criterion.id, proof, result: 'owed' as const, followUp: { title, requestId, input: {
       title, type: 'chore' as const, priority: 1, dependencies: [work.id], reason: `${work.key} ${criterion.id}'s declared post-deploy verification ${proof} is unobserved on the serving release ${short}`.slice(0, 2000),
       // The marker leads, so no truncation of a long criterion can cut the identity a later check matches by.
       description: `${postDeployMarker}${requestId}\n\n${work.key} was delivered with ${criterion.id} declared a post-deploy verification (${proof}). the post-deploy check found no trusted passing ${proof} observation on the serving release ${release}, so this item owes it: observe the outcome on that release and record the proof.${observationWindow ? `\n\nObservation window: the reading can first exist at ${observationWindow.notBefore} — ${observationWindow.detail}. The item is not dispatched before then.` : ''}\n\n${work.key} ${criterion.id}: ${criterion.text}`.slice(0, 20000),
       criteria: [{ id: 'AC-1', text, proofs: [`manual:${name.replace(/\//g, '-')}-on-serving-release`] }], ...(observationWindow ? { observationWindow } : {}) } } };
   }));
-}
-
-/**
- * A reader over `GET /api/interventions` (the coordinator credential reads it; an operator agent may
- * not): the pattern's row and its under-threshold reading, or null when the report holds none.
- */
-export function patternReader(read: (path: string) => Promise<unknown>): PatternReader {
-  return async pattern => {
-    const report = await read('interventions') as { patterns?: { kind: string; stage: string; underThreshold?: PatternProjection }[] } | null;
-    const row = report?.patterns?.find(entry => entry.kind === pattern.kind && entry.stage === pattern.stage);
-    return row?.underThreshold ? { since: row.underThreshold.since ?? null, projected: row.underThreshold.projected ?? null } : null;
-  };
 }

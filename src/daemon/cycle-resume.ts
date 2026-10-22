@@ -305,7 +305,7 @@ async function resumeStepWithin(cycle: Cycle, failedOver: Set<string>, listingLi
         // does a pending refusal grow the paste's backoff, so the delivery follows the landing.
         const coordinate = state.actions[`owed:handle:${item.id}:${profile.principal}:${epoch}`];
         const coordinatePending = carriedRow(coordinate) || coordinate?.cycle === state.cycle;
-        performed.push(await record(state, promptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, attempts: coordinatePending ? previous?.attempts ?? 1 : (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, coordinatePending ? null : undefined));
+        performed.push(await record(state, promptKey, { kind: 'session', work: item.key, principal: profile.principal, epoch, state: 'failed', detail: `${item.key} epoch ${epoch}: ${changed}; the recorded pane cannot be re-prompted: ${paneReason}`, attempts: coordinatePending ? previous?.attempts ?? 1 : (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
         // A handle that records no pane (its coordinate write failed or never completed) refuses
         // every resolution for ever: the name-based absence checks see the name's still-listed
         // holder, and the idle recovery below stays unreachable while the waits stand. So does a

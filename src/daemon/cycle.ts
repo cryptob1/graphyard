@@ -4,10 +4,10 @@ import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { cycleMetricsSchema, type CycleStepName, type DaemonAction, type DaemonActionKind, type DaemonState, emptyCycleSteps, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import type { ExhaustedProof } from './decisions.js';
-import { decisionFailureKind, emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
+import { emptyHeldDecisions, type HeldDecisions } from './decision-reads.js';
 import { actionableSubjects, latencyBudget, observeItemClock, stageMetrics } from './metrics.js';
 import { profileHealth } from './sessions.js';
-import { boundedPersist, progressAttention } from './liveness.js';
+import { boundedPersist } from './liveness.js';
 import { type DaemonEffects, record } from './effects.js';
 import { closeStep } from './cycle-sessions.js';
 import { masterSessionStep } from './cycle-master.js';
@@ -18,14 +18,11 @@ import { decisionStep } from './cycle-decisions.js';
 import { baseFailureStep } from './cycle-base-failures.js';
 import { reviewCapStep } from './cycle-review-cap.js';
 import { deploymentStep, mergeStep, shepherdStep } from './cycle-delivery.js';
-import { faultStep } from './faults.js';
-import { doctorStep } from './doctor.js';
 import { triageBacklogStep } from './cycle-triage.js';
+import { checkInvariants } from '../model/invariants.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
 import { Timings, withTimings, withoutTimings } from '../master/timings.js';
 import { syncProjectMemory } from '../project-memory.js';
-import { planeUnavailable } from '../model/refusal.js';
-import { planeWideRefusal } from '../model/blocker-class.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
@@ -86,10 +83,10 @@ export class Launcher {
 /**
  * One coordination cycle: close finished sessions, reclaim the disk finished assignments hold,
  * dispatch claimable work to a healthy profile, shepherd reviews and proofs, invoke only the
- * guarded merge, verify the deployed SHA, and measure the stages. The cursor is persisted before and after every external action, so a kill between
+ * guarded merge, verify the deployed SHA, and measure the stages. A step that fails is logged and runs again next cycle. The cursor is persisted before and after every external action, so a kill between
  * them leaves an entry the next start reconciles against Graphyard instead of repeating.
  */
-export async function runCycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number = Date.now, launcher?: Launcher) {
+export async function runCycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number = Date.now, launcher?: Launcher, log: (line: string) => void = line => console.error(line)) {
   // Every step this cycle runs is timed, and every external call beneath it of a second or more is
   // recorded against the step it was made in (GY-377): the recorder is found through the async
   // context, so the dispatcher running beside the cycle in the same process keeps its own calls.
@@ -97,10 +94,10 @@ export async function runCycle(config: MasterConfig, state: DaemonState, unbound
   // Without a launcher the loop keeps across cycles (a single cycle, a test), the cycle is its own
   // and settles its launches after each step that makes them, as one cycle always did: the step's
   // launches run at once, bounded only by the profiles free for them, and are reported in the cycle.
-  return withTimings(timings, () => cycle(config, state, unbounded, now, timings, launcher ?? new Launcher(Number.POSITIVE_INFINITY), !launcher));
+  return withTimings(timings, () => cycle(config, state, unbounded, now, timings, launcher ?? new Launcher(Number.POSITIVE_INFINITY), !launcher, log));
 }
 
-async function cycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number, timings: Timings, launcher: Launcher, settle: boolean) {
+async function cycle(config: MasterConfig, state: DaemonState, unbounded: DaemonEffects, now: () => number, timings: Timings, launcher: Launcher, settle: boolean, log: (line: string) => void) {
   // Every pane a step of this cycle closes, so a later step reading the same cycle-start inventory
   // never closes it again (GY-980).
   const closedPanes = new Set<string>();
@@ -134,13 +131,9 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     try { return await body(); }
     catch (error) {
       const key = `isolated:${kind}:${item?.id ?? name}`;
-      // GY-1344: a control plane that did not answer judged nothing; it is retried next cycle and is no fault of the step's.
-      // GY-1541: nor did one that answered "Startup validation has not completed" (a deploy's 503, GY-1375) or any other plane-wide failure.
-      const unanswered = planeUnavailable(error) || planeWideRefusal(error);
       performed.push(await record(state, key, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
-        detail: unanswered ? `Handling ${name} in the ${kind} step met a control plane that did not answer, so it is retried next cycle: ${message(error)}`
-          : `Handling ${name} in the ${kind} step threw, so only its own action failed and the cycle went on with every other item: ${message(error)}`,
-        attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, unanswered ? null : undefined));
+        detail: `Handling ${name} in the ${kind} step threw, so it is retried next cycle: ${message(error)}`,
+        attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       return undefined;
     }
   };
@@ -176,13 +169,10 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
     catch (error) {
       const failed = `isolated:${kind}:${item?.id ?? key}`;
       const why = `The ${kind} launch for ${item?.key ?? key} threw, so only that launch failed: ${message(error)}`;
-      // GY-1505: an approver launch that met a silent control plane or lost the folder-trust race is
-      // made again next cycle; the first at its key is no decision fault, a second in a row is.
-      const faultKind = kind === 'decision' && item ? decisionFailureKind(state, item.key, why, state.actions[failed]) : undefined;
       try {
         sink.push(await record(state, failed, { kind, work: item?.key ?? null, principal: null, state: 'failed', epoch: item?.epoch ?? null,
           detail: why,
-          attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist, faultKind));
+          attempts: (state.actions[failed]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       } catch { /* a cursor that cannot be written is the next cycle's failure */ }
       // The launch's own `started` entry is what holds the cycle off the same work until it settles,
       // and a body that threw after recording it, before settling it itself, left it started until a
@@ -193,7 +183,7 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
         try {
           sink.push(await record(state, key, { kind: started.kind, work: started.work, principal: started.principal, epoch: started.epoch, state: 'failed',
             detail: `${why} Its own started entry is settled failed for that throw, so no restart is needed to reconcile it`,
-            attempts: started.attempts, cycle: state.cycle }, now(), effects.persist, faultKind));
+            attempts: started.attempts, cycle: state.cycle }, now(), effects.persist));
         } catch { /* a cursor that cannot be written is the next cycle's failure */ }
       }
     }
@@ -202,9 +192,18 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   let heldDecisions = heldHistories.get(unbounded);
   if (!heldDecisions) heldHistories.set(unbounded, heldDecisions = emptyHeldDecisions());
   const cycle: Cycle = { config, state, effects, now, snapshot, clock, clockOffset, performed, isolate, agents, credentials, open, owns, heldBy, timings, launcher, launch, detached: !settle, baseFailed: new Map(), exhaustedProofs, heldDecisions, closedPanes };
+  /**
+   * One step of the cycle. A step that throws or times out is one log line naming the step and the
+   * error; the cycle goes on with its other steps and the step runs again next cycle. Nothing is
+   * classified, remedied or escalated.
+   */
+  const step = async <T>(name: string, body: () => Promise<T>): Promise<T | undefined> => {
+    try { return await timings.step(name, body); }
+    catch (error) { log(`[graphyard-master] cycle ${state.cycle}: the ${name} step failed and runs again next cycle: ${message(error)}`); return undefined; }
+  };
   /** A cycle that owns its launcher waits for what a step handed it; the loop's cycles never do. */
   const settleLaunches = async () => { if (settle && launcher.pending) { await timings.step('launches', () => launcher.idle()); performed.push(...launcher.drain()); } };
-  await timings.step('close', () => closeStep(cycle));
+  await step('close', () => closeStep(cycle));
   await settleLaunches();
 
   // A pane this cycle just closed frees its profile, so health is read after the closures.
@@ -212,54 +211,50 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
 
   // 1m. The loop's own master session (GY-898): launch, adopt, supervise, rotate, wake. Isolated
   //     like every step: a failed launch or wake is its own action, and the cycle goes on.
-  await timings.step('master session', () => masterSessionStep(cycle));
+  await step('master session', () => masterSessionStep(cycle));
   await settleLaunches();
 
   spent('close');
 
   // 2d. Every standing blocker is re-checked: its cause probed, cleared once the probe passes (GY-1008).
-  await timings.step('blockers', () => blockerStep(cycle));
+  await step('blockers', () => blockerStep(cycle));
   spent('decisions');
 
-  const assessments = await timings.step('reclaim', () => reclaimStep(cycle));
+  const assessments = await step('reclaim', () => reclaimStep(cycle)) ?? {};
   spent('close');
 
   // 3a. A required check that fails on the base head too is set aside before anything decides on
   //     the item (GY-528): the decisions and the approver capacity dispatch counts read it.
-  cycle.baseFailed = await timings.step('base failures', () => baseFailureStep(cycle));
+  cycle.baseFailed = await step('base failures', () => baseFailureStep(cycle)) ?? new Map();
   spent('decisions');
 
-  const capacity = await timings.step('dispatch', () => dispatchStep(cycle, health, assessments));
+  const capacity = await step('dispatch', () => dispatchStep(cycle, health, assessments)) ?? { capacities: [], approversSpent: false };
   await settleLaunches();
   spent('dispatch');
 
   // 4b. Past the review-round cap (GY-1118) a change request is filed as follow-ups and withdrawn, or escalated; it is never reworked.
-  await timings.step('review cap', () => reviewCapStep(cycle));
-  await timings.step('decisions', () => decisionStep(cycle, assessments, capacity));
+  await step('review cap', () => reviewCapStep(cycle));
+  await step('decisions', () => decisionStep(cycle, assessments, capacity));
   await settleLaunches();
   spent('decisions');
 
-  await timings.step('reviews and proofs', () => shepherdStep(cycle));
+  await step('reviews and proofs', () => shepherdStep(cycle));
   spent('dispatch');
 
-  await timings.step('merges', () => mergeStep(cycle));
+  await step('merges', () => mergeStep(cycle));
   // 6b'. The control-plane merge executor (GY-1524): open intents reconciled, then one head trial-merged,
   //      tested and pushed with the deploy key beside the cycle; active only under the control-plane merger.
-  await timings.step('merge writer', () => cycle.isolate('merge', null, 'merge writer', () => mergeWriterStep(cycle)));
+  await step('merge writer', () => cycle.isolate('merge', null, 'merge writer', () => mergeWriterStep(cycle)));
   spent('merge');
 
-  await timings.step('deployment verification', () => deploymentStep(cycle));
-  // 7b. Classify what is wrong and file one item per recurring class (GY-173). It shares the
-  //     deployment step's clock: it reads the same snapshot and makes at most one call per class.
-  await timings.step('faults', () => faultStep(cycle, assessments));
+  await step('deployment verification', () => deploymentStep(cycle));
+  // 7b. The system invariants (GY-404): properties of the running pipeline no per-item gate can see, one `master status` line each.
+  await step('invariants', async () => checkInvariants(state.invariants, { work: snapshot.work, now: clock, thresholds: config.invariants, metrics: state.metrics, approvals: state.approvals, docsSyncs: state.docsSyncs, agents, build: state.deployment?.sha ?? null }));
   // 7c. The machine-filed backlog (GY-402): the one-time follow-up migration, then a triage run
   //     for each machine-filed item no triage has judged; its closures go to the approver in 4c.
-  await timings.step('triage', () => triageBacklogStep(cycle));
-  // 7d. The pipeline doctor (GY-711): the deterministic remedies every cycle, and one doctor run
-  //     every `run.doctor.intervalMinutes`. It shares the deployment step's clock too.
-  await timings.step('doctor', () => doctorStep(cycle));
+  await step('triage', () => triageBacklogStep(cycle));
   // 7e. Setup (GY-1416): derived deployment variables the deployment lacks are set by the loop, never asked of a human.
-  if (effects.selfProvision) await timings.step('setup', () => cycle.isolate('config', null, 'setup self-provision', () => effects.selfProvision!()));
+  if (effects.selfProvision) await step('setup', () => cycle.isolate('config', null, 'setup self-provision', () => effects.selfProvision!()));
   spent('deployment');
 
   await settleLaunches();
@@ -281,12 +276,6 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   // not a recomputation beside it, so what reclasses a subject is what the step decided. GY-2097:
   // the in-flight cap's own hold (`wipHeld`) is the same reading — the wait is the cap's capacity.
   const actionable = actionableSubjects(config, snapshot.work, clock, { assessments, approvals: state.approvals, baseFailed: cycle.baseFailed, docsSyncs: state.docsSyncs, fleetHeld: cycle.fleetHeld, wipHeld: cycle.wipHeld, launching: item => launcher.busy(dispatchKey(item)) });
-  // The loop's progress watchdog (GY-2005): its lines (progressAttention, GY-1980) began standing
-  // this cycle. The onset — not every cycle the stall stands — is the resolver's cue: a run is
-  // marked due and the next cycle's doctorStep launches it at once instead of waiting the interval.
-  const watchdogStanding = progressAttention(snapshot.work, state.promotion, clock).length > 0;
-  if (watchdogStanding && !state.doctor.watchdogStanding) state.doctor.watchdogDue = true;
-  state.doctor.watchdogStanding = watchdogStanding;
   const { stages, lead } = stageMetrics(snapshot.work, clock);
   // The cycle's duration, and of it the time at least one child was in flight: the difference is
   // the loop's own work, which is what the liveness bound is judged on (cycleCost).
@@ -301,14 +290,12 @@ async function cycle(config: MasterConfig, state: DaemonState, unbounded: Daemon
   state.cycle += 1;
   state.lastCycleAt = new Date(now()).toISOString();
   if (state.lock) state.lock = { ...state.lock, heartbeatAt: state.lastCycleAt };
-  // GY-1125 / GY-1144: project memory is synchronized per cycle from settled work, faults, and merges.
-  // It is bounded by retention caps (retainedMemoryDecisions=20, retainedMemoryPitfalls=20,
-  // retainedMemoryChanges=30), and effects.persist mirrors .graphyard/project-memory.json only when
+  // GY-1125 / GY-1144: project memory is synchronized per cycle from settled work and merges.
+  // It is bounded by retention caps (retainedMemoryDecisions=20, retainedMemoryChanges=30), and effects.persist mirrors .graphyard/project-memory.json only when
   // state.projectMemory actually changes, ensuring no redundant disk writes occur per cycle.
   state.projectMemory = await syncProjectMemory({
     existing: state.projectMemory,
     work: snapshot.work,
-    state,
     now: clock,
   });
   pruneDaemonState(state);

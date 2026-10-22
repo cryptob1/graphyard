@@ -1053,24 +1053,24 @@ export function throughputClaimVisibility(measurement: { report: ThroughputRepor
     ? `settles whether the coordination that leaves ${throughputClaim.item}'s claim missing its budgets changes, or records that its claim stands unverified on this release (the budgets unchanged)`
     : `settles the population rule ${throughputClaim.item}'s claim is judged over or the coordination that leaves these fingerprints`;
   const attention = (reason: string): AttentionItem => {
-    if (stall) return { subject: 'throughput', kind: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
+    if (stall) return { subject: 'throughput', text: `${throughputClaim.item}'s throughput claim is unverified against the deployed release and ${stall.text}`,
       ...(selfRequest ? agentOwner('control plane', throughputSelfAsked(decideOn), 'approver')
         : agentOwner('master', `graphyard master decide ${decideOn} requirements @revision.json "REASON" with a revision that ${settles}, then graphyard master approver ${decideOn} DECISION`, 'approver')) };
     const text = `${throughputClaim.item}'s throughput claim is unverified against the deployed release: ${reason}. ${progress}${superseded}`;
-    if (applied) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${applied}`, ...agentOwner('master', command) };
-    if (!pursuit) return { subject: 'throughput', kind: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };
-    if (!pursuit.escalated) return { subject: 'throughput', kind: 'throughput', text: `${text}; ${pursuit.text}`, inMotionUntil: pursuit.dueAt, ...agentOwner('master', command) };
+    if (applied) return { subject: 'throughput', text: `${text}; ${applied}`, ...agentOwner('master', command) };
+    if (!pursuit) return { subject: 'throughput', text: `${text}; the loop re-measures the serving release at most every ${Math.round(throughputRemeasureMs / 60_000)} min while it stays unverified`, ...agentOwner('master', command) };
+    if (!pursuit.escalated) return { subject: 'throughput', text: `${text}; ${pursuit.text}`, inMotionUntil: pursuit.dueAt, ...agentOwner('master', command) };
     // Past the bound the line names the blocker. Only two blockers are a human's to remove (AGENTS.md):
     // a credential for the measurement, or whether deliveries may run with no master session at all.
     // An unreachable plane, an unconfirmed release or a failed or missed measurement stays the master's.
-    if (answered) return { subject: 'throughput', kind: 'throughput', text: `${text}; its needs-decision on this release was answered at ${answered}, so the claim stays carried until a recorded measurement verifies it, and the next release measured unverified past the bound asks afresh`,
+    if (answered) return { subject: 'throughput', text: `${text}; its needs-decision on this release was answered at ${answered}, so the claim stays carried until a recorded measurement verifies it, and the next release measured unverified past the bound asks afresh`,
       ...agentOwner('master', command) };
     const escalated = `${text}; escalated: ${pursuit.text}`;
-    if (pursuit.blocker === 'missing-credentials') return { subject: 'throughput', kind: 'throughput', text: escalated,
+    if (pursuit.blocker === 'missing-credentials') return { subject: 'throughput', text: escalated,
       ...humanOwner('issuing credentials to people', `Issue the measurement a coordinator or reader credential for the control plane, then run ${command}`) };
-    if (pursuit.blocker === 'no-session-free-deliveries') return { subject: 'throughput', kind: 'throughput', text: escalated,
+    if (pursuit.blocker === 'no-session-free-deliveries') return { subject: 'throughput', text: escalated,
       ...humanOwner('goals and priorities', `Decide whether to let routine deliveries run with no master session until ${throughputClaim.minimumDeliveries} accumulate, or to accept ${throughputClaim.item}'s claim as unverified`) };
-    return { subject: 'throughput', kind: 'throughput', text: escalated, ...agentOwner('master', command) };
+    return { subject: 'throughput', text: escalated, ...agentOwner('master', command) };
   };
   const base = { claim: throughputClaim, deployed, command, owner, stall, pursuit,
     measurement: measurement ? { at: measurement.report.measuredAt, deployedRevision: measurement.report.deployed?.revision ?? null,
