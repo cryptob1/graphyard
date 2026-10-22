@@ -226,7 +226,7 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
     dispatch: { file: 'cycle-dispatch.ts', calls: ['agents', 'roleHealth', 'reportCapacity', 'planeHealth'] },
     sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'recordSession', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork'] },
     resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'recordSession', 'preserveWork', 'reportCapacity'] },
-    reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaimLease', 'removeWorktree', 'preserveWork', 'reportCapacity'] },
+    reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaimLease', 'removeWorktree', 'sweepCheckouts', 'preserveWork', 'reportCapacity'] },
     master: { file: 'cycle-master.ts', calls: ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'] },
     rework: { file: 'rework.ts', calls: ['rework', 'recordMechanicalPlan'] },
   };
