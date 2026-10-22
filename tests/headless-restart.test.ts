@@ -8,7 +8,7 @@ import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { graphyardTools, type EvidencePayload } from '../src/runner/payloads.js';
 import { cancelScratchRuns, cgroupService, detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, scratchBoundMarginSeconds, scratchRunsDirectory, signalRun, sweepScratchRuns } from '../src/runner/pi.js';
-import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, liveRunCheckouts, runsDirectory, unendedRunOnDisk, type Applied } from '../src/runner/registry.js';
+import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, runsDirectory, unendedRunOnDisk, type Applied } from '../src/runner/registry.js';
 import { producerRunOptions, runConfinement, startNarrowRun } from '../src/runner/roles.js';
 import { sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
@@ -156,22 +156,18 @@ test('unit:headless-run-survives-restart an adopted run keeps its managed checko
   try {
     const checkout = join(root, 'run-checkout');
     const { meta } = await start('run-9', 'graphyard-producer-gy-9', checkout);
-    assert.deepEqual(liveRunCheckouts(), [checkout], 'the launching loop holds the run\'s checkout');
     detachRuns();
-    assert.deepEqual(liveRunCheckouts(), [], 'the restarted loop starts holding nothing');
 
     const settledCheckouts: string[] = [];
     const [adopted] = await adoptRuns(root, { producer: async owner => ({ options: producerRunOptions('', binding(String(owner.context.subject)), {}, 60_000), apply: async () => [],
       checkout: String(owner.context.checkout), settled: () => { settledCheckouts.push(String(owner.context.checkout)); } }) });
     assert.equal(adopted.live, true);
-    assert.deepEqual(liveRunCheckouts(), [checkout], 'the adopted run holds its checkout again, so a reclaim pass leaves it');
 
     // Lost from outside: no result is applied, and the checkout is settled once.
     signalRun(meta, 'SIGKILL');
     const record = await adopted.settled;
     assert.equal(record.result?.ok === false && record.result.reason, 'lost');
     assert.deepEqual(settledCheckouts, [checkout]);
-    assert.deepEqual(liveRunCheckouts(), []);
   } finally { await cleanup(); }
 });
 

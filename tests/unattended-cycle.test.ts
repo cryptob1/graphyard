@@ -5,11 +5,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { actionableSubjects, cycleDelay, daemonSummary, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, mergeableCandidate, neededRework, observeItemClock, progressAttention, runCycle, runDaemon, standingVerdict, watchdogPlan, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { actionableSubjects, cycleDelay, daemonSummary, emptyDaemonState, loopAttention, loopLiveness, mergeableCandidate, neededRework, progressAttention, runCycle, runDaemon, standingVerdict, watchdogPlan, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { maxInFlight } from '../src/model/dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 // Time-bomb allowance (GY-1694): the 2031-03-01 clockStart is the loop's injected now and every verdict/lease instant and loopLiveness call takes it explicitly; new Date() only stamps an empty snapshot for a lockless status.
@@ -51,23 +50,19 @@ interface Script { key: string; rounds: Round[] }
  * a claim, a rework. Between cycles `advance` runs everyone else: the launched worker, CI, the
  * reviewer, and GitHub merging what is green (GY-1235: the loop never merges).
  */
-function plane(scripts: Script[], options: { hostId?: string; delivered?: number; admit?: number } = {}) {
+function plane(scripts: Script[], options: { hostId?: string; delivered?: number } = {}) {
   const hostId = options.hostId ?? 'machine-a';
   /** GitHub's side: whether it merges a green candidate on the next tick, or holds it (a queue that does not move). */
   const github = { merging: true };
   let now = clockStart;
   const iso = (at: number = now) => new Date(at).toISOString();
-  // GY-2097: with `admit`, the exercise releases work as the pipeline admits it — the operator's
-  // release of the next item as slots free — so a budget over many deliveries measures each item's
-  // own passage, never its deliberate wait under the dispatcher's in-flight cap.
-  const admit = options.admit ?? scripts.length;
   const scripted = (item: Work) => scripts.some(entry => entry.key === item.key);
   const work: Work[] = scripts.map((script, index) => ({
     id: `id-${script.key}`, key: script.key, title: `Deliver ${script.key}`, description: '', type: 'feature', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven end to end', proofs: ['integration:loop'] }],
     policy: { checks: ['test'], review: true }, 
     stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(now - 30 * minute), updatedAt: iso(), stageEnteredAt: iso(now - minute),
-    ready: index < admit, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
+    ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [],
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
     pr: 100 + index,
@@ -181,17 +176,7 @@ function plane(scripts: Script[], options: { hostId?: string; delivered?: number
   const effects = (overrides: Partial<DaemonEffects> = {}): DaemonEffects => ({
     agents: () => [],
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-    snapshot: async () => {
-      // Release the next admitted item the instant a slot frees, so its released-at stamp is the
-      // admission, and its ready→claim measures the loop, not the cap.
-      if (admit < scripts.length) {
-        const inFlight = work.filter(item => scripted(item) && item.stage !== 'done'
-          && (item.lease && Date.parse(item.lease.expiresAt) > now || !!item.submission && !item.reworkRequested)).length;
-        const next = work.find(item => scripted(item) && !item.ready);
-        if (next && inFlight < admit) { next.ready = true; next.stageEnteredAt = iso(); next.updatedAt = iso(); recompute(next); }
-      }
-      return { work: work.map(item => ({ ...item })), now: iso() };
-    },
+    snapshot: async () => ({ work: work.map(item => ({ ...item })), now: iso() }),
     closeSession: () => {},
     dispatch: async (item, worker) => {
       const target = find(item.id);
@@ -266,73 +251,6 @@ test('integration:unattended-full-cycle — with no master session and no human 
     observation: { ...item.observation!, merged: false, reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: item.candidate!.sha, state: 'CHANGES_REQUESTED', submittedAt: '2031-03-01T09:20:00Z' }] } } as Work;
   assert.deepEqual(standingVerdict(reviewed), { reviewer: 'graphyard-reviewer[bot]', at: '2031-03-01T09:20:00Z', reason: `graphyard-reviewer[bot] requested changes on ${item.candidate!.sha.slice(0, 12)}` });
   assert.equal(neededRework(reviewed)?.binding, `${item.candidate!.sha}:verdict:graphyard-reviewer[bot]`);
-
-  // The passage it measured, from its own observations: one delivery, each figure inside its bound.
-  const budget = latencyBudget(state.latency);
-  assert.equal(budget.deliveries, 1);
-  assert.ok(budget.readyToClaim.p90Ms <= latencyTargets.readyToClaimP90Ms, `ready→claim ${budget.readyToClaim.p90Ms}ms`);
-  assert.equal(budget.reworkRequest.count, 1, 'the verdict round was measured from the verdict that stood; the base conflict had no verdict behind it');
-  assert.deepEqual(budget.reworkRequest.breaches, [], 'each rework was requested inside the five-minute bound');
-  assert.deepEqual(budget.mergeDwell.breaches, []);
-});
-
-test('integration:mergeable-dwell-budget — a candidate whose gates are green merges within five minutes of becoming mergeable and a standing verdict reaches a rework request in the same window, with p90 approval→merge inside ten minutes over more than ten deliveries; a candidate left green reports the breach', async () => {
-  const scripts = Array.from({ length: 11 }, (_, index) => ({ key: `GY-${200 + index}`, rounds: ['pass' as const] }));
-  // The loop starts beside a ledger that already holds deliveries, as every real installation does,
-  // and keeps cycling long after its own: the budget is of the passages this loop watched, and a
-  // delivered item is history, not a passage that completes again every cycle.
-  const history = 79;
-  // The exercise admits work as the cap frees slots, so the budget measures each delivery's own
-  // passage; the cap's own wait is deliberate and is proven in tests/wip-limit.test.ts.
-  const simulation = plane(scripts, { delivered: history, admit: maxInFlight });
-  const master = config({ workers: scripts.map((_, index) => profile(`claude-${index}`)) });
-  const state = emptyDaemonState(master);
-  const effects = simulation.effects();
-  const open = () => simulation.work.filter(item => scripts.some(entry => entry.key === item.key) && item.stage !== 'done');
-  await cycle(state, master, simulation, effects, 2 * minute);
-  assert.equal(state.latency.length, 0, 'a delivery this loop never watched is not a sample');
-  assert.equal(latencyBudget(state.latency).met, null, 'and history alone does not make the ten deliveries the targets are judged over');
-  for (let pass = 0; pass < 60 && open().length; pass++) await cycle(state, master, simulation, effects, 2 * minute);
-  for (let pass = 0; pass < 40; pass++) await cycle(state, master, simulation, effects);
-
-  assert.equal(simulation.work.filter(item => item.stage === 'done').length, history + 11, 'every item was delivered by the loop alone');
-  const budget = latencyBudget(state.latency);
-  assert.equal(budget.deliveries, 11, 'one sample per delivery the loop made, forty cycles after the last of them');
-  assert.deepEqual(state.latency.map(sample => sample.work).sort(), scripts.map(entry => entry.key).sort(), 'and each is of an item this loop delivered');
-  assert.equal(budget.approvalToMerge.count, 11, 'approval→merge is not diluted by items delivered before the loop watched');
-  assert.ok(budget.approvalToMerge.p50Ms > 0, 'the median is of real passages, not of zeros');
-  assert.deepEqual(Object.keys(state.clocks), [], 'a sampled delivery keeps no clock, and none is created for it again');
-  assert.deepEqual(budget.mergeDwell.breaches, [], 'no candidate stayed mergeable past the five-minute bound');
-  assert.ok(budget.mergeDwell.count >= latencyTargets.minimumDeliveries, 'every delivery measured its mergeable dwell');
-  assert.ok(budget.approvalToMerge.p90Ms <= latencyTargets.approvalToMergeP90Ms, `approval→merge p90 ${budget.approvalToMerge.p90Ms}ms exceeds the ten-minute target`);
-  assert.ok(budget.approvalToMerge.p90Ms > 0, 'the measurement is of a real passage, not of a zero');
-  assert.equal(budget.met, true, `budget reasons: ${budget.reasons.join('; ')}`);
-  assert.deepEqual(loopAttention({ liveness: loopLiveness(state, simulation.now(), 20_000, master.hostId), budget }).filter(attention => /budget/.test(attention.text)), []);
-
-  // The same measurement over a candidate GitHub leaves green (GY-1235: GitHub merges, not the
-  // loop): the dwell is the breach, it names the candidate, and it reaches the attention list
-  // rather than a chart nobody reads.
-  const stalled = plane([{ key: 'GY-300', rounds: ['pass'] }], { delivered: history });
-  const stalledState = emptyDaemonState(master);
-  const stalledEffects = stalled.effects();
-  stalled.github.merging = false;
-  for (let pass = 0; pass < 4; pass++) await cycle(stalledState, master, stalled, stalledEffects, 2 * minute);
-  assert.ok(mergeableCandidate(stalled.work[0]), 'the candidate is green and GitHub is not merging it');
-  stalled.advance(30 * minute);
-  stalled.github.merging = true;
-  await cycle(stalledState, master, stalled, stalledEffects);
-  // The breach is still what the budget reports many cycles later: nothing evicts it, and nothing
-  // outvotes it with deliveries that were never measured.
-  for (let pass = 0; pass < 40; pass++) await cycle(stalledState, master, stalled, stalledEffects);
-  const stalledBudget = latencyBudget(stalledState.latency);
-  assert.equal(stalledBudget.deliveries, 1);
-  assert.deepEqual(stalledBudget.mergeDwell.breaches.map(breach => breach.work), ['GY-300']);
-  assert.equal(stalledBudget.met, false);
-  assert.match(stalledBudget.reasons.join('; '), /GY-300 stayed mergeable for 3\d(\.\d)? min, past the 5 min bound/);
-  const attention = loopAttention({ liveness: loopLiveness(stalledState, stalled.now(), 20_000, master.hostId), budget: stalledBudget });
-  assert.match(attention.at(-1)!.text, /unattended delivery budget is not met/);
-  assert.equal(attention.at(-1)!.role, 'master');
-  assert.equal(attention.at(-1)!.human, false);
 });
 
 test('integration:no-actionable-silence — every cycle records what it could act on and what it did, an actionable item stays named while nothing can act on it', async () => {
@@ -392,36 +310,6 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()), [], 'a delivered item asks nothing of the loop');
 });
 
-test('integration:dispatch-latency-budget — ready work reaches a free worker inside two minutes and its first push inside fifteen, measured over ten items the in-flight cap admits in turn, and a long configured interval cannot push a claim past that bound', async () => {
-  const scripts = Array.from({ length: 10 }, (_, index) => ({ key: `GY-${500 + index}`, rounds: ['pass' as const] }));
-  // The exercise releases each item as the cap frees a slot (GY-2097): the budget then measures the
-  // loop's dispatch responsiveness, never the deliberate wait under the cap, which
-  // tests/wip-limit.test.ts proves.
-  const simulation = plane(scripts, { admit: maxInFlight });
-  const master = config({ workers: scripts.map((_, index) => profile(`claude-${index}`)) });
-  const state = emptyDaemonState(master);
-  const effects = simulation.effects();
-  // The loop's first cycles fill the cap's slots from free profiles; each subsequent pass is
-  // the workers' own work and the next release, which the push budget — not the dispatch budget —
-  // is judged on.
-  for (let pass = 0; pass < 60 && simulation.work.some(item => item.stage !== 'done'); pass++) await cycle(state, master, simulation, effects, 3 * minute);
-  await cycle(state, master, simulation, effects);
-
-  assert.equal(simulation.work.filter(item => item.stage === 'done').length, 10);
-  const budget = latencyBudget(state.latency);
-  assert.equal(budget.readyToClaim.count, 10, 'every item measured ready→claim');
-  assert.ok(budget.readyToClaim.p90Ms <= latencyTargets.readyToClaimP90Ms, `ready→claim p90 ${budget.readyToClaim.p90Ms}ms exceeds two minutes`);
-  assert.equal(budget.readyToFirstPush.count, 10);
-  assert.ok(budget.readyToFirstPush.p90Ms > 0 && budget.readyToFirstPush.p90Ms <= latencyTargets.readyToFirstPushP90Ms, `ready→first push p90 ${budget.readyToFirstPush.p90Ms}ms exceeds fifteen minutes`);
-  assert.equal(budget.met, true, budget.reasons.join('; '));
-
-  // A fifteen-minute interval is an idle cadence, never a bound on how long ready work may sit:
-  // with anything actionable the loop comes back inside the responsive window.
-  assert.equal(cycleDelay(900_000, 1), 30_000);
-  assert.equal(cycleDelay(10_000, 3), 10_000, 'a shorter configured interval still wins');
-  assert.equal(cycleDelay(900_000, 0), 900_000);
-});
-
 test('integration:loop-liveness — an absent or stalled loop is the top attention item with the command that restarts it, the loop keeps its supervisor\'s watchdog fed per cycle, and the packaged unit restarts it without a person', async () => {
   const master = config({ workers: [] });
   const intervalMs = master.run.intervalSeconds * 1000;
@@ -462,7 +350,6 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   // The same judgement reaches `master status` through the daemon summary it reads.
   const summary = daemonSummary(state, now, intervalMs, master.hostId);
   assert.equal(summary.liveness.state, 'running');
-  assert.equal(summary.budget.met, null, 'no delivery measured yet');
 
   // Self-healing: under a supervisor that watches for keep-alives, the loop reports ready once and
   // alive after every completed cycle, so a cycle that hangs becomes a restart.
@@ -523,7 +410,7 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   assert.equal(watchdogPlan({ NOTIFY_SOCKET: '/run/notify', WATCHDOG_USEC: String(window * 1000) }, intervalMs).refusal, null, 'the packaged unit and the default interval agree');
 });
 
-test('a rework the server refuses is applied again on a later cycle, automatic merging off asks for no merge, and an item with no review gate starts no approval→merge passage', async () => {
+test('a rework the server refuses is applied again on a later cycle, and automatic merging off asks for no merge', async () => {
   const master = config({ workers: [profile('claude-a')], autoMerge: false });
   const simulation = plane([{ key: 'GY-701', rounds: ['changes', 'pass'] }]);
   const state = emptyDaemonState(master), effects = simulation.effects(), item = simulation.work[0];
@@ -543,16 +430,6 @@ test('a rework the server refuses is applied again on a later cycle, automatic m
   assert.equal(item.stage, 'done', steps(merging).join(', '));
   assert.deepEqual(merging.filter(action => action.kind === 'merge'), []);
 
-  // An item with no review gate was never approved, so it starts no approval→merge passage.
-  const at = Date.parse('2031-03-01T09:30:00Z'), sha = hex('candidate');
-  const candidate = { sha, baseSha: hex('base'), pr: 7, branch: 'graphyard/gy-700-1', author: 'worker', createdAt: '2031-03-01T09:20:00Z' };
-  const unreviewed = { id: 'id-GY-700', key: 'GY-700', stage: 'review', epoch: 1, policyRevision: 1, lease: null, submission: { epoch: 1, pr: 7 }, reworkRequested: false, candidate, violations: [], workspaces: [],
-    observation: { candidate, reviews: [], at: '2031-03-01T09:20:00Z' }, gates: [{ name: 'build', passed: true, reasons: [] }] } as unknown as Work;
-  const clocks = emptyDaemonState(master);
-  observeItemClock(clocks, unreviewed, at);
-  assert.equal(clocks.clocks[unreviewed.id].approvedAt, null);
-  observeItemClock(clocks, { ...unreviewed, gates: [...unreviewed.gates, { name: 'review', passed: true, reasons: [] }] } as Work, at);
-  assert.equal(clocks.clocks[unreviewed.id].approvedAt, new Date(at).toISOString());
 });
 
 test('a requested round is requested once: a base conflict whose round\'s worker dies before pushing is reworked once and delivered', async () => {

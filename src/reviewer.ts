@@ -87,7 +87,7 @@ export const reviewRecordSchema = z.object({
   resolution: z.string().min(1).max(900).optional(),
   /** The session directory under the managed worktree root; removed when the session resolves. */
   checkout: z.string().min(1).max(1200).optional(),
-  /** Why the checkout could not be removed at settlement; the reclaim pass takes it back. */
+  /** Why the checkout could not be removed at settlement. */
   checkoutFailure: z.string().min(1).max(500).optional(),
   /**
    * The launch that reserved this record has not yet confirmed its runtime started (GY-124). A
@@ -1168,7 +1168,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         if (pane || tabId || malformedTab) try { closed = await closeFailedLaunch(pane, tabId ?? malformedTab, dependencies.run); }
           catch { await rm(sessionDirectory, { recursive: true, force: true }); throw new Error(`${error instanceof Error ? error.message : 'Reviewer launch failed'}; Herdr could not confirm cleanup, so the reviewer credential directory was removed and the token will expire at ${minted.expiresAt}`); }
         await rm(sessionDirectory, { recursive: true, force: true });
-        // A launch that failed for want of room says so, with the path and the reclaim command.
+        // A launch that failed for want of room says so, with the path.
         const failure = writeFailure(error, `Launching the ${binding.key} reviewer session (${String((error as Error)?.message ?? error).split('\n')[0]})`, checkout.directory);
         // A disk-exhaustion report keeps its advice last; the close rides on it as `paneClosed` (GY-413).
         if (closed) { if (failure === error) withLaunchClose(failure, closed); else Object.assign(failure, { paneClosed: closed }); }
@@ -1359,8 +1359,7 @@ async function closeReviewSession(root: string, record: ReviewRecord, dependenci
   record.closeFailure = closeFailure;
   if (!closeFailure || options.force) {
     // The session decides nothing further, so its checkout under the managed worktree root goes
-    // with it — whatever the outcome. One that cannot be removed is said so on the record and
-    // taken back by the next reclaim pass.
+    // with it — whatever the outcome. One that cannot be removed is said so on the record.
     const failure = await settleCheckout(root, record.checkout);
     if (failure) record.checkoutFailure = failure; else delete record.checkoutFailure;
     record.state = options.state; record.closedAt = dependencies.now().toISOString();

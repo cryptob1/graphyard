@@ -1,7 +1,6 @@
 // The dashboard audit fixture: ten work items that cover every place an item can be (not
 // started, waiting for a worker after a lapsed claim, never claimed, being built, in review,
-// proving, stuck on a blocker, and three shipped), with the flow and attribution reports
-// computed by the real aggregations from ledger events for the same items. Importing it gives
+// proving, stuck on a blocker, and three shipped). Importing it gives
 // the fixture to tests (tests/dashboard-simplification.test.ts); running it reproduces the
 // audit views as screenshots and prints the visible word count of each:
 //
@@ -9,8 +8,6 @@
 //
 // It serves dist/ with this fixture as the API on a local port and drives headless Chromium
 // through @playwright/test. Nothing leaves the machine and no real data is read.
-import { computeFlow, deriveFacts, flowDrilldown } from '../src/flow-analytics.ts';
-import { computeAttribution } from '../src/attribution.ts';
 
 export const NOW = Date.parse('2026-09-19T12:00:00.000Z');
 const minute = 60_000, hour = 60 * minute, day = 24 * hour;
@@ -84,68 +81,9 @@ export function fixtureWork() {
   ];
 }
 
-/**
- * A repository whose window holds `count` delivered items, each with one measured episode. The
- * phase drill-down returns one row per phase per episode, so this is how the bound at
- * `flowLimits.drilldown` is reached: the combined request is cut off past roughly a sixth of it.
- */
-export function busyFixtureWork(count) {
-  return Array.from({ length: count }, (_, index) => shipped(100 + index, `Delivered item ${index + 1}`, 500 + index, -(index + 1) * hour));
-}
-
 export const fixtureStatus = (role = 'admin') => ({ actor: { id: role === 'admin' ? 'operator' : `fixture-${role}`, role, sessionKind: role === 'admin' ? 'human' : 'ai' }, github: true, reviewProviders: ['github'],
   repository: 'fixture/shop', baseBranch: 'main', jobs: [], delegation: { limits: { maxLeads: 3, maxEngineersPerLead: 2, minReviewers: 1, maxReviewers: 2 },
     slices: [{ id: 'product', name: 'Product', lead: null, workers: [], bottlenecks: [] }, { id: 'infrastructure', name: 'Infrastructure', lead: null, workers: [], bottlenecks: [] }, { id: 'docs-experience', name: 'Docs/experience', lead: null, workers: [], bottlenecks: [] }], reviewers: [] } });
-
-/** Ledger events for the fixture, so the flow report is the real aggregation's output. */
-function ledger(work) {
-  const events = []; let seq = 0;
-  const push = (snapshot, when, kind) => events.push({ seq: ++seq, work_id: snapshot.id, actor: 'fixture', kind, payload: { work: snapshot }, created_at: at(when) });
-  for (const final of work) {
-    const created = Date.parse(final.createdAt) - NOW;
-    const initial = { ...final, ready: false, stage: 'backlog', stageEnteredAt: final.createdAt, lease: null, submission: null, candidate: null, observation: null, evidence: [], blocker: null, delivery: undefined, mergeAuthorization: undefined, gates: gates(blocked({ ready: ['Not released from backlog'] }), final.criteria) };
-    push(initial, created, 'create');
-    if (final.stage !== 'done') { push(final, Date.parse(final.stageEnteredAt) - NOW, final.lease ? 'claim' : final.candidate ? 'github.observed' : 'ready'); continue; }
-    // Real delivered items may carry no observation (nor reviews, nor a candidate): the history
-    // is then replayed without one, never read through a null (GY-161, AC-12).
-    const merged = Date.parse(final.stageEnteredAt) - NOW, opened = merged - 20 * hour;
-    const observed = changes => final.observation ? { ...final.observation, merged: false, mergeSha: null, mergedAt: null, ...changes } : null;
-    const reviews = final.observation?.reviews ?? [];
-    const open = { ...final, stage: 'review', delivery: undefined, mergeAuthorization: undefined, evidence: [], observation: observed({ reviews: [] }), gates: gates(blocked({ build: [], test: [], merge: [] }), final.criteria) };
-    push({ ...open, stage: 'build', candidate: null, observation: null, lease: { owner: 'worker-2', epoch: 1, expiresAt: at(opened) } }, opened - 6 * hour, 'claim');
-    push({ ...open, candidate: null, observation: null }, opened, 'submit');
-    push({ ...open, stageEnteredAt: at(opened + hour) }, opened + hour, 'github.observed');
-    push({ ...open, stage: 'acceptance', observation: observed({ reviews }), gates: gates(blocked({ build: [], review: [], test: [], merge: [] }), final.criteria) }, merged - 5 * hour, 'github.observed');
-    push({ ...open, stage: 'merge', evidence: final.evidence ?? [], observation: observed({ reviews }), gates: gates({ merge: ['Merge queue position 1 of 1: GY-0 is ahead'], acceptance: [] }, final.criteria) }, merged - 3 * hour, 'evidence');
-    push({ ...final, observation: observed({}), stage: 'merge', delivery: undefined }, merged - hour, 'merge.authorize');
-    push(final, merged, 'github.observed');
-  }
-  return events;
-}
-export function flowDataset(work) {
-  const states = new Map(), facts = [];
-  for (const event of ledger(work)) { const state = states.get(event.work_id) ?? {}; states.set(event.work_id, state); facts.push(...deriveFacts(event, state)); }
-  const latest = [];
-  for (const fact of [...facts].reverse()) if (!latest.some(entry => entry.workId === fact.workId && entry.kind === fact.kind)) latest.push(fact);
-  return { observedAt: at(0), from: at(-30 * day), to: at(0), days: 30, work, included: work, facts, latest, carryIn: [], deployments: [], mergedForDeployments: [],
-    scanned: facts.length, truncated: false, workTruncated: false, deploymentsTruncated: false, deploymentMergesTruncated: false,
-    projection: { lastEvent: facts.length, updatedAt: at(0), pendingEvents: 0, pendingCapped: false } };
-}
-
-/**
- * The flow-analytics API over an arbitrary work list, answered by the real aggregation and the
- * real bounded drill-down, so a test sees exactly the payload — cut-off rows included — that the
- * control plane would return for the same repository.
- */
-export function flowApi(work, role = 'admin') {
-  const dataset = flowDataset(work);
-  const report = computeFlow(dataset, { days: 30 });
-  return path => {
-    const url = new URL(path.replace(/^\/?(api\/)?/, 'http://fixture/api/'));
-    if (!url.pathname.endsWith('/drilldown')) return report;
-    return flowDrilldown(dataset, report, { metric: url.searchParams.get('metric'), key: url.searchParams.get('key'), authorized: role !== 'reader' });
-  };
-}
 
 /** The fixture API: the JSON body the control plane would return for `path` (with its query). */
 export function fixtureApi(path, role = 'admin') {
@@ -156,23 +94,8 @@ export function fixtureApi(path, role = 'admin') {
   if (route === 'work-snapshot') return { work, jobs: [], now: at(0) };
   if (route === 'work') return work;
   if (route === 'events') return [{ seq: 3, kind: 'claim', actor: 'worker-3', created_at: at(-4 * hour) }, { seq: 2, kind: 'ready', actor: 'operator', created_at: at(-day) }, { seq: 1, kind: 'create', actor: 'operator', created_at: at(-10 * day) }];
-  if (route.startsWith('analytics/flow')) return flowApi(work, role)(path);
-  if (route.startsWith('analytics/attribution')) {
-    const empty = { observedAt: at(0), from: at(-30 * day), to: at(0), days: 30, records: [], recordsTruncated: false, requests: [], requestsTruncated: false, environments: {}, blockedNow: [] };
-    return route.endsWith('/drilldown') ? { rows: [], columns: [], total: 0, truncated: false } : computeAttribution(empty);
-  }
-  if (route === 'shipping-pulse') {
-    const done = work.filter(w => w.stage === 'done');
-    const week = index => ({ start: at((index - 12) * 7 * day), end: at((index - 11) * 7 * day), count: done.filter(w => { const t = Date.parse(w.delivery.mergedAt) - NOW; return t >= (index - 12) * 7 * day && t < (index - 11) * 7 * day; }).length });
-    return { generatedAt: at(0), range: { start: at(-84 * day), end: at(0), weeks: 12, semantics: 'repository-utc-inclusive' }, completeness: 'complete', truncated: false,
-      counts: { days7: done.filter(w => Date.parse(w.delivery.mergedAt) > NOW - 7 * day).length, days30: done.length }, intentToMerge: { medianHours: 240, sampleSize: done.length, excluded: 0 },
-      prToProduction: { averageHours: null, medianHours: null, p90Hours: null, sampleSize: 0, eligible: done.length, excluded: done.length, coveragePercent: 0, sparse: true, exclusions: { 'no-verifiable-production-deployment': done.length }, split: { prToMergeAverageHours: 20, mergeToProductionAverageHours: null } },
-      weeks: Array.from({ length: 12 }, (_, index) => week(index + 1)),
-      recent: done.map(w => ({ key: w.key, title: w.title, pullRequest: w.candidate?.pr ?? null, mergeSha: w.delivery.mergeSha, mergedAt: w.delivery.mergedAt, quality: { passingProofs: 1, requiredProofs: 1, violations: [] } })) };
-  }
   if (route === 'delivery') return { environments: [], releases: [], rollbacks: [], now: at(0) };
   if (route.startsWith('validation')) return { requests: [], candidates: [], nextCursor: null };
-  if (route === 'proof-grants') return { authorities: [{ principalId: 'ci', role: 'producer', patterns: ['integration:*', 'unit:*'], source: 'grant' }], grants: [] };
   if (route === 'operator-agents') return [];
   return [];
 }
@@ -254,12 +177,6 @@ async function main() {
   await page.keyboard.press('Escape');
   await page.getByRole('button', { name: /Shipped/ }).first().click();
   await shot('04-shipped');
-  await page.getByRole('button', { name: /Insights/ }).click();
-  await page.waitForLoadState('networkidle');
-  await shot('05-insights');
-  await page.getByText('Show details', { exact: true }).click();
-  await page.getByRole('heading', { name: 'Where work is waiting' }).waitFor();
-  await shot('06-flow-analytics');
   await page.getByRole('button', { name: /Settings/ }).click();
   await page.waitForLoadState('networkidle');
   await shot('07-settings');

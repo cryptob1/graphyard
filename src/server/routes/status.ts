@@ -2,7 +2,6 @@ import { z } from 'zod';
 import { demand, dropRetiredScopeFields, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
-import { catchUpPipelineTimelines, pipelineBackfillState, readPipelineTimelines } from '../../pipeline-backfill.js';
 import { delegationSnapshot } from '../../delegation.js';
 import { loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, loopPanesRegistry, loopRegistry, loopSupervision, loopSupervisionHeader, reportedLoopMerger } from '../../model/loop-presence.js';
 import { releaseInfo, schemaVersion } from '../../release.js';
@@ -16,7 +15,7 @@ import { autoMergeStatus, mergeWriterStatus } from '../../merger-mode.js';
 import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
-import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment, leadTimeReport } from '../../flow-analytics.js';
+import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../production-environment.js';
 import { boardFromStatus } from '../../model/board.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { snapshotPage } from '../../store/paged-snapshot.js';
@@ -37,15 +36,10 @@ export const statusRoutes = defineRoutes('status', [
       // Settled deliveries as the work index's summary (GY-1376): this read never loads every document.
       const work = await engine.store.fleet();
       const visibleWork = operatorVisible(work);
-      // The one speed number (GY-1989), read from the items' own release records; a failed read is
-      // absent, never an error: the status every client polls keeps answering. It names work items
-      // across the repository, so a scoped operator agent does not read it, exactly as production.
-      const eventsReader = (path: string) => readEventHistory(services.engine.store.pool, parseEventHistoryQuery(new URLSearchParams(path.startsWith('events?') ? path.slice('events?'.length) : path)));
-      const leadTime = actor.role === 'operator-agent' ? null : await leadTimeReport(visibleWork, eventsReader).catch(() => null);
       // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
       // on the read every client polls, so the Needs you page renders that table (GY-102).
       // The production environment the master publishes (else this process's own setting), so the
-      // dashboard reads a release as live under the same name the flow report's production phase uses.
+      // dashboard reads a release as live under the same name the production watch uses.
       const productionEnvironment = await resolvedProductionEnvironment(engine.store.pool);
       const humanOnly = openHumanOnly(await humanOnlySubjects(services, visibleWork), observedAt.getTime());
       const loop = await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt);
@@ -56,8 +50,6 @@ export const statusRoutes = defineRoutes('status', [
         // the build/protocol the CLI checks before brokering a merge. Production names work
         // items across the repository, so a scoped operator agent does not see it.
         delegationLimits: services.delegationLimits, build, repositoryPolicy: repositoryPolicy(), production: actor.role === 'operator-agent' ? null : production?.status() ?? null, productionEnvironment,
-        // What the timeline reconstruction has done in this process, and any failure it hit.
-        pipelineBackfill: pipelineBackfillState(observedAt.getTime()),
         // The fleet as the registry holds it: each account's runtime, model, eligibility, sessions,
         // quota and reset time. `?host=` (or the executor-host header) judges placement for that
         // executor. It names hosts and login homes, so implementers and producers do not read it.
@@ -70,8 +62,6 @@ export const statusRoutes = defineRoutes('status', [
         autoMerge: await autoMergeStatus(engine.store.pool),
         // Delivery defaults, applications and case bindings (GY-1901).
         project: projectDelivery(),
-        // Median lead time, released to merged, over the last 10 merges (GY-1989).
-        leadTime,
         // Heartbeat latency and the renewals refused or failed server-side, this process, last 10 minutes (GY-558).
         leaseHealth: engine.leaseHealth.report(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):
@@ -100,7 +90,7 @@ export const statusRoutes = defineRoutes('status', [
   {
     // The master loop publishes the production environment it resolves from its own configuration
     // (`graphyard master config productionEnvironment=…`), which lives only on the master's host.
-    // Recorded once per change in the installation ledger; every status and flow read uses it.
+    // Recorded once per change in the installation ledger; every status read uses it.
     method: 'POST', path: '/api/production-environment',
     async handle(context) {
       const { actor, services: { engine } } = context;
@@ -127,16 +117,6 @@ export const statusRoutes = defineRoutes('status', [
       const loopInterval = actor.role === 'coordinator' ? loopPresenceInterval(req.headers[loopPresenceHeader.toLowerCase()]) : null;
       if (loopInterval !== null) loopRegistry(services.engine).observe({ principal: actor.id, intervalSeconds: loopInterval, supervision: loopSupervision(req.headers[loopSupervisionHeader.toLowerCase()]) }, new Date());
       if (loopInterval !== null) loopPanesRegistry(services.engine).observe(loopPanes(req.headers[loopPanesHeader.toLowerCase()]));
-      // Bounded catch-up: items that predate the per-item timeline gain one from their own
-      // ledger before the snapshot every speed report is derived from is read. The ledger is read
-      // outside the coordination lock, one run at a time; it converges and then costs one small
-      // query per settle window; a failure is reported through /api/status, never here.
-      //
-      // It rides the default and full reads, which are the reads its output is for: master status
-      // derives every speed report from their timelines. The coordination view is the inverted loop's
-      // poll — the cycle and the dispatcher ask for it every few seconds — and a ledger
-      // reconstruction in front of those reads would sit in the path of every step.
-      if (view !== 'coordination') await catchUpPipelineTimelines(services.engine.store);
       const scope = <T extends { work: Work[]; jobs: IntegrationJob[] }>(snapshot: T) => {
         const visibleWork = operatorVisible(snapshot.work);
         return { ...snapshot, work: visibleWork, jobs: actor.role === 'operator-agent' ? snapshot.jobs.filter(job => visibleWork.some(work => work.id === job.work_id)) : snapshot.jobs };
@@ -172,15 +152,6 @@ export const statusRoutes = defineRoutes('status', [
         if (cut) { trimmedView.omitted.evidence += cut.evidence; trimmedView.omitted.dispatchHistory += cut.dispatchHistory; trimmedView.omitted.queueHistory += cut.queueHistory; trimmedView.omitted.actionHistory += cut.actionHistory; trimmedView.omitted.sessions += cut.sessions; }
       }
       return trimmedView;
-    },
-  },
-  {
-    // Every item's timeline alone (GY-1489): `master status` reads the coordination view, which
-    // drops them, and attaches these to measure speed. The same bounded catch-up runs first.
-    method: 'GET', path: '/api/pipeline-timelines',
-    async handle({ services, operatorVisible }) {
-      await catchUpPipelineTimelines(services.engine.store);
-      return { timelines: operatorVisible(await readPipelineTimelines(services.engine.store)) };
     },
   },
   {

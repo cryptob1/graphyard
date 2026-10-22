@@ -5,7 +5,6 @@ import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerPro
 import { carriedApproval } from './carry.js';
 import { mechanicalReviewHold } from '../mechanical-findings.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
-import { itemLane, laneRequirements, laneSpeedTargets, type Lane } from './policy.js';
 import { isDelivered } from './closure.js';
 import { reviewedBeforeMerge, riskOf } from './risk-class.js';
 import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
@@ -47,24 +46,13 @@ export function mergeLedgerRefusals(ledger: MergeLedgerState | null | undefined,
 /** The test and merge gates' refusal until the merge writer has observed the candidate at exactly the current head and base tip. */
 export const unobservedCandidateRefusal = 'The merge writer has not observed the current candidate';
 
-// ---- Risk lanes (GY-883) -------------------------------------------------------------------------
-
-// The per-lane required set lives with the path policy it scales (model/policy.ts); the verdict
-// here is one of its readers.
-export { laneRequirements };
-
 /**
- * The item's stage, gates and lane, judged from the record alone. The merge writer merges each
+ * The item's stage and gates, judged from the record alone. The merge writer merges each
  * candidate whose gates pass (docs/delivery.md); nothing here places it in a queue of Graphyard's own.
  */
-export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; gates: Gate[]; violations: string[]; lane: Lane; speedTarget: number; postMergeReview?: PostMergeReviewState | null } {
+export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; gates: Gate[]; violations: string[]; postMergeReview?: PostMergeReviewState | null } {
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
-  // The lane rides the one landability verdict, not beside it (GY-883 AC-3): the verdict
-  // (model/landability.ts) takes the item's lane and decides which facts it requires; the
-  // evaluation reports the lane with its speed target.
-  const lane = itemLane(work);
-  const speedTarget = laneSpeedTargets[lane];
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
   add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`),
     ...(work.blocker ? [work.blocker] : [])]);
@@ -98,19 +86,16 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
     : work.formalReviewResetRequired ? 'A new independent approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
   // An approval naming mechanical nits waits for its worker-bot round before the merge writer may merge (GY-971).
   const mechanicalHold = reviewPassed ? mechanicalReviewHold(work, now.getTime()) : null;
-  // Review by risk (GY-1525): a head the control plane observed itself is judged by the class of its
-  // merge delta (model/risk-class.ts), not by the path lane. A sensitive delta needs the exact-head
-  // approval before it merges; a normal one passes here and owes one post-merge review
-  // (model/post-merge-review.ts), which the evaluation marks on the item — unless the repository
-  // declares `review.normalChanges: pre-merge` (GY-1843), when a normal one needs its approval too
-  // and owes none after. A pull-request-era observation is untouched.
-  const byRisk = current && obs!.source === 'control-plane' && work.policy.review ? riskOf(work) : null;
+  // The one merge rule (GY-1525): a head is judged by the class of its merge delta
+  // (model/risk-class.ts). A sensitive delta needs the exact-head approval before it merges; any
+  // other passes here and owes one post-merge review (model/post-merge-review.ts), which the
+  // evaluation marks on the item.
+  const byRisk = current && work.policy.review ? riskOf(work) : null;
   const beforeMerge = byRisk ? reviewedBeforeMerge(byRisk.risk) : true;
   const riskRefusal = reviewPassed || !beforeMerge ? [] : byRisk?.risk === 'sensitive' ? [sensitiveReviewRefusal(byRisk.reasons)] : [reviewRefusal];
   const postMerge = byRisk ? postMergeReviewMark(work, beforeMerge ? 'sensitive' : byRisk.risk, reviewPassed) : {};
-  // A change request holds only when this mode still requires a pre-merge review: a pull-request-era observation, a
-  // sensitive control-plane delta, or any delta under a pre-merge repository. A normal-risk change
-  // request reviewed after merge is attention for the post-merge pass, never a merge gate (GY-1525).
+  // A change request holds only a sensitive delta (or a candidate not yet observed). A normal-risk
+  // change request is attention for the post-merge pass, never a merge gate (GY-1525).
   const changeRequestHold = changesRequested && beforeMerge
     ? ['Outstanding change requests must be resolved through a new review'] : [];
   add('review', work.policy.review ? [
@@ -133,5 +118,5 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   let stage: Stage = !work.ready ? 'backlog' : !work.submission ? (work.lease && Date.parse(work.lease.expiresAt) > now.getTime() ? 'build' : 'ready') : (first?.name === 'ready' ? 'build' : first?.name as Stage ?? 'merge');
   // Delivery history stays complete; later observations cannot rewrite it.
   if (work.stage === 'done') stage = 'done';
-  return { stage, gates, violations, lane, speedTarget, ...postMerge };
+  return { stage, gates, violations, ...postMerge };
 }

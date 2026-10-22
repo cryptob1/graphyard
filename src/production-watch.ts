@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Store } from './store.js';
 import type { Work } from './model.js';
 import type { BuildIdentity } from './protocol-version.js';
-import { productionEnvironmentEvent, productionEnvironmentName } from './flow-analytics.js';
+import { productionEnvironmentEvent, productionEnvironmentName } from './production-environment.js';
 
 /**
  * Production deployment observation for the managed base branch.

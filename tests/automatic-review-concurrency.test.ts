@@ -5,7 +5,6 @@ import { dirname } from 'node:path';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { automaticReviewerConcurrency, liveMasterConfig, loadMasterConfig, loadStoredMasterConfig, profileConcurrency, saveMasterSettings, withReviewerDefaults } from '../src/master.js';
-import { assertNameAvailable } from '../src/master-resources.js';
 import { heldNameAttention, launchReview, readReviewLedger, reconcileReviews, settledCloseAttempts } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, selectReviewerProfile } from '../src/auto-dispatch.js';
 import { fleet, requested, starts } from './helpers/review-fleet.js';
@@ -38,8 +37,6 @@ test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set an
     assert.equal(pending.length, 3);
     assert.deepEqual(pending.map(record => record.agentName), items.map(item => `claude-reviewer-${item.autoDispatch!.review!.id.slice(0, 8)}`), 'each session is named for its request');
     assert.deepEqual(host.agents.map(agent => agent.name), pending.map(record => record.agentName), 'all three run at once');
-    // A fourth review still has a name to take: the namespace is not at its bound.
-    assert.doesNotThrow(() => assertNameAvailable('reviewer', profile!, host.agents));
 
     // Three launches answering three requests at the same moment, outside the dispatcher's turns.
     const parallel = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');

@@ -10,7 +10,7 @@ import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/tes
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
 import { underTestRunner } from '../supervisor.js';
-import type { HostMemoryReading } from '../master-resources.js';
+import type { HostMemoryReading } from '../master/host-memory.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -130,8 +130,7 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
 export const trialLookupEntries = ['node_modules', '.git', 'package.json'] as const;
 /**
  * Where a trial's temporary directory and short checkout may go, in order: the platform's own, then
- * the coordinator's. They are the roots the loop's tmp reclaim scans (`hostTmpRoots`), so a
- * directory a crashed trial left behind, its owner gone, is taken back by that bounded pass.
+ * the coordinator's.
  */
 export const trialTemporaryRoots = (own = tmpdir()): string[] => [...new Set(['/tmp', own])];
 /** Whether `directory` or a folder above it, the filesystem root included, holds an entry an upward lookup would resolve. */
@@ -184,11 +183,11 @@ export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: 
   }
   return null;
 }
-/** This process's trial checkouts whose removal failed (GY-2020): kept marked as its own, and taken back by the next reclaim pass though it lives. */
+/** This process's trial checkouts whose removal failed (GY-2020): kept marked as its own, and taken back by the next trial though it lives. */
 const abandonedTrialCheckouts = new Set<string>();
 /**
- * Takes back the short checkouts a crashed trial left in `root` (GY-2020): the tmp reclaim scans only
- * the temporary roots, so a `gy-c` directory here whose owner marker names a process that is gone, or
+ * Takes back the short checkouts a crashed trial left in `root` (GY-2020): a `gy-c` directory here
+ * whose owner marker names a process that is gone, or
  * one this process failed to remove (`clearTrialCheckout`), is removed, with its marker, before the
  * next trial makes its own. Best effort: nothing here fails a trial.
  */
@@ -205,9 +204,8 @@ export async function reclaimTrialCheckouts(root: string): Promise<string[]> {
 }
 /**
  * Removes a trial's short checkout directory (GY-2020). Its owner marker goes only once the directory
- * has: the trials folder has no tmp reclaim to take an ownerless leftover, so a removal that fails
- * keeps the marker and is remembered as abandoned, and the next trial's reclaim pass (or any pass once
- * this process is gone) takes it back. The failure is rethrown.
+ * has: a removal that fails keeps the marker and is remembered as abandoned, and the next trial
+ * (or any trial once this process is gone) takes it back. The failure is rethrown.
  */
 export async function clearTrialCheckout(directory: string, remove: (path: string) => Promise<void> = path => rm(path, { recursive: true, force: true })): Promise<void> {
   try { await remove(directory); } catch (error) { abandonedTrialCheckouts.add(directory); throw error; }
@@ -216,8 +214,7 @@ export async function clearTrialCheckout(directory: string, remove: (path: strin
 /**
  * The name prefix of a trial's temporary directory. It stays this short, as CI's /tmp is
  * (`graphyard-trial-` lengthened master-agent-envs' and master-loop-resilience's launch lines past
- * their bound), and it is one of the tmp reclaim's own names (`gy-`), so the loop's pass takes a
- * directory a crashed merge writer left, its owner marker naming a process that is gone.
+ * their bound).
  */
 export const trialTemporaryPrefix = 'gy-t';
 /**
@@ -307,13 +304,13 @@ export function trialShardBreadth(cores: number, shards: number, affordableFiles
 }
 /**
  * The files the host's memory affords a trial's shards at once (GY-1832), or null when it cannot be
- * read: available memory less the floor and the recovery margin the loop defers launches at,
+ * read: available memory less the floor and the recovery margin,
  * `bytesPerSuiteFile` a file, less the files runs holding the host's verification slots under
  * `slots` declared and may not yet have allocated — as tests/helpers/run-tests.ts's breadth
  * deducts them, since the shards' environment carries no slot of their own.
  */
 export async function trialAffordableFiles(read?: () => Promise<HostMemoryReading | null>, slots?: string): Promise<number | null> {
-  const resources = await import('../master-resources.js'), { bytesPerSuiteFile, othersDeclaredFiles } = await import('../master/verification-slots.js');
+  const resources = await import('../master/host-memory.js'), { bytesPerSuiteFile, othersDeclaredFiles } = await import('../master/verification-slots.js');
   const reading = await (read ?? resources.readHostMemory)();
   if (!reading) return null;
   return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile) - (slots ? othersDeclaredFiles(slots) : 0);
@@ -410,7 +407,7 @@ export class TrialRunnerError extends Error {
 /**
  * A trial directory could not be removed afterwards, so it is left behind: the session directory
  * under the managed root (the orphan reclaim removes it later), or the temporary or short checkout
- * directory, its owner marker dropped so the tmp reclaim takes it once it ages (GY-1565).
+ * directory, its owner marker dropped (GY-1565).
  * `directory` is the one that failed. The verdict the trial reached, if it reached one, rides
  * along so the failure is recorded beside it rather than in place of it.
  */
@@ -593,13 +590,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const enter = (next: TrialPhase = phase) => { const at = now(); phases[phase] += Math.max(0, at - phaseAt); phase = next; phaseAt = at; return { ...phases }; };
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
   // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
-  // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's so a
-  // crash before the cleanup leaves it to the tmp reclaim.
+  // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
-    // A temporary directory that would not go loses its owner marker, so the tmp reclaim takes it once it ages rather than keeping it for this live process.
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
   };
   try {

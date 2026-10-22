@@ -6,7 +6,7 @@ import { admin, demand, type Principal, type ReleaseDelivery, type Work } from '
 import { save } from './store.js';
 import { deliveryPolicy, type Environment, type Registration, type RollbackFencing, type Validation } from './validation.js';
 import { digestHash } from './attribution.js';
-import { resolvedProductionEnvironment } from './flow-analytics.js';
+import { resolvedProductionEnvironment } from './production-environment.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);

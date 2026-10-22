@@ -2,7 +2,6 @@
 import { type AttentionItem, agentOwner } from '../master.js';
 import { type Work } from '../model.js';
 import { boundDaemonState, type CycleFailures, type CycleMetrics, type CycleStepName, type CycleSteps, type DaemonState, initialPidNamespace, liveProcess, type LoopRelease, message, pidNamespace, type PromotionState, type StepCost } from './state.js';
-import type { LatencyBudget } from './metrics.js';
 import type { DaemonEffects } from './effects.js';
 import { slowestSteps } from '../master/timings.js';
 
@@ -256,9 +255,9 @@ export const culpritShare = (cost: Pick<CycleCost, 'culprit' | 'workMs'>) => cos
 
 /**
  * The loop's own attention, ahead of every work item: a coordinator that is not cycling is why
- * nothing else on the list is moving. A breached latency budget follows it.
+ * nothing else on the list is moving.
  */
-export function loopAttention(report: { liveness: LoopLiveness; /** Retired (GY-1980): always null, ignored. */ silence?: null; budget?: LatencyBudget | null; failures?: CycleFailures | null; cost?: CycleCost | null }): AttentionItem[] {
+export function loopAttention(report: { liveness: LoopLiveness; /** Retired (GY-1980): always null, ignored. */ silence?: null; failures?: CycleFailures | null; cost?: CycleCost | null }): AttentionItem[] {
   const items: AttentionItem[] = [];
   const cost = report.cost ?? report.liveness.cost;
   // What to do about a long cycle depends on where its time went: a step that computed too long
@@ -282,8 +281,6 @@ export function loopAttention(report: { liveness: LoopLiveness; /** Retired (GY-
   if (failures?.last && failures.consecutive >= cycleFailureAttentionAfter) items.push({ subject: 'loop',
     text: `The master loop has failed ${failures.consecutive} consecutive cycles, the last (cycle ${failures.last.cycle} at ${failures.last.at}) in ${describeFailingCall(failures.last)}: ${failures.last.reason}. It keeps cycling in-process, waiting ${Math.round(failures.last.delayMs / 1000)}s before the next attempt (due ${failures.last.nextAt}); a restart does not clear this`,
     ...agentOwner('master', `graphyard master status shows daemon.failures with the failing call and its reason; clear what ${describeFailingCall(failures.last)} is refusing on`) });
-  if (report.budget?.met === false) items.push({ subject: 'loop', text: `The unattended delivery budget is not met: ${report.budget.reasons.join('; ')}`,
-    ...agentOwner('master', 'graphyard master status shows daemon.budget with every measured passage; clear what is holding the breached step') });
   return items;
 }
 
@@ -377,4 +374,23 @@ export function progressAttention(work: readonly Work[], release: Pick<Promotion
       text: `${unreleased.length} merged change(s) have not reached the running release for ${Math.round((now - oldest.at) / 60_000)} minutes; the oldest is ${oldest.key} merged at ${new Date(oldest.at).toISOString()}; ${promotedAt === null ? 'no release has been observed' : `the release last moved at ${new Date(promotedAt).toISOString()}`}`,
       ...agentOwner('master', 'graphyard master status shows the continuous deploy under promotion; judge why the release has not moved onto the merged heads and unblock it — the merges themselves are delivered') });
   return items;
+}
+
+/**
+ * How the coordination cycle keeps to its configured interval, from the durations the daemon
+ * records for its retained cycles: the last one, the p95, and every cycle that overran. A cycle
+ * longer than its interval means the loop is falling behind the work it shepherds.
+ */
+export function cycleBudget(state: Pick<DaemonState, 'metrics'>, intervalMs: number) {
+  const metrics = state.metrics;
+  const last = metrics.at(-1) ?? null;
+  const durations = metrics.map(metric => metric.durationMs).sort((a, b) => a - b);
+  const p95Ms = durations.length ? durations[Math.min(durations.length - 1, Math.ceil(durations.length * 0.95) - 1)] : null;
+  const overruns = metrics.filter(metric => metric.durationMs > intervalMs);
+  const describe = (m: CycleMetrics) => ({ cycle: m.cycle, at: m.at, durationMs: m.durationMs, childWaitMs: m.childWaitMs ?? null, workMs: m.workMs ?? null });
+  return {
+    intervalMs, measured: metrics.length, lastCycle: last ? describe(last) : null,
+    withinInterval: last ? last.durationMs <= intervalMs : null, p95Ms, overruns: overruns.length,
+    lastOverrun: overruns.length ? describe(overruns.at(-1)!) : null,
+  };
 }

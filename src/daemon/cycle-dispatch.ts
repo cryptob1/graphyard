@@ -1,8 +1,7 @@
 // Concern: cycle step 4 — dispatch claimable work under capacity and report base refreshes.
 import type { Work } from '../model.js';
 import { pendingBaseRefresh } from '../model/base-refresh.js';
-import { dispatchSort, inFlight } from '../coordination.js';
-import { isHotfix, maxInFlight, wipHoldWording } from '../model/dispatch.js';
+import { dispatchSort } from '../coordination.js';
 import { type CapacityRole, capacitySignature, standingCapacity, describeCapacity } from '../model/capacity.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand } from '../model/human-request.js';
 import { humanNeededActions } from '../model/next-action.js';
@@ -21,7 +20,6 @@ import type { Cycle } from './cycle.js';
 import { credentialBlockedMarker } from '../worker-credential.js';
 import { attemptEndsNeedingRetry, attemptRetryHold, maxFailedAttempts, preferOtherRuntime, retryBackoffMs, runtimeToAvoid, type AttemptRetryHold } from './reblocked-attempts.js';
 import { hotBeside, hotspots, type Hotspot } from './hotspots.js';
-import { judgeHostMemory } from '../master-resources.js';
 import { deploySkewFailure, planeWideFailure } from '../model/refusal.js';
 import { carriedCall, launchWrite, owedWrite, recordCarried, stepCallCarried, supersedeOwed, unboundedEffects, withinStepBudget } from './step-budget.js';
 
@@ -107,7 +105,7 @@ export function saturatedFleet(health: readonly ProfileHealth[], held: (entry: P
 
 /** Step 4: dispatch claimable work under capacity, and report base refreshes of in-flight candidates. */
 export const dispatchStep = (cycle: Cycle, health: ReturnType<typeof profileHealth>) =>
-  withinStepBudget(cycle, 'dispatch', ['agents', 'roleHealth', 'reportCapacity', 'planeHealth', 'hostMemory'], bounded => dispatchStepWithin(bounded, cycle, health)); // GY-1774: every call the step makes — the role and plane health reads, each capacity report and the memory reading — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
+  withinStepBudget(cycle, 'dispatch', ['agents', 'roleHealth', 'reportCapacity', 'planeHealth'], bounded => dispatchStepWithin(bounded, cycle, health)); // GY-1774: every call the step makes — the role and plane health reads and each capacity report — is bounded; the body runs on a copy of the cycle, so its saturation report is set on the original the measure reads
 async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: ReturnType<typeof profileHealth>) {
   const { config, state, effects, now, snapshot, clock, performed, isolate, agents, credentials, open } = cycle;
   // 4. Dispatch claimable work to a healthy profile. The launcher claims under the worker's own
@@ -219,36 +217,16 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await carriedCall(cycle, 'dispatch', 'dispatch', 'planeHealth', () => effects.planeHealth!(), error => `the control plane's health read was carried to the next cycle, which reads it again: ${message(error)}`) : null;
   if (unrecordable && detailChanged(state.actions['attention:dispatch:plane'], `Dispatch held: ${unrecordable}`))
     performed.push(await record(state, 'attention:dispatch:plane', { kind: 'attention', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['attention:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-  // A host below its memory floor launches no worker (GY-612): the crossing is recorded once each
-  // way — deferred with its reason and top consumers, resumed once memory recovers — and master
-  // status raises one `resources` attention item while it stands. Running sessions are left alone.
-  const memoryLow = await hostMemoryStep(cycle);
   // Each item's profile is chosen in dispatch order, one after another, and taken before the next
   // item chooses; the launches themselves do not depend on each other and are handed to the
   // launcher beside the cycle (GY-616), which runs them a few at a time while the cycle goes on to
   // its decisions, merges and closes. Each launch holds a distinct healthy profile from hand-off
   // until it settles, across cycles: a profile an earlier cycle's launch still holds is taken.
   const taken = cycle.launcher.held();
-  // GY-2097: at most `maxInFlight` items in flight. The loop starts new implementation work only
-  // while fewer than `maxInFlight` items are being built or waiting to merge — `inFlight`: a live
-  // lease, or a standing submission — and an item titled "Hotfix: …" starts whatever the count.
-  // The count is read once from this cycle's snapshot, and each launch this cycle hands over joins
-  // it, so one cycle cannot oversubscribe past the cap. A held item is the cap's capacity, not the
-  // loop's silence (the GY-1890 reading a saturated fleet gets): `saturation.wipHeld` retitles the
-  // wait for the measure, and one capacity record names the cap while the count stands.
-  let inFlightCount = snapshot.work.filter(entry => inFlight(entry, clock)).length;
   // The `launches` step is the hand-off: choosing each item's profile and handing its launch over.
-  await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable || memoryLow ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
+  await cycle.timings.step('launches', async () => { for (const item of workersSpent || unrecordable ? [] : claimable) if (await isolate('dispatch', item, item.key, async () => {
     const key = dispatchKey(item);
     if (cycle.launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) return;
-    // GY-2097: the cap holds every item but a hotfix before any profile is picked, so a held item
-    // neither cools a profile nor reports the fleet busy; its wait ends when a merge frees a slot.
-    if (inFlightCount >= maxInFlight && !isHotfix(item)) {
-      saturation.wipHeld = true;
-      const heldKey = `wip:${item.id}`, detail = `${item.key} ${wipHoldWording.held}`;
-      if (detailChanged(state.actions[heldKey], detail)) performed.push(await record(state, heldKey, { kind: 'capacity', work: null, principal: null, state: 'done', detail, attempts: (state.actions[heldKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      return;
-    }
     // GY-860: a workspace failure hands the epoch back, so the next dispatch reuses this key; it
     // waits out the usual doubling backoff instead of retrying the same host git state every cycle.
     const failed = state.actions[key];
@@ -300,7 +278,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
     // GY-1836: the launch prepares from the tip this cycle's snapshot fetched however long it
     // waits in the queue, so the cycle's fetch is held from now until the launch settles.
     const releaseBase = holdCycleBase(snapshot.now);
-    if (cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued).finally(releaseBase))) inFlightCount += 1; else releaseBase();
+    if (!cycle.launch('dispatch', item, key, holds, sink => launch(item, key, choice!, free, pick, holds, sink, beside, queued).finally(releaseBase))) releaseBase();
   }) === 'stop') break; });
 
   /** What a dispatch that starts on a hot file adds to its record, so master status can show the contention (GY-882). */
@@ -415,22 +393,6 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
       attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   });
   return { capacities };
-}
-
-/** The key of the loop's host-memory record: one deferral and one resumption per crossing. */
-export const memoryActionKey = 'attention:dispatch:memory';
-/** Read the host's memory, keep it on the loop's state, and record a crossing of its floor. Whether launches are deferred. */
-export async function hostMemoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'config' | 'performed'>) {
-  const { state, effects, now, config, performed } = cycle;
-  if (!effects.hostMemory) return false;
-  const reading = await carriedCall(cycle, 'dispatch', 'attention', 'hostMemory', () => effects.hostMemory!(), () => null).catch(() => null);
-  // An unreadable host keeps the last judgment: a deferral is not lifted by a failed read.
-  if (!reading) return !!state.memory?.low;
-  const judged = judgeHostMemory(state.memory, reading, now(), config.hostId ?? null);
-  state.memory = judged.state;
-  if (judged.event) performed.push(await record(state, memoryActionKey, { kind: 'attention', work: null, principal: null, state: 'done', detail: judged.detail.slice(0, 1000),
-    attempts: (state.actions[memoryActionKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-  return judged.state.low;
 }
 
 /** Name one backoff window the item's retry ladder is waiting out (GY-885): a record, so `master status` shows why nothing dispatches. */

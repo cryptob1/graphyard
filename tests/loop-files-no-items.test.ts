@@ -15,7 +15,7 @@ import type { Work } from '../src/model.js';
 
 // GY-2186: the loop files no work item on its own. A cycle that sees a test failing on the base
 // branch, a flaky test past its rerun, a failing advisory test after a merge, exhausted docs
-// headroom and a throughput needs-decision — plus every recurring fault class at any count — makes
+// headroom — plus every recurring fault class at any count — makes
 // no work-item request: each is a master-status attention line, and the loop's effects expose no
 // filing route at all.
 
@@ -39,11 +39,11 @@ function item(key: string, overrides: Partial<Work> = {}): Work {
     gates: [], violations: [], ...overrides,
   } as unknown as Work;
 }
-/** The serving delivery the deployment step verifies, so the throughput measurement runs. */
+/** The serving delivery the deployment step verifies. */
 const delivered = () => item('GY-87', { title: "GY-87's throughput claim", delivery: { mergedAt: iso(-2 * hour), mergeSha: sha('m'), authorizationRevision: 1,
   deployment: { sha: serving, mergeSha: sha('m'), source: 'endpoint', observedAt: iso(-hour), covers: 'exact', at: iso(-hour), observer: 'coordinator-1' } } } as Partial<Work>);
 
-test('unit:loop-files-no-items — a cycle with a failing base test, a flaked rerun, a failing advisory test, saturated docs headroom and a throughput needs-decision files nothing and raises no escalation', async t => {
+test('unit:loop-files-no-items — a cycle with a failing base test, a flaked rerun, a failing advisory test, saturated docs headroom files nothing and raises no escalation', async t => {
   const root = await temporaryDirectory('loop-files-no-items');
   t.after(() => rm(root, { recursive: true, force: true }));
   const master = config(), state = emptyDaemonState(master);
@@ -71,10 +71,6 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
     closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(0), reason: null, deployed: ['GY-87'], pending: [], requests: 0 }),
     recordDeployment: async () => {},
-    // The measurement misses its p50 with an admitted population past the minimum: a needs-decision
-    // stands, and the loop neither files an owner nor raises an escalation on one (GY-2186).
-    measureThroughput: async () => ({ outcome: 'recorded', revision: serving, verdict: 'unverified',
-      detail: `Recorded for ${serving.slice(0, 12)}: unverified: submit→merge p50 45 min over the 30 min budget; 10 admitted of 10` }),
     persist: async () => {},
   };
   await runCycle(master, state, effects, () => clock);
@@ -82,11 +78,11 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
   // No work item was created and no decision requested: every action row is a record, not a filing.
   for (const action of Object.values(state.actions)) {
     assert.doesNotMatch(action.detail, /^Filed /, `nothing is filed: ${action.detail}`);
-    // A throughput or owner escalation would be a work-item ask; a launch-profile escalation on a
+    // An owner escalation would be a work-item ask; a launch-profile escalation on a
     // review-stage item is not a filing, so only those are forbidden here.
     if (action.kind === 'attention' && /needs decision on |owner|Filed /.test(action.detail)) escalations.push(`${action.work}: ${action.detail}`);
   }
-  assert.deepEqual(escalations, [], `no throughput or owner escalation is raised: ${JSON.stringify(escalations)}`);
+  assert.deepEqual(escalations, [], `no owner escalation is raised: ${JSON.stringify(escalations)}`);
   assert.deepEqual(Object.keys(state.actions).filter(key => key.includes('throughput:owner')), [], 'no throughput owner record');
 
   // 3. The base failure and the flake are the attention lines that name them.

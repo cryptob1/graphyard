@@ -57,18 +57,9 @@ export type DelegationLimitVariable = typeof delegationLimitVariables[number];
 const limitDefaults: Record<DelegationLimitVariable, number> = { GRAPHYARD_MAX_SLICE_LEADS: 3, GRAPHYARD_MAX_ENGINEERS_PER_LEAD: 2, GRAPHYARD_MIN_REVIEWERS: 1, GRAPHYARD_MAX_REVIEWERS: 2 };
 const countLeads = (principals: Roster) => principals.filter(p => p.role === 'slice-lead').length;
 type Roster = readonly Pick<Principal, 'id' | 'role' | 'grants' | 'proofs' | 'deploymentProviders'>[];
-// A reviewer slot is held only by a producer holding proof grants (GY-1879): a lane-only producer, a
-// producer configured with no proofs and one whose recorded grant was revoked to none hold none.
-// Callers holding the grant store pass the roster through `withRecordedProofs`, so a recorded grant decides it.
+// A reviewer slot is held only by a producer whose roster entry carries proof patterns (GY-1879): a
+// lane-only producer and a producer configured with no proofs hold none.
 export const proofProducer = (p: Pick<Principal, 'role' | 'proofs'>) => p.role === 'producer' && !!p.proofs?.length;
-/**
- * The roster with each producer's proofs as Graphyard's grant store records them (proof-grants.ts: a
- * record supersedes the environment seed), so a reviewer slot is counted from effective proof
- * authority: a lane producer later granted proofs holds one, and holds none again once they are revoked.
- */
-export function withRecordedProofs<T extends Roster[number]>(principals: readonly T[], recorded: ReadonlyMap<string, readonly string[]>): T[] {
-  return principals.map(p => p.role === 'producer' && recorded.has(p.id) ? { ...p, proofs: [...recorded.get(p.id)!] } : p);
-}
 const countProducers = (principals: Roster) => principals.filter(proofProducer).length;
 
 /**

@@ -34,8 +34,6 @@ export const glossary = {
   dependency: 'Another work item that has to ship before this one can start moving.',
   stage: 'Where an item is on its way to shipping: not started, needs a worker, being built, in review, automated checks, proving it works, merging, shipped.',
   'required check': 'A GitHub check that must pass before anything merges.',
-  'shipping pulse': 'Counts of merged work per week and how long delivery took, for the whole repository. It never ranks people.',
-  'flow analytics': 'Where work waits and how long each step takes, measured from Graphyard’s history.',
   'p50 / p90': 'Half of the items took less than the p50 time; nine in ten took less than the p90 time.',
 } as const;
 export type GlossaryTerm = keyof typeof glossary;

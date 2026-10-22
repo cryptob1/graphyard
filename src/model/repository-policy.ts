@@ -4,29 +4,24 @@ import { z } from 'zod';
 
 /**
  * What a repository declares about its own changes in `graphyard.json`, beside its documentation and
- * delivery policy: which paths are sensitive (`risk.sensitive`), when a normal-risk change is
- * reviewed (`review.normalChanges`), whether a required E2E case bound to an outcome not yet
+ * delivery policy: which paths are sensitive (`risk.sensitive`), whether a required E2E case bound to an outcome not yet
  * delivered blocks (`e2e.pendingOutcomes`), and what a failed release candidate does
  * (`release.onFailure`, `release.revertUnmatched`). Nothing here names Graphyard's own layout: a
  * repository that declares no `risk` gets `genericSensitiveRules`, common sensitive surfaces
  * anywhere in a tree, and Graphyard's own graphyard.json declares its list like any other repository.
  *
  * A sensitive entry is one glob (documentation-glob syntax: `dir/` a tree, `*` within a segment,
- * `**` across segments) and the rule a reason cites; several entries may share a rule. `only`
- * narrows an entry to the risk class (`risk`: review, worker preference, manual attestations) or to
- * the path lane (`lane`: ceremony); absent, it counts for both.
+ * `**` across segments) and the rule a reason cites; several entries may share a rule.
  */
 const glob = z.string().trim().min(1).max(200)
   .refine(path => !path.startsWith('/') && !path.split('/').some(segment => segment === '..' || segment === '.') && !/[\s\u0000-\u001f]/.test(path), 'Sensitive paths are repository-relative globs without . or .. segments or whitespace');
-export const sensitiveEntrySchema = z.object({ rule: z.string().trim().min(1).max(120), glob, only: z.enum(['risk', 'lane']).optional() }).strict();
+export const sensitiveEntrySchema = z.object({ rule: z.string().trim().min(1).max(120), glob }).strict();
 export type SensitiveEntry = z.infer<typeof sensitiveEntrySchema>;
-export const normalChangeReviews = ['post-merge', 'pre-merge'] as const;
 export const pendingOutcomeRules = ['non-blocking', 'blocking'] as const;
 /** What a failed release candidate does (GY-1848): `hold` names the failure and reverts nothing; `revert` is the behaviour a repository that declares nothing keeps. */
 export const releaseFailureActions = ['revert', 'hold'] as const;
 export const repositoryPolicySchema = z.object({
   risk: z.object({ sensitive: z.array(sensitiveEntrySchema).min(1).max(200) }).strict().optional(),
-  review: z.object({ normalChanges: z.enum(normalChangeReviews) }).strict().optional(),
   e2e: z.object({ pendingOutcomes: z.enum(pendingOutcomeRules) }).strict().optional(),
   release: z.object({ onFailure: z.enum(releaseFailureActions).optional(), revertUnmatched: z.boolean().optional() }).strict().optional(),
 }).strict();
@@ -34,7 +29,6 @@ export type RepositoryPolicyInput = z.infer<typeof repositoryPolicySchema>;
 /** The policy in force: every section resolved, the declared one or its default. */
 export interface RepositoryPolicy {
   risk: { sensitive: SensitiveEntry[]; declared: boolean };
-  review: { normalChanges: typeof normalChangeReviews[number] };
   e2e: { pendingOutcomes: typeof pendingOutcomeRules[number] };
   release: { onFailure: typeof releaseFailureActions[number]; revertUnmatched: boolean };
 }
@@ -61,7 +55,6 @@ export const genericSensitiveRules: readonly SensitiveEntry[] = [
 
 export const defaultRepositoryPolicy: RepositoryPolicy = {
   risk: { sensitive: [...genericSensitiveRules], declared: false },
-  review: { normalChanges: 'post-merge' },
   e2e: { pendingOutcomes: 'non-blocking' },
   release: { onFailure: 'revert', revertUnmatched: true },
 };
@@ -71,7 +64,6 @@ export function resolveRepositoryPolicy(input: unknown): RepositoryPolicy {
   const declared = repositoryPolicySchema.parse(input ?? {});
   return {
     risk: declared.risk ? { sensitive: declared.risk.sensitive, declared: true } : defaultRepositoryPolicy.risk,
-    review: declared.review ?? defaultRepositoryPolicy.review,
     e2e: declared.e2e ?? defaultRepositoryPolicy.e2e,
     release: {
       onFailure: declared.release?.onFailure ?? defaultRepositoryPolicy.release.onFailure,
@@ -90,9 +82,9 @@ const globSource = (pattern: string) => {
   return source.split(/(\*\*\/?|\*|\?)/).map(part => part === '**/' ? '(?:.*/)?' : part === '**' ? '.*' : part === '*' ? '[^/]*' : part === '?' ? '[^/]' : part.replace(/[.+^${}()|[\]\\]/g, '\\$&')).join('');
 };
 /** The rules a policy applies to `use`, grouped by rule name in declaration order. */
-export function compiledRules(policy: Pick<RepositoryPolicy, 'risk'>, use: 'risk' | 'lane'): CompiledRule[] {
+export function compiledRules(policy: Pick<RepositoryPolicy, 'risk'>): CompiledRule[] {
   const rules = new Map<string, string[]>();
-  for (const entry of policy.risk.sensitive) if (!entry.only || entry.only === use) rules.set(entry.rule, [...(rules.get(entry.rule) ?? []), entry.glob]);
+  for (const entry of policy.risk.sensitive) rules.set(entry.rule, [...(rules.get(entry.rule) ?? []), entry.glob]);
   return [...rules].map(([rule, globs]) => ({ rule, globs, pattern: new RegExp(`^(?:${globs.map(globSource).join('|')})$`) }));
 }
 /**
@@ -107,7 +99,7 @@ export const globSurface = (pattern: string) => {
 
 // ---- The policy in force for this process --------------------------------------------------------
 
-/** The deployment variable the control plane reads the policy from, as compact JSON of graphyard.json's `risk`, `review`, `e2e` and `release`. */
+/** The deployment variable the control plane reads the policy from, as compact JSON of graphyard.json's `risk`, `e2e` and `release`. */
 export const repositoryPolicyVariable = 'GRAPHYARD_REPOSITORY_POLICY' as const;
 /** The committed file the policy is read from when the variable is unset. */
 const configFile = 'graphyard.json';
@@ -115,13 +107,13 @@ const configFile = 'graphyard.json';
 type Source = 'environment' | 'graphyard.json' | 'default';
 let inForce: { policy: RepositoryPolicy; source: Source } | null = null;
 
-/** The `risk`, `review`, `e2e` and `release` sections of a parsed graphyard.json. */
+/** The `risk`, `e2e` and `release` sections of a parsed graphyard.json. */
 export const policySections = (config: Record<string, unknown> | null | undefined) =>
-  Object.fromEntries(['risk', 'review', 'e2e', 'release'].filter(key => config?.[key] !== undefined).map(key => [key, config![key]]));
+  Object.fromEntries(['risk', 'e2e', 'release'].filter(key => config?.[key] !== undefined).map(key => [key, config![key]]));
 
 /**
  * The deployment value an installer sets from a parsed graphyard.json (null when the repository has
- * none): compact JSON of its `risk`, `review` and `e2e` sections, `{}` when it declares none, so a
+ * none): compact JSON of its `risk`, `e2e` and `release` sections, `{}` when it declares none, so a
  * redeploy also clears a declaration since removed. The runtime image carries no repository, so this
  * variable is how the deployed control plane judges changes by the committed policy. Refuses a
  * declaration the control plane would refuse.
@@ -148,7 +140,7 @@ export function loadRepositoryPolicy(env?: Record<string, string | undefined>, r
   const raw = variables?.[repositoryPolicyVariable]?.trim();
   if (raw) {
     let value: unknown;
-    try { value = JSON.parse(raw); } catch { throw new Error(`${repositoryPolicyVariable} must be JSON of graphyard.json's risk, review, e2e and release sections, e.g. {"review":{"normalChanges":"pre-merge"}}`); }
+    try { value = JSON.parse(raw); } catch { throw new Error(`${repositoryPolicyVariable} must be JSON of graphyard.json's risk, e2e and release sections, e.g. {"e2e":{"pendingOutcomes":"blocking"}}`); }
     return { policy: resolveRepositoryPolicy(value), source: 'environment' };
   }
   const fs = host?.getBuiltinModule?.('node:fs'), path = host?.getBuiltinModule?.('node:path');
@@ -189,10 +181,10 @@ export function setRepositoryPolicy(policy: RepositoryPolicy | null, source: Sou
   inForce = policy ? { policy, source } : null;
 }
 
-/** What doctor prints of the policy in force at `root`: its sensitive rules, review timing, pending-outcome rule, release failure action and source. */
+/** What doctor prints of the policy in force at `root`: its sensitive rules, pending-outcome rule, release failure action and source. */
 export function doctorRepositoryPolicy(root: string) {
   try {
     const { policy, source } = loadRepositoryPolicy(undefined, root);
-    return { source, sensitive: policy.risk.declared ? policy.risk.sensitive : 'generic default', review: policy.review, e2e: policy.e2e, release: policy.release, variable: repositoryPolicyVariable };
+    return { source, sensitive: policy.risk.declared ? policy.risk.sensitive : 'generic default', e2e: policy.e2e, release: policy.release, variable: repositoryPolicyVariable };
   } catch (error: any) { return { error: error.message as string }; }
 }

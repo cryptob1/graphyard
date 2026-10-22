@@ -17,9 +17,9 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { bwrapOnPath, coordinatorCheckoutRefusal, readCoordinatorCheckout, readOnlyMountWrapper } from '../src/master/profiles.js';
-import { dataDirectory, orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
+import { dataDirectory, worktreeRoot } from '../src/install/worktree-root.js';
 import { atomicPrivateWrite, dispatchWork, loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { launchProducer, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
+import { launchProducer, readProducerLedger } from '../src/producer.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
@@ -137,19 +137,6 @@ const contextModule = fileURLToPath(new URL('../src/cli/context.ts', import.meta
 const cliRoot = (start: string, environment: Record<string, string>) => execFileSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--input-type=module', '-e',
   `const { createContext } = await import(${JSON.stringify(contextModule)}); console.log((await createContext('master', undefined, [], false)).repositoryRoot());`],
   { cwd: start, encoding: 'utf8', env: { ...process.env, ...environment } }).trim();
-/**
- * A reclaim pass run long past the orphan grace keeps `directory`, while it removes a stray
- * managed directory no session owns — so the pass did run, and what it left was owned.
- */
-async function survivesReclaim(root: string, config: MasterConfig, directory: string) {
-  const managedRoot = worktreeRoot(root, config);
-  const stray = join(managedRoot, `graphyard-approval-stray-${'0'.repeat(7)}-${'1'.repeat(8)}`);
-  await mkdir(stray, { recursive: true });
-  const report = await reclaimCheckouts(root, config, { now: Date.now() + 4 * orphanGraceMs });
-  assert.ok(report.removed.includes(resolve(stray)), 'the reclaim pass removes a managed directory no session owns');
-  return existsSync(directory) && !report.removed.includes(resolve(directory));
-}
-
 /** Effects both the loop's guard and the steps read: a snapshot over `work`, and stubs for everything else. */
 function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects {
   const base = {

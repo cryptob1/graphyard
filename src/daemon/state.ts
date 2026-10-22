@@ -9,7 +9,6 @@ import { boundDetail } from './text.js';
 import { waitReason } from '../model/action-kinds.js'; import { timingsSchema } from '../master/timings.js';
 import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
 import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
-import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 
 // 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
@@ -38,8 +37,8 @@ export const daemonActionSchema = z.object({
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
-const percentileSchema = z.object({ count: z.number().int().min(0), p50Ms: z.number().int().min(0), p90Ms: z.number().int().min(0) }).strict();
-const noMeasurement = { count: 0, p50Ms: 0, p90Ms: 0 };
+/** A field a release retired: an older cursor's value still parses. */
+const retired = z.unknown().optional();
 /**
  * The six phases of one cycle, in the order the cycle runs them. Each carries the milliseconds the cycle spent in it (`ms`) and, of
  * those, how many it spent waiting on a child process (`childWaitMs`): Herdr, gh, git or systemctl, run through the asynchronous runner
@@ -55,7 +54,7 @@ export type StepCost = z.infer<typeof stepCostSchema>;
 export const cycleStepsSchema = z.object({
   /** Reading the coordination snapshot and reconciling the actions an interrupted cycle left. */
   observe: stepCostSchema,
-  /** Closing finished sessions, failing over exhausted ones, and reclaiming worktrees and lapsed leases. */
+  /** Closing finished sessions, failing over exhausted ones, removing ended attempts' worktrees and reconciling lapsed leases. */
   close: stepCostSchema,
   /** Re-checking blockers, setting base failures aside and sending reworks. */
   decisions: stepCostSchema,
@@ -97,13 +96,8 @@ export const cycleMetricsSchema = z.object({
   actionable: z.number().int().min(0).optional(),
   /** How long the longest unacted subject had waited, while the cursor field stood; never written now, kept so older cursors parse. */
   idleMs: z.number().int().min(0).optional(),
-  stages: z.record(z.string(), percentileSchema).default({}),
-  lead: percentileSchema,
-  // Delivery analytics behind the merge: creation to the observed deployment (PR-to-production
-  // latency), merge to the smoke verdict (post-deploy time), and how many verdicts failed.
-  production: percentileSchema.default(noMeasurement),
-  postDeploy: percentileSchema.default(noMeasurement),
-  postDeployFailures: z.number().int().min(0).default(0),
+  /** Retired (GY-2876): stage, lead-time and post-deploy measurements; a cursor written before still parses. */
+  stages: retired, lead: retired, production: retired, postDeploy: retired, postDeployFailures: retired,
   /** Retired (GY-1992): the scope-request latency; nothing writes it, and a cursor written before keeps parsing. */
   scope: z.unknown().optional(), scopeOpenMs: z.unknown().optional(),
 }).strict();
@@ -162,28 +156,6 @@ export const promotionStateSchema = z.object({
 });
 export type PromotionState = z.infer<typeof promotionStateSchema>;
 
-/** What one reclamation did, kept on the cursor so `master status` reports it without rescanning. */
-export const reclaimSummarySchema = z.object({
-  at: z.string(), scanned: z.number().int().min(0), removed: z.number().int().min(0), kept: z.number().int().min(0),
-  freedBytes: z.number().int().min(0), freeBytes: z.number().int().min(0).nullable().default(null),
-  errors: z.array(z.string().max(500)).max(20).default([]),
-  // The managed worktree root's share of the pass: ephemeral checkouts no live session owned that
-  // were removed, and the free space left on the root's own volume.
-  checkouts: z.number().int().min(0).default(0), checkoutsOffVolume: z.number().int().min(0).default(0), rootFreeBytes: z.number().int().min(0).nullable().default(null),
-  // Finished assignment worktrees removed outright (GY-360), and the reclaimable ones the per-pass
-  // bound left for the next cycle: while any are left, the loop reclaims every cycle.
-  trees: z.number().int().min(0).default(0), treeBacklog: z.number().int().min(0).default(0),
-}).strict();
-export type ReclaimSummary = z.infer<typeof reclaimSummarySchema>;
-
-/** The host's memory at the last cycle (GY-612): below its floor, new launches on the host are deferred. */
-export const hostMemoryStateSchema = z.object({
-  host: z.string().max(200).nullable(), at: z.string(), totalBytes: z.number().min(0), availableBytes: z.number().min(0), floorBytes: z.number().min(0),
-  low: z.boolean(), since: z.string().nullable(),
-  consumers: z.array(z.object({ command: z.string().max(200), processes: z.number().int().min(0), rssBytes: z.number().min(0) }).strict()).max(10).default([]),
-}).strict();
-
-export { itemClockSchema, latencySampleSchema, type ItemClock, type LatencySample } from './latency-clock.js';
 
 /**
  * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a runtime call that failed, a
@@ -326,11 +298,8 @@ export const daemonStateSchema = z.object({
   upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
-  reclaim: reclaimSummarySchema.nullable().default(null), // the last worktree reclamation: what it removed and how much room the host has
-  /** The host's memory as the last cycle read it, and whether launches are deferred on it. */
-  memory: hostMemoryStateSchema.nullable().default(null),
-  clocks: z.record(z.string(), itemClockSchema).default({}), // per-item passage clocks and the samples they produced: the loop's own latency measurement
-  latency: z.array(latencySampleSchema).default([]),
+  /** Retired (GY-2876): resource reclaim, host memory holds and the latency clocks; a cursor written before parses, and its next write drops them. */
+  reclaim: retired, memory: retired, clocks: retired, latency: retired,
   /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and a cursor written before keeps parsing. */
   silence: z.unknown().optional(),
   /** Retired (GY-1992): the scope requests this loop decided; a cursor written before keeps parsing. */
@@ -379,5 +348,5 @@ export async function archiveDaemonCursor(config: Pick<MasterConfig, 'credential
 // The cursor's persistence, bounds and single-writer lock live in ./state-cursor.ts; these
 // re-export it, so every existing import keeps working.
 import { daemonStatePath, clampCount } from './state-cursor.js';
-export { standingTmpKey, retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, retainedSamples, retainedClocks, retainedBaseFailures, reclaimIntervalMs, gigabytes, emptyDaemonState, daemonStatePath, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, boundDaemonState, boundDeployment, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
+export { retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, retainedBaseFailures, emptyDaemonState, daemonStatePath, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, boundDaemonState, boundDeployment, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
 

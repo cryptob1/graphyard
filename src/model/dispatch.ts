@@ -203,29 +203,3 @@ export function liveReviewRequest(work: Work): DispatchRequest | null {
   const request = work.autoDispatch?.review;
   return request && request.state === 'requested' && binds(request, work) ? request : null;
 }
-
-
-// ---------------------------------------------------------------------------
-// The work-in-progress cap (GY-2097). Lead time is items in flight over merge rate: at twenty in
-// flight and two merges an hour every item waits hours, and main moves under queued changes, so
-// conflicts and reworks compound. The dispatcher therefore starts new implementation work only
-// while fewer than `maxInFlight` items are being built or waiting to merge; everything else waits
-// in Todo, and one merge frees the next ready item. An item titled "Hotfix: …" is exempt:
-// production halting beats lead time. One constant — no settings, no throughput measurement, no
-// new status field.
-// ---------------------------------------------------------------------------
-
-/** The most items the dispatcher lets be in flight at once (GY-2097): claimed, or submitted with its candidate standing. */
-export const maxInFlight = 4;
-/** The title prefix that puts an item past the cap. */
-export const hotfixTitle = 'Hotfix: ';
-/** Whether `work` starts whatever the in-flight count. */
-export const isHotfix = (work: Pick<Work, 'title'>) => work.title.startsWith(hotfixTitle);
-/**
- * The fixed wording of a claimable item the cap holds back (GY-2097): the dispatcher's own cap is
- * the capacity decision, so the wait is capacity's, not the loop's silence — the same reading a
- * saturated fleet gets (GY-1890). Only a merge frees a slot; no cycle of the loop can end the wait
- * by acting, and counting it as the loop's silence would file loop faults for a queue the cap
- * correctly holds.
- */
-export const wipHoldWording = { held: `is claimable but ${maxInFlight} items are already in flight; it starts when one merges` } as const;

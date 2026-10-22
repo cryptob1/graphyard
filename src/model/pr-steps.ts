@@ -20,18 +20,14 @@ export const stateLabel: Record<StateId, string> = { todo: 'Todo', doing: 'Doing
 /**
  * The recorded flow's own steps (GY-161): Build, Validate, Test, Review, Prove, Merge, in the
  * order a change travels; they end at the merge (GY-1981). The board and the item page no longer draw them — items show the
- * four states above — but the recorded step history keeps this vocabulary: the gate facts, the
- * steps drill-down, the Insights Flow panel and the replay (src/flow-analytics.ts `flowSteps`)
- * all read and write these names, so a recorded move says exactly which gate changed.
+ * four states above — but a recorded step move keeps this vocabulary, so it says exactly which
+ * gate changed.
  */
 export const stepIds = ['build', 'validate', 'test', 'review', 'prove', 'merge'] as const;
 export type StepId = typeof stepIds[number];
-/** One recorded move of an item between recorded steps, as the Insights Flow replay (web/flow-replay.ts) plays it. */
+/** One recorded move of an item between recorded steps. */
 export interface StepTransition { key: string; from: StepId | null; to: StepId | null; at: string }
 export type StepState = 'done' | 'current' | 'pending';
-export const stepLabel: Record<StepId, string> = { build: 'Build', validate: 'Validate', test: 'Test', review: 'Review', prove: 'Prove', merge: 'Merge' };
-/** The verb the recorded step's live label starts with: "Testing · 3 of 5 checks done". */
-export const stepVerb: Record<StepId, string> = { build: 'Building', validate: 'Validating', test: 'Testing', review: 'Reviewing', prove: 'Proving', merge: 'Merging' };
 /** The gate each recorded step after Build reads. */
 export const stepGate: Partial<Record<StepId, string>> = { validate: 'build', test: 'test', review: 'review', prove: 'acceptance', merge: 'merge' };
 /** The recorded steps folded into the Checking state, in the order the control plane evaluates them. */
@@ -194,30 +190,6 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
     const index = stateIds.indexOf(id);
     return index < at ? 'done' : index === at ? 'current' : 'pending';
   }, 'checking', detail, who);
-}
-
-/**
- * The item's place in the recorded flow (the six steps the step history keeps), as the Insights
- * Flow panel's Now view and the replay read it (web/flow-replay.ts, web/step-moves.ts). This is
- * the reading the recorded gate facts are written against — src/flow-analytics.ts `gateFactStep`
- * is its recorded counterpart — not the four states the board and the item page draw.
- */
-export function flowStep(work: Work, now: number, release: ReleaseView = noRelease): { current: StepId | null; label: string; detail: string; who: string } {
-  const make = (current: StepId | null, detail: string, who: string) => ({ current, label: current ? `${stepVerb[current]} · ${detail}` : detail, detail, who });
-  if (isClosed(work)) return make(null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
-  if (work.stage === 'done') return servedFor(work, release) ? make(null, 'Live', 'Nobody — it is live') : make(null, 'Merged', 'Nobody — it has merged');
-  const readyRefused = work.gates.some(gate => gate.name === 'ready' && !gate.passed);
-  const handedIn = !!work.submission && !work.reworkRequested && !changesRequested(work) && !readyRefused;
-  if (!handedIn) {
-    const { detail, who } = waitsOn('build', undefined, work, now, release);
-    return make('build', detail, who);
-  }
-  const byName = new Map(work.gates.map(gate => [gate.name, gate]));
-  // A gate the item does not carry has nothing to refuse, so its step reads done.
-  const passed = (id: StepId) => id === 'build' || (id !== 'merge' && byName.get(stepGate[id]!)?.passed !== false);
-  const current = stepIds.find(id => !passed(id)) ?? 'merge';
-  const { detail, who } = waitsOn(current, stepGate[current] ? byName.get(stepGate[current]!) : undefined, work, now, release);
-  return make(current, detail, who);
 }
 
 /**

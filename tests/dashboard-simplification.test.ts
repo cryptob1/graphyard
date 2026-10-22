@@ -4,11 +4,10 @@ import { readFile } from 'node:fs/promises';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import { evaluate, stages, type Gate, type Work } from '../src/model.js';
-import { flowLimits } from '../src/flow-analytics.js';
 import { apiRoutes } from '../src/server/index.js';
 import { computeAttribution } from '../src/attribution.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
-import { busyFixtureWork as auditBusyWork, fixtureApi, fixtureStatus, fixtureWork as auditWork, flowApi, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
+import { fixtureApi, fixtureStatus, fixtureWork as auditWork, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
 import { jargon, phaseLabel, phaseOf, phases, plainReason, plainStatus } from '../src/model/plain-status.js';
 import { homeNumbers } from '../web/home-numbers.js';
@@ -27,7 +26,6 @@ import AutomationPage from '../web/pages/automation.js';
 import CreateWork from '../web/pages/create-work.js';
 import TopBar from '../web/components/top-bar.js';
 import Sidebar from '../web/components/sidebar.js';
-import FlowAnalytics, { FlowSummary, mergeTime, plainWait, submitToMerge, toMerged } from '../web/flow-analytics.js';
 import ScenarioLibrary from '../web/scenarios.js';
 
 // GY-67: the dashboard is rendered from the checked-in fixture (scripts/dashboard-fixture.mjs)
@@ -37,7 +35,6 @@ import ScenarioLibrary from '../web/scenarios.js';
 
 // The fixture's merged items are served by the release (since GY-161 a merge alone is still at Deploy).
 const fixtureWork = () => auditWork().map(live);
-const busyFixtureWork = (count: number) => auditBusyWork(count).map(live);
 const root = new URL('..', import.meta.url);
 const read = (path: string) => readFile(new URL(path, root), 'utf8');
 const work = fixtureWork() as unknown as Work[];
@@ -145,39 +142,37 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
   assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge').text, 'Waiting to merge');
 });
 
-test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, Tests, Insights, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {
+test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, Tests, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {
   const labels = (d: Dashboard) => primaryEntries(d).map(entry => entry!.label);
-  // GY-161 replaced GY-67's four entries with the approved design's six; Tests opens the test-case results (GY-162).
-  assert.deepEqual(sections.map(section => section.label), ['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
-  for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 6, role);
-  assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Insights', 'Settings']);
+  // Tests opens the test-case results (GY-162); the Insights analytics page left with flow analytics (GY-2876).
+  assert.deepEqual(sections.map(section => section.label), ['Work', 'Workers', 'Shipped', 'Tests', 'Settings']);
+  for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
+  assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
-  assert.equal(sectionOf.Insights, 'insights');
   for (const page of ['Delivered', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
-  for (const page of ['Test cases', 'Proof authority', 'Operator automation', 'Agents']) assert.equal(sectionOf[page], 'settings', page);
+  for (const page of ['Test cases', 'Operator automation', 'Agents']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
   const sidebar = markup(createElement(Sidebar, { entries: views.map(view => primaryEntry(dashboard(), view)), dashboard: dashboard() }));
-  assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 6);
+  assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs(dashboard(), 'insights'), [], 'Insights is one page with no tabs (GY-168)');
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Validation', 'Releases']);
-  assert.deepEqual(tabs(dashboard(), 'grants'), ['Test cases', 'Proof authority', 'Operator automation', 'Agents']);
+  assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents']);
   assert.deepEqual(tabs(dashboard(), 'work'), [], 'a section with one page draws no tab row');
   assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
 
   // Admin-only pages are hidden from reader and worker sessions, even when configured.
   const configured = { validation: true, releases: true, automation: true };
-  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'grants'), ['Test cases', 'Proof authority', 'Agents']);
-  assert.deepEqual(tabs(dashboard({}, 'worker', configured), 'grants'), ['Test cases', 'Proof authority']);
+  assert.deepEqual(tabs(dashboard({}, 'reader', configured), 'scenarios'), ['Test cases', 'Agents']);
+  assert.deepEqual(tabs(dashboard({}, 'worker', configured), 'scenarios'), []);
   for (const role of ['reader', 'worker']) assert.ok(!visibleViews(dashboard({}, role, configured)).some(view => view.adminOnly), role);
   // A feature with nothing configured is hidden, not rendered as an empty explainer; an unknown one stays.
   const probed = await probeFeatures(async path => path === 'operator-agents' ? [] : { environments: [], releases: [], requests: [], candidates: [] }, true, false);
   assert.deepEqual(probed.features, { releases: false, validation: false, automation: false });
   const none = dashboard({}, 'admin', probed.features);
   assert.deepEqual(tabs(none, 'shipped'), [], 'Delivered alone draws no tab row');
-  assert.deepEqual(tabs(none, 'grants'), ['Test cases', 'Proof authority', 'Agents']);
+  assert.deepEqual(tabs(none, 'scenarios'), ['Test cases', 'Agents']);
   const failing = await probeFeatures(async () => { throw new Error('unavailable'); }, true, false);
   assert.deepEqual(failing.features, { releases: null, validation: null, automation: null }, 'an outage never hides a page');
   // An outage and an empty registry mean opposite things, so the page never reports one as the other.
@@ -194,11 +189,6 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.doesNotMatch(home(dashboard({ status: led })), /Delivery slices/);
   assert.doesNotMatch(markup(createElement(WorkersPage, dashboard())), /Delivery slices/);
   assert.match(markup(createElement(WorkersPage, dashboard({ status: led }))), /Delivery slices/);
-  // Operator agents cannot read the analytics pages, so they are not offered.
-  assert.ok(!visibleViews(dashboard({}, 'operator-agent')).some(view => view.id === 'insights'));
-  assert.ok(visibleViews(dashboard({}, 'admin')).some(view => view.id === 'insights'));
-  // Nor are their sessions polled for step moves, which read the same refused analytics route.
-  assert.match(await read('web/main.tsx'), /useStepMoves\(!!token && !!status && readsFlowAnalytics\(status\.actor\?\.role\)/);
   // web/main.tsx builds the sidebar from the registry through primaryEntry.
   assert.match(await read('web/main.tsx'), /views\.map\(entry => primaryEntry\(dashboard, entry\)\)/);
 });
@@ -246,55 +236,6 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   for (const role of ['reader', 'worker']) { const other = itemView('GY-16', role); assert.doesNotMatch(other, /edit-menu|Use Codex cloud review|Revise requirements/, role); }
 });
 
-test('integration:analytics-default-view — flow analytics opens to where work waits and handed-in-to-merge time; the rest behind Show details; no UNKNOWN cards', async () => {
-  const report = fixtureApi('analytics/flow?window=30');
-  const phaseRows = (fixtureApi('analytics/flow/drilldown?window=30&metric=phase') as any).rows;
-  const merge = submitToMerge(phaseRows);
-  assert.equal(merge.n, 3, 'every shipped fixture item has a measured handed-in-to-merge time');
-  assert.ok(merge.p50Ms! > 0 && merge.p90Ms! >= merge.p50Ms!);
-  assert.equal(merge.truncated, false);
-  const attribution = computeAttribution({ observedAt: new Date(NOW).toISOString(), from: new Date(NOW - 30 * 864e5).toISOString(), to: new Date(NOW).toISOString(), days: 30, records: [], recordsTruncated: false, requests: [], requestsTruncated: false, environments: {}, blockedNow: [] } as any);
-  const page = markup(createElement(FlowAnalytics, { request: async () => ({}), token: 'fixture', canAudit: true, initial: { report, merge, attribution } }));
-  const visible = text(page);
-  assert.match(visible, /Where work is waiting/);
-  assert.match(visible, /Handed in merged/);
-  assert.match(page, /Handed in<\/abbr> → merged/);
-  assert.match(visible, /typical p50 .*slowest one in ten p90 .*3 merged/);
-  const waiting = (report as any).bottleneck.categories.filter((c: any) => c.id !== 'delivered');
-  for (const category of waiting) assert.equal(visible.includes(`${plainWait[category.id]} ${category.count}`), category.count > 0, `${category.label}: shown only when it has items, in plain words`);
-  assert.doesNotMatch(visible, /acceptance evidence|In implementation/, 'the server category labels stay in Show details');
-  for (const hidden of ['Cumulative flow', 'Lead time', 'Stage dwell', 'Phase durations', 'Operations', 'Attribution', 'Coverage, exclusions and definitions', 'Work type', 'Delivery slice'])
-    assert.ok(!visible.includes(hidden), `${hidden} is behind Show details`);
-  assert.match(page, /<details class="flow-details"><summary>Show details<\/summary>[\s\S]*Cumulative flow[\s\S]*Attribution[\s\S]*Coverage, exclusions and definitions/);
-  assert.ok((attribution as any).unavailable.length > 0, 'the fixture has unmeasured attribution metrics');
-  assert.doesNotMatch(page, /class="flow-card attribution-card"[^>]*data-state="unavailable"|attribution-badge-unavailable/, 'a metric with no data is never drawn as an UNKNOWN card');
-  assert.doesNotMatch(visible, /UNKNOWN/i);
-  // A report with nothing measured omits the merge figure rather than showing a placeholder.
-  assert.doesNotMatch(markup(createElement(FlowSummary, { report, merge: submitToMerge([]), onDrill: noop })), /Handed in/);
-
-  // The drill-down is bounded at flowLimits.drilldown rows and is sorted by work key before it is
-  // cut, so a single request for every phase of every episode silently returns the lowest-keyed
-  // items. The page asks for one phase at a time instead, and says so rather than averaging a
-  // sample it knows is partial.
-  const busy = flowApi(busyFixtureWork(60));
-  const combined = busy('analytics/flow/drilldown?window=30&metric=phase');
-  assert.ok(combined.truncated && combined.total > flowLimits.drilldown && combined.rows.length === flowLimits.drilldown, `${combined.total} phase rows, cut to ${combined.rows.length}`);
-  assert.ok(submitToMerge(combined.rows).n < 60, 'the cut-off rows would undercount the merges');
-  const perPhase = (await mergeTime(async path => busy(path), 'window=30'))!;
-  assert.equal(perPhase.truncated, false);
-  assert.equal(perPhase.n, 60, 'asking for one phase at a time reads every episode in the window');
-  const everyPhase = submitToMerge(toMerged.flatMap(phase => busy(`analytics/flow/drilldown?window=30&metric=phase&key=${phase}`).rows));
-  assert.equal(perPhase.p50Ms, everyPhase.p50Ms); assert.equal(perPhase.p90Ms, everyPhase.p90Ms);
-  // Past the bound even per phase, the figure is reported as unreadable and never drawn.
-  const huge = flowApi(busyFixtureWork(flowLimits.drilldown + 10));
-  const unreadable = (await mergeTime(async path => huge(path), 'window=30'))!;
-  assert.equal(unreadable.truncated, true);
-  const partial = markup(createElement(FlowSummary, { report, merge: unreadable, onDrill: noop }));
-  assert.match(text(partial), /Handed in merged Not shown: this window holds more merged changes than one read can return/);
-  assert.doesNotMatch(text(partial), /typical|p50|p90|merged \d/, 'no percentile is drawn from a sample that was cut off');
-  assert.doesNotMatch(text(partial), /UNKNOWN/i);
-});
-
 // The words a newcomer cannot guess: abbreviations, proof names and a commit. Wherever one is
 // visible by default it must carry its glossary definition in place — the same screens the
 // manual plain-language review reads, which found PR, the commit, E2E and the form's terms bare.
@@ -307,14 +248,12 @@ test('plain-language support for manual:plain-language-review — every visible 
   const guide = markup(createElement(GuidePage));
   assert.ok(words(guide).length <= 300, `guide is ${words(guide).length} words`);
   const form = markup(createElement(CreateWork, dashboard({ creating: true })));
-  const report = fixtureApi('analytics/flow?window=30');
   const screens: [string, string][] = [
     ['How Graphyard works', guide],
     ['home', home(dashboard({ status: (() => { const s = fixtureStatus('admin'); s.delegation.slices[0].lead = { id: 'l', displayName: 'Pine', sessionKind: 'ai' } as any; return s; })() }))],
     ['item view', itemView('GY-16')],
     ['create form', form],
     ['test cases', markup(createElement(ScenarioLibrary, { api: async () => [], canEdit: true }))],
-    ['flow analytics', markup(createElement(FlowSummary, { report, merge: submitToMerge((fixtureApi('analytics/flow/drilldown?window=30&metric=phase') as any).rows), onDrill: noop }))],
   ];
   for (const [name, html] of screens) {
     // Every definition on screen is the shared glossary's own wording, and none is written twice.
@@ -349,16 +288,16 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   // The dashboard calls only endpoints the server already serves: the API is unchanged.
   const served = apiRoutes.flatMap(module => module.routes).map(route => route.path);
   const matches = (path: string) => served.some(route => typeof route === 'string' ? route === `/api/${path}` : route.test(`/api/${path}`));
-  for (const file of ['web/features.ts', 'web/flow-analytics.tsx', 'web/main.tsx', 'web/pages/create-work.tsx', 'web/pages/work-details.tsx'])
+  for (const file of ['web/features.ts', 'web/main.tsx', 'web/pages/create-work.tsx', 'web/pages/work-details.tsx'])
     for (const [, path] of (await read(file)).matchAll(/(?:api|request|read)\(`([^`$?]+)[`$?]/g)) assert.ok(matches(path.replace(/\/$/, '')) || matches(`${path}x`), `${file}: /api/${path}`);
-  for (const path of ['delivery', 'validation', 'operator-agents', 'analytics/flow', 'analytics/flow/drilldown', 'work']) assert.ok(matches(path), path);
+  for (const path of ['delivery', 'validation', 'operator-agents', 'work']) assert.ok(matches(path), path);
   const source = (await Promise.all(['web/pages/work-details.tsx', 'src/model/plain-status.ts', 'web/home-numbers.ts'].map(read))).join('\n');
   assert.doesNotMatch(source, /api\((['`])work\/[^'`]*\/(stage|state)/, 'no client-controlled lifecycle state');
   // The fixture reproduces the audit's cases (the stage table in unit:plain-status-copy covers the rest), and the script the views.
   for (const phase of ['not-started', 'needs-worker', 'building', 'review', 'proof', 'shipped'] as const) assert.ok(work.some(w => phaseOf(w, NOW) === phase), phase);
   assert.ok(work.some(w => w.blocker) && work.some(w => w.stage === 'build' && !w.submission && Date.parse(w.lease?.expiresAt ?? '') < NOW), 'a blocked item and a lapsed claim');
   const script = await read('scripts/dashboard-fixture.mjs');
-  for (const view of ['01-home', '02-item-view', '05-insights', '06-flow-analytics', '09-create-form']) assert.ok(script.includes(`'${view}'`), view);
+  for (const view of ['01-home', '02-item-view', '09-create-form']) assert.ok(script.includes(`'${view}'`), view);
   // The sidebar is a full-height flex column whose contents stick; no later rule pins it to one viewport.
   const css = await read('web/style.css');
   const sidebarRules = [...css.matchAll(/(?:^|[}\s])\.sidebar\{([^}]*)\}/g)].map(match => match[1]);

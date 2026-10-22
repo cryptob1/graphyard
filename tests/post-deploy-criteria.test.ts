@@ -116,11 +116,9 @@ test('manual:intervention-pattern-escalation-build — GY-1660: each linked buil
   }
 });
 
-test('unit:post-deploy-criteria — a declared post-deploy proof gates no merge in any lane', async () => {
-  const { laneRequiresProof, requiredProofs, evaluateLandability } = await modules();
-  for (const lane of ['low', 'medium', 'high'] as const) assert.equal(laneRequiresProof(lane, 'manual:post-deploy/harness-drift-cleared'), false, lane);
-  assert.equal(laneRequiresProof('high', 'manual:harness-drift-cleared'), true);
-  // An unobserved change rides the high lane, where every other manual: proof is demanded before merge.
+test('unit:post-deploy-criteria — a declared post-deploy proof gates no merge', async () => {
+  const { requiredProofs, evaluateLandability } = await modules();
+  // Every other manual: proof is demanded before merge.
   const reasons = (work: Work) => { const verdict = evaluateLandability(work, [work], new Date()); return verdict.verdict === 'refused' ? verdict.reasons.map(reason => reason.reason).join('\n') : ''; };
   const declared = delivered({ stage: 'acceptance', delivery: undefined }), undeclared = delivered({ stage: 'acceptance', delivery: undefined, criteria: [{ ...gy1652 }] });
   assert.deepEqual(requiredProofs(declared, [declared]).filter(proof => proof.startsWith('manual:post-deploy/')), []);

@@ -17,7 +17,7 @@ import { DELIVERY_EVENT_PREDICATE } from './tables/production.js';
  * A full snapshot is written for the first save, every `snapshotEvery` rows, when the delta
  * would exceed `deltaSizeFraction` of the document, when the stage or delivery changed (so
  * lifecycle rows stay whole), and for an item's first accepted-delivery observation (the row
- * the shipping pulse indexes). Nothing is updated; only the audited compaction of routine rows
+ * the delivery index reads). Nothing is updated; only the audited compaction of routine rows
  * past their retention window deletes (store/compaction.ts).
  *
  * A routine save (`routineSaveKinds`: the continuous writes nobody reads as a lifecycle step) is

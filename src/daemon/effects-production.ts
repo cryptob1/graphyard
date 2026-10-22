@@ -1,14 +1,13 @@
-// Concern: the production wiring of the cycle's effects — every read, launch, write and reclaim the loop runs, bound to one coordinator process.
+// Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { wakeOwnObservation } from '../master/base-break-refresh.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { basename, dirname } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
-import { worktreeReclaimPass } from './worktree-reclaim.js';
 import { type ChildRun, ChildWaitLedger, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
-import { type HostMemoryReading, type ResourceReclaimReport, disposableWorktrees, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
+import { dispatchRefusal } from '../server/plane-health.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
@@ -17,7 +16,7 @@ import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview }
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, holdRepeatedLimitAccount, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, herdrJson, readCredentialFile, withRoleDefaults, heldAwareProbe, type SessionIdentity } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, holdRepeatedLimitAccount, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, herdrJson, readCredentialFile, heldAwareProbe, removeAttemptWorktree, type SessionIdentity } from '../master.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
 import { httpFleetClient, reconcileFleetSessions, selectFleetSession, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
@@ -25,7 +24,6 @@ import { writeProjectMemory } from '../project-memory.js';
 import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import { worktreeRoot } from '../install/worktree-root.js';
-import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import { readingEffects } from './reading-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { loopCodeRoot } from './checkout-state.js';
@@ -173,10 +171,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return followUpThreadIds((await readReviewLedger(root)).reviews, work, reviewer ? { reviewer: `${reviewer.slug}[bot]`, now: at } : undefined);
     },
     closeSession: pane => closeHerdrPane(pane, run),
-    worktreeReclaimable: (work, at) => disposableWorktrees(root, current(), { work, now: at }),
-    reclaimResources: (work, agents) => reclaimResources(root, withRoleDefaults(current()), { work, agents }, { closePane: pane => closeHerdrPane(pane, run) }),
+    removeWorktree: path => removeAttemptWorktree(root, path, run),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
-    hostMemory: readHostMemory,
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     wakeObservation: work => mutate(`work/${work.id}/resync`, { prioritized: true, wait: false }),
@@ -210,20 +206,13 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       await mutate('merge-queue', config);
       publishedMergeQueue = published;
     },
-    ...throughputEffects(root, current, run, asCoordinator), ...readingEffects(current, mutate), // GY-1779: the loop's own post-deploy readings
-    readThroughputOwner: async owner => await asCoordinator(`work/${encodeURIComponent(owner.id)}`) as Work,
+    ...readingEffects(current, mutate), // GY-1779: the loop's own post-deploy readings
     readWork: async work => await asCoordinator(`work/${encodeURIComponent(work.id)}`) as Work,
     recordDeployment: (work, observation) => mutate(`work/${work.id}/deployment`, { sha: observation.sha, mergeSha: work.delivery!.mergeSha, source: observation.source, observedAt: observation.observedAt }),
     exhaustedProofs: async () => Object.entries((await readDispatchCursor(root, current(), () => {})).abandoned).filter(([, entry]) => entry.kind === 'producer')
       .map(([requestId, entry]) => ({ requestId, work: entry.work, sha: entry.sha, group: entry.group ?? null, proofs: entry.proofs ?? [], attempts: entry.attempts, reason: entry.reason })),
     // GY-1814: the read also names the approvals the ledger answered (planned, follow-ups filed, a fresh read, a fallback), so a plan still owed is reported only until the answer lands. A ledger that cannot be read answers everything: the requests-only read carries no `answered`, and the gate never holds what nothing backs.
     mechanicalFixes: async () => { try { const reviews = (await readReviewLedger(root)).reviews; return { ...mechanicalFixState(reviews), answered: answeredMechanicalReviews(reviews) }; } catch { return readMechanicalFixState(root); } }, recordMechanicalPlan: (work, plan, answered) => mutate(`work/${work.id}/mechanicalplan`, plan ? { ...plan, planned: true } : { reviewId: answered?.reviewId ?? work.mechanicalPlan?.reviewId ?? 1, head: answered?.head ?? work.mechanicalPlan?.head ?? work.candidate!.sha, planned: false }),
-    // The idle bound comes from the live configuration, so a host under pressure can shorten it
-    // (or a slow repository lengthen it) without restarting the loop.
-    // The same pass takes back every ephemeral checkout no live session owns, under the managed root.
-    // Finished worktrees are removed outright first, a bounded number per pass (GY-360); the
-    // inventory that remains is the one the dependency reclaim judges and `master status` reads.
-    reclaim: (work, now) => worktreeReclaimPass(root, current(), run, work, now),
     // Rework exists only while the live configuration names the master's operator-agent identity; provisioning it brings it back on the next reload.
     get rework() { return current().operatorAgent ? rework : undefined; },
     // systemd-notify keep-alive (NOTIFY_SOCKET; NotifyAccess=all; bounded child via `run`). GY-437: upgrade between cycles, re-exec under the cgroup unit.

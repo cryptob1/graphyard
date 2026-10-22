@@ -12,7 +12,6 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { eventHistoryLimits, routineEventKinds } from '../src/events-history.js';
-import { reconstructTimeline, type LedgerEntry } from '../src/pipeline-speed.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -157,18 +156,13 @@ test('integration:events-pagination — an item with more than 2,000 events has 
   assert.equal(everything.pages[0].routine.included, true);
   assert.equal(everything.pages[0].routine.kinds.length, 0);
 
-  // What the retrieved history is for: the item's timeline, rebuilt from the rows the read
-  // returned, is the timeline the control plane kept as the commands ran.
+  // The timeline the control plane kept as the commands ran.
   const { pipeline } = (await rows('SELECT document AS pipeline FROM work_items WHERE id=$1', [item.id]))[0].pipeline as Work;
-  const reconstructed = reconstructTimeline(everything.events as LedgerEntry[]);
-  assert.deepEqual(reconstructed, pipeline);
-  assert.equal(reconstructed.attempts.length, 3);
   // The blocked report ended the first attempt as released (GY-1008) and is the hand-off it was;
   // the other two ended at their own submission, and the rework between them is a rework round.
-  assert.deepEqual(reconstructed.attempts.map(attempt => [attempt.epoch, attempt.end]), [[1, 'released'], [2, 'submitted'], [3, 'submitted']]);
-  assert.equal(reconstructed.reworkRounds, 1);
-  assert.deepEqual(reconstructed.interventions, { blocked: 1, requirements: 0 });
-  assert.ok(reconstructed.submittedAt && reconstructed.resubmittedAt! > reconstructed.submittedAt);
+  assert.deepEqual(pipeline!.attempts.map(attempt => [attempt.epoch, attempt.end]), [[1, 'released'], [2, 'submitted'], [3, 'submitted']]);
+  assert.equal(pipeline!.reworkRounds, 1);
+  assert.deepEqual(pipeline!.interventions, { blocked: 1, requirements: 0 });
 
   // Kind and time filters narrow the same read.
   const claims = await read(`events?work=${item.id}&kind=claim,submit&order=asc&view=history`);

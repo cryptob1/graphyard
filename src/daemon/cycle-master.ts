@@ -3,7 +3,7 @@ import { detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer 
 import { detectExhaustion, detectRetryingExhaustion } from '../model/capacity.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { launchAppearanceMs, promptDigest, record, stoppedStates, type DaemonEffects } from './effects.js';
-import { actionableSubjects } from './metrics.js';
+import { actionableSubjects } from './subjects.js';
 import { detailChanged } from './text.js';
 import { message } from './state.js';
 import { emptyMasterSession, type DaemonAction, type DaemonState, type MasterSessionState } from './state.js';

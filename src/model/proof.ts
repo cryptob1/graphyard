@@ -7,9 +7,9 @@ export const proofSchema = z.string().regex(/^(unit|integration|e2e|manual):[a-z
  * acceptance criterion: a criterion gates the merge, and nothing is deployed before the merge.
  */
 export const deploySmokeProof = 'e2e:deploy-smoke';
-// Proof authority is granted inside Graphyard, never inferred from a deployment
-// environment. A grant names either an exact proof, a whole proof kind, or a bounded
-// prefix ending in `/*`; nothing else widens a producer's authority.
+// Proof authority is the roster's (GY-2876): a principal may prove exactly the --proof patterns its
+// roster entry carries, and nothing is granted at runtime. A pattern names an exact proof, a whole
+// proof kind, or a bounded prefix ending in `/*`; nothing else widens a producer's authority.
 export const grantPatternSchema = z.string().max(150).regex(/^(unit|integration|e2e|manual):(?:\*|[a-zA-Z0-9._-]+(?:\/[a-zA-Z0-9._-]+)*(?:\/\*)?)$/);
 export function proofMatchesGrant(pattern: string, proof: string): boolean {
   const separator = pattern.indexOf(':');
@@ -24,14 +24,20 @@ export function proofMatchesGrant(pattern: string, proof: string): boolean {
   return name === scope;
 }
 export const grantsAuthorize = (patterns: readonly string[], proof: string) => patterns.some(pattern => proofMatchesGrant(pattern, proof));
-/** Roles that can never hold proof authority, however a grant is requested. */
+/** Roles that can never hold proof authority, whatever their roster entry says. */
 export const ungrantableRoles = ['worker', 'reader', 'coordinator', 'operator-agent'] as const;
-export interface ProofGrant {
-  principalId: string; role: 'producer'; patterns: string[]; revision: number;
-  createdAt: string; updatedAt: string;
-  /** The environment allowlist this record was materialized from, for audit only. */
-  seededFrom: string[];
-  lastMutation: { kind: 'seed' | 'grant' | 'revoke'; actor: string; at: string; reason: string; patterns: string[] };
-}
-/** One principal's effective proof authority, with the source that currently decides it. */
-export interface ProofAuthority { principalId: string; role: Principal['role']; patterns: string[]; source: 'grant' | 'environment' | 'role' }
+/** One principal's proof authority: an admin attests any manual proof, a producer proves its roster patterns, no other role proves anything. */
+export interface ProofAuthority { principalId: string; role: Principal['role']; patterns: string[] }
+export const proofAuthority = (principal: Pick<Principal, 'id' | 'role' | 'proofs'>): ProofAuthority => ({ principalId: principal.id, role: principal.role,
+  patterns: principal.role === 'admin' ? ['manual:*'] : principal.role === 'producer' ? [...principal.proofs ?? []] : [] });
+/** The single authorization question every trusted-evidence path asks. */
+export const authorizedForProof = (actor: Pick<Principal, 'id' | 'role' | 'proofs'>, proof: string) =>
+  !(ungrantableRoles as readonly string[]).includes(actor.role) && grantsAuthorize(proofAuthority(actor).patterns, proof);
+export const authorizedForEveryProof = (actor: Pick<Principal, 'id' | 'role' | 'proofs'>, proofs: readonly string[]) =>
+  proofs.length > 0 && proofs.every(proof => authorizedForProof(actor, proof));
+/**
+ * Required proof names no configured principal may produce. A manual proof the work names in
+ * `producerProofs` is run by a producer session, never attested, so the admin role's `manual:*` does not cover it.
+ */
+export const unauthorizedProofs = (principals: readonly Pick<Principal, 'id' | 'role' | 'proofs'>[], proofs: readonly string[], producerProofs: readonly string[] = []) =>
+  proofs.filter(proof => !principals.some(principal => (principal.role === 'producer' || !producerProofs.includes(proof)) && authorizedForProof(principal, proof)));

@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewLedgerLockStaleMs, saveReviewerProfile, updateReviewLedger } from '../src/reviewer.js';
-import { reconcileLedgers } from '../src/cli/master-status-pipeline.js';
+import { reconcileLedgers } from '../src/cli/master-status.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-05 submittedAt is a past verdict literal that reconcile records without comparing it to a clock; the gh stub's submitted_at and the item timestamps come from Date.now().

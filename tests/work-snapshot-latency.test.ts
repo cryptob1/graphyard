@@ -9,11 +9,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store, storeConnectionTimeoutMs, storeStatementTimeoutMs } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { invalidateFlowReports } from '../src/flow-analytics.js';
 import { evidenceIndependenceRefusals, type Evidence, type Work } from '../src/model.js';
 import { reconcileAutoDispatch, type DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { emptyDaemonState, missingProofs, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { dispatchSummary, emptyDispatchCursor, runAutoDispatch, tickRetryDelay, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { proofOutcome } from '../src/producer.js';
 import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork, type CoordinationRounds } from '../src/server/work-view.js';
@@ -140,7 +139,6 @@ test('integration:work-snapshot-latency — the coordination snapshot of a 100-i
     assert.equal(item.id, whole.id);
     for (const field of ['stage', 'gates', 'violations', 'lease', 'candidate', 'submission', 'criteria', 'policyRevision', 'epoch', 'mergeAuthorization', 'delivery'] as const) assert.deepEqual(item[field], whole[field], `${item.key} ${field}`);
     assert.deepEqual({ review: item.autoDispatch!.review, producers: item.autoDispatch!.producers }, { review: whole.autoDispatch!.review, producers: whole.autoDispatch!.producers });
-    assert.deepEqual(missingProofs(item, now), missingProofs(whole, now));
     assert.deepEqual(evidenceIndependenceRefusals(item, now), evidenceIndependenceRefusals(whole, now));
     for (const request of item.autoDispatch!.producers) for (const proof of request.proofs ?? [])
       assert.equal(proofOutcome(item, request, proof), proofOutcome(whole, request, proof));
@@ -408,7 +406,6 @@ async function settledDocumentsRead<T>(run: () => Promise<T>) {
   };
   try { return { value: await run(), keys, bytes }; } finally { resultSink = null; }
 }
-const flowDrilldownRead = () => { invalidateFlowReports(hotStore); return hotRead('analytics/flow/drilldown?window=30&metric=throughput'); };
 
 test('integration:hot-paths-read-no-settled-documents — /api/status, /api/board and lookups by id or key read no settled delivery\'s document; GET /api/work serves the fleet, each settled delivery as its stored summary', async () => {
   await hotPaths();
@@ -455,23 +452,6 @@ async function fullListMs() {
   const { samples } = await steadyState(() => hotStore.list(), { warmup: 1, samples: 3 });
   return [...samples].sort((a, b) => a - b)[1];
 }
-
-test('integration:drilldown-reads-no-settled-documents — a flow drill-down reads the window\'s items from the work index, never a settled delivery\'s document, and answers within a fraction of the full list\'s time', async () => {
-  await hotPaths();
-  for (const metric of ['throughput', 'lead-time', 'steps', 'wip']) {
-    invalidateFlowReports(hotStore);
-    const read = await settledDocumentsRead(() => hotRead(`analytics/flow/drilldown?window=30&metric=${metric}`));
-    assert.equal(read.value.metric, metric);
-    assert.deepEqual([...read.keys], [], `the ${metric} drill-down read ${read.keys.size} settled documents (${read.bytes} bytes)`);
-  }
-  // The report the drill-downs share a dataset with reads the same way.
-  invalidateFlowReports(hotStore);
-  assert.deepEqual([...(await settledDocumentsRead(() => hotRead('analytics/flow?window=30'))).keys], []);
-  // And it answers within a fraction of the full list's time on the same store, each sample a fresh read.
-  const listMs = await fullListMs();
-  const { warmup, samples } = await steadyState(flowDrilldownRead, { warmup: 2, samples: HOT_PATH_SAMPLES });
-  assertTiming({ name: `drilldown-reads-no-settled-documents.latency`, test: 'integration:drilldown-reads-no-settled-documents', statistic: 'median', fraction: 0.5, budgetMs: Math.round(listMs * HOT_PATH_FRACTION), samples, warmup });
-});
 
 test('integration:hot-path-latency-bounded — GET /api/status and GET /api/board each answer within a fraction of the full list\'s time on the same store', async () => {
   await hotPaths();

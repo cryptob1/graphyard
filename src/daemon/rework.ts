@@ -4,7 +4,7 @@ import { baseRefreshConflict, conflictReworkDue, pendingBaseRefresh } from '../m
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
-import { latencySampleSchema, message, type DaemonActionKind } from './state.js';
+import { message, type DaemonActionKind } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged } from './text.js';
 import { record } from './effects.js';
@@ -196,12 +196,8 @@ async function reworkStepWithin(cycle: Cycle, budgetLeft: () => number | null) {
     if (wait) { await noteWait(item, wait); return wakeJob(item, 'rework'); }
     await retireMootWake(item, 'the item no longer waits for the observation it was to fetch');
     const attempts = (previous?.attempts ?? 0) + 1;
-    const verdict = standingVerdict(item);
     try {
       await effects.rework!(item, rework.reason, rework.binding);
-      // The verdict-to-rework latency the loop is judged on (metrics.ts `latencyTargets`).
-      const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
-      if (Number.isFinite(verdictAt) && rework.binding.includes(':verdict:')) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
       performed.push(await record(state, key, { kind: 'judgement', work: item.key, principal: null, state: 'done', detail: `Returned ${item.key} to a worker: ${rework.reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       if (stepCallCarried(error)) throw error;

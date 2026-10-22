@@ -392,26 +392,6 @@ test('unit:step-calls-bounded — a step budget is spent on the wall as well as 
   assert.equal(budget.left(), null);
 });
 
-test('unit:step-calls-bounded — reclaim: the worktree reclaim is bounded; carried, it is recorded on the step\'s row with no fault, the next cycle reclaims again and joins it, and its answer, once consumed, is applied and retires the row', async () => {
-  const sb = await helper();
-  const slow = hanging<unknown>();
-  const fx = effects([], { reclaim: slow.call as DaemonEffects['reclaim'] } as Partial<DaemonEffects>);
-  const state = emptyDaemonState(config()), key = 'carried:reclaim:reclaim';
-  await cycle(state, fx, clock);
-  assert.equal(slow.calls.length, 1, 'the reclaim was started');
-  assert.ok(sb.carriedRow(state.actions[key]), `the reclaim is recorded carried on the step's row: ${JSON.stringify(Object.keys(state.actions))}`);
-  assert.match(state.actions[key].detail, /the reclaim step's 30 ms per-call bound passed before the reclaim call answered; the call stays owed and is retried next cycle/);
-  assert.ok(!state.reclaim, 'nothing is applied before it answers');
-  await cycle(state, fx, clock + 60_000);
-  assert.equal(slow.calls.length, 1, 'the next cycle reclaimed again and joined the one in flight');
-  slow.answer({ root: '/repo', at: iso(60_000), applied: true, scanned: 2, idleMs: 0, removed: [], kept: [], freeBefore: null, freeAfter: 10e9, freedBytes: 0, errors: [] });
-  await settle();
-  await cycle(state, fx, clock + 120_000);
-  assert.equal(slow.calls.length, 1, 'the answer was consumed, not reclaimed again');
-  assert.equal((state.reclaim as unknown as { at?: string } | undefined)?.at, iso(60_000), `the consumed report is applied: ${JSON.stringify(state.reclaim)}`);
-  assert.equal(state.actions[key]?.state, 'done', `the row is retired once the call answered: ${JSON.stringify(state.actions[key])}`);
-});
-
 test('unit:step-calls-bounded — sessions and dispatch: the listings the steps read at their own level are bounded; carried, each is recorded on the step\'s row with no fault and answered with what the step had, the next cycle reads again and joins it, and the answer retires the row', async () => {
   const sb = await helper();
   const listing = hanging<never[]>(), roles = hanging<Record<string, never>>();

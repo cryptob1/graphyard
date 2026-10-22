@@ -8,7 +8,6 @@ import { forwardTolerant } from '../master/profiles.js';
 import { boundDetail } from './text.js';
 import { daemonActionSchema, daemonStateSchema, type DaemonAction, type DaemonState, type DeploymentObservation } from './state.js';
 
-export const standingTmpKey = 'reclaim:tmp:standing'; // GY-1600: the one row of a run of /tmp passes removing 0 under the standing inode bound
 /**
  * The cursor schema as GY-1960 reads and writes it: declared fields strict, unknown fields kept.
  * Built on first use, never at module scope: state.ts and this module import each other, so the
@@ -23,10 +22,7 @@ const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSche
  */
 export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
-export const retainedSamples = 200, retainedClocks = 500, retainedBaseFailures = 200;
-/** Reclamation scans the worktree directory, so it runs on its own bounded interval, not every cycle. */
-export const reclaimIntervalMs = 600_000;
-export const gigabytes = (bytes: number | null) => bytes === null ? 'an unknown amount of space' : `${(bytes / 1e9).toFixed(1)} GB`;
+export const retainedBaseFailures = 200;
 
 export function emptyDaemonState(config: MasterConfig): DaemonState {
   return daemonStateSchema.parse({ version: 1, url: config.url, repository: config.repository });
@@ -72,19 +68,16 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
 /** Keep the cursor bounded without ever discarding an unresolved action. */
 export function pruneDaemonState(state: DaemonState) {
   const entries = Object.entries(state.actions);
-  // The standing /tmp pass row (GY-1600) is its run's only count and exists only while the inode bound stands.
-  const resolved = entries.filter(([key, action]) => (action.state === 'done' || action.state === 'failed') && key !== standingTmpKey);
+  const resolved = entries.filter(([, action]) => action.state === 'done' || action.state === 'failed');
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
-  if (state.latency.length > retainedSamples) state.latency = state.latency.slice(-retainedSamples);
-  // A clock is dropped when its delivery was sampled; this bound only catches items the loop
-  // stopped seeing (a removed item, a renamed repository) so the cursor cannot grow without end.
-  const clocks = Object.keys(state.clocks);
-  if (clocks.length > retainedClocks) for (const id of clocks.slice(0, clocks.length - retainedClocks)) delete state.clocks[id];
   // Retired fields a cursor written before GY-2874 still carries are dropped on its next write.
   delete state.orphans; delete state.approvals; delete state.absences; delete state.decisionsDeferred;
+  // And those GY-2876 retired: the reclaim, memory and latency readings.
+  delete state.reclaim; delete state.memory; delete state.clocks; delete state.latency;
+  for (const metric of state.metrics) { delete metric.stages; delete metric.lead; delete metric.production; delete metric.postDeploy; delete metric.postDeployFailures; }
   // A cleared base failure is retired by its step once its candidates were rerun and refreshed; this bound drops the oldest, cleared first.
   const failures = Object.entries(state.baseFailures).sort((a, b) => Number(!a[1].cleared) - Number(!b[1].cleared) || Date.parse(a[1].raisedAt) - Date.parse(b[1].raisedAt));
   if (failures.length > retainedBaseFailures) for (const [key] of failures.slice(0, failures.length - retainedBaseFailures)) delete state.baseFailures[key];
@@ -132,9 +125,6 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     if (state.upgrade.snapshot) state.upgrade.snapshot = { ...state.upgrade.snapshot, commit: cut(state.upgrade.snapshot.commit, 40), checkout: cut(state.upgrade.snapshot.checkout, 40), dirty: state.upgrade.snapshot.dirty.slice(0, 20).map(path => cut(path, 300)) };
   }
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
-  if (state.reclaim) state.reclaim.errors = state.reclaim.errors.slice(0, 20).map(entry => cut(entry, 500));
-  for (const clock of Object.values(state.clocks)) clock.key = cut(clock.key, 40);
-  for (const sample of state.latency) sample.work = cut(sample.work, 40);
   if (state.master) {
     state.master.agentName = cut(state.master.agentName, 200);
     state.master.pane = cut(state.master.pane, 200);

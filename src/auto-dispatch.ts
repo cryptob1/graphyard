@@ -24,11 +24,9 @@ import { readProjectMemory, recordNoteInMemory, writeProjectMemory } from './pro
 import { agentToken } from './master/autonomy.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
 import { currentEvidence } from './model/evidence.js';
-import { judgeHostMemory, memoryDeferral, readHostMemory, reclaimResources, type HostMemoryReading } from './master-resources.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
 /** The fixed wording of review launch-wait reasons (GY-1175). */
 const launchWaitWording = { busy: 'every reviewer profile is busy', settles: 'the control plane settles the request once it reads that verdict' } as const;
-export { hostMemoryHold, loopMemoryAttention } from './master-resources.js';
 
 /**
  * The launch side of automatic dispatch at submit. The control plane records what each exact
@@ -396,12 +394,6 @@ export interface DispatchEffects {
   /** `released` names the panes, with their names, of settled sessions the pass closed (GY-1072): those names are free for this tick's launches. */
   reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
-  /**
-   * The name half of the resource reclaim (GY-1196): closes finished panes on profile names on the
-   * tick's cadence rather than the cycle's, so a name is given back within `nameReclaimBoundMs`
-   * however long a cycle runs. Returns the panes it closed, whose names are free for this tick.
-   */
-  reclaimNames?: (work: Work[], agents: HerdrAgent[]) => Promise<{ pane: string; agentName: string }[]>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   /**
@@ -432,8 +424,6 @@ export interface DispatchEffects {
   selectedAccount?: (role: 'reviewer' | 'producer', profile: string) => Promise<{ environment: string | null; kind: string | null } | null>;
   holdAccount?: (account: string, observed: Omit<ObservedExhaustion, 'until'>) => Promise<{ until?: string } | void>;
   reportCapacity?: (work: Work, event: Record<string, unknown>) => Promise<unknown>;
-  /** This host's memory (GY-612): below its floor, no reviewer or producer is launched and each request waits with the reason. */
-  hostMemory?: () => Promise<HostMemoryReading | null>;
   /**
    * Review by risk in control-plane mode (GY-1525): launches the one post-merge reviewer session of a
    * delivered normal-risk merge commit; a dispatcher wired without it launches none. `createWork`
@@ -883,17 +873,10 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // inventory and in the recorded handles alike (GY-1075): `observeSessions` above read the
   // inventory before the close, so a running handle on that pane still says running until a later
   // tick's report closes it, and a profile of one session could not take the freed name this tick.
-  // A failed name reclaim never fails the tick: the cycle's own pass runs it again.
-  const reclaimed = herdr && effects.reclaimNames ? await timings.step('reclaim names', () => effects.reclaimNames!(snapshot.work, herdr).catch(() => [])) : [];
-  const releasedPanes = new Set([...(released ?? []), ...reclaimed].map(entry => `${entry.pane}\0${entry.agentName}`));
+  const releasedPanes = new Set((released ?? []).map(entry => `${entry.pane}\0${entry.agentName}`));
   const isReleased = (pane: string | null | undefined, name: string | null | undefined) => !!pane && !!name && releasedPanes.has(`${pane}\0${name}`);
   const agents = (herdr ?? []).filter(agent => !isReleased(agent.pane_id, agent.name));
   const credentials = await timings.step('credentials', () => effects.credentials(config.producers));
-  // A host below its memory floor launches nothing new (GY-612): every request that would launch
-  // waits with the reason, and launches on the first tick after memory recovers.
-  const memory = effects.hostMemory ? await timings.step('memory', () => effects.hostMemory!().catch(() => null)) : null;
-  const memoryHold = memory ? judgeHostMemory(null, memory, clock, config.hostId) : null;
-  const memoryDeferred = memoryHold?.state.low ? memoryDeferral(memoryHold.state) : null;
   // The sessions this tick has started join the inventory at once, so two requests in one tick
   // never both take a profile's last slot. A launcher that does not report its session name is
   // counted under the name it would have chosen for the request.
@@ -1171,7 +1154,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     if (reviewedAfterMerge(item)) wait('review', item, review, postMergeWaitReason);
     else if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
     else if (!herdr) wait('review', item, review, 'Herdr session inventory is unavailable');
-    else if (memoryDeferred) wait('review', item, review, memoryDeferred);
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
     else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
     else {
@@ -1246,7 +1228,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through the loop's rework, and no producer is launched for it again`); continue; }
           if (!session('producer', item, request, producers)) continue;
           if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
-          if (memoryDeferred) { wait('producer', item, request, memoryDeferred); continue; }
           if (spent('producer')) { wait('producer', item, request, capacityWait('producer')); continue; }
           if (!retryable(request)) { wait('producer', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt' : `next attempt at ${cursor.failures[request.id].nextAt}`}`); continue; }
           // Independence is per item, never per process: a profile whose principal held an assignment
@@ -1298,7 +1279,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       const request = postMergeRequest(item);
       if (!session('review', item, request, reviews)) continue;
       if (!herdr) { wait('review', item, request, 'Herdr session inventory is unavailable'); continue; }
-      if (memoryDeferred) { wait('review', item, request, memoryDeferred); continue; }
       if (spent('review')) { wait('review', item, request, capacityWait('review')); continue; }
       // A post-merge request the attempt limit stranded is probed again one hour after its last
       // refusal (GY-2075): nothing else recovers it — the item is delivered, so no pre-merge
@@ -1481,7 +1461,6 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     credentials: profiles => inspectProducerCredentials(root, profiles),
     reconcileReviews: (work, agents) => reconcileReviews(root, current(), { run, work, agents }),
     reconcileProducers: (work, agents) => reconcileProducers(root, current(), work, agents, { run }),
-    hostMemory: readHostMemory,
     wakeObservation: async work => {
       const at = (deps.now ?? Date.now)(), previous = observationWakes.get(work.id);
       if (previous !== undefined && at - previous < observationWakeIntervalMs) return;
@@ -1489,8 +1468,6 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
       await mutate(`work/${work.id}/resync`, { prioritized: true, wait: false });
       observationWakes.set(work.id, at);
     },
-    reclaimNames: async (work, agents) => (await reclaimResources(root, withReviewerDefaults(current()), { work, agents }, { namesOnly: true, closePane: pane => closeHerdrPane(pane, run) }))
-      .closed.map(entry => ({ pane: entry.pane, agentName: entry.name })),
     // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
     // limit notice is failed over below rather than counted as a refusal.
     launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },

@@ -21,7 +21,6 @@ import { plainStatus } from '../../src/model/plain-status';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
-import { blastRadius } from '../../src/model/blast-radius';
 import { shownRisk } from '../../src/model/risk-class';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
@@ -71,7 +70,7 @@ export function PreviewPanel({ preview }: { preview: ItemPreview }) {
  * commands, review provider, next action, agent requests, evidence — is in one
  * collapsed "Technical details" section, and policy changes are in the admin Edit menu.
  */
-export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, stepMoves, signOut }: Dashboard & { item: Work }) {
+export default function WorkDetails({ item, work, status, token, observedAt, jobs, events, busy, codexAvailable, editingRequirements, setEditingRequirements, action, api, refresh, setSelected, setView, sessionEpoch, signOut }: Dashboard & { item: Work }) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const plain = plainStatus(item, now);
   // The recorded blocker is written once, under Blocker as recorded (GY-1739): any other line that
@@ -80,7 +79,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     const head = b.slice(0, 60), at = b.length > 60 ? text.indexOf(head) : -1; return at < 0 ? text : `${text.slice(0, at)}the recorded blocker, above`; };
   // The same duration and the same threshold the card carries; this view is another view of it.
   const release = releaseView(status);
-  const held = stepHeld(item, now, stepMoves, release);
+  const held = stepHeld(item, now, null, release);
   const owner = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
   const proofs = proofPreview(item, work);
@@ -130,9 +129,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const checks = checkStates(item);
   // The review gate's own verdict, whichever provider gave it (a reviewer session, Codex or an agent reviewer).
   const reviewGate = item.gates.find(g => g.name === 'review');
-  // What merging it would reach and what could take it back (GY-972), from its changed files and gates.
-  const radius = blastRadius(item);
-  // The risk class of the delta the merge would apply, beside the path-glob lane (GY-1521), judged by the repository
+  // The risk class of the delta the merge would apply (GY-1521), judged by the repository
   // policy the control plane serves on /api/status, the one its gates use (GY-1843).
   const risk = shownRisk(item, status?.repositoryPolicy);
   const review = !reviewGate || reviewGate.passed ? 'Approved' : reviewGate.reasons.some(r => r.startsWith('Outstanding change requests')) ? 'Changes requested' : 'Waiting for approval';
@@ -174,12 +171,10 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
         {prUrl && <div><dt>Link</dt><dd><a className="pr-open" href={prUrl} target="_blank" rel="noopener noreferrer" aria-label={`Pull request on GitHub for ${item.key}`}>Open on GitHub ↗</a></dd></div>}
         <div><dt><Term term="commit" focusable={false}>Commit</Term></dt><dd className="candidate-details"><CandidateSha repository={status?.repository} sha={item.candidate.sha} workKey={item.key}/></dd></div>
         {item.observation?.files && <div><dt>Changes</dt><dd>{item.observation.files.length} {item.observation.files.length === 1 ? 'file' : 'files'}</dd></div>}
-        <div><dt>Lane</dt><dd className="lane-details">{item.lane ?? 'unknown'}</dd></div>
         <div><dt>Risk</dt><dd className="risk-details">{risk.risk}{risk.reasons.length ? <small> · {risk.reasons.join(' · ')}</small> : <small> · no sensitive path in the merge delta</small>}</dd>{risk.estimated && <dd className="risk-estimate"><small>Read here by the generic default rules; the gates use this repository's <code>graphyard.json</code> policy (<code>graphyard work {item.key}</code>).</small></dd>}</div>
         <div><dt>Checks</dt><dd>{checks.length ? checks.map(check => `${check.name} ${check.state}`).join(' · ') : 'none required'}</dd></div>
         <div><dt>Review</dt><dd>{!item.policy.review ? 'not required' : review}</dd></div>
       </dl> : <p className="muted">No pull request yet.</p>}
-      {item.candidate && <details className={`blast-radius danger-${radius.danger}`}><summary>{radius.headline}</summary><ul>{radius.sentences.map(sentence => <li key={sentence}>{sentence}</li>)}</ul></details>}
     </section>
     {item.preview && <PreviewPanel preview={item.preview}/>}
     <TestCases item={item} api={api}/>

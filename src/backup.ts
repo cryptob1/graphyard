@@ -98,10 +98,8 @@ const restoreDeadlockAttempts = 5;
  *
  * Empty is a requirement, not a default: restoring over a live ledger would resurrect
  * expired ownership beside current assignments and discard evidence submitted since the
- * backup, which is exactly the outcome the deployment guide warns against. Proof grants
- * count: a release that already started against the target has materialized its
- * environment allowlist, and restoring beside that seed would leave two proof authorities
- * claiming the same principals. Migrate the target with `db migrate` instead. Tables the
+ * backup, which is exactly the outcome the deployment guide warns against. Migrate the
+ * target with `db migrate` instead. Tables the
  * backup does not carry — added by a later migration — stay empty and are reported, and
  * the migration that follows a restore fills in whatever the newer schema needs. A
  * checkpoint the migration itself seeds is not live state: the backup's checkpoint
@@ -130,9 +128,7 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     for (const name of ledgerTables) {
       if (name === 'graphyard_schema' || ledgerSeeded.includes(name)) continue;
       const count = Number((await db.query(`SELECT count(*) AS n FROM ${name}`)).rows[0].n);
-      if (count) throw new Error(`Restore requires an empty database: ${name} already holds ${count} row(s). ${name.startsWith('proof_grant')
-        ? 'A release that started against this database has already seeded proof authority from its environment; restore into a database migrated with `graphyard db migrate` instead, so the backup\'s grants and their history are the only authority'
-        : 'Restoring over live state resurrects expired ownership and discards later evidence'}`);
+      if (count) throw new Error(`Restore requires an empty database: ${name} already holds ${count} row(s). Restoring over live state resurrects expired ownership and discards later evidence`);
     }
     for (const table of backup.tables) {
       if (table.name === 'graphyard_schema') continue;

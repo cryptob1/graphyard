@@ -8,7 +8,7 @@ import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileRereadSql, recon
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
-import { authorizedForProof, unauthorizedProofs } from './proof-grants.js';
+import { authorizedForProof, unauthorizedProofs } from './model/proof.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
@@ -216,12 +216,12 @@ export function sameBesideActions(read: Work, current: Work): boolean {
 /**
  * Whether two readings of one item differ only in the loop's own bookkeeping (GY-1257): the action
  * queue (`sameBesideActions`), plus what each save re-derives or the loop records about the item
- * rather than the submitted work — its next action, gates and the lane they stamp, the sessions it
+ * rather than the submitted work — its next action and gates, the sessions it
  * reports. None of it is what a GitHub observation
  * reads, and the observation's own save re-evaluates the gates, so it never stands on a stale one.
  */
 export function sameBesideBookkeeping(read: Work, current: Work): boolean {
-  const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates, lane: _lane, speedTarget: _target,
+  const rest = ({ actionQueue: _queue, revision: _revision, updatedAt: _updated, nextAction: _next, gates: _gates,
     sessions: _sessions, ...others }: Work) => stableJson(others);
   return rest(read) === rest(current);
 }
@@ -973,7 +973,7 @@ export class Engine {
         work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
         // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
-        work!.proofGaps = await unauthorizedProofs(db, this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])], data.producerProofs);
+        work!.proofGaps = unauthorizedProofs(this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])], data.producerProofs);
         await adoptFollowUpWindow(db, work!);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
@@ -1311,7 +1311,7 @@ export class Engine {
         const dependent = actor.role === 'worker' ? null : producerIndependenceRefusal(actor, work, this.principals);
         demand(!dependent, dependent ?? 'Evidence producer is not independent', 403);
         // Trust is decided by the live grant set, never by the deployment environment.
-        const trusted = await authorizedForProof(db, actor, data.proof);
+        const trusted = authorizedForProof(actor, data.proof);
         if (data.proof === deploySmokeProof) {
           // Post-deployment proof is a trust boundary with no untrusted tier: it is accepted only
           // from a producer granted the proof, only once Graphyard has observed the deployment,
@@ -1337,7 +1337,7 @@ export class Engine {
       }
       if (command === 'revoke') {
         // Producer authority is the same live grant set that decides trust at submission.
-        demand(actor.role === 'admin' || actor.role === 'producer' && await authorizedForProof(db, actor, data.proof),
+        demand(actor.role === 'admin' || actor.role === 'producer' && authorizedForProof(actor, data.proof),
           'Evidence revocation requires an operator or the trusted producer authorized for this proof', 403);
         // Revoke every applicable record for the tuple, not merely the newest: leaving an older
         // accepted run behind would silently re-authorize the same candidate.
@@ -1401,7 +1401,7 @@ export class Engine {
     work.dependencies = data.dependencies; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
     work.scenarioRequirements = pins; work.policyRevision++;
     this.refuseRenewedDeferral(work, all);
-    work.proofGaps = await unauthorizedProofs(db, this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
+    work.proofGaps = unauthorizedProofs(this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
     work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
     // A revision is a hand-off for an item already under way: its timeline counts it, and the
     // lapsed lease it discards (a live one was refused above) ends that attempt at its deadline.

@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, appendSave, applyWorkDelta, eventStats, resolvedPayloadSql, snapshotEvery, workDiff, type WorkDelta } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { ledgerEntry, ledgerReplayColumns, reconstructTimeline } from '../src/pipeline-speed.js';
 import { readEventHistory, parseEventHistoryQuery } from '../src/events-history.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -155,10 +154,6 @@ test('integration:delta-readers — events history, store.events and the timelin
   const history = await readEventHistory(store.pool, parseEventHistoryQuery(new URLSearchParams({ work: w.id, routine: 'include', order: 'asc' })));
   assert.equal(history.events.length, rows.length);
   for (const event of history.events) { assert.deepEqual(event.payload.work, byRevision.get(event.payload.work.revision)); assert.equal(event.payload.delta, undefined); }
-  // The projected replay and a replay of whole documents agree.
-  const projected = (await store.pool.query(`SELECT ${ledgerReplayColumns} FROM events WHERE work_id=$1 ORDER BY seq`, [w.id])).rows.map(ledgerEntry);
-  const whole = (await store.pool.query(`SELECT seq, kind, created_at, ${resolvedPayloadSql()} AS payload FROM events WHERE work_id=$1 ORDER BY seq`, [w.id])).rows;
-  assert.deepEqual(reconstructTimeline(projected), reconstructTimeline(whole));
   // Append-only holds for delta rows.
   await assert.rejects(store.pool.query("UPDATE events SET payload='{}'::jsonb WHERE work_id=$1 AND payload ? 'delta'", [w.id]), /append-only/);
   await assert.rejects(store.pool.query("DELETE FROM events WHERE work_id=$1 AND payload ? 'delta'", [w.id]), /append-only/);

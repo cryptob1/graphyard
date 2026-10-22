@@ -133,8 +133,8 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
     const json = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } });
     if (url.endsWith('/healthz')) return options.healthy === false ? json(503, { ok: false }) : json(200, { ok: true, commit: options.servedCommit === undefined ? GRAPHYARD_SOURCE_SHA : options.servedCommit });
     if (url.endsWith('/api/agent-registry/document')) return json(200, registry);
-    // The served roster (GET /api/principals), as the control plane lists it: ids, roles, kinds and grants, never tokens.
-    if (url.endsWith('/api/principals')) return json(200, { principals: deployedRoster(transport).map(principal => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [], leases: [] })) });
+    // The served roster (GET /api/principals), as the control plane lists it: ids, roles, kinds, grants and proofs, never tokens.
+    if (url.endsWith('/api/principals')) return json(200, { principals: deployedRoster(transport).map(principal => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [], proofs: principal.proofs ?? [], leases: [] })) });
     if (url.endsWith('/api/agent-registry/apply') && method === 'POST') return json(200, { applied: true });
     if (url.endsWith('/api/status')) return json(200, typeof options.statusBody === 'function' ? options.statusBody() : options.statusBody ?? { actor: { id: `${installId}-operator`, role: 'admin' }, repository });
     // Nothing else is served: a request to GitHub's API is recorded and refused, so a test can prove there was none.

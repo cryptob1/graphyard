@@ -9,7 +9,6 @@ import { openActions } from '../src/model/actions.js';
 import { groupOf, nextCommand } from '../src/model/board.js';
 import { prSteps } from '../src/model/pr-steps.js';
 import { leftFlowAt, noRelease, type ReleaseView } from '../src/model/release.js';
-import { flowExitAt } from '../src/flow-analytics.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import { unhandled, type MasterSession } from '../src/cli/master/session.js';
 import { Engine } from '../src/engine.js';
@@ -69,7 +68,6 @@ test('unit:done-at-merge-board-and-goal — the board groups a merged item as sh
     assert.equal(steps.steps.at(-1)!.id, 'done', `${item.key} shows no Deploy step`);
     assert.ok(steps.steps.every(step => step.state === 'done'));
     assert.equal(leftFlowAt(item, view), item.delivery!.mergedAt, `${item.key} leaves the flow at its merge`);
-    assert.equal(flowExitAt(item), item.delivery!.mergedAt);
   }
 });
 

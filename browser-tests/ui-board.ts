@@ -5,7 +5,7 @@
 // tests render the same items (tests/ui-dashboard.test.ts), so a screenshot and an assertion are
 // about the same board.
 // @ts-expect-error Dependency-free fixture script.
-import { NOW, fixtureApi, fixtureStatus, fixtureWork, flowApi } from '../scripts/dashboard-fixture.mjs';
+import { NOW, fixtureApi, fixtureStatus, fixtureWork } from '../scripts/dashboard-fixture.mjs';
 import { boardFromStatus } from '../src/model/board';
 
 export { NOW };
@@ -114,7 +114,6 @@ export function boardApi(path: string, role = 'admin') {
   // GET /api/board (GY-200): the server's own module over this board, which the Work page renders.
   if (route === 'board') return boardFromStatus(work as any, NOW, boardStatus(role));
   if (route === 'work') return work;
-  if (route.startsWith('analytics/flow')) return flowApi(work, role)(path);
   // The Tests page (GY-162): one flaky case with history, one skipped, one never run.
   if (route === 'tests') return testsSummary();
   if (route === 'agent-registry') return { configured: false, attention: [], roles: [], accounts: [], runtimes: [], models: [], sessions: [], refusals: [] };

@@ -1,5 +1,4 @@
-import { readDaemonState } from './daemon/state.js';
-import { agentOwner, buildMasterStatus, concurrencyAttention, inventoryWorktrees, roleConcurrency, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
+import { agentOwner, buildMasterStatus, concurrencyAttention, roleConcurrency, type AttentionItem, type HerdrAgent, type MasterConfig } from './master.js';
 import type { ActionRow } from './model/actions.js';
 import type { Work } from './model.js';
 import { producerLedgerSpec, sessionRetries, summarizeProducers, type ProducerRecord } from './producer.js';
@@ -15,7 +14,6 @@ import { actorlessAttention } from './cli/actorless-submissions.js';
 import { overlongSessionAttention } from './cli/overlong-sessions.js';
 import { consentHoldItems } from './cli/consent-holds.js';
 import { setupHealth } from './cli/master-setup.js';
-import { attributionFor, describeReading, loadedRevision, owedUpgrade, readDisk, readPlaneResources, readReclaimState, readResources, readTmpInodes, resourceAttention, type ResourceInputs, type ResourceReading } from './master-resources.js';
 
 /**
  * A launch refused by a full session ledger is attributed to that ledger (GY-131).
@@ -107,75 +105,15 @@ function attentionLaunchKind(text: string): LedgerKind | null {
 }
 
 /**
- * The resource picture `master status` reports (GY-132): every registered resource as used of
- * bound with its headroom, one attention item per resource below its warning line, and the last
- * reclaim the loop recorded. It reads what the report already holds — the ledgers, Herdr, the
- * work snapshot, the loop's liveness — and adds the plane's own report from `/healthz`, the
- * worktree volume and the revision the running loop loaded.
- */
-export async function resourceStatus(root: string, master: MasterConfig, observed: {
-  reviews: ReviewRecord[] | null; producers: ProducerRecord[] | null; agents: HerdrAgent[] | null; work: Work[];
-  loop: (NonNullable<ResourceInputs['loop']> & { lock: { pid: number; host: string } | null }) | null;
-}, deps: { fetcher?: typeof fetch; run?: (command: string, args: string[]) => string;
-  /** The instant the readings are judged at: the snapshot's (GY-1379). */
-  now?: number;
-  /** The host's clock, for the age `ps` answers (GY-1547); a test's stand-in for Date.now. */
-  clock?: () => number;
-  cursor?: () => Promise<Parameters<typeof owedUpgrade>[0]> } = {}) {
-  const now = deps.now ?? Date.now();
-  const lock = observed.loop?.lock;
-  // The loop's age is counted back from the host's clock as `ps` is asked, never from the snapshot's
-  // instant the readings judge at (GY-1547): the two can lie a cycle's steps apart.
-  const revision = lock && lock.host === master.hostId ? loadedRevision(root, lock.pid, deps.run, (deps.clock ?? Date.now)()) : null;
-  // The remediation still in flight (GY-1198): the restart the self-upgrade owes, from the loop's
-  // cursor, and the panes the reclaim pass has seen unowned, from its own record.
-  const upgrade = owedUpgrade(await (deps.cursor ?? (() => readDaemonState(root, master)))().catch(() => null));
-  const reclaim = await readReclaimState(root);
-  // The worktree-disk reading judges the current plan beside the pass (GY-1784 review): what is disposable now decides whether the loop's latest pass answers it, so the registry and the `disk` line of master status answer alike.
-  const readings = readResources({ now, reviews: observed.reviews, producers: observed.producers, agents: observed.agents, work: observed.work,
-    profiles: { workers: master.workers, reviewers: master.reviewers, producers: master.producers },
-    plane: await readPlaneResources(master.url, deps.fetcher), loop: observed.loop, revision, upgrade, reclaimSeen: reclaim.seen, disk: await readDisk(root, master, undefined, { work: observed.work, now }), tmp: await readTmpInodes(root) });
-  const attention = resourceAttention(readings);
-  return { readings, attention, report: resourceReport(readings, reclaim.reports.at(-1) ?? null), upgrade };
-}
-
-/** The `resources` block of `master status`: one row per reading, with a one-line summary. */
-export function resourceReport(readings: ResourceReading[], lastReclaim: unknown) {
-  const pressed = readings.filter(reading => reading.state === 'low' || reading.state === 'exhausted');
-  return {
-    summary: `${readings.length} resource reading(s): ${pressed.length ? pressed.map(reading => `${reading.id} ${reading.state}`).join(', ') : 'all within their warning lines'}${readings.some(reading => reading.state === 'unknown') ? `; unread: ${readings.filter(reading => reading.state === 'unknown').map(reading => reading.id).join(', ')}` : ''}`,
-    readings: readings.map(({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable, waiting, overdue, advisory }) => ({ id, title, unit, used, bound, headroom, warnBelow, state, detail, owner, reclaim, reclaimable,
-      ...(waiting === undefined ? {} : { waiting }), ...(overdue === undefined ? {} : { overdue }), ...(advisory ? { advisory } : {}) })),
-    lastReclaim,
-  };
-}
-
-/**
- * Names the resource in place of the symptom. An attention item whose text is the downstream
- * effect of a resource at its bound — a reviewer "busy in Herdr" on a name a finished pane holds,
- * a launch refused by a full ledger, a stalled action repeating either — is rewritten to name the
- * resource, its bound and its usage, and keeps its subject; its next step becomes the resource's remedy.
- */
-export function attributeAttention(items: AttentionItem[], readings: ResourceReading[]): AttentionItem[] {
-  return items.map(item => {
-    if (item.subject.startsWith('resource:')) return item;
-    const reading = attributionFor(item.text, readings);
-    if (!reading) return item;
-    return { ...item, text: `${item.subject} is held by a registered resource at its bound: ${describeReading(reading)}. ${reading.remedy}`, next: reading.remedy, resource: reading.id };
-  });
-}
-
-/**
  * The lines `master status` builds from the snapshot, the session ledgers and the host after
  * `buildMasterStatus` (GY-173): agent requests, consent holds, review conflicts, stuck
- * requests, stalled items and actions, overlong sessions, the
- * GitHub budget and owed judgments. The report and the loop both read them from
- * here, so every class the report shows is one the loop counts. The report passes the rows and
- * checkouts it already has; the loop, reading them `standalone`, has them derived here and also reads
+ * requests, stalled items and actions, overlong sessions and owed judgments. The report and the
+ * loop both read them from here, so every class the report shows is one the loop counts. The report
+ * passes the rows it already has; the loop, reading them `standalone`, has them derived here and also reads
  * the setup and the dispatcher, which the report reads before everything else.
  */
 export async function derivedAttention(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, coordinator: any, snapshot: { work: Work[]; now: string },
-  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; trees?: (string | { path: string })[]; standalone?: boolean;
+  observed: { reviews: ReviewRecord[]; producers: ProducerRecord[]; runtime: { available: boolean; agents: HerdrAgent[] }; rows?: ReturnType<typeof buildMasterStatus>['work']; standalone?: boolean;
     /** GY-2015: the merge writer's own summary, so the owed lines it holds read as its motion; absent, the readers behave as before. */
     mergeWriter?: MergeWriterSummary | null }) {
   const reviews = summarizeReviews(observed.reviews), now = Date.parse(snapshot.now);
@@ -183,7 +121,7 @@ export async function derivedAttention(root: string, master: MasterConfig, maste
     // The retry schedule of every settled session (GY-533): without it a failed session whose next
     // attempt is already scheduled reads as a request nothing will answer.
     { producers: summarizeProducers(observed.producers), failures: [], retries: [...sessionRetries(observed.reviews, now), ...sessionRetries(observed.producers, now)] }).work;
-  const requests = [...agentRequestAttention(snapshot), ...consentHoldItems(observed.trees ?? await inventoryWorktrees(root).catch(() => []), snapshot)];
+  const requests = [...agentRequestAttention(snapshot), ...consentHoldItems(snapshot.work.flatMap(item => item.workspaces.filter(space => space.host === master.hostId).map(space => space.path)), snapshot)];
   const stalledItems = stalledItemAttention(snapshot);
   // A submitted item with no review, producer or rework request and no named wait (GY-191).
   const actorless = actorlessAttention(snapshot);

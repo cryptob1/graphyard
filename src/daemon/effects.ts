@@ -8,7 +8,6 @@ import type { Work } from '../model.js';
 import type { SessionHandleInput } from '../model/sessions.js';
 import { paneAlreadyGone, withPaneGone } from '../request-settlement.js';
 import type { MergeWriterSummary } from './cycle-merge-writer.js';
-import { type HostMemoryReading, type ResourceReclaimReport, reclaimResources, dispatchRefusal, readHostMemory } from '../master-resources.js';
 import { RefusedResponse } from '../model/refusal.js';
 
 /** GY-1713: body `error` + zod `issues` so attention names the refused field; else stringify. */
@@ -34,7 +33,7 @@ import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview }
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
 import { type MasterSessionEffects, masterSessionEffects } from '../master/master-session.js';
-import { type WorkerProfile, type HerdrAgent, type WorktreeReclaimReport, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, holdRepeatedLimitAccount, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
+import { type WorkerProfile, type HerdrAgent, type ObservedExhaustion, type ProfileAccountHealth, type MasterConfig, agentToken, holdRepeatedLimitAccount, listHerdrAgents, sessionAccount, preservePartialWork, recordObservedExhaustion, closeHerdrPane, inspectProfileAccounts, inspectProducerCredentials, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, writeFailure, herdrJson, readCredentialFile, withRoleDefaults, type ControlPlaneStatus, type SessionIdentity } from '../master.js';
 import { herdrCall, listHerdrPanes, type HerdrPane } from '../master/herdr.js';
 import { httpFleetClient, reconcileFleetSessions, settledRecordSessions } from '../fleet.js';
 import { type ContainmentRetention, type DaemonAction, type DaemonState, type LoopRelease, storeAction, type DeploymentObservation, message, writeDaemonState } from './state.js';
@@ -44,7 +43,6 @@ import type { daemonSummary } from './run.js';
 import { observeDeployment, deploymentEnvironmentName } from './deployment.js';
 import { mergeRecordKey, mergeWriterReads, type MergeWriterReads } from './cycle-merge-writer.js';
 import { worktreeRoot } from '../install/worktree-root.js';
-import { throughputEffects, type ThroughputEffects } from './throughput-effect.js';
 import type { ReadingEffects } from './reading-effect.js';
 import { alignRunningLoopUnit, awaitSupervisorRestart, detectLoopSupervisorUnit, performSelfUpgrade, recoverMovedHead, type SelfUpgradeDeps, type SelfUpgradeOutcome } from './upgrade.js';
 import { serverCallName, timedCall, timedFetch, timedRun } from '../master/timings.js';
@@ -62,11 +60,9 @@ export const capacityKey = (role: CapacityRole) => `capacity:${role}`;
 /** GY-852: paste by pane_id, else name (profiles reuse names across sessions). */
 export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
 
-export interface DaemonEffects extends ThroughputEffects, ReadingEffects {
+export interface DaemonEffects extends ReadingEffects {
   closeSession: (pane: string) => void | Promise<void>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
-  /** The throughput owner as the control plane holds it now, read before its needs-decision is keyed by its requirements revision (GY-1609). */
-  readThroughputOwner?: (owner: Work) => Promise<Work>;
   /** An item as the control plane holds it now, read outside any transaction (GY-2151): a containment settlement is judged on this record before it is posted, because the plane lowers the fence against its own record, not the cycle's snapshot. */
   readWork?: (work: Work) => Promise<Work>;
   wakeObservation?: (work: Work) => Promise<unknown>; // GY-710: a prioritized `resync` now (GY-1266) that waits on no tick (GY-1286), for a step refused on a stale observation
@@ -112,20 +108,10 @@ export interface DaemonEffects extends ThroughputEffects, ReadingEffects {
    * a previous process left there; a loop wired without it reports none.
    */
   loadedRelease?: LoopRelease | null;
-  /**
-   * Removes the dependency directories of finished assignment worktrees. A loop configured
-   * without it keeps cycling; it simply never reclaims. It touches no checkout, no branch, and
-   * no Graphyard record, so it needs no credential and is safe to run on every cycle.
-   */
-  reclaim?: (work: Work[], now?: number) => Promise<WorktreeReclaimReport>;
-  /** Worktrees disposable now by the plan over the current inventory (GY-1784); null when the plan cannot be read. */
-  worktreeReclaimable?: (work: Work[], now: number) => Promise<number | null>;
-  /** The resource reclaim pass (GY-132): reaps terminal records, closes finished sessions holding profile names, frees stuck sessions' slots; every cycle. */
-  reclaimResources?: (work: Work[], agents: HerdrAgent[] | null) => Promise<ResourceReclaimReport>;
+  /** Removes an ended attempt's assignment worktree with `git worktree remove` (never forced); whether one was removed. A loop wired without it removes none. */
+  removeWorktree?: (path: string) => Promise<boolean>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
-  /** This host's memory (GY-612): below its floor, new launches are deferred. A loop wired without it never defers. */
-  hostMemory?: () => Promise<HostMemoryReading | null>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`); absent, the loop applies no rework. */
   rework?: (work: Work, reason: string, binding?: string) => Promise<unknown>;
   /**

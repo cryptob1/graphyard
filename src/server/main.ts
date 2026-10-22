@@ -6,9 +6,7 @@ import { Engine } from '../engine.js';
 import { demand, parseReviewerApps } from '../model.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
-import { ProofGrants } from '../proof-grants.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
-import { projectFlow } from '../flow-analytics.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, observationLine, productionProvider, resolvedWatchEnvironment, startProductionWatch } from '../production-watch.js';
@@ -38,9 +36,8 @@ export async function main(options: MainOptions = {}) {
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
   engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
-  // The producers this installation already ran with. An over-limit roster of these starts
-  // with a warning; only a principal added beyond the limit refuses, naming the variable.
-  const knownPrincipals = (await store.pool.query('SELECT principal_id FROM proof_grants')).rows.map(row => String(row.principal_id));
+  // The configured roster is the one this installation runs with: an over-limit roster starts with a warning.
+  const knownPrincipals = credentials.map(credential => credential.id);
   const build = buildIdentity();
   // Railway's API when a Railway token is set; GitHub deployments are no longer read (GY-2010).
   const provider = productionProvider(process.env, null, fetch, await resolvedWatchEnvironment(store.pool));
@@ -79,11 +76,6 @@ export async function main(options: MainOptions = {}) {
       try {
         if (!prepared) {
           mark('production.load'); await production.load().catch(error => { if (!closing) console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'); });
-          if (closing) return;
-          // One-time materialization of the deployment allowlist. Operators manage proof authority
-          // inside Graphyard from here on; a later environment edit no longer changes authority.
-          mark('proofGrants.seed'); const seeded = await new ProofGrants(store, credentials.map(({ token, ...actor }) => actor)).seed();
-          if (seeded.length) console.log(`Seeded proof grants for ${seeded.map(grant => grant.principalId).join(', ')}`);
           if (closing) return;
           mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
           prepared = true;
@@ -138,7 +130,6 @@ export async function main(options: MainOptions = {}) {
     // backlog of observations drains across ticks without ever skipping one.
     await step('validation.expireArtifacts', () => validation.expireArtifacts()); await step('validation.reconcile', () => validation.reconcile());
     await step('engine.reconcile', () => engine.reconcile()); await step('delivery.sweep', () => delivery.sweep());
-    await step('projectFlow', () => projectFlow(engine.store, { batches: 4 }));
     // Bounded, on the pool, never under the coordination lock: receipts past the replay window go.
     if (Date.now() - receiptsPrunedAt >= receiptPruneIntervalMs) { receiptsPrunedAt = Date.now(); await step('pruneReceipts', () => pruneReceipts(store.pool).catch(error => { console.error('receipt pruning failed', error instanceof Error ? error.message : 'unknown'); return 0; })); }
     // Routine ledger rows past the retention window go in bounded, audited batches (store/compaction.ts).

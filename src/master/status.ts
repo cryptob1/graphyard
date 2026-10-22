@@ -9,7 +9,6 @@ import { type Work, carriedBindings, describeGround, observationWindowHold, loop
 import { pendingBaseRefresh, baseRefreshConflict, currentBaseRefreshCarry } from '../model/base-refresh.js';
 import { MERGE_PROTOCOL } from '../protocol-version.js';
 import { mergeBaseDismissal, mergeBaseDismissalAttention } from '../merge-base-ancestry.js';
-import { pipelineSpeed, pipelineSpeedSummary } from '../pipeline-speed.js';
 import { profileSessions, promotionCommand, type Supervision, type WorkerProfile } from './profiles.js';
 import { sessionActivity } from './launch.js';
 import { launchingSession, sessionView } from '../model/session-state.js';
@@ -17,7 +16,6 @@ import type { HerdrAgent } from './herdr.js';
 import { agentOwner, type AttentionItem, controlPlaneAttention, type ControlPlaneStatus, fleetStatus, workAttentionOwner, type WorkAttentionCause } from './attention.js';
 import { launchFailedBeforeStart } from '../model/lease-end.js';
 import { mechanicalProof, unexercisedDetail, unexercisedFindings } from '../model/mechanical-proofs.js';
-import { maxInFlight } from '../model/dispatch.js';
 import { unrunnableRemedies } from './harness.js';
 import { mergeAuthorized, mergedWithoutAuthorization, refusedReconciliation, unauthorizedMergeViolation } from '../model/merge-authorization.js';
 import type { ProjectMemory } from '../model/project-memory.js';
@@ -255,9 +253,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     const attentionOwner = cause ? workAttentionOwner(work, cause, now) : null;
     if (cause) causes.set(work.key, cause);
     return { key: work.key, title: work.title, stage: work.stage, owner: active ? work.lease!.owner : null, profile: profile?.name ?? null, session: session?.state ?? null, refusal: first ? { gate: first.name, reason: first.reasons[0] } : null, mergeable, review, dispatch, proofGaps: gaps, attention, attentionOwner,
-      // The risk lane the item rides and its speed target (GY-883), stamped by the last evaluation
-      // and shown per row: the lane names the ceremony the item's change is asked for.
-      lane: work.lane ?? null, speedTarget: work.speedTarget ?? null,
       // The observation window a windowed post-deploy follow-up carries (GY-1698): `waiting` while it holds the dispatch.
       observationWindow,
       // The loop's observation an all-manual post-deploy item waits for (GY-1762): counted as waiting, never ready.
@@ -277,8 +272,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
           evidence: refreshCarry.evidence.map(entry => ({ proof: entry.proof, carried: entry.carried, reason: entry.reason })) } : null } : null,
       blocker: work.blocker,
       overlap: { concurrent }, conflicts,
-      // Execution versus wait so far, rework rounds and hand-offs, from the item's own timeline.
-      speed: pipelineSpeed(work, now),
       // The review and proofs held by carry across a Graphyard-authored merge, each with its ground:
       // the verdict given before that merge, shown as carried rather than as freshly passed.
       carried: carriedBindings(work, snapshot.work, new Date(now)) };
@@ -287,12 +280,6 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   // record at the merge cutoff satisfied every gate — or operator-authorized, where it did not
   // and an operator took responsibility (GY-94). Neither is mistaken for the other or for a routine merge.
   const deliveries = recoveredDeliveries(snapshot.work);
-  // Merge-to-production over every delivery with an observed deployment, whether or not its
-  // policy asked for a smoke proof, so the periodic measurement reads one number for the repository.
-  const mergeToProduction = latencyPercentiles(snapshot.work.map(work => mergeToProductionMs(work)).filter((value): value is number => value !== null));
-  // Submit→merge p50/p90 over every delivery with a recorded submission, judged against the
-  // pipeline-speed target; the periodic measurement records this beside the production latency.
-  const speed = pipelineSpeedSummary(snapshot.work, now);
   // Capacity, one line per spent role: the accounts, their resets, and every item that waits on it.
   const open = snapshot.work.filter(work => work.stage !== 'done');
   const capacity = quotaRoles.flatMap(role => {
@@ -311,7 +298,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
   const idle = workerSessions.filter(session => session.mode === 'launch' && session.credential.available && (session.state === 'offline' || session.state === 'idle') && !rows.some(row => row.owner === session.principal));
   const launchProfiles = workerSessions.filter(session => session.mode === 'launch').length;
   const fleet = { effective: inFlightCount + scheduling.order.length, inFlight: inFlightCount, dispatchable: scheduling.order.length, idleWorkers: idle.length, workers: launchProfiles,
-    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle; the dispatcher starts new work while fewer than ${maxInFlight} ${inFlightCount === 1 ? 'item is' : 'items are'} in flight${atCapClause(inFlightCount)}` };
+    statement: `${inFlightCount + scheduling.order.length} item${inFlightCount + scheduling.order.length === 1 ? '' : 's'} could be in flight at once (${inFlightCount} in flight, ${scheduling.order.length} dispatchable; file overlap holds nothing); ${idle.length} of ${launchProfiles} launch profile${launchProfiles === 1 ? '' : 's'} idle; the dispatcher starts every dispatchable item while a worker profile is free` };
   // A blocker whose remedy no launched session may run is Graphyard's own defect (GY-128).
   const remedies = unrunnableRemedies(snapshot.work, { cliPath, baseBranch, workerKinds: profiles.filter(profile => profile.mode === 'launch').flatMap(profile => profile.kind ? [profile.kind] : []) });
   const remedyItems: AttentionItem[] = remedies.map(entry => ({ subject: entry.key, text: entry.text,
@@ -339,7 +326,7 @@ export function buildMasterStatus(snapshot: { work: Work[]; now: string }, profi
     closed: closedHistory(snapshot.work),
     // GY-1779: the readings the loop owes loop-owned observation items, with the loop's last record of each (`reading:ITEM:RELEASE`).
     pendingReadings: pendingReadings(rows, snapshot.work, loop, now),
-    workers: workerSessions, reviews, producers: sessions.producers, work: rows, deliveries, latency: { mergeToProduction }, speed, controlPlane: installation, fleet: registry.fleet,
+    workers: workerSessions, reviews, producers: sessions.producers, work: rows, deliveries, controlPlane: installation, fleet: registry.fleet,
     schedule: scheduling, conflicts: { available: candidateConflicts.available, reason: candidateConflicts.reason, ...sequenceAdvice(rows.filter(row => row.conflicts).map(row => ({ key: row.key, conflicts: row.conflicts!.candidates }))) },
     // The shared project memory the loop keeps (GY-1125), as its cursor holds it; null while the cursor is unreadable.
     projectMemory: loop && 'projectMemory' in loop ? loop.projectMemory ?? null : null };
@@ -361,8 +348,6 @@ export function sequenceAdvice(candidates: { key: string; conflicts: string[] }[
   const conflicting = candidates.filter(entry => entry.conflicts.length);
   return { sequence, conflicting: conflicting.map(entry => ({ key: entry.key, conflicts: entry.conflicts })) };
 }
-/** The clause the fleet statement adds once the in-flight cap is full (GY-2097); empty while it has room. */
-const atCapClause = (inFlight: number) => inFlight >= maxInFlight ? ` — ${inFlight} in flight is the cap, so ready work waits until one merges (Hotfix items excepted)` : '';
 
 /**
  * The deliveries that did not come through an authorized merge execution: a reconciled delivery
@@ -374,17 +359,4 @@ const atCapClause = (inFlight: number) => inFlight >= maxInFlight ? ` — ${inFl
 export function recoveredDeliveries(work: Work[]) {
   const done = work.filter(item => item.stage === 'done' && item.delivery) as (Work & { delivery: NonNullable<Work['delivery']> & { reconciliation?: unknown; operatorAuthorization?: unknown } })[];
   return { reconciled: done.filter(item => item.delivery.reconciliation), operatorAuthorized: done.filter(item => item.delivery.operatorAuthorization) };
-}
-/** Time from the accepted merge to the observed deployment covering it: merge-to-production latency. */
-export function mergeToProductionMs(work: Work): number | null {
-  const observedAt = work.delivery?.deployment?.observedAt;
-  if (work.stage !== 'done' || !observedAt) return null;
-  const value = Date.parse(observedAt) - Date.parse(work.delivery!.mergedAtRepository ?? work.delivery!.mergedAt);
-  return Number.isFinite(value) && value >= 0 ? value : null;
-}
-/** Nearest-rank percentiles over the measured deliveries, for the periodic measurement. */
-export function latencyPercentiles(values: number[]) {
-  const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
-  const at = (percentile: number) => sorted.length ? sorted[Math.min(sorted.length - 1, Math.max(0, Math.ceil(sorted.length * percentile / 100) - 1))] : 0;
-  return { count: sorted.length, p50Ms: at(50), p90Ms: at(90) };
 }

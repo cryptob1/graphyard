@@ -30,8 +30,8 @@
         "glob": "src/operator-agent.ts"
       },
       {
-        "rule": "proof grants",
-        "glob": "src/proof-grants.ts"
+        "rule": "proof authority",
+        "glob": "src/model/proof.ts"
       },
       {
         "rule": "installation",
@@ -55,68 +55,45 @@
       },
       {
         "rule": "CI configuration",
-        "glob": ".github/",
-        "only": "risk"
+        "glob": ".github/"
       },
       {
         "rule": "dependencies",
-        "glob": "package.json",
-        "only": "risk"
+        "glob": "package.json"
       },
       {
         "rule": "dependencies",
-        "glob": "package-lock.json",
-        "only": "risk"
+        "glob": "package-lock.json"
       },
       {
         "rule": "merge path",
-        "glob": "src/merge-queue.ts",
-        "only": "risk"
+        "glob": "src/merge-queue.ts"
       },
       {
         "rule": "merge path",
-        "glob": "src/direct-merge.ts",
-        "only": "risk"
+        "glob": "src/direct-merge.ts"
       },
       {
         "rule": "merge path",
-        "glob": "src/merger-mode.ts",
-        "only": "risk"
+        "glob": "src/merger-mode.ts"
       },
       {
         "rule": "merge path",
-        "glob": "src/main-guard.ts",
-        "only": "risk"
+        "glob": "src/main-guard.ts"
       },
       {
         "rule": "merge path",
-        "glob": "src/regression-guard.ts",
-        "only": "risk"
+        "glob": "src/regression-guard.ts"
       },
       {
         "rule": "merge writer",
-        "glob": "src/merge-writer/",
-        "only": "risk"
+        "glob": "src/merge-writer/"
       },
       {
         "rule": "migrations",
-        "glob": "migrations/",
-        "only": "risk"
-      },
-      {
-        "rule": "database schema",
-        "glob": "migrations/schema**",
-        "only": "lane"
-      },
-      {
-        "rule": "credentials",
-        "glob": "auth/credentials**",
-        "only": "lane"
+        "glob": "migrations/"
       }
     ]
-  },
-  "review": {
-    "normalChanges": "post-merge"
   },
   "e2e": {
     "pendingOutcomes": "non-blocking"

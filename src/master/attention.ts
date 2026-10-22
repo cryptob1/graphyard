@@ -96,7 +96,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   // A system-driven item is never pushed by hand (GY-175): the owner text names the loop step, not a command the CLI refuses.
   const driven = work.systemDriven === true;
   if (cause === 'session') return agentOwner('master', `herdr agent list to inspect the session; once the lease lapses, ${driven ? `the loop's dispatcher launches ${key} again` : `graphyard master dispatch ${key} PROFILE`}`);
-  if (cause === 'proof-gap') return agentOwner('master', `graphyard grants grant PRODUCER ${(work.proofGaps ?? [])[0] ?? 'PROOF'} REASON`);
+  if (cause === 'proof-gap') return agentOwner('master', `graphyard principal add PRODUCER --role producer --proof ${(work.proofGaps ?? [])[0] ?? 'PROOF'}`);
   const reviewNext = driven ? `the loop relaunches the review on its own; graphyard master review ${key} only once the loop has stopped relaunching its request` : `graphyard master review ${key}`;
   if (cause === 'reviewer-exhausted') return agentOwner('master', `graphyard master reviewer add FILE with a profile on another provider, then ${reviewNext}`);
   if (cause === 'launch-review') return agentOwner('master', `Fix the refusal reason, then ${reviewNext}`);

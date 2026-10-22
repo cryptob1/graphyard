@@ -96,7 +96,7 @@ export function callIdentity(arg: unknown): unknown {
 const identityArguments: Partial<Record<keyof DaemonEffects, number[]>> = {
   promptSession: [0], endRegistrySession: [0], endSession: [0], rework: [0],
   holdAccount: [0], recordSession: [], reportCapacity: [0],
-  reclaim: [], reclaimResources: [], panes: [], herdr: [], roleHealth: [], launchedSessions: [], planeHealth: [], hostMemory: [], reconcileSessions: [],
+  panes: [], herdr: [], roleHealth: [], launchedSessions: [], planeHealth: [], reconcileSessions: [],
 };
 /**
  * The intent of a prompt's text: the instruction it gives, with what the clock moves between one cycle's wording

@@ -5,11 +5,11 @@ import { compiledRules, repositoryPolicy, type CompiledRule, type RepositoryPoli
 
 /**
  * The risk class of a change, judged from the files the merge would actually apply to the base
- * branch, beside the path-glob lane (`policy.ts determineLane`) that still gates a pull-request-era
- * observation. The lane classifies the observed paths; the class classifies the delta the merge
- * applies — the landing check's three-way result when it was computed against the live base tip —
- * and names, per file, the rule that made it sensitive. Nothing gates on the class yet: it is
- * computed on read and shown beside the lane by `graphyard status` and the item page.
+ * branch — the landing check's three-way result when it was computed against the live base tip —
+ * naming, per file, the rule that made it sensitive. It is the one merge rule (model/gates.ts): a
+ * sensitive delta waits for one independent approval before the merge writer merges it; any other
+ * merges on its passing trial and is reviewed after the merge. It is computed on read and shown by
+ * `graphyard status` and the item page.
  *
  * `sensitive` is whatever the repository's graphyard.json declares under `risk.sensitive`
  * (model/repository-policy.ts, GY-1843): each entry a glob and the rule a reason cites. A repository
@@ -26,19 +26,14 @@ const compiled = new WeakMap<RepositoryPolicy, CompiledRule[]>();
 /** Every rule that makes a path sensitive under `policy` (the one in force by default), with the name a reason cites. */
 export function riskRules(policy: RepositoryPolicy = repositoryPolicy()): readonly CompiledRule[] {
   let rules = compiled.get(policy);
-  if (!rules) compiled.set(policy, rules = compiledRules(policy, 'risk'));
+  if (!rules) compiled.set(policy, rules = compiledRules(policy));
   return rules;
 }
 /** The rules in force when this module loaded; readers that must follow a replaced policy call `riskRules()`. */
 export const sensitiveRules: readonly CompiledRule[] = riskRules();
 
-/**
- * Whether a change of this class is reviewed before it merges: a sensitive one always, a normal one
- * only when the repository declares `review.normalChanges: pre-merge`; otherwise a normal change
- * merges on its trial and owes one post-merge review (GY-1525).
- */
-export const reviewedBeforeMerge = (risk: RiskClass, policy: RepositoryPolicy = repositoryPolicy()) =>
-  risk === 'sensitive' || policy.review.normalChanges === 'pre-merge';
+/** Whether a change of this class is reviewed before it merges: only a sensitive one; a normal change merges on its trial and owes one post-merge review (GY-1525). */
+export const reviewedBeforeMerge = (risk: RiskClass) => risk === 'sensitive';
 
 /** One file of a delta: its path and, for a rename, where it came from. */
 export interface DeltaFile { path: string; previousPath?: string }
@@ -68,7 +63,7 @@ export function classifyRisk(files: readonly DeltaFile[], policy: RepositoryPoli
 
 declare module './work.js' {
   interface Work {
-    /** GY-1521: the risk class of the delta the merge would apply, computed on read beside `lane`; never stamped by an evaluation. */
+    /** GY-1521: the risk class of the delta the merge would apply, computed on read; never stamped by an evaluation. */
     risk?: RiskClass;
   }
 }
@@ -107,15 +102,12 @@ export function shownRisk(work: Pick<Work, 'candidate' | 'observation'>, served?
   return { risk, reasons, estimated: !served };
 }
 
-/**
- * The item as a reader prints it: `risk` and its reasons placed right after `lane`, so the two
- * classifications of the same change read side by side, whatever order the record's keys came in.
- */
+/** The item as a reader prints it: `risk`, its reasons and source right after `key`. */
 export function withRisk<T extends Pick<Work, 'candidate' | 'observation'>>(work: T): T & { risk: RiskClass; riskReasons: string[]; riskSource: DeltaSource } {
   const { risk, reasons, source } = riskOf(work);
   const shown: Record<string, unknown> = {};
   const beside = () => { shown.risk = risk; shown.riskReasons = reasons; shown.riskSource = source; };
-  for (const [key, value] of Object.entries(work)) { shown[key] = value; if (key === 'lane') beside(); }
+  for (const [key, value] of Object.entries(work)) { shown[key] = value; if (key === 'key') beside(); }
   if (!('risk' in shown)) beside();
   return shown as T & { risk: RiskClass; riskReasons: string[]; riskSource: DeltaSource };
 }

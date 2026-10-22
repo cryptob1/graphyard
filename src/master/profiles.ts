@@ -327,15 +327,8 @@ export const masterRunSchema = z.object({
   // How long a launched runtime has to come up in its pane before the launch fails and closes it
   // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
   launchStartSeconds: z.number().int().min(10).max(600).optional(),
-  // Worktree reclamation: idle hours before dependencies count as disposable, and free space
-  // threshold for disk pressure. Both read from .graphyard/master.json on every cycle.
-  reclaimIdleHours: z.number().min(0.25).max(720).optional(),
-  diskThresholdGb: z.number().min(0.1).max(10_000).optional(),
-  // How many finished assignment worktrees one reclaim pass removes outright (GY-360; default 50),
-  // so a large backlog drains over a few cycles without stalling any one of them.
-  worktreeRemovalLimit: z.number().int().min(1).max(1000).optional(),
   // Managed worktree root for proof and review checkouts: absolute path outside worktrees,
-  // required free space, and max size before master status asks for a reclaim.
+  // required free space, and max size before master status warns.
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
   worktreeRootMinFreeGb: z.number().min(0.1).max(10_000).optional(),
   worktreeRootBudgetGb: z.number().min(0.1).max(10_000).optional(),
@@ -438,8 +431,6 @@ export const masterConfigSchema = forwardTolerant(z.object({
   }).strict().optional(),
   // The system invariants' thresholds (GY-404, src/model/invariants.ts), each defaulting to the loop's bound.
   invariants: invariantThresholdsSchema.optional(),
-  // Delivery-speed p90 targets master status judges (GY-1232); unset keeps 2h ready→merged, 8h merged→production.
-  deliverySpeed: z.object({ readyToMergedP90Ms: z.number().int().positive().max(30 * 86_400_000).optional(), mergedToProductionP90Ms: z.number().int().positive().max(30 * 86_400_000).optional() }).strict().optional(),
 // GY-1960: master.json is forward-tolerant — fields a newer version wrote that this one does not
 // declare parse and are written back unchanged, so a rollback or a held-CLI snapshot opens the file.
 }).strict());

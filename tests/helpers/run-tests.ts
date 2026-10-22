@@ -1,13 +1,14 @@
 import { spawn } from 'node:child_process';
 import { chmodSync, mkdirSync, readdirSync, readFileSync, statfsSync } from 'node:fs';
+import { readdir, rm } from 'node:fs/promises';
 import { availableParallelism, homedir, tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parseShard, shardFiles } from '../../scripts/ci-tests.mjs';
 import { isolatedTestEnvironment, reserveTestPorts, testPortEnvironment, type ReserveOptions } from '../../src/cli/test-isolation.js';
-import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master-resources.js';
+import { hostMemoryFloor, hostMemoryVariable, memoryRecoveryMarginBytes, readHostMemory } from '../../src/master/host-memory.js';
 import { bytesPerSuiteFile, declareSlotFiles, heldVariable, othersDeclaredFiles, sessionVerificationSlot, slotsDirectoryVariable } from '../../src/master/verification-slots.js';
-import { describeTmpReclaim, reclaimTmpDirectories } from '../../src/tmp-reclaim.js';
+import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-reclaim.js';
 
 // The suite's own runner (GY-174): `npm test` and `npm run test:browser` start here, so a clean run
 // needs nothing the session has to know about the host.
@@ -34,32 +35,17 @@ import { describeTmpReclaim, reclaimTmpDirectories } from '../../src/tmp-reclaim
 // run holds until it exits, and GRAPHYARD_BROWSER_PORT the dev server's port. Two runs on one host —
 // two worktrees, or a worker beside a producer — therefore never share a database or a server.
 //
-// Before and after the suite it runs, the runner sweeps the `<tmpdir>/graphyard-*` directories
-// earlier runs left behind (GY-421): one whose owning process is gone is removed whatever its age,
-// an old ownerless one once nothing live holds it open, and one a live run still owns is never
-// touched. A run that was killed mid-test therefore stops leaking its embedded-Postgres data dirs
-// into the tmpfs — and each run's own backstop removes whatever this one's children leaked.
+// Before and after the suite it runs, the runner removes the `<tmpdir>/graphyard-*` directories
+// whose owner marker names a process that is gone (GY-421), so a killed run stops leaking its
+// embedded-Postgres data dirs; one a live run owns, or one with no marker, is never touched.
 
-/** The most leftovers one sweep of this runner removes, so a backlog cannot stall the suite's start. */
-export const runnerTmpSweepLimit = 40;
-/**
- * How old a `pg-password-*` file must be before the runner takes it (GY-1074). embedded-postgres
- * writes the file to the tmpdir for initdb and unlinks it in a finally, so only a process killed
- * mid-init leaves one; initdb reads it within seconds, so ten minutes never takes a live run's.
- */
-export const runnerPasswordFileAgeMs = 10 * 60_000;
-
-/** One runner sweep over `tmpRoot` (the host's tmpdir by default): its `graphyard-*` leftovers and stale `pg-password-*` files. */
-export async function sweepLeftoverTempDirectories(when: string, tmpRoot?: string) {
+/** One runner sweep over `tmpRoot` (the host's tmpdir by default): its `graphyard-*` leftovers whose owner is gone. */
+export async function sweepLeftoverTempDirectories(tmpRoot = tmpdir()) {
   const removed: string[] = [];
-  for (const options of [{ prefixes: ['graphyard-'] }, { prefixes: ['pg-password-'], maxAgeMs: runnerPasswordFileAgeMs }]) {
-    try {
-      const sweep = await reclaimTmpDirectories({ ...options, limit: runnerTmpSweepLimit, ...(tmpRoot ? { tmpRoot } : {}) });
-      removed.push(...sweep.removed.map(entry => entry.path));
-      const freed = describeTmpReclaim(sweep.removed.length, sweep.bytes);
-      if (freed) console.error(`[run-tests] ${when}: ${freed}, ${sweep.kept} kept (a live run's or not yet due)`);
-      for (const error of sweep.errors) console.error(`[run-tests] ${when}: could not remove ${error}`);
-    } catch { /* a sweep that cannot run must never stop the suite */ }
+  for (const name of await readdir(tmpRoot).catch(() => [] as string[])) {
+    const directory = join(tmpRoot, name), owner = name.startsWith('graphyard-') && !name.endsWith('.owner') ? await readTempOwner(directory) : null;
+    if (!owner || !tempOwnerGone(owner)) continue;
+    try { await rm(directory, { recursive: true, force: true }); await rm(tempOwnerMarker(directory), { force: true }); removed.push(directory); } catch { /* the next sweep */ }
   }
   return removed;
 }
@@ -177,7 +163,7 @@ export function nestedFirst(environment: NodeJS.ProcessEnv = process.env): { fir
 
 export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   const tmpRoot = durableTestTmpdir() ?? undefined;
-  await sweepLeftoverTempDirectories('before the suite', tmpRoot);
+  await sweepLeftoverTempDirectories(tmpRoot);
   const cwd = resolve(options.cwd ?? process.cwd()), args = options.args ?? [];
   const selection = options.browser ? null : nodeTestArgs(cwd, args);
   // An empty selection (a shard with nothing assigned, a change that affects no test) runs nothing:
@@ -191,9 +177,8 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
   try {
     // The suite's managed checkouts live inside the tree it runs from (ignored by .graphyard/): a worker's
     // sandbox can write nowhere else, and the default ~/.local/share/graphyard failed every checkout there (GY-498).
-    // A run of the suite reads no host memory (GY-612): the deferral the loop launches under is
-    // exercised by tests that stub a reading, and a host the suite itself loaded low must not flip
-    // the behaviour of tests that stub none.
+    // A run of the suite reads no host memory (GY-612): a host the suite itself loaded low must not
+    // flip the behaviour of tests that stub no reading.
     const dataHome = resolve(cwd, '.graphyard/test-data');
     mkdirSync(dataHome, { recursive: true });
     const set = { ...(options.browser ? { GRAPHYARD_BROWSER_PORT: String(reservation.base) } : { ...testPortEnvironment(reservation.base), [hostMemoryVariable]: 'unreadable' }), GRAPHYARD_DATA_HOME: dataHome, ...(tmpRoot ? { TMPDIR: tmpRoot, TMP: tmpRoot, TEMP: tmpRoot } : {}) };
@@ -215,7 +200,7 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     process.off('SIGINT', forward); process.off('SIGTERM', forward);
     // Whatever this run's children leaked — a failure before an after hook, a killed file — its
     // processes are gone now, so the sweep takes their directories back at once.
-    await sweepLeftoverTempDirectories('after the suite', tmpRoot);
+    await sweepLeftoverTempDirectories(tmpRoot);
     return { code, base: reservation.base, environment, stdout, stderr };
   } finally { reservation.release(); }
 }

@@ -1,5 +1,6 @@
 import type { Work } from './work.js';
-import { itemLane, laneRequiresProof, type BootstrapMode } from './policy.js';
+import type { BootstrapMode } from './policy.js';
+import { postDeployProof } from './post-merge-proofs.js';
 import { evidenceBindsCandidate } from './carry.js';
 import { evidenceProves } from './mechanical-proofs.js';
 import { pathScopesOverlap } from './documentation-glob.js';
@@ -48,11 +49,9 @@ export function inheritedObligations(work: Work, all: Work[]): BootstrapObligati
 }
 
 /**
- * Exactly the proofs the acceptance gate demands for the current candidate: the criteria's proofs
- * the item's risk lane requires (GY-883: low none of its producer-run or manual ones, medium no
- * manual one) and every inherited obligation, which no lane waives.
+ * Exactly the proofs the acceptance gate demands for the current candidate: every criterion's
+ * proofs but a declared post-deploy one (GY-1660), observed after delivery, and every inherited obligation.
  */
 export function requiredProofs(work: Work, all: Work[]): string[] {
-  const lane = itemLane(work);
-  return [...new Set([...work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs.filter(proof => laneRequiresProof(lane, proof))), ...inheritedObligations(work, all).map(obligation => obligation.proof)])];
+  return [...new Set([...work.criteria.flatMap(ac => ac.bootstrap ? [] : ac.proofs.filter(proof => !postDeployProof(proof))), ...inheritedObligations(work, all).map(obligation => obligation.proof)])];
 }

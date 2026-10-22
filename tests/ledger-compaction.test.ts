@@ -7,7 +7,7 @@ import { Store, save, applyWorkDelta, documentBefore, resolvedPayloadSql, routin
 import { compactLedger, ledgerCompactedKind, ledgerRetentionMs, configuredLedgerRetentionMs } from '../src/store/compaction.js';
 import { DELIVERY_EVENT_PREDICATE } from '../src/store/tables/production.js';
 import { Engine } from '../src/engine.js';
-import { defaultDatabaseMaxBytes, readDatabaseCapacity } from '../src/master-resources.js';
+import { defaultDatabaseMaxBytes, readDatabaseCapacity } from '../src/server/plane-health.js';
 import { readEventHistory, parseEventHistoryQuery } from '../src/events-history.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

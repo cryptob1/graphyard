@@ -20,7 +20,7 @@ import { DELIVERY_EVENT_PREDICATE } from './tables/production.js';
  * - a whole row repeats the stage and delivery of the item's previous whole row, so every stage
  *   timeline (the intervention report's "stage before") reads the same;
  * - it is not a delivery event (`DELIVERY_EVENT_PREDICATE`), nor the revision an item's delivery
- *   cites as its authorization (the shipping pulse reads it back), nor a row of an item observed
+ *   cites as its authorization, nor a row of an item observed
  *   merged but not yet done (its merge is still judged against the record before it).
  * Every surviving row therefore resolves to exactly the document it resolved to before.
  */

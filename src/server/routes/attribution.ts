@@ -1,14 +1,14 @@
 import { z } from 'zod';
 import { demand, operatorScopeIncludes, type Work } from '../../model.js';
-import { attributionDrilldown, attributionHistory, attributionWindows, computeAttribution, readAttribution, releaseManifest } from '../../attribution.js';
+import { attributionDrilldown, attributionHistory, attributionWindowMessage, attributionWindows, computeAttribution, readAttribution, releaseManifest } from '../../attribution.js';
 import type { Release } from '../../delivery.js';
-import { flowWindowMessage, type FlowWindow } from '../../flow-analytics.js';
+import type { FlowWindow } from '../../attribution.js';
 import { defineRoutes } from '../routes.js';
 
 /** Roles that may see request, attempt, evidence and artifact identifiers behind an aggregate. */
 const auditRoles = ['admin', 'coordinator', 'producer'];
 const querySchema = z.object({
-  window: z.coerce.number().int().refine(value => (attributionWindows as readonly number[]).includes(value), flowWindowMessage).default(30),
+  window: z.coerce.number().int().refine(value => (attributionWindows as readonly number[]).includes(value), attributionWindowMessage).default(30),
   asOf: z.iso.datetime().nullish(), metric: z.string().max(60).nullish(), key: z.string().max(200).nullish(),
 }).strict();
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);

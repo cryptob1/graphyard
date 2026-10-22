@@ -10,7 +10,6 @@ import { worktreeRoot } from '../install/worktree-root.js';
 import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
 import { carryUndeclared } from './state-cursor.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
-import { latencyBudget } from './metrics.js';
 import { boundedPersist, cycleCost, cycleTimes, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
@@ -38,8 +37,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     liveness,
     // Failed cycles and the process-level events the loop survived (GY-119).
     failures: state.failures,
-    // What it could act on, and the latency budgets.
-    budget: latencyBudget(state.latency),
     lock: state.lock, cycle: state.cycle, lastCycleAt: state.lastCycleAt, lagMs,
     unresolved: recent.filter(action => action.state === 'started' || action.state === 'indeterminate'),
     escalations: recent.filter(action => action.kind === 'attention').slice(0, 20),
@@ -59,9 +56,6 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     upgrade: state.upgrade,
     profiles: state.profiles,
     config: state.config,
-    reclaim: state.reclaim,
-    // The host's memory as the last cycle read it; while `low`, launches on this host are deferred (GY-612).
-    memory: state.memory,
     // The master session the loop launches, adopts, wakes and rotates (GY-898): the live handle,
     // its age against the configured budget, why the last one ended, and the last wake's causes.
     master: masterSummary(state.master, now),

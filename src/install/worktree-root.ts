@@ -131,59 +131,6 @@ export async function removeSessionCheckout(repository: string, base: string, di
   await rmdir(base).catch(() => {});
 }
 
-/** A directory no record owns is left alone this long: a launch allocates it before it records the session. */
-export const orphanGraceMs = 15 * 60_000;
-export interface CheckoutReclaimReport { root: string; at: string; scanned: number; removed: string[]; kept: string[]; errors: string[]; freeBytes: number | null; /** Abandoned neighbouring roots that held nothing and were removed. */ swept: string[] }
-/**
- * The reclaim pass. A session settles its own checkout, so what is found here was left by a
- * session that died with its master — a crash between the launch and the ledger write, a host
- * that went down mid-proof. Every managed directory no live session record owns is removed.
- */
-export async function reclaimSessionCheckouts(repository: string, base: string, live: Iterable<string>, options: { now?: number; graceMs?: number; run?: Run; probe?: FilesystemProbe; failure?: (error: unknown, action: string, path: string) => Error; environment?: Environment } = {}): Promise<CheckoutReclaimReport> {
-  const now = options.now ?? Date.now(), grace = options.graceMs ?? orphanGraceMs, owned = new Set([...live].map(path => resolve(path)));
-  const entries = await readdir(base, { withFileTypes: true }).catch(() => []);
-  const removed: string[] = [], kept: string[] = [], errors: string[] = [];
-  let scanned = 0;
-  for (const entry of entries) {
-    if (!entry.isDirectory() || !managedName.test(entry.name)) continue;
-    const directory = resolve(base, entry.name);
-    scanned++;
-    if (owned.has(directory)) { kept.push(directory); continue; }
-    const info = await lstat(directory).catch(() => null);
-    if (!info || now - info.mtimeMs < grace) { kept.push(directory); continue; }
-    try { await removeSessionCheckout(repository, base, directory, options.run); removed.push(directory); }
-    catch (error) { errors.push(`${directory}: ${(options.failure?.(error, 'Reclaiming an ephemeral checkout', directory) ?? (error instanceof Error ? error : new Error(String(error)))).message}`); }
-  }
-  return { root: base, at: new Date(now).toISOString(), scanned, removed, kept, errors, freeBytes: (await (options.probe ?? probeFilesystem)(base)).freeBytes,
-    swept: await sweepAbandonedRoots(base, { now, graceMs: grace, environment: options.environment }) };
-}
-/**
- * Default roots are neighbours in the data directory, one per checkout of a repository, and a
- * checkout that was deleted — a scratch clone, a test fixture — never runs another reclaim pass.
- * What it leaves is swept here, and only when it holds nothing: a neighbouring root is removed
- * when every entry in it is an empty session directory past the grace period. Every removal is a
- * plain rmdir, so nothing that contains a file can be lost to it, whoever it belongs to.
- */
-export async function sweepAbandonedRoots(base: string, options: { now?: number; graceMs?: number; environment?: Environment } = {}): Promise<string[]> {
-  const parent = dirname(resolve(base)), now = options.now ?? Date.now(), grace = options.graceMs ?? orphanGraceMs;
-  if (parent !== resolve(dataDirectory(options.environment), 'worktrees')) return [];
-  const swept: string[] = [];
-  for (const neighbour of await readdir(parent, { withFileTypes: true }).catch(() => [])) {
-    const root = resolve(parent, neighbour.name);
-    if (!neighbour.isDirectory() || root === resolve(base)) continue;
-    const entries = await readdir(root, { withFileTypes: true }).catch(() => null);
-    if (!entries) continue;
-    const idle = await Promise.all(entries.map(async entry => {
-      if (!entry.isDirectory() || !managedName.test(entry.name)) return false;
-      const directory = resolve(root, entry.name), info = await lstat(directory).catch(() => null);
-      return !!info && now - info.mtimeMs >= grace && (await readdir(directory).catch(() => ['?'])).length === 0;
-    }));
-    if (!idle.every(Boolean) || now - ((await lstat(root).catch(() => null))?.mtimeMs ?? now) < grace) continue;
-    try { for (const entry of entries) await rmdir(resolve(root, entry.name)); await rmdir(root); swept.push(root); } catch { /* something arrived meanwhile: it is not abandoned */ }
-  }
-  return swept;
-}
-
 /** What the root itself holds, as `du` counts it; null when it cannot be measured in time. */
 export async function directoryBytes(path: string, timeoutMs = 10_000): Promise<number | null> {
   try {
@@ -214,14 +161,12 @@ export async function inspectWorktreeRoot(path: string, settings: { minFreeBytes
     low: facts.freeBytes !== null && facts.freeBytes < settings.minFreeBytes,
     overBudget: usedBytes !== null && usedBytes >= settings.budgetBytes * worktreeRootBudgetWarning };
 }
-/** The command that runs a reclaim pass now, whether or not a loop is running. */
-export const reclaimCommand = 'graphyard master run --once';
 /** Attention texts for the root; `master status` gives each its owner. Raised on thresholds, never on the first failed write. */
 export function worktreeRootConcerns(health: WorktreeRootHealth): string[] {
   const concerns: string[] = [];
   const held = `${health.checkouts} ephemeral checkout(s), ${health.unowned} owned by no live session`;
   if (health.volatile) concerns.push(`The managed worktree root ${health.path} is on a ${health.volatile}: every proof and review checkout is held in memory. Set run.worktreeRoot in .graphyard/master.json to a directory on durable storage`);
-  if (health.low && health.freeBytes !== null) concerns.push(`${gigabytes(health.freeBytes)} free on the managed worktree root ${health.path}, below the configured ${gigabytes(health.minFreeBytes)} minimum; it holds ${held}. Reclaim them before the volume fills`);
-  if (health.overBudget && health.usedBytes !== null) concerns.push(`The managed worktree root ${health.path} holds ${gigabytes(health.usedBytes)} of its ${gigabytes(health.budgetBytes)} budget (run.worktreeRootBudgetGb) in ${held}. Reclaim them before the quota is exhausted`);
+  if (health.low && health.freeBytes !== null) concerns.push(`${gigabytes(health.freeBytes)} free on the managed worktree root ${health.path}, below the configured ${gigabytes(health.minFreeBytes)} minimum; it holds ${held}`);
+  if (health.overBudget && health.usedBytes !== null) concerns.push(`The managed worktree root ${health.path} holds ${gigabytes(health.usedBytes)} of its ${gigabytes(health.budgetBytes)} budget (run.worktreeRootBudgetGb) in ${held}`);
   return concerns;
 }

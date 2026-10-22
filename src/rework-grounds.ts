@@ -9,8 +9,7 @@ import { baseRefreshConflict } from './model/base-refresh.js';
  * a ground the loop's own rule acts on by itself (`neededDecision` in daemon/decisions.ts) — the
  * candidate conflicts with the base, a reviewer requested changes
  * on it, the guarded merge refused it for rework, a trusted proof failed on it — needs nobody: the
- * loop requests that rework itself, situated on the head and its grounds, and the risk lane or the
- * approver agent applies it. Between 2026-09-30 and 2026-10-07 the report filed 493 rework
+ * loop requests that rework itself, situated on the head and its grounds, and applies it. Between 2026-09-30 and 2026-10-07 the report filed 493 rework
  * interventions at the build stage: 377 the loop requested under its own situated binding and 109
  * a master session requested on a ground the record already showed. Only a
  * rework whose grounds the record does not show is somebody's judgement: an ejection that left no

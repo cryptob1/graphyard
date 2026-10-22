@@ -1,5 +1,5 @@
 import { releaseInfo, schemaVersion } from '../../release.js';
-import { planeVerdict, probeWrites, readDatabaseCapacity } from '../../master-resources.js';
+import { planeVerdict, probeWrites, readDatabaseCapacity } from '../plane-health.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
 import { demand } from '../../model.js';
 import { humanSignIn } from '../auth.js';

@@ -4,7 +4,6 @@ import { formatDuration } from '../../src/model/duration';
 import { groupOf, nextActor, timedGroups, type Group } from '../groups';
 import { blockerSummary, phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
 import { prSteps, stepHeld } from '../../src/model/pr-steps';
-import type { StepTransition } from '../flow-replay';
 import type { ActionlessCard } from '../../src/model/actionless';
 import type { ReleaseView } from '../../src/model/release';
 import StatusAge from './status-age';
@@ -21,10 +20,10 @@ const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replac
  * threshold. On a phone the same element lays out as a card. The candidate is linked once, on the row's second line; the open
  * control and that link are siblings, never nested, so each stays a separate keyboard stop.
  */
-export default function WorkCard({ item, all, repository, now, onOpen, group: given, stall, stepMoves, release }: { item: Work; all?: Work[]; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; stepMoves?: readonly StepTransition[] | null; release?: ReleaseView }) {
+export default function WorkCard({ item, all, repository, now, onOpen, group: given, stall, release }: { item: Work; all?: Work[]; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; release?: ReleaseView }) {
   const group = given ?? groupOf(item, now, undefined, undefined, release) ?? 'shipped';
   const status = plainStatus(item, now);
-  const held = stepHeld(item, now, stepMoves, release);
+  const held = stepHeld(item, now, null, release);
   const timed = timedGroups.has(group);
   const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now, release) : null;
   const actor = nextActor(item, group, now, release, all);

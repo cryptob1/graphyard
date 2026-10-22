@@ -1,9 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import { Refusal, demand, operatorScopeIncludes, type Principal } from '../model.js';
-import type { Credential } from './principals.js';
-import { ProofGrants } from '../proof-grants.js';
-import { proofProducer, withRecordedProofs } from '../delegation.js';
-import type { Store } from '../store.js';
+import { laneOnlyProducer, type Credential, type PrincipalGrant } from './principals.js';
+import { readImports } from '../validation-import.js';
 import type { Engine } from '../engine.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
@@ -15,7 +13,7 @@ import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import { responderFromEnv, type Responder } from '../closed-question.js';
 import { assembleDelegationLimits } from './limits.js';
-import { Next, type Route, type RouteModule, type Services } from './routes.js';
+import { Next, type Route, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { leaseCommandRequest } from './routes/work.js';
 import { signinClaimFromEnv } from './routes/signin.js';
 
@@ -69,8 +67,49 @@ export const operatorAgentRouteGuard: Route = {
   },
 };
 
-// A lane-only producer's routes (GY-1879, GY-1912) live in producer-lanes.ts.
-export { confinedLaneProducer, laneProducerRouteGuard, laneProducerScope } from './producer-lanes.js';
+/** Whether `actor` is confined to its lanes: a producer whose roster entry carries lane grants and no proof patterns (GY-1879, GY-1912). */
+export const confinedLaneProducer = (actor: Principal) => laneOnlyProducer(actor);
+
+type Lane = { may: string; answer(context: RouteContext): unknown };
+/** Each grant's routes: `answer` returns Next to pass the request on, a response to answer it here, or undefined when it is not one of the lane's. */
+const lanes: Record<PrincipalGrant, Lane> = {
+  'external-runs:import': {
+    may: 'import a run, read its own imports',
+    answer({ req, url, actor, services }) {
+      if (req.method === 'POST' && url.pathname === '/api/validation/import') return Next;
+      const head = req.method === 'GET' ? /^\/api\/validation\/import\/([a-f0-9]{40})$/.exec(url.pathname) : null;
+      // Only the runs this principal imported itself.
+      return head ? readImports({ store: services.engine.store }, head[1], url.searchParams.get('candidate'), actor.id) : undefined;
+    },
+  },
+  // GY-1912: the GY-1861 observation by commit, and nothing beside it.
+  'delivery:observe-sha': {
+    may: 'record a deployment observation by commit (POST /api/delivery/observe-sha)',
+    answer: ({ req, url }) => req.method === 'POST' && url.pathname === '/api/delivery/observe-sha' ? Next : undefined,
+  },
+};
+/**
+ * A lane-only producer is held to the routes its grants name. This guard is the first authenticated
+ * route (src/server/index.ts dispatches it ahead of the table): each grant passes or answers its own
+ * routes, GET /api/principals answers with its own entry alone, and every other route is refused.
+ */
+export const laneProducerRouteGuard: Route = {
+  method: '*', path: /^\/api\//,
+  async handle(context) {
+    const { actor, url, req } = context;
+    if (!confinedLaneProducer(actor)) return Next;
+    const grants = (actor.grants ?? []) as PrincipalGrant[];
+    for (const grant of grants) {
+      const answer = await lanes[grant].answer(context);
+      if (answer !== undefined) return answer;
+    }
+    if (req.method === 'GET' && url.pathname === '/api/principals')
+      return { principals: [{ id: actor.id, role: actor.role, sessionKind: actor.sessionKind ?? null, grants, leases: [] }] };
+    demand(false, `${req.method} ${url.pathname} is outside the ${grants.join(' and ')} lane of producer ${actor.id}: it may ${grants.map(grant => lanes[grant].may).join(', ')} and read its own principal`, 403);
+    return Next;
+  },
+};
+export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', routes: [laneProducerRouteGuard] };
 
 /**
  * The human operator signs into the dashboard without handling a token (GY-738). `graphyard login`,
@@ -148,57 +187,6 @@ export function humanSignIn(services: Services) {
   return table;
 }
 
-/** Each producer's recorded proof patterns, from the grant store: a record supersedes the environment seed. */
-async function recordedProofs(store: Store): Promise<Map<string, string[]>> {
-  return new Map((await store.pool.query('SELECT document FROM proof_grants')).rows.map(row => [row.document.principalId, row.document.patterns]));
-}
-const proofProducers = (principals: readonly Principal[]) => principals.filter(proofProducer).length;
-
-/**
- * The delegation report recomputed from effective proof authority (GY-1879): a reviewer slot is
- * counted from the grant store, so a lane producer granted proofs through the grant API holds one.
- * Start-up assembles the report from the environment before any query can run; this runs once the
- * server is built and after every grant or revoke, updating the limits in force and their drift and
- * attention in place. A roster the recorded grants put over an explicit limit is reported, not refused.
- */
-export async function refreshDelegationLimits(services: Services, credentials: Credential[], env: NodeJS.ProcessEnv, known?: readonly string[]) {
-  const effective = withRecordedProofs(credentials, await recordedProofs(services.engine.store));
-  let report: ReturnType<typeof assembleDelegationLimits>;
-  try { report = assembleDelegationLimits(effective, env, known); }
-  catch (error) {
-    if (!(error instanceof Refusal)) throw error;
-    report = { ...assembleDelegationLimits(effective, env, effective.map(p => p.id)), attention: [error.message] };
-  }
-  Object.assign(services.limits, report.limits);
-  Object.assign(services.delegationLimits, { drift: report.drift, attention: report.attention });
-}
-
-/**
- * The grant store with reviewer capacity enforced (GY-1879): proof patterns granted to a producer
- * holding none make it a proof producer holding a reviewer slot, so the grant is refused once every slot
- * GRAPHYARD_MAX_REVIEWERS allows is held; every grant or revoke then recomputes the delegation report.
- */
-export class SlotCountedProofGrants extends ProofGrants {
-  constructor(private readonly grantStore: Store, private readonly configured: readonly Principal[], private readonly maxReviewers: () => number, private readonly refresh: () => Promise<void>) { super(grantStore, configured); }
-  override async grant(actor: Principal, id: string, input: unknown, key: string) {
-    const target = this.configured.find(p => p.id === id);
-    if (actor.role === 'admin' && target) {
-      const effective = withRecordedProofs(this.configured, await recordedProofs(this.grantStore));
-      const held = proofProducers(effective);
-      demand(target.role !== 'producer' || proofProducer(effective.find(p => p.id === id)!) || held < this.maxReviewers(),
-        `Granting proofs to ${id} makes it an independent review/proof agent, and all ${held} slots GRAPHYARD_MAX_REVIEWERS=${this.maxReviewers()} allows are held; set GRAPHYARD_MAX_REVIEWERS=${held + 1} on the deployment first`, 409);
-    }
-    const result = await super.grant(actor, id, input, key);
-    await this.refresh();
-    return result;
-  }
-  override async revoke(actor: Principal, id: string, input: unknown, key: string) {
-    const result = await super.revoke(actor, id, input, key);
-    await this.refresh();
-    return result;
-  }
-}
-
 /** Where retained validation artifacts live and how much the postgres backend may hold. */
 export interface ArtifactOptions { backend: ArtifactBackend | null; capacityBytes: number }
 
@@ -227,11 +215,7 @@ export function assembleServices(engine: Engine, credentials: Credential[], arti
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   const productionDelivery = new ProductionDelivery(engine.store);
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
-  // Proof authority is Graphyard state. The configured registry only identifies which
-  // principals exist and what role each holds; the grant store decides what they may prove.
-  const configured = credentials.map(({ token, ...actor }) => actor);
-  engine.principals = configured;
-  let services: Services;
-  const proofGrants = new SlotCountedProofGrants(engine.store, configured, () => services.limits.maxReviewers, () => refreshDelegationLimits(services, credentials, env, options.knownPrincipals));
-  return services = { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, proofGrants, productionDelivery, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
+  // Proof authority is the roster's: each principal may prove exactly the --proof patterns its entry carries.
+  engine.principals = credentials.map(({ token, ...actor }) => actor);
+  return { signinClaim: signinClaimFromEnv(env, credentials), engine, repository, principals, limits: delegationLimits.limits, delegationLimits, build: buildIdentity(env), production: options.production ?? null, validation, delivery, operatorAgents, productionDelivery, agentRegistry: new AgentRegistry(engine.store), responder: options.responder !== undefined ? options.responder : responderFromEnv(env) };
 }

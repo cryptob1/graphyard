@@ -1,7 +1,7 @@
 // Concern: observing the deployed release and which deliveries it serves.
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { productionEnvironmentFromEnv } from '../flow-analytics.js';
+import { productionEnvironmentFromEnv } from '../production-environment.js';
 import type { ChildRun } from '../child-runner.js';
 import type { Work } from '../model.js';
 import type { MasterConfig } from '../master.js';

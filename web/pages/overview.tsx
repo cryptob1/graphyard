@@ -24,7 +24,7 @@ const week = 7 * 24 * 60 * 60 * 1000;
  * ones the control plane's production observation reports unserved — none where production serves
  * the newest merge, and none claimed where nothing observes production.
  */
-export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly, stepMoves }: Dashboard) {
+export default function OverviewPage({ work, board, status, query, setQuery, setSelected, setCreating, setView, observedAt, filter: only, setFilter: setOnly }: Dashboard) {
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const match = (w: Pick<Work, 'key' | 'title'>) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
   const release = releaseView(status);
@@ -47,7 +47,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   // A legacy merge with no delivery record is Shipped on the board (groupOf), so it is never counted.
   const unreleased = release.observedAt === null ? 0 : merged.filter(w => !!w.delivery && now - mergedAt(w) <= week && !servedFor(w, release)
     && (release.unserved.has(w.key) || release.failed.has(w.key) || mergedAt(w) > release.observedAt!)).length;
-  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} stepMoves={stepMoves} release={release}/>;
+  const row = (w: Work, group: OpenGroup) => <WorkCard key={w.id} item={w} all={work} group={group} stall={group === 'blocked' ? stalls.get(w.id) : undefined} repository={status?.repository} now={now} onOpen={setSelected} release={release}/>;
   const shown = (group: OpenGroup) => !only || only === group;
   const section = (group: OpenGroup, note?: string) => shown(group) && byGroup[group].length > 0 && <section key={group} className={`work-group group-${group}`} aria-label={groupLabel[group]} data-group-section={group}>
     <h2><GroupDot group={group}/>{groupLabel[group]} <span className="count">{byGroup[group].length}</span>{note && <small>{note}</small>}{group === 'needs-you' && <button type="button" className="text-button push" onClick={() => setView('needs-you')}>Every request and answer →</button>}</h2>

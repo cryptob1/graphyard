@@ -1,5 +1,27 @@
 import type { Work } from '../model.js';
-import { defaultProductionEnvironment, flowExitAt, noProductionHold, productionHold, servedAt, type ProductionHold } from '../flow-analytics.js';
+
+const defaultProductionEnvironment = 'production';
+const time = (value: string | null | undefined) => { const parsed = Date.parse(value ?? ''); return Number.isFinite(parsed) ? parsed : null; };
+
+/** What the production watch observes about production: merged items not served yet, those with an open deployment incident, and when it last looked. */
+export interface ProductionHold {
+  unserved: ReadonlySet<string>;
+  failed: ReadonlySet<string>;
+  observedAt: number | null;
+}
+const noProductionHold: ProductionHold = { unserved: new Set(), failed: new Set(), observedAt: null };
+
+/** The hold from the production watch's report; only a pass that saw what production serves is an observation. */
+function productionHold(report: any): ProductionHold {
+  const observed = !!report?.observedAt && !!report?.serving && !report?.error;
+  if (!observed || time(report.observedAt) === null) return noProductionHold;
+  const keys = (list: unknown) => Array.isArray(list) ? list.filter((key): key is string => typeof key === 'string') : [];
+  return {
+    unserved: new Set(keys(report.pending)),
+    failed: new Set(keys((Array.isArray(report.incidents) ? report.incidents : []).map((incident: any) => incident?.key))),
+    observedAt: time(report.observedAt),
+  };
+}
 
 /**
  * What the control plane knows about production, as every page reads it (GY-161): the
@@ -30,12 +52,16 @@ export function releaseView(status: any): ReleaseView {
 
 /** When the release was observed serving a merged item, under the configured environment; null until then. */
 export function servedFor(work: Work, release: ReleaseView = noRelease): string | null {
-  return servedAt(work, release.environment);
+  if (work.stage !== 'done' || work.closure || !work.delivery) return null;
+  const verified = (work.releaseDeliveries ?? []).filter(entry => entry.environment === release.environment)
+    .map(entry => entry.verifiedAt).filter(at => time(at) !== null).sort((a, b) => time(a)! - time(b)!)[0];
+  return verified ?? work.delivery.deployment?.observedAt ?? null;
 }
 
-/** When a merged item left the flow as the board reads it: `flowExitAt`, its merge (GY-1981). */
+/** When a merged item left the flow as the board reads it: its merge (GY-1981). Null for work closed without delivery. */
 export function leftFlowAt(work: Work, _release?: ReleaseView): string | null {
-  return flowExitAt(work);
+  if (work.stage !== 'done' || work.closure || !work.delivery) return null;
+  return work.delivery.mergedAt ?? work.observation?.mergedAt ?? work.stageEnteredAt;
 }
 
 /**

@@ -2,16 +2,14 @@
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../model/merge-authorization.js';
-import { boundDeployment, type DaemonAction, type DaemonState, deploymentObservationSchema, message, storeAction } from './state.js';
+import { boundDeployment, deploymentObservationSchema, message } from './state.js';
 import { candidateKey } from './reconcile.js';
-import { readyToRetry } from './sessions.js';
 import { detailChanged } from './text.js';
 import { exhaustedProofDetail, exhaustedProofKey, standingVerdict } from './rework.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, deploymentDetail, deploymentStepBudgetMs, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
 import { readingDueNow, readingsStep } from './cycle-readings.js';
-import { throughputRemeasureAt } from '../throughput.js';
 
 /** Step 5: shepherd reviews for submitted candidates. */
 export async function shepherdStep(cycle: Cycle) {
@@ -95,44 +93,6 @@ export async function deploymentStep(cycle: Cycle) {
 
   // 7a''. GY-1982: no promotion drive: the between-cycles self-upgrade deploys each new base tip itself.
 
-  // 7a'''. GY-1385: GY-87's throughput claim is measured, not asserted. After a verified deployment
-  //        the loop records a measurement for the release the control plane serves, with its own
-  //        coordinator credential, reading only the window's deliveries whole; master status reads
-  //        it back as verified or with its shortfall. One action per observed release: a plane that
-  //        does not serve it yet answers `waiting`, asked again on the failure backoff (one status
-  //        read per ask, never one per cycle) until it serves or a newer observation supersedes the
-  //        key; a failure backs off the same way. It follows a verification: a cycle whose
-  //        observation is still in flight (cut by the budget) starts no measurement, so the step
-  //        never holds two reads in flight. GY-1437/GY-1438: the verification is live — an
-  //        unverified answer is not settled, so it is asked again on the same backoff and the
-  //        measurement is re-taken once its record is throughputRemeasureMs old. GY-1458: the
-  //        re-measure is asked in the cycle that finds it due, whatever the backoff has grown to.
-  //        GY-2186: the verification is owned by nobody — no owner item is filed or closed, and a
-  //        needs-decision a measurement shows is the throughput attention line alone.
-  const verified = observed !== stillVerifying && observed.ok ? state.deployment : null, measure = effects.measureThroughput;
-  if (measure && verified && verified.source !== 'unavailable' && verified.sha) {
-    const key = `throughput:${verified.sha}`, previous = state.actions[key];
-    if (throughputAskDue(previous, state.cycle, now())) {
-      const measured = await withinDeploymentBudget(state, 'throughput', () => measure(snapshot.work, verified.sha!), deadline, now);
-      if (measured === stillVerifying) deferred.push('the throughput measurement');
-      else {
-        const outcome = measured.ok ? measured.value : null;
-        const detail = outcome ? outcome.detail : `GY-87's throughput measurement could not be recorded for ${verified.sha.slice(0, 12)}: ${message((measured as { error: unknown }).error)}`;
-        // An unverified measurement of the serving release is not settled (GY-1437): it waits on the
-        // same backoff and is measured again as session-free deliveries accumulate.
-        const unverified = outcome?.settled === false || outcome?.verdict === 'unverified';
-        const entryState = !outcome ? 'failed' : outcome.outcome === 'waiting' || unverified ? 'waiting' : 'done';
-        // Every ask is recorded, so the backoff counts them; a wait whose reason stands is not reported again.
-        const entry = await record(state, key, { kind: 'deployment', work: null, principal: null, state: entryState, detail, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist);
-        if (entryState !== 'waiting' || detailChanged(previous, detail)) performed.push(entry);
-      }
-    }
-    // GY-2186: the loop raises no needs-decision on a throughput owner any more — no owner item is
-    // filed or closed, and the measurement's needs-decision is the attention line alone. An
-    // escalation an earlier loop raised settles here, so no cursor row waits on an owner nobody moves.
-    settleThroughputEscalations(state);
-  }
-
   const served = state.deployment;
   // 7c. GY-1779: the loop's own due readings of loop-owned observation items on the release verified above
   //     (cycle-readings.ts). An observation still in flight verifies nothing this cycle: the due readings
@@ -141,64 +101,6 @@ export async function deploymentStep(cycle: Cycle) {
   if (readingsDeferred) deferred.push(`${readingsDeferred} loop-owned observation readings`);
   await noteDeploymentBudget(cycle, budgetMs, deferred);
 }
-
-/**
- * When the throughput measurement for an observed release is asked again: a release never asked
- * is asked now, a settled one (`done`, verified) never again, and a wait on the plane, an
- * unverified measurement still accumulating its population (GY-1437), or a failure on the
- * failure backoff (`readyToRetry`, doubling per ask up to its cap), so a plane that lags the
- * deployment record costs one status read per ask rather than per cycle. GY-1458: an unverified
- * answer naming its re-measure time (`throughputRemeasureAt`) is asked as soon as that time comes,
- * whatever the backoff has grown to: thirty cycles of backoff outlast the hour the loop promises.
- */
-export function throughputAskDue(previous: DaemonAction | undefined, cycle: number, now: number) {
-  const remeasureAt = previous?.state === 'waiting' && answeredVerdict(previous) === 'unverified' ? throughputRemeasureAt(previous.detail) : null;
-  if (remeasureAt !== null && now >= remeasureAt) return true;
-  return readyToRetry(previous?.state === 'waiting' ? { ...previous, state: 'failed' } : previous, cycle);
-}
-
-/**
- * GY-1438: the verdict the release's recorded answer names — the verdict word a `recorded` answer
- * gives after its revision (`: unverified:`) or a `current` one in its parenthesis (`(verified,`) —
- * or null for any other answer: a wait on the plane, a failure or a skip names none.
- */
-export function answeredVerdict(answer: DaemonAction | undefined): 'verified' | 'unverified' | null {
-  const named = answer && answer.state !== 'failed' ? /(?:: |\()(unverified|verified)[:,]/.exec(answer.detail) : null;
-  return named ? named[1] as 'verified' | 'unverified' : null;
-}
-
-/**
- * The action key the loop's old raises used for a needs-decision on a throughput owner, keyed by the
- * owner's requirements revision when it was raised, so only a revision applied after it answers it
- * (`throughputOwnerAnswered`). GY-2186 retired the raises: no owner item is filed or closed, and the
- * needs-decision a measurement shows is the throughput attention line alone. The key stays so
- * `throughputEscalatedAt` still reads what an earlier loop raised, which the attention line names.
- */
-export const throughputEscalationKey = (owner: string, policyRevision: number) => `attention:throughput:${owner}:${policyRevision}`;
-/**
- * The owner's requirements revision at which the loop raised its needs-decision (the earliest, should a key repeat), or null when it raised none.
- * Read by the throughput attention (master-status-sections.ts) to word what an applied revision answered. The old
- * `waiting` raises settle through settleThroughputEscalations, and a settled row still answers here.
- */
-export function throughputEscalatedAt(actions: Record<string, DaemonAction>, owner: Pick<Work, 'key'>): number | null {
-  const prefix = `attention:throughput:${owner.key}:`;
-  const raised = Object.entries(actions).filter(([key, action]) => key.startsWith(prefix) && (action.state === 'waiting' || action.state === 'done') && action.work === owner.key)
-    .map(([key]) => Number(key.slice(prefix.length))).filter(Number.isInteger);
-  return raised.length ? Math.min(...raised) : null;
-}
-
-/**
- * GY-2186: every throughput escalation an earlier loop raised on an owner item is settled at once.
- * No owner item is filed or closed any more, so no raise has an owner to wait on: the decision the
- * measurement shows is the throughput attention line alone, and the cursor keeps no row waiting on
- * an owner nobody moves. `done` keeps the raise readable (throughputEscalatedAt).
- */
-function settleThroughputEscalations(state: DaemonState) {
-  for (const [key, action] of Object.entries(state.actions)) {
-    if (key.startsWith('attention:throughput:') && action.state === 'waiting') storeAction(state, key, { ...action, state: 'done' });
-  }
-}
-
 
 /** Record a budget-cut step, so the journal and `master status` say verification is in flight rather than blind; a full step supersedes the last cut once. */
 async function noteDeploymentBudget(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'performed'>, budgetMs: number, deferred: string[]) {

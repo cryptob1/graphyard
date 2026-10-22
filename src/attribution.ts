@@ -3,7 +3,6 @@ import type pg from 'pg';
 import type { Store } from './store.js';
 import type { BuildAttestation, ValidationRequest } from './validation.js';
 import type { DeploymentObservation, Release } from './delivery.js';
-import { distribution, flowWindows, type FlowWindow } from './flow-analytics.js';
 
 // Candidate-to-deployment attribution.
 //
@@ -217,7 +216,10 @@ export async function attributionHistory(store: Store, workId: string, limit = 2
 
 // ---- Analytics ------------------------------------------------------------------------------
 
-export const attributionWindows = flowWindows;
+export const attributionWindows = [1, 7, 30, 90] as const;
+export type FlowWindow = typeof attributionWindows[number];
+/** The schema message for a window outside `attributionWindows`. */
+export const attributionWindowMessage = `Window must be ${attributionWindows.map(days => days === 1 ? '24 hours' : `${days} days`).join(', ')}`;
 export const attributionLimits = { records: 20_000, requests: 5000, drilldown: 200, items: 25 };
 const day = 86_400_000;
 export interface AttributionQuery { days: FlowWindow; asOf?: string | null }
@@ -268,6 +270,12 @@ export const attributionDefinitions: Record<string, { label: string; formula: st
   cost: { label: 'Cost accounting', formula: 'One cost unit is one paid run: an attempt the runner acknowledged, which authorizes a container start. Spent units count acknowledged attempts in the window; wasted units are spent units whose result could not be attributed (target changed, undermined, or refused); saved units are paid runs avoided. Cost is never estimated from money; it is counted in runs.', sources: ['validation_requests:attempts', 'attribution_records:paid-run-avoided', 'attribution_records:target-changed', 'attribution_records:attribution-undermined'] },
 };
 
+// n is reported beside each statistic, an empty sample is null rather than zero, and a sample under five is flagged sparse.
+function distribution(values: number[]) {
+  const sorted = [...values].sort((a, b) => a - b), n = sorted.length;
+  const percentile = (p: number) => { if (!n) return null; const rank = (p / 100) * (n - 1), low = Math.floor(rank), high = Math.ceil(rank); return Math.round(sorted[low] + (sorted[high] - sorted[low]) * (rank - low)); };
+  return { n, averageMs: n ? Math.round(sorted.reduce((sum, value) => sum + value, 0) / n) : null, medianMs: percentile(50), p90Ms: percentile(90), sparse: n > 0 && n < 5 };
+}
 function metric(id: string, unit: Metric['unit'], values: number[], count: number | null, available: boolean, reason: string | null, state: MetricState = available ? 'measured' : 'unavailable'): Metric {
   const spread = distribution(values);
   return { id, label: attributionDefinitions[id].label, state, count, n: spread.n, average: spread.averageMs, median: spread.medianMs, p90: spread.p90Ms, unit, reason: state === 'measured' ? null : reason, sparse: spread.sparse };

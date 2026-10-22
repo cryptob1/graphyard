@@ -4,7 +4,7 @@ import { chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { acquireDaemonLock, actionDetailMax, candidateKey, cycleFailureDelay, cycleFailureStart, daemonStatePath, daemonStateSchema, daemonSummary, dispatchKey, emptyDaemonState, missingProofs, noteCycleFailure, observeDeployment, percentiles, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, retriedSnapshot, runCycle, runDaemon, snapshotRetryDelayMs, stageMetrics, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { acquireDaemonLock, actionDetailMax, candidateKey, cycleFailureDelay, cycleFailureStart, daemonStatePath, daemonStateSchema, daemonSummary, dispatchKey, emptyDaemonState, noteCycleFailure, observeDeployment, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, retriedSnapshot, runCycle, runDaemon, snapshotRetryDelayMs, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -245,9 +245,6 @@ test('one cycle closes finished sessions, dispatches, leaves proofs to CI and th
     // Every cycle measures, whether or not it acted.
     assert.equal(result.metrics.cycle, 0);
     assert.equal(result.metrics.open, 3);
-    assert.equal(result.metrics.stages.ready.p50Ms, 2 * hour);
-    assert.equal(result.metrics.lead.count, 1);
-    assert.equal(result.metrics.lead.p90Ms, 3 * hour);
     assert.equal(state.metrics.length, 1);
     // A second cycle repeats no completed action.
     log.length = 0;
@@ -403,35 +400,12 @@ test('deployment verification reports the served commit and which delivered item
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('stage percentiles and outstanding proofs are computed from the snapshot the cycle acted on', () => {
-  assert.deepEqual(percentiles([]), { count: 0, p50Ms: 0, p90Ms: 0 });
-  assert.deepEqual(percentiles([10, 20, 30, 40, 100]), { count: 5, p50Ms: 30, p90Ms: 100 });
-  const metrics = stageMetrics([
-    work({ id: '1', stage: 'ready', stageEnteredAt: iso(-hour) }),
-    work({ id: '2', stage: 'ready', stageEnteredAt: iso(-3 * hour) }),
-    work({ id: '3', stage: 'review', stageEnteredAt: iso(-2 * hour) }),
-    work({ id: '4', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: 'c'.repeat(40), authorizationRevision: 1 }, createdAt: iso(-5 * hour) }),
-  ], clock);
-  assert.equal(metrics.stages.ready.count, 2);
-  assert.equal(metrics.stages.ready.p50Ms, hour);
-  assert.equal(metrics.stages.ready.p90Ms, 3 * hour);
-  assert.equal(metrics.stages.done, undefined, 'delivered work has no stage dwell');
-  assert.equal(metrics.lead.p50Ms, 4 * hour);
-
-  const candidate = submitted({ criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop', 'manual:witness'] }] });
-  assert.deepEqual(missingProofs(candidate, new Date(clock)), ['integration:loop', 'manual:witness']);
-  const evidence = { id: 'e1', proof: 'integration:loop', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, producer: 'ci', trusted: true, result: 'pass' as const, executed: 4, skipped: 0, at: iso(0) };
-  assert.deepEqual(missingProofs({ ...candidate, evidence: [evidence] }, new Date(clock)), ['manual:witness']);
-  assert.deepEqual(missingProofs({ ...candidate, evidence: [{ ...evidence, skipped: 1 }] }, new Date(clock)), ['integration:loop', 'manual:witness'], 'a skipped run is not proof');
-  assert.deepEqual(missingProofs({ ...candidate, evidence: [{ ...evidence, trusted: false }] }, new Date(clock)), ['integration:loop', 'manual:witness'], 'untrusted evidence is not proof');
-});
-
 test('the cursor stays bounded without discarding an unresolved action, and status reports the loop', () => {
   const { directory: _ } = { directory: '' };
   const state = emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project' }));
   for (let index = 0; index < retainedActions + 50; index++) state.actions[`done:${index}`] = { kind: 'review', work: `GY-${index}`, principal: null, epoch: null, state: 'done', detail: 'recorded', attempts: 1, cycle: index, at: iso(index) };
   state.actions.stuck = { kind: 'proof', work: 'GY-9', principal: null, epoch: null, state: 'indeterminate', detail: 'interrupted', attempts: 1, cycle: 0, at: iso(-hour) };
-  for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), durationMs: 1, open: 1, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 }, production: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeploy: { count: 0, p50Ms: 0, p90Ms: 0 }, postDeployFailures: 0 });
+  for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), durationMs: 1, open: 1, actions: 0 });
   pruneDaemonState(state);
   assert.equal(Object.keys(state.actions).length, retainedActions + 1);
   assert.ok(state.actions.stuck, 'an unresolved action is never pruned away');

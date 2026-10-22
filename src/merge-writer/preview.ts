@@ -7,7 +7,6 @@ import { extname, join, resolve, sep } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { loadCases, type CaseFile } from '../e2e/case.js';
 import { releaseVerdict, type E2eLauncher, type E2eReport } from '../e2e/runner.js';
-import { docsOnlyPaths, testOnlyPaths } from '../model/policy.js';
 import { hostPassthrough } from '../e2e/steps.js';
 import { buildStaticSite, projectCaseSuite, type StaticBuildShell } from '../release-project.js';
 import { composeBounds, composeLeftovers, composeProjectName, composeStack, dockerEnvironment, snapshotComposeSite, sweepComposePreviews, type ComposeBounds, type Docker } from '../compose-preview.js';
@@ -73,9 +72,11 @@ export interface PreviewVerdict { result: 'pass' | 'fail' | 'timeout' | 'error';
 
 /**
  * Why the merge of `files` needs no preview, or null when it does: the repository names no static
- * UAT, or the merge changes only docs or tests (model/policy.ts's own classes), which cannot change
+ * UAT, or the merge changes only docs or tests, which cannot change
  * what the site serves. A skipped preview leaves the merge exactly as it was before GY-1718.
  */
+const testOnlyPaths = /(^|\/)(tests?|__tests__)\/|\.test\.[A-Za-z]+$|\.spec\.[A-Za-z]+$/;
+const docsOnlyPaths = /^docs\/|(^|\/)README\.md$|^AGENTS\.md$|\.mdx?$/;
 export function previewSkip(files: readonly string[], site: PreviewSite | null): string | null {
   if (!site) return 'the repository names no static UAT';
   if (files.length && files.every(path => docsOnlyPaths.test(path) || testOnlyPaths.test(path))) return 'the merge changes only docs or tests';
@@ -110,11 +111,10 @@ const swept = new Set<string>();
  * tmp-reclaim.ts) is gone, removed with its marker, and git's record of the worktree pruned. A
  * directory with no marker, or one whose owner still runs, is left alone. A marker this reader
  * cannot judge by pid — another PID namespace's, or one recorded before namespaces were kept
- * (GY-1896) — is judged as an ownerless directory is (reclaimRoot): kept while younger than
+ * (GY-1896) — is judged as an ownerless directory is: kept while younger than
  * `tmpReclaimMinAgeMs`, so a live writer in a sandbox this reader cannot see outlives the sweep,
  * and removed once older and nothing live holds it, so a crashed preview's or an upgrade's
- * leftovers do not sit under the managed worktree root forever, which the /tmp reclaim pass never
- * scans. Answers the removed paths.
+ * leftovers do not sit under the managed worktree root forever. Answers the removed paths.
  */
 export async function sweepPreviewCheckouts(base: string, options: { root?: string; run?: ChildRun; procRoot?: string } = {}): Promise<string[]> {
   let names: string[];

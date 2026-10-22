@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 import { wholeDocument } from '../model/work-summary.js';
-import { inheritedObligations } from '../model.js';
+import { inheritedObligations, proofAuthority, type Principal, type ProofAuthority } from '../model.js';
 import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from '../coordination.js';
 import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
@@ -27,8 +27,8 @@ export const workCommands = defineCommands([
       const item = await wholeDocument(listed, api);
       // A required proof nobody is authorized to produce can never be satisfied; report it
       // alongside the other blockers rather than leaving it to be discovered at acceptance.
-      let authorities: any[] = [];
-      try { authorities = (await api('proof-grants')).authorities ?? []; } catch { /* reported as unknown authority below */ }
+      let authorities: ProofAuthority[] = [];
+      try { authorities = ((await api('principals')).principals ?? []).map((principal: Principal) => proofAuthority(principal)); } catch { /* reported as unknown authority below */ }
       const authorization = proofAuthorization(item, authorities, snapshot.work);
       return print({ key: item.key, observedAt: snapshot.now, diagnostics: diagnose(item, snapshot.work, Date.parse(snapshot.now), snapshot.jobs), overlaps: fileConflicts(item, snapshot.work), proofs: proofPreview(item, snapshot.work), obligations: inheritedObligations(item, snapshot.work),
         proofAuthority: authorization, proofGaps: authorization.filter(entry => !entry.producers.length).map(entry => entry.proof) });

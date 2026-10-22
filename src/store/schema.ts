@@ -6,12 +6,10 @@ import { workIndexTables } from './tables/work-index.js';
 import { mergesTables } from './tables/merges.js';
 import { delegationTables } from './tables/delegation.js';
 import { operatorAgentTables } from './tables/operator-agents.js';
-import { proofGrantTables } from './tables/proof-grants.js';
 import { validationTables } from './tables/validation.js';
 import { scenarioTables } from './tables/scenarios.js';
 import { deliveryTables } from './tables/delivery.js';
 import { productionTables } from './tables/production.js';
-import { flowTables } from './tables/flow.js';
 import { attributionTables } from './tables/attribution.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
 import { planeLivenessTables } from './tables/plane-liveness.js';
@@ -22,15 +20,19 @@ import { mergerDefaultTables } from './tables/merger-default.js';
  * appears after every table it references. A feature adds its tables to one module here.
  */
 export const tables: readonly TableDefinition[] = [
-  ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables, ...proofGrantTables,
-  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...flowTables, ...attributionTables,
+  ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
+  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables, ...attributionTables,
   ...schemaGenerationTables, ...planeLivenessTables, ...mergerDefaultTables,
 ];
 
-/** The additive startup migration: the append-only trigger function, then each table's DDL. */
+/** Tables a release retired: the flow analytics projection and its deployment observations, and the runtime proof grants (GY-2876). */
+export const retiredTables = ['flow_facts', 'flow_projection', 'flow_projection_state', 'deployment_merge_observations', 'deployment_observations', 'proof_grants', 'proof_grant_history'] as const;
+
+/** The startup migration: the append-only trigger function, the retired tables dropped, then each table's DDL. */
 export const migration = `
 CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
+DROP TABLE IF EXISTS ${retiredTables.join(', ')};
 ${tables.map(table => table.ddl).join('\n')}
 `;
 

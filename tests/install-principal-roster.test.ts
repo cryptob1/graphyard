@@ -1,21 +1,18 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { promisify } from 'node:util';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { principalSchema, server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
-import { authorizedForProof, effectiveAuthority, ProofGrants } from '../src/proof-grants.js';
+import { authorizedForProof, proofAuthority } from '../src/model/proof.js';
 import { principalCommand } from '../src/cli/install.js';
 import { applyInstall, buildPlan, prepareInstall } from '../src/install/index.js';
 import { fingerprint, importPrincipalToken, plannedPrincipals, reconcileRoster, rosterEntry, tokenFile } from '../src/install/secrets.js';
 import { externalRunsImportGrant } from '../src/server/principals.js';
-import { cliPath } from '../src/cli/context.js';
 import { freePort } from '../src/cli/test-isolation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { catFrom, deployedRoster, harness, REPOSITORY, type Harness, type HarnessOptions } from './install-harness.js';
@@ -160,31 +157,13 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add --tok
     assert.notEqual((await readFile(tokenFile(directory, 'owner-project-worker-1'), 'utf8')).trim(), 'b'.repeat(43), 'an installer-owned credential is never replaced');
     await assert.rejects(principal(fixture, ['add', 'observer', '--role', 'producer', '--grant', 'delivery:observe-sha', '--grant', GRANT, '--token-file', other]), /dedicated observer/);
     await assert.rejects(stat(tokenFile(directory, 'observer')), { code: 'ENOENT' });
-    // The served grant records, as ProofGrants keeps them: a producer's record is seeded once from its
-    // GRAPHYARD_PRINCIPALS proofs and never re-seeded, so a later --proof changes the environment only.
-    const records = new Map<string, string[]>();
-    const granted = (async (input: string | URL | Request, init?: RequestInit) => {
-      if (!String(input).endsWith('/api/proof-grants')) return fixture.deps.fetch!(input, init);
-      for (const entry of deployedRoster(fixture.transport)) if (entry.role === 'producer' && !records.has(entry.id)) records.set(entry.id, [...(entry.proofs ?? [])]);
-      return new Response(JSON.stringify({ authorities: [...records].map(([principalId, patterns]) => ({ principalId, role: 'producer', patterns, source: 'grant' })), grants: [] }), { status: 200, headers: { 'Content-Type': 'application/json' } });
-    }) as typeof fetch;
-    const withGrants = (args: string[]) => principalCommand(args, { ...fixture.deps, fetch: granted, cwd: fixture.root });
-    const proof = await withGrants(['add', 'restored-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']);
+    // --proof registers a proof producer, read back from the served roster: proof authority is the roster's (GY-2876).
+    const proof = await principal(fixture, ['add', 'restored-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']);
     assert.equal(proof.changed, true);
     assert.deepEqual(proof.principal, { id: 'restored-producer', role: 'producer', sessionKind: 'ai', grants: [], proofs: ['integration:*', 'unit:*'] });
     assert.deepEqual(withoutToken(deployedRoster(fixture.transport).find(entry => entry.id === 'restored-producer')!), { id: 'restored-producer', role: 'producer', sessionKind: 'ai', proofs: ['integration:*', 'unit:*'] });
-    assert.deepEqual(proof.readback.principal, { id: 'restored-producer', role: 'producer', sessionKind: 'ai', grants: [] }, 'the served roster lists lane grants only; proof seeds ride in GRAPHYARD_PRINCIPALS');
-    assert.deepEqual(proof.readback.proofAuthority, ['integration:*', 'unit:*'], 'a new producer reads back the effective grant its seed recorded');
-
-    // An already-seeded producer: widening --proof is never reported restored while its record lacks the pattern.
-    assert.deepEqual((await withGrants(['add', 'seeded-producer', '--role', 'producer', '--proof', 'unit:*'])).readback.proofAuthority, ['unit:*']);
-    await assert.rejects(withGrants(['add', 'seeded-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']),
-      /recorded proof grant holds unit:\*, not integration:\*.*never re-seeds.*graphyard grants grant seeded-producer integration:\* REASON/);
-    assert.deepEqual(records.get('seeded-producer'), ['unit:*'], 'the roster edit grants nothing: a revoked pattern is not resurrected');
-    records.set('seeded-producer', ['integration:*', 'unit:*']);
-    const restored = await withGrants(['add', 'seeded-producer', '--role', 'producer', '--proof', 'unit:*', '--proof', 'integration:*']);
-    assert.equal(restored.changed, false, 'once the explicit grant is applied, the rerun changes nothing');
-    assert.deepEqual(restored.readback.proofAuthority, ['integration:*', 'unit:*']);
+    assert.deepEqual(proof.readback.principal, { id: 'restored-producer', role: 'producer', sessionKind: 'ai', grants: [] });
+    assert.deepEqual(proof.readback.proofAuthority, ['integration:*', 'unit:*'], 'the served roster carries the --proof patterns');
   } finally { await fixture.cleanup(); }
 });
 
@@ -279,11 +258,11 @@ const github = {
     throw new Error(`unexpected GitHub read ${path}`);
   },
 };
-let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string, databasePort: number;
+let database: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string, scratch: string;
 
 before(async () => {
   // A free port: verify runs each proof of this file at once, and a fixed port collides between them.
-  const port = databasePort = await freePort();
+  const port = await freePort();
   scratch = await temporaryDirectory('principal-roster');
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('principal_roster_test');
@@ -308,15 +287,12 @@ test('unit:external-import-requires-grant — a producer without external-runs:i
   assert.equal((await call(`validation/import/${sha}`, operator)).body.runs.length, 0, 'a refused run is never recorded');
 
   // The granted producer passes the grant check; binding its run to a candidate is the release ledger's (tests/validation-import*.test.ts).
-  assert.deepEqual((await call('principals', operator)).body.principals.find((entry: { id: string }) => entry.id === granted.id), { id: granted.id, role: 'producer', sessionKind: 'ai', grants: [GRANT], leases: [] }, 'the served roster lists the grant');
+  assert.deepEqual((await call('principals', operator)).body.principals.find((entry: { id: string }) => entry.id === granted.id), { id: granted.id, role: 'producer', sessionKind: 'ai', grants: [GRANT], proofs: [], leases: [] }, 'the served roster lists the grant');
 
   // The grant is no proof authority: the single question every trusted-evidence path asks answers no for every proof.
-  const client = await store.pool.connect();
-  try {
-    assert.deepEqual(await effectiveAuthority(client, granted), { principalId: granted.id, role: 'producer', patterns: [], source: 'environment' });
-    for (const proof of ['unit:anything', 'e2e:login', 'manual:audit', 'external-runs:import']) assert.equal(await authorizedForProof(client, granted, proof), false, `${proof} is not authorized by the import grant`);
-    assert.equal(await authorizedForProof(client, ungranted, 'unit:anything'), true, 'proof authority still comes from proofs alone');
-  } finally { client.release(); }
+  assert.deepEqual(proofAuthority(granted), { principalId: granted.id, role: 'producer', patterns: [] });
+  for (const proof of ['unit:anything', 'e2e:login', 'manual:audit', 'external-runs:import']) assert.equal(authorizedForProof(granted, proof), false, `${proof} is not authorized by the import grant`);
+  assert.equal(authorizedForProof(ungranted, 'unit:anything'), true, 'proof authority still comes from proofs alone');
   // The server's principal schema admits the grant beside the role and refuses an unknown one.
   principalSchema.parse([{ ...granted, token: tokens.get(granted.id) }]);
   assert.throws(() => principalSchema.parse([{ ...granted, grants: ['proof:*'], token: tokens.get(granted.id) }]));
@@ -435,94 +411,4 @@ test('unit:principal-upsert-remove-single-entry-readback — principal add reach
     assert.doesNotMatch(bundle(), /127\.0\.0\.1:4310:/);
   } finally { await compose.cleanup(); }
 
-});
-
-test('manual:local-plane-principals-restored — a local plane booted on the old plane\'s database with only the installer\'s roster refuses the dispatched worker process\'s existing credential file and reports proof-authority gaps; principal add --token-file/--proof, read back from that real plane as each roster redeploys, restores the claim with the existing credential file, brings the gap count master status reports to 0, and leaves every former producer\'s effective grant exactly as the old plane recorded it (GY-1998)', async () => {
-  const fixture = await composeHarness();
-  const planes: { url: string; roster: string; close: () => Promise<void> }[] = [];
-  try {
-    const session = await prepareInstall(fixture.root, { repository: REPOSITORY, provider: 'compose' }, fixture.deps);
-    await applyInstall(session, await buildPlan(session));
-    const installed = deployedRoster(fixture.transport), admin = installed.find(entry => entry.role === 'admin')!;
-    await database.createDatabase('local_plane_restore');
-    const planeStore = new Store(`postgres://graphyard:testing-only@127.0.0.1:${databasePort}/local_plane_restore`); await planeStore.init();
-    /** Boot a control plane on the shared database as server/main.ts does: the served roster, then the one-time proof seed. */
-    const boot = async (roster: typeof installed) => {
-      const credentials = principalSchema.parse(roster);
-      await new ProofGrants(planeStore, credentials.map(({ token: _token, ...actor }) => actor)).seed();
-      const plane = server(new Engine(planeStore, 120, REPOSITORY), credentials);
-      await new Promise<void>(resolve => plane.listen(0, '127.0.0.1', resolve));
-      const booted = { url: `http://127.0.0.1:${(plane.address() as any).port}`, roster: JSON.stringify(roster), close: () => new Promise<void>(resolve => plane.close(() => resolve())) };
-      planes.push(booted);
-      return booted;
-    };
-    const api = async (plane: { url: string }, path: string, token: string, data?: unknown) => {
-      const response = await fetch(`${plane.url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: data === undefined ? undefined : JSON.stringify(data) });
-      return { status: response.status, body: await response.json() as any };
-    };
-    /** proofAuthorityGaps as master status counts it: open items whose stored proofGaps is non-empty. */
-    const gapCount = async () => (await planeStore.list()).filter(work => work.stage !== 'done' && work.proofGaps?.length).length;
-
-    // The old plane: the installer's roster plus a dispatched worker and the producers, one widened by an admin grant after its seed.
-    const workerToken = `former-worker-${'w'.repeat(40)}`;
-    const former = [
-      { id: 'graphyard-claude-1', role: 'worker', sessionKind: 'ai', token: workerToken },
-      { id: 'ci-proofs', role: 'producer', sessionKind: 'ai', proofs: ['unit:*', 'integration:*'], token: `ci-proofs-${'c'.repeat(40)}` },
-      { id: 'production-acceptance-producer', role: 'producer', sessionKind: 'ai', proofs: ['integration:claim-safety'], token: `acceptance-${'p'.repeat(40)}` },
-    ];
-    const old = await boot([...installed, ...former]);
-    const adminActor = { id: admin.id, role: 'admin' as const };
-    await new ProofGrants(planeStore, principalSchema.parse([...installed, ...former]).map(({ token: _token, ...actor }) => actor))
-      .grant(adminActor, 'production-acceptance-producer', { patterns: ['unit:*', 'integration:*', 'manual:*'], reason: 'Designated independent proof producer' }, randomUUID());
-    const oldEngine = new Engine(planeStore, 120, REPOSITORY);
-    const open = async (title: string) => {
-      const created = await oldEngine.execute(adminActor, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:roster-restore', 'integration:roster-restore'] }] }, randomUUID());
-      return oldEngine.execute(adminActor, 'ready', created.id, {}, randomUUID());
-    };
-    const items = [await open('Needs unit and integration proof'), await open('Dispatched to the former worker')];
-    const before = (await api(old, 'proof-grants', admin.token)).body;
-    const formerAuthority = before.authorities.filter((entry: { role: string }) => entry.role === 'producer');
-    assert.deepEqual(formerAuthority.map((entry: { principalId: string; patterns: string[] }) => [entry.principalId, entry.patterns]),
-      [['ci-proofs', ['unit:*', 'integration:*']], ['production-acceptance-producer', ['integration:*', 'integration:claim-safety', 'manual:*', 'unit:*']]]);
-    await old.close(); planes.pop();
-
-    // The incident: the local plane comes up on the same database with the installer's roster alone.
-    const incident = await boot(installed);
-    const credentialFile = join(fixture.root, 'graphyard-claude-1.token');
-    await writeFile(credentialFile, `${workerToken}\n`, { mode: 0o600 });
-    /** The dispatched worker: the real CLI process, handed only the plane's URL and its existing credential file. */
-    const dispatch = (plane: { url: string }) => promisify(execFile)(process.execPath, [cliPath, 'claim', items[1].key], { cwd: fixture.root,
-      env: { ...process.env, GRAPHYARD_URL: plane.url, GRAPHYARD_TOKEN_FILE: credentialFile, GRAPHYARD_TOKEN: undefined, GRAPHYARD_REQUEST_ID: undefined } });
-    await assert.rejects(dispatch(incident), (error: any) => /A valid Graphyard bearer token is required/.test(error.stderr) && error.code === 1);
-    assert.equal(await gapCount(), items.length, 'no producer the plane serves holds unit:* or integration:*');
-    assert.deepEqual((await api(incident, 'proof-grants', admin.token)).body.authorities.map((entry: { principalId: string }) => entry.principalId), installed.filter((entry: { role: string }) => entry.role === 'admin').map((entry: { id: string }) => entry.id), 'the roster’s admins alone hold authority — the operator and the e2e identity');
-    await incident.close(); planes.pop();
-
-    // Restoration: each principal add redeploys GRAPHYARD_PRINCIPALS, and its readback reaches a real plane booted on that roster.
-    const realPlane = (async (input: string | URL | Request, init?: RequestInit) => {
-      const target = String(input), path = target.match(/\/api\/(principals|proof-grants)$/)?.[0];
-      if (!path) return fixture.deps.fetch!(input, init);
-      const roster = deployedRoster(fixture.transport);
-      if (planes.at(-1)?.roster !== JSON.stringify(roster)) { await planes.pop()?.close(); await boot(roster); }
-      return fetch(`${planes.at(-1)!.url}${path}`, init);
-    }) as typeof fetch;
-    const restore = (args: string[]) => principalCommand(args, { ...fixture.deps, fetch: realPlane, cwd: fixture.root });
-    assert.equal((await restore(['add', 'graphyard-claude-1', '--role', 'worker', '--token-file', credentialFile])).changed, true);
-    for (const producer of formerAuthority) {
-      const restored = await restore(['add', producer.principalId, '--role', 'producer', ...producer.patterns.flatMap((pattern: string) => ['--proof', pattern])]);
-      assert.deepEqual(restored.readback.proofAuthority, producer.patterns, `${producer.principalId} reads back the grant the old plane recorded`);
-    }
-    const local = planes.at(-1)!;
-    assert.equal(JSON.parse(local.roster).find((entry: { id: string }) => entry.id === 'graphyard-claude-1').token, (await readFile(credentialFile, 'utf8')).trim(), 'the plane serves the existing credential, not a minted one');
-
-    // AC-1: the dispatched worker process claims with its existing credential file, and master status counts no proof-authority gap.
-    const claimed = JSON.parse((await dispatch(local)).stdout);
-    assert.equal(claimed.lease.owner, 'graphyard-claude-1', JSON.stringify(claimed));
-    assert.equal(await gapCount(), 0);
-    // No widening: the producers' effective authority and every grant record are the old plane's, byte for byte.
-    const after = (await api(local, 'proof-grants', admin.token)).body;
-    assert.deepEqual(after.authorities.filter((entry: { role: string }) => entry.role === 'producer'), formerAuthority);
-    assert.deepEqual(after.grants, before.grants, 'no grant record was re-seeded, widened or narrowed');
-    await planeStore.close();
-  } finally { for (const plane of planes) await plane.close(); await fixture.cleanup(); }
 });

@@ -10,14 +10,14 @@ const directMerges = (services: Services) => new DirectMerges(services.engine.st
 /** Scoped operator automation identities: listing, setup, and credential lifecycle; and the admin-only direct-merge mode. */
 export const operatorAgentRoutes = defineRoutes('operator-agents', [
   // The configured roster without credentials: who the server authenticates, in which role, with
-  // which lane grants (GY-1879), and which of them hold a live lease. A roster rotation is previewed against it so it can never
+  // which lane grants (GY-1879) and proof patterns, and which of them hold a live lease. A roster rotation is previewed against it so it can never
   // drop a live principal; it answers operator agents itself, like every route in this module.
   {
     method: 'GET', path: '/api/principals',
     async handle({ actor, services }) {
       demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'The principal roster is available to admin, coordinator and operator-agent identities', 403);
       const now = Date.now(), leased = (await services.engine.store.fleet()).filter(work => work.lease && Date.parse(work.lease.expiresAt) > now);
-      return { principals: services.principals.map(({ actor: principal }) => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [],
+      return { principals: services.principals.map(({ actor: principal }) => ({ id: principal.id, role: principal.role, sessionKind: principal.sessionKind ?? null, grants: principal.grants ?? [], proofs: principal.proofs ?? [],
         leases: leased.filter(work => work.lease!.owner === principal.id).map(work => work.key) })) };
     },
   },

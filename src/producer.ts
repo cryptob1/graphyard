@@ -10,12 +10,12 @@ import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
-import { reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, worktreeRoot, type CheckoutReclaimReport, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
+import { removeSessionCheckout, sessionCheckout, worktreeRoot, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { anchorSessionCheckout, sessionWritable, verifySessionSandbox, type SessionSandboxProbe, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
-import { liveRun, liveRunCheckouts, registeredRun, unendedRunOnDisk, type RunAdopter } from './runner/registry.js';
+import { liveRun, registeredRun, unendedRunOnDisk, type RunAdopter } from './runner/registry.js';
 import type { EvidencePayload } from './runner/payloads.js';
 import { sessionVerificationEnvironment } from './master/harness.js';
 import { withVerificationPath } from './master/verification-slots.js';
@@ -193,7 +193,7 @@ export const producerRecordSchema = z.object({
   closeFailure: z.string().min(1).max(500).optional(),
   /** The session directory under the managed worktree root; removed when the session resolves. */
   checkout: z.string().min(1).max(1200).optional(),
-  /** Why the checkout could not be removed at settlement; the reclaim pass takes it back. */
+  /** Why the checkout could not be removed at settlement. */
   checkoutFailure: z.string().min(1).max(500).optional(),
   /** `pi`: a headless run (GY-169), with no pane; absent is a Herdr session. */
   runtime: z.enum(['herdr', 'pi']).optional(),
@@ -734,7 +734,7 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
     record.closeFailure = closeFailure;
     if (!closeFailure) {
       // The session is gone, so its checkout goes with it — whatever the outcome. One that cannot
-      // be removed is said so on the record and taken back by the next reclaim pass.
+      // be removed is said so on the record.
       const failure = await settleCheckout(root, record.checkout);
       if (failure) record.checkoutFailure = failure; else delete record.checkoutFailure;
       record.state = next.state; record.resolution = paneGone ? withPaneGone(next.resolution, record.pane!) : next.resolution; record.closedAt = now.toISOString();
@@ -745,28 +745,6 @@ export async function reconcileProducers(root: string, config: MasterConfig, wor
   changed += releaseClosedRequests(ledger.producers, work, now);
   if (changed) await saveProducerLedger(root, ledger);
   return { producers: ledger.producers, changed };
-}
-
-/** GY-866: managed directories this process holds outside every ledger — the loop's scratch checkout. */
-const heldCheckouts = new Set<string>();
-/** Hold `directory` against the reclaim pass until the returned release is called. */
-export function holdCheckout(directory: string) {
-  const held = resolve(directory); heldCheckouts.add(held);
-  return () => { heldCheckouts.delete(held); };
-}
-
-
-/**
- * The reclaim pass over the managed worktree root: every session directory no pending producer or
- * reviewer record owns is removed. Settlement removes a session's own checkout, so what this finds
- * was left by a session whose master died before it could settle.
- */
-export async function reclaimCheckouts(root: string, config: MasterConfig, options: { now?: number; graceMs?: number; probe?: FilesystemProbe } = {}): Promise<CheckoutReclaimReport> {
-  const now = options.now ?? Date.now();
-  const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
-  // A live headless run's directory is owned by its run, not by a ledger record (GY-391).
-  const live = [...[...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!), ...liveRunCheckouts(), ...heldCheckouts];
-  return reclaimSessionCheckouts(root, worktreeRoot(root, config), live, { ...options, failure: writeFailure });
 }
 
 export function summarizeProducers(records: ProducerRecord[]) {

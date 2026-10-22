@@ -22,7 +22,7 @@ import { readReviewerProfileRefusal, reviewerProfileRefusalAttention, simplicity
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
 import { closeHerdrPane, createdHerdrTab, type HerdrAgent, herdrJson } from './herdr.js';
 import { agentOwner, type AttentionItem } from './attention.js';
-import { cycleBaseTip, dependencyDirectories, failureText, recordWorktreePrepare, shareDependencies, worktreePrepareSummary, type SharedDependencies } from './worktrees.js';
+import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, type SharedDependencies } from './worktrees.js';
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
@@ -140,7 +140,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   // GY-1772: which runtimes the worker is tried on first, never judged from its path lane; recorded with the selection it ordered.
   let prefer: 'fast' | 'strong' | null = null;
   let harness: Awaited<ReturnType<typeof installWorkerHarness>> | null = null;
-  let dependencies: PreparedWorker['dependencies'] | null = null, reclaimed: string[] = [], prepareMs: number | null = null;
+  let dependencies: PreparedWorker['dependencies'] | null = null, reclaimed: string[] = [];
   let delivery: RequestDelivery | null = null, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
   let started: 'started' | 'awaiting consent' = 'started', consent: { answered: ConsentAnswer[]; awaiting: ConsentHold | null } = { answered: [], awaiting: null };
   let pushCredential: 'minted' | 'none' = 'none';
@@ -221,7 +221,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, prepareMs } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round, observedAt));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round, observedAt));
               claimedEpoch = epoch;
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
@@ -229,11 +229,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
               // The dispatch record names the runtime and account the session runs on, the preference
               // that ordered the accounts (GY-1772), every account whose runtime failed to start
               // first, so a slot running one runtime under a profile named for another is on the
-              // record, not a surprise (GY-417), and how long the worktree took to prepare (GY-1836).
+              // record, not a surprise (GY-417).
               await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: work.key, epoch, agentName: profile.agentName, at,
-                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, prefer, ...(prepareMs !== null ? { prepareMs } : {}), ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
-              // The preparation time joins the day's sample, which master status ranks (GY-1836).
-              if (prepareMs !== null) await recordWorktreePrepare(root, { at, key: work.key, epoch, profile: profile.name, ms: prepareMs }).catch(() => {});
+                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, prefer, ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
               // A start on the account clears its own run of consecutive start failures.
               if (chosen.account) await clearAccountStartFailures(config, chosen.account.name).catch(() => {});
               break;
@@ -268,7 +266,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   // and every watcher key by `principal:epoch` must carry the one that was claimed, so the caller
   // re-keys the registration once the claim is known.
   return { work: work.key, epoch: claimedEpoch, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
-    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, prepareMs, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
+    launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     // The selection names the preference that ordered the accounts it chose from (GY-1772).
@@ -338,11 +336,11 @@ export const describeStartFailures = (failures: readonly AccountStartFailure[], 
  * never by the profile's name alone — and, when the preferred account's runtime failed to start,
  * one `fallback` line naming that account and the one launched on.
  */
-export function workerLaunchRows(profiles: { name: string }[], records: Record<string, ProfileLaunchRecord>): Record<string, { runtime: string | null; account: string | null; fallback: string | null; prepareMs: number | null }> {
-  const rows: Record<string, { runtime: string | null; account: string | null; fallback: string | null; prepareMs: number | null }> = {};
+export function workerLaunchRows(profiles: { name: string }[], records: Record<string, ProfileLaunchRecord>): Record<string, { runtime: string | null; account: string | null; fallback: string | null }> {
+  const rows: Record<string, { runtime: string | null; account: string | null; fallback: string | null }> = {};
   for (const profile of profiles) {
     const record = records[profile.name];
-    if (record) rows[profile.name] = { runtime: record.runtime, account: record.account, fallback: record.failedAccounts.length ? describeStartFailures(record.failedAccounts, record.account) : null, prepareMs: record.prepareMs };
+    if (record) rows[profile.name] = { runtime: record.runtime, account: record.account, fallback: record.failedAccounts.length ? describeStartFailures(record.failedAccounts, record.account) : null };
   }
   return rows;
 }
@@ -358,11 +356,11 @@ export function accountStartFailureAttention(failures: AccountStartFailures, cli
     ...agentOwner('master', `Re-check the account with node ${cliPath} master environments --apply and log its runtime in, or drop it from the profiles' account order with node ${cliPath} master config accounts:PROFILE=… until it starts`) }));
 }
 /** What a profile's last worker dispatch recorded, as master status reads it (GY-417). */
-export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; /** How long the dispatch took to prepare the worktree, claim included (GY-1836); null on a record written before it was measured. */ prepareMs: number | null; failedAccounts: AccountStartFailure[] }
+export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; failedAccounts: AccountStartFailure[] }
 const profileLaunchRecordSchema = z.object({
   key: z.string().min(1), epoch: z.number().int().min(1), agentName: z.string().min(1), at: z.string().min(1),
   runtime: z.string().nullable().default(null), account: z.string().nullable().default(null), prefer: z.enum(['fast', 'strong']).nullable().default(null),
-  prepareMs: z.number().int().min(0).nullable().default(null),
+  prepareMs: z.unknown().optional().transform(() => undefined), // retired (GY-2876): a record written before parses
   failedAccounts: z.array(z.object({ account: z.string().min(1), kind: z.string().min(1), reason: z.string().min(1), at: z.string().min(1) }).strict()).default([]),
 }).strict();
 /** The last dispatch record of each launch profile; a profile never dispatched reads as absent. */
@@ -374,11 +372,11 @@ export async function readProfileLaunchRecords(root: string, profiles: { name: s
   }
   return records;
 }
-/** Everything `master status` shows of worker launches (GY-417): each profile's row fields, the never-starting accounts, and the day's worktree preparation percentiles (GY-1836). */
+/** Everything `master status` shows of worker launches (GY-417): each profile's row fields and the never-starting accounts. */
 export async function workerLaunchStatus(root: string, config: Pick<MasterConfig, 'credentialFile' | 'cliPath' | 'workers'> & Partial<Pick<MasterConfig, 'reviewers'>>) {
   const failures = await readAccountStartFailures(config);
   // GY-1850: and the one configuration attention an unknown reviewer profile's consecutive refusals raise.
-  return { rows: workerLaunchRows(config.workers, await readProfileLaunchRecords(root, config.workers)), items: [...accountStartFailureAttention(failures, config.cliPath), ...reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config), config.reviewers ? { workers: config.workers, reviewers: config.reviewers } : undefined)], prepare: await worktreePrepareSummary(root) };
+  return { rows: workerLaunchRows(config.workers, await readProfileLaunchRecords(root, config.workers)), items: [...accountStartFailureAttention(failures, config.cliPath), ...reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config), config.reviewers ? { workers: config.workers, reviewers: config.reviewers } : undefined)] };
 }
 
 export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: string, epoch: number, agentName: string, pane: string, awaiting: { prompt: string; kind: ConsentHold['kind']; request?: string | null; named?: boolean }, now = Date.now()): ConsentHold {
@@ -394,11 +392,8 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   let keepAlive = null as ReturnType<typeof launchLeaseKeepAlive> | null;
   const keep = (epoch: number) => { keepAlive ??= launchLeaseKeepAlive(renew ? () => renew(root, work.key, epoch, profile.name) : null, renewIntervalMs); return () => keepAlive!.stop(); };
   let prepared: PreparedWorker;
-  // GY-1836: the dispatch names how long the worktree took to prepare, the claim included.
-  const prepareBeganAt = Date.now();
   try { prepared = await prepare(root, work.key, profile.name, undefined, claimBy, keep, cycle); }
   catch (error) { await keepAlive?.stop(); throw error; }
-  const prepareMs = Math.max(0, Date.now() - prepareBeganAt);
   keep(prepared.epoch);
   try { return await launchPrepared(); } finally { await keepAlive?.stop(); }
   async function launchPrepared() {
@@ -451,7 +446,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
       if (hold) writeConsentHold(started.files.stem, hold);
       return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
-        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const, prepareMs };
+        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const };
     } catch (error) {
       const malformedTab = (error as any)?.herdrTab as string | undefined;
       const failed = error instanceof Error ? error.message : 'Worker launch failed';

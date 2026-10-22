@@ -13,18 +13,15 @@ import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskEx
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { daemonSummary } from '../src/daemon/run.js';
-import { memoryActionKey } from '../src/daemon/cycle-dispatch.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { hostMemoryAttention, hostMemoryFloor, memoryConsumers, memoryRecoveryMarginBytes, type HostMemoryReading } from '../src/master-resources.js';
 import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
 import { grantWorkerPaths, verifyWorkerSandbox } from '../src/worker-sandbox.js';
-import { launchProducer, producerPrompt, readProducerLedger, reclaimCheckouts, reconcileProducers, producerIdleGraceMs, type ProducerBinding } from '../src/producer.js';
+import { launchProducer, producerPrompt, readProducerLedger, reconcileProducers, producerIdleGraceMs, type ProducerBinding } from '../src/producer.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
-import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, orphanGraceMs, probeFilesystem, reclaimCommand, reclaimSessionCheckouts, removeSessionCheckout, sessionCheckout, sweepAbandonedRoots, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
+import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, probeFilesystem, removeSessionCheckout, sessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-09-26 `at` is the explicit clock of the AC-2 memory-hold cycles; the 2026-01-02 `observed` is the snapshot clock the reclaim-stamp case hands to runCycle and compares with the stamp, never a wall-clock read (snapshot now iso(at), () => at); the earlier tests derive every grace/expiry instant from Date.now() itself.
 
 // Each test is named for the proof it produces: integration:managed-worktree-root,
 // integration:ephemeral-checkout-reclaim, integration:worktree-root-preflight and
@@ -188,7 +185,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
   } finally { await cleanup(); }
 });
 
-test('integration:ephemeral-checkout-reclaim — every checkout is removed when its session resolves, dependency directory included, and a reclaim pass takes back what a dead session left', async () => {
+test('integration:ephemeral-checkout-reclaim — every checkout is removed when its session resolves, dependency directory included', async () => {
   const { root, managed, git, cleanup } = await installation();
   try {
     const config = await loadMasterConfig(root);
@@ -254,54 +251,10 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, mint, filesystem: durable }), /herdr pane run failed/);
     assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'every resolved or failed launch is gone from the root; the host verification lock directory stays');
 
-    // A session that died with its master: a checkout no record owns. One live session is left
-    // pending beside it, and a directory that is not Graphyard's sits in the same root.
+    // A pending session keeps its checkout, and only a Graphyard session directory is ever removed.
     const live = await produce('GY-111');
-    const dead = await allocateSessionCheckout(managed, 'proof', 'GY-112', H, randomUUID()), deadReview = await allocateSessionCheckout(managed, 'review', 'GY-113', H, randomUUID());
-    await occupy(git, dead.directory); await occupy(git, deadReview.directory);
-    await mkdir(join(managed, 'operator-notes')); await writeFile(join(managed, 'operator-notes/keep.txt'), 'not a checkout\n');
-    const early = await reclaimCheckouts(root, config, { probe: durable });
-    assert.deepEqual(early.removed, [], 'a directory allocated moments ago may belong to a launch still being recorded');
-    assert.equal(early.scanned, 3);
-    const pass = await reclaimCheckouts(root, config, { now: Date.now() + orphanGraceMs + 1000, probe: durable });
-    assert.deepEqual(pass.removed.sort(), [dead.directory, deadReview.directory].sort()); assert.deepEqual(pass.kept, [live.checkout]); assert.deepEqual(pass.errors, []);
-    gone(dead.directory); gone(deadReview.directory);
-    assert.ok(existsSync(join(live.checkout, 'checkout/node_modules/left-pad/index.js')), 'a pending session is never reclaimed');
-    assert.ok(existsSync(join(managed, 'operator-notes/keep.txt')), 'only a Graphyard session directory is ever removed');
     await assert.rejects(removeSessionCheckout(root, managed, join(managed, 'operator-notes')), /Refusing to remove/);
     await assert.rejects(removeSessionCheckout(root, managed, dirname(managed)), /Refusing to remove/);
-
-    // Default roots are neighbours in the data directory. One whose checkout is gone never runs a
-    // pass again, so a pass sweeps what it left — only when it holds nothing at all.
-    const data = join(dirname(dirname(managed)), 'shared-data'), mine = defaultWorktreeRoot(root, 'owner/project', { GRAPHYARD_DATA_HOME: data });
-    const abandoned = join(dirname(mine), 'project-000000000000'), occupied = join(dirname(mine), 'project-111111111111'), fresh = join(dirname(mine), 'project-222222222222');
-    const left = await allocateSessionCheckout(abandoned, 'proof', 'GY-1', H, randomUUID()), held = await allocateSessionCheckout(occupied, 'proof', 'GY-2', H, randomUUID());
-    await allocateSessionCheckout(occupied, 'review', 'GY-2', H, randomUUID()); await allocateSessionCheckout(fresh, 'proof', 'GY-3', H, randomUUID());
-    await writeFile(join(held.directory, 'proof.evidence.json'), '{}\n');
-    const later = Date.now() + orphanGraceMs + 1000;
-    assert.deepEqual((await reclaimSessionCheckouts(root, mine, [], { now: Date.now(), probe: durable, environment: { GRAPHYARD_DATA_HOME: data } })).swept, [], 'nothing is abandoned inside the grace period');
-    assert.deepEqual(await sweepAbandonedRoots(managed, { now: later, environment: { GRAPHYARD_DATA_HOME: data } }), [], 'a configured root has no neighbours to sweep');
-    const old = new Date(Date.now() - orphanGraceMs - 60_000);
-    for (const path of [left.directory, abandoned, ...(await readdir(occupied)).map(name => join(occupied, name)), occupied]) await utimes(path, old, old);
-    assert.deepEqual((await reclaimSessionCheckouts(root, mine, [], { probe: durable, environment: { GRAPHYARD_DATA_HOME: data } })).swept, [abandoned]);
-    assert.equal(existsSync(abandoned), false); assert.ok(existsSync(join(held.directory, 'proof.evidence.json')), 'a root that holds a file is never swept'); assert.ok(existsSync(fresh));
-    await rm(data, { recursive: true, force: true });
-
-    // The durable loop runs the same pass, and its summary says what it took back.
-    const orphan = await allocateSessionCheckout(managed, 'proof', 'GY-114', H, randomUUID());
-    await occupy(git, orphan.directory);
-    await utimes(orphan.directory, old, old);
-    const state = emptyDaemonState(config);
-    const effects: DaemonEffects = { snapshot: async () => ({ work: [], now: new Date().toISOString() }), agents: () => [], credentials: async () => ({}), closePane: () => {}, dispatch: async () => ({}), observeDeployment: async () => null,
-      recordDeployment: async () => ({}), merge: async () => ({}), persist: async () => {},
-      reclaim: async () => ({ root, at: new Date().toISOString(), applied: true, scanned: 0, idleMs: 0, removed: [], kept: [], freeBefore: 50e9, freeAfter: 50e9, freedBytes: 0, errors: [], checkouts: await reclaimCheckouts(root, config, { probe: free(1e9) }) }) } as unknown as DaemonEffects;
-    const cycle = await runCycle(config, state, effects);
-    gone(orphan.directory);
-    assert.equal(state.reclaim!.checkouts, 1); assert.equal(state.reclaim!.rootFreeBytes, 1e9);
-    assert.match(cycle.actions.find(action => action.kind === 'reclaim')!.detail, new RegExp(`Reclaimed 1 ephemeral checkout\\(s\\) no live session owned from ${managed}`));
-    let passes = 0;
-    await runCycle(config, state, { ...effects, reclaim: async () => { passes++; return (effects.reclaim as any)(); } } as DaemonEffects);
-    assert.equal(passes, 1, 'a root below its minimum is reclaimed on every cycle, not on the ten-minute cadence');
 
     // No checkout outlives its session record: every record that is not pending has no directory,
     // and every directory under the root belongs to a record that is.
@@ -315,7 +268,6 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     // And the last one goes when its session does, taking the emptied root with it.
     await settle({ ...producing('GY-111', live.asked), evidence: [passing] } as any);
     gone(live.checkout);
-    await rm(join(managed, 'operator-notes'), { recursive: true });
     const last = await allocateSessionCheckout(managed, 'proof', 'GY-115', H, randomUUID());
     await removeSessionCheckout(root, managed, last.directory);
     assert.deepEqual(await readdir(managed), ['.verification-slots'], 'an installation with no session leaves nothing behind but the host verification lock directory (GY-612)');
@@ -323,7 +275,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
   } finally { await cleanup(); }
 });
 
-test('integration:worktree-root-preflight — setup refuses a tmpfs or a volume without the configured room, and master status asks for a reclaim before the volume or quota is exhausted', async () => {
+test('integration:worktree-root-preflight — setup refuses a tmpfs or a volume without the configured room, and master status warns before the volume or quota is exhausted', async () => {
   const scratch = await realpath(await temporaryDirectory('root-preflight'));
   try {
     const root = join(scratch, 'repository'), credentialDirectory = join(scratch, 'credentials'), managed = join(scratch, 'data/worktrees');
@@ -369,8 +321,7 @@ test('integration:worktree-root-preflight — setup refuses a tmpfs or a volume 
     await assert.rejects(allocateManagedCheckout(root, config, 'review', 'GY-88', H, randomUUID(), free(0.5e9)), /has 0\.5 GB free, below the required 1\.0 GB/);
     assert.equal(existsSync(managed), false);
 
-    // master status: nothing while the root is healthy, and an attention item — owned by the
-    // master, naming the reclaim command — while writes still succeed.
+    // master status: nothing while the root is healthy, and an attention item owned by the master while writes still succeed.
     const owned = await allocateManagedCheckout(root, config, 'proof', 'GY-88', H, randomUUID(), durable), unowned = await allocateManagedCheckout(root, config, 'review', 'GY-88', H, randomUUID(), durable);
     const sessions = [{ state: 'pending', checkout: owned.directory }, { state: 'completed', checkout: unowned.directory }];
     const healthy = await managedRootStatus(root, config, sessions, { probe: free(80e9), usage: async () => 0.4e9 });
@@ -380,22 +331,19 @@ test('integration:worktree-root-preflight — setup refuses a tmpfs or a volume 
     const low = await managedRootStatus(root, config, sessions, { probe: free(0.7e9), usage: async () => 0.4e9 });
     assert.equal(low.attention.length, 1);
     assert.equal(low.attention[0].subject, 'disk'); assert.equal(low.attention[0].role, 'master'); assert.equal(low.attention[0].human, false);
-    assert.match(low.attention[0].text, new RegExp(`0\\.7 GB free on the managed worktree root ${managed}, below the configured 1\\.0 GB minimum; it holds 2 ephemeral checkout\\(s\\), 1 owned by no live session\\. Reclaim them before the volume fills`));
-    assert.match(low.attention[0].next, /^graphyard master run --once removes every ephemeral checkout no live session owns/);
-    assert.ok(low.attention[0].next.includes(reclaimCommand));
+    assert.match(low.attention[0].text, new RegExp(`0\\.7 GB free on the managed worktree root ${managed}, below the configured 1\\.0 GB minimum; it holds 2 ephemeral checkout\\(s\\), 1 owned by no live session$`));
+    assert.match(low.attention[0].next, /Raise run\.worktreeRootBudgetGb or move run\.worktreeRoot/);
 
     // A quota is invisible in the volume's free space, so the root's own size is held to a budget.
     const quota = await managedRootStatus(root, { ...config, run: { ...config.run, worktreeRootBudgetGb: 5 } }, sessions, { probe: free(300e9), usage: async () => 4.1e9 });
     assert.equal(quota.health.overBudget, true); assert.equal(quota.health.low, false);
-    assert.match(quota.attention[0].text, /holds 4\.1 GB of its 5\.0 GB budget \(run\.worktreeRootBudgetGb\) in 2 ephemeral checkout\(s\), 1 owned by no live session\. Reclaim them before the quota is exhausted/);
-    assert.match(quota.attention[0].next, /graphyard master run --once/);
+    assert.match(quota.attention[0].text, /holds 4\.1 GB of its 5\.0 GB budget \(run\.worktreeRootBudgetGb\) in 2 ephemeral checkout\(s\), 1 owned by no live session$/);
     assert.deepEqual((await managedRootStatus(root, { ...config, run: { ...config.run, worktreeRootBudgetGb: 5 } }, sessions, { probe: free(300e9), usage: async () => 3.9e9 })).attention, [], 'below four fifths of the budget nothing is raised');
 
     // A configuration that predates this check, or was edited onto a tmpfs, is said so too.
     const volatile = await managedRootStatus(root, config, sessions, { probe: memory, usage: async () => 0 });
     assert.match(volatile.attention[0].text, /is on a tmpfs: every proof and review checkout is held in memory/);
     assert.match(volatile.attention[0].next, /Set run\.worktreeRoot in \.graphyard\/master\.json to an absolute path on durable storage/);
-    assert.deepEqual(worktreeRootAttention({ ...low.health, volatile: 'tmpfs' }).map(item => /graphyard master run --once/.test(item.next)), [true, true]);
 
     // The real measurement of a real root, and a root that does not exist yet.
     const real = await inspectWorktreeRoot(managed, { minFreeBytes: 1, budgetBytes: 10e9 }, [owned.directory]);
@@ -405,15 +353,14 @@ test('integration:worktree-root-preflight — setup refuses a tmpfs or a volume 
   } finally { await rm(scratch, { recursive: true, force: true }); }
 });
 
-test('unit:disk-exhaustion-message — a write that failed for want of room is reported as disk exhaustion naming the path and the reclaim command, wherever in the loop it failed', async () => {
+test('unit:disk-exhaustion-message — a write that failed for want of room is reported as disk exhaustion naming the path and the remedy, wherever in the loop it failed', async () => {
   const quota = Object.assign(new Error("EDQUOT: disk quota exceeded, mkdir '/data/worktrees/graphyard-proof-gy-88-aaaaaaa-0123abcd'"), { code: 'EDQUOT', path: '/data/worktrees/graphyard-proof-gy-88-aaaaaaa-0123abcd' });
   const full = Object.assign(new Error('ENOSPC: no space left on device, write'), { code: 'ENOSPC' });
   const child = Object.assign(new Error('Command failed: git worktree add'), { stderr: 'pwd: write error: Disk quota exceeded\n' });
   const unrelated = new Error('connect ECONNREFUSED 127.0.0.1:5432');
 
-  // The message: the condition, the path, the reclaim command.
-  assert.equal(reclaimCommand, 'graphyard master run --once');
-  assert.ok(reclaimAdvice.includes(`${reclaimCommand} reclaims immediately, ephemeral proof and review checkouts included`));
+  // The message: the condition, the path, the remedy.
+  assert.match(reclaimAdvice, /^free space on the volume, then retry/);
   assert.equal(diskExhaustionMessage(quota), `the host's disk quota is exhausted (EDQUOT) at /data/worktrees/graphyard-proof-gy-88-aaaaaaa-0123abcd: ${reclaimAdvice}`);
   assert.equal(diskExhaustionMessage(full, '/data/worktrees'), `the volume is full (ENOSPC) at /data/worktrees: ${reclaimAdvice}`, 'a caller that knows the path names it');
   assert.equal(diskExhaustionMessage(child, '/repo/.graphyard/worktrees/GY-88-1'), `the host's disk quota is exhausted (EDQUOT) at /repo/.graphyard/worktrees/GY-88-1: ${reclaimAdvice}`, 'a child command\'s output is the same condition');
@@ -424,25 +371,9 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
   // writeFailure: the action, then that message; the code and the cause survive, and any other failure is left exactly as it is.
   const wrapped = writeFailure(quota, 'Allocating a proof checkout under the managed worktree root', '/data/worktrees') as Error & { code?: string; cause?: unknown };
   assert.equal(wrapped.message, `Allocating a proof checkout under the managed worktree root failed because the host's disk quota is exhausted (EDQUOT) at /data/worktrees: ${reclaimAdvice}`);
-  assert.match(wrapped.message, /graphyard master run --once/);
   assert.equal(wrapped.code, 'EDQUOT'); assert.equal(wrapped.cause, quota);
   assert.match(writeFailure(quota, 'Removing the ephemeral checkout').message, /\(EDQUOT\) at \/data\/worktrees\/graphyard-proof-gy-88-aaaaaaa-0123abcd: /, 'the path the system call reported is named when the caller gives none');
   assert.equal(writeFailure(unrelated, 'Writing the cursor'), unrelated);
-
-  // A real write into a place that cannot take it is reported through the same path: the
-  // allocation under the managed root, and the reclaim pass.
-  const scratch = await realpath(await temporaryDirectory('exhaustion'));
-  try {
-    const orphan = await allocateSessionCheckout(scratch, 'proof', 'GY-88', H, randomUUID());
-    const refusing = () => { throw quota; };
-    const pass = await reclaimSessionCheckouts(scratch, scratch, [], { now: Date.now() + orphanGraceMs + 1000, probe: durable, failure: writeFailure, run: refusing });
-    assert.deepEqual(pass.errors, [], 'a git failure never stops the directory from being removed');
-    assert.equal(existsSync(orphan.directory), false);
-    const stuck = await allocateSessionCheckout(scratch, 'review', 'GY-88', H, randomUUID());
-    const failing = await reclaimSessionCheckouts(scratch, scratch, [], { now: Date.now() + orphanGraceMs + 1000, probe: durable,
-      failure: (error, action, path) => writeFailure(Object.assign(new Error('write error: No space left on device'), { original: error }), action, path), run: () => '' });
-    assert.deepEqual(failing.errors, []); assert.equal(existsSync(stuck.directory), false);
-  } finally { await rm(scratch, { recursive: true, force: true }); }
 
   // A session launch that runs out of room — Herdr's own output says so, nothing else does — is
   // reported as that, names the checkout it was launching into, and leaves no checkout behind.
@@ -455,12 +386,12 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
       assert.ok(error.message.endsWith(reclaimAdvice)); return true;
     });
     await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, mint: async () => ({ token: 'ghs_session_token_value', expiresAt: future(3_000_000) }), filesystem: durable }),
-      new RegExp(`^Error: Launching the GY-88 reviewer session .* failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-review-gy-88-aaaaaaa-[0-9a-f]{8}: .*graphyard master run --once`));
+      new RegExp(`^Error: Launching the GY-88 reviewer session .* failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-review-gy-88-aaaaaaa-[0-9a-f]{8}: .*free space on the volume`));
     assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'no checkout is left behind, only the host verification lock directory');
   } finally { await cleanup(); }
 
   // And the loop records it that way: an action that failed for want of room carries its own
-  // output, the condition, the path and the reclaim command — once.
+  // output, the condition, the path and the remedy — once.
   const credentials = await realpath(await temporaryDirectory('exhaustion-loop'));
   try {
     const token = join(credentials, 'coordinator.token'); await writeFile(token, coordinatorToken, { mode: 0o600 });
@@ -477,17 +408,13 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
     const already = await runCycle(config, emptyDaemonState(config), { ...base, dispatch: async () => { throw wrapped; } } as unknown as DaemonEffects);
     const reported = already.actions.find(action => action.kind === 'dispatch' && action.state === 'failed')!;
     assert.ok(reported.detail.includes('at /data/worktrees: ')); once(reported.detail);
-    const reclaiming = await runCycle(config, emptyDaemonState(config), { ...base, snapshot: async () => ({ work: [], now: new Date().toISOString() }), dispatch: async () => ({}), reclaim: async () => { throw child; } } as unknown as DaemonEffects);
-    const reclaim = reclaiming.actions.find(action => action.kind === 'reclaim')!;
-    assert.match(reclaim.detail, /Worktree reclamation failed: Command failed: git worktree add — the host's disk quota is exhausted \(EDQUOT\): /); once(reclaim.detail);
   } finally { await rm(credentials, { recursive: true, force: true }); }
 });
 
 /**
  * GY-612: concurrent agent test runs exhausted host memory. On a 62 GB host fourteen full suites
  * and five `tsc --noEmit` runs were live at once and available memory fell to one or two gigabytes.
- * unit:host-verification-slots bounds heavy verification runs per host; unit:dispatch-defers-on-host-memory
- * holds new launches while the host is below its memory floor and resumes them once it recovers.
+ * unit:host-verification-slots bounds heavy verification runs per host.
  */
 
 const GiB = 2 ** 30;
@@ -601,106 +528,4 @@ test('unit:host-verification-slots — a sandboxed session is granted the lock d
     assert.equal(withVerificationPath(harness, {}).PATH, harness.PATH);
     assert.equal(withVerificationPath({}, { PATH: '/account/bin' }).PATH, '/account/bin', 'no slots, no wrappers');
   } finally { await rm(scratch, { recursive: true, force: true }); }
-});
-
-// ---- AC-2 --------------------------------------------------------------------------------------
-
-const at = Date.parse('2026-09-26T11:50:00.000Z');
-const iso = (ms: number) => new Date(ms).toISOString();
-const low: HostMemoryReading = { totalBytes: 62 * GiB, availableBytes: 2 * GiB, consumers: memoryConsumers([[14, 'node'], [5.7, 'claude'], [2.8, 'opencode'], [1, 'postgres']].map(([gb, command]) => `${Math.round(Number(gb) * 1024 * 1024)} ${command}`).join('\n')) };
-const recovered: HostMemoryReading = { totalBytes: 62 * GiB, availableBytes: 20 * GiB };
-const worker = { name: 'worker-a', principal: 'agent-a', agentName: 'agent-worker-a', mode: 'launch', kind: 'codex', credentialFile: '/nonexistent', agentArgs: [], environment: {} } as unknown as WorkerProfile;
-const config = masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:9', credentialFile: '/nonexistent/coordinator.json', cliPath: '/nonexistent/graphyard.mjs',
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [worker],
-  producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: '/nonexistent/producer-a.token' }],
-  reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' }], reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/nonexistent/reviewer.json', boundAt: iso(at) } }) as MasterConfig;
-const ready = { id: 'work-ready', key: 'GY-44', title: 'Ready', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
-  policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(at), updatedAt: iso(at), stageEnteredAt: iso(at), ready: true, epoch: 0,
-  lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-  gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] } as unknown as Work;
-function loopEffects(log: string[], memory: () => HostMemoryReading): DaemonEffects {
-  return {
-    agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-    snapshot: async () => ({ work: [ready], now: iso(at) }), closeSession: () => {}, dispatch: async item => { log.push(`dispatch:${item.key}`); },
- merge: async () => ({ result: 'merge requested' }), recordDeployment: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(at), reason: 'not configured', deployed: [], pending: [] }) as any,
-    persist: async () => {}, hostMemory: async () => memory(),
-  } as DaemonEffects;
-}
-/** A submitted head with open producer requests, as the control plane raises them at the build gate. */
-function submitted(): Work {
-  const sha = 'a1'.padEnd(40, 'f'), baseSha = 'b1'.padEnd(40, 'f'), candidate = { sha, baseSha, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
-  const item = { id: 'work-64', key: 'GY-64', title: 'Submitted', description: '', type: 'feature', priority: 0, dependencies: [], 
-    criteria: [{ id: 'AC-1', text: 'Proof', proofs: ['unit:memory-proof'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1,
-    createdAt: iso(at), updatedAt: iso(at), stageEnteredAt: iso(at), ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
-    observation: { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: iso(at), prState: 'open', draft: false, baseTip: baseSha, baseTree: '7b'.padEnd(40, 'f'), baseTipContained: true },
-    blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }], violations: [] } as unknown as Work;
-  reconcileAutoDispatch(item, [item], new Date(at));
-  return item;
-}
-
-test('unit:dispatch-defers-on-host-memory — below the memory floor the loop defers new launches with a recorded reason, raises one attention item naming the top consumers, and resumes once memory recovers', async () => {
-  assert.equal(hostMemoryFloor(62 * GiB), 62 * GiB * 0.1, '10% of total on a large host');
-  assert.equal(hostMemoryFloor(16 * GiB), 4 * GiB, '4 GB on a small one');
-  let memory = low;
-  const log: string[] = [];
-  const state = emptyDaemonState(config);
-
-  // Low: nothing is dispatched, and the deferral is recorded with its reason and consumers.
-  await runCycle(config, state, loopEffects(log, () => memory));
-  assert.deepEqual(log, [], 'no worker is launched while the host is below its floor');
-  const deferred = state.actions[memoryActionKey];
-  assert.match(deferred.detail, /^Launches deferred: host machine-a has 2\.0 GB of 62\.0 GB memory available, below its 6\.2 GB floor, so new session launches on it are deferred until memory recovers; top consumers: node 14\.0 GB, claude 5\.7 GB, opencode 2\.8 GB, postgres 1\.0 GB$/);
-  assert.equal(state.memory?.low, true);
-  assert.equal(daemonSummary(state, at, 30_000, 'machine-a').memory?.low, true, 'master status reads it from the loop');
-
-  // One attention item, naming the top consumers, from master status.
-  const attention = hostMemoryAttention(state.memory);
-  assert.equal(attention.length, 1);
-  assert.match(attention[0].text, /top consumers: node 14\.0 GB, claude 5\.7 GB/);
-
-  // Still low: still deferred, and the crossing is not recorded again.
-  await runCycle(config, state, loopEffects(log, () => memory));
-  assert.deepEqual(log, []);
-  assert.equal(state.actions[memoryActionKey].attempts, deferred.attempts);
-
-  // Producer and reviewer launches wait on it too, with the same reason.
-  const item = submitted(), launched: string[] = [];
-  const dispatchEffects: DispatchEffects = {
-    snapshot: async () => ({ work: [item], now: iso(at) }), agents: () => [],
-    credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
-    reconcileReviews: async () => ({ reviews: [] }), reconcileProducers: async () => ({ producers: [] }),
-    launchReview: async () => { launched.push('review'); }, launchProducer: async () => { launched.push('producer'); },
-    persist: async () => {}, hostMemory: async () => memory,
-  };
-  const tick = await runDispatchTick(config, emptyDispatchCursor(config), dispatchEffects, () => at);
-  assert.equal(launched.length, 0, 'no reviewer or producer is launched');
-  assert.ok(tick.waiting.length > 0 && tick.waiting.every(wait => /below its 6\.2 GB floor, so new session launches on it are deferred/.test(wait.reason)));
-  // Barely back over the floor is not recovered: the deferral lifts only past the margin, so a host hovering at it does not flap.
-  memory = { totalBytes: 62 * GiB, availableBytes: hostMemoryFloor(62 * GiB) + memoryRecoveryMarginBytes / 2 };
-  await runCycle(config, state, loopEffects(log, () => memory));
-  assert.deepEqual(log, [], 'still deferred just above the floor');
-  assert.equal(state.actions[memoryActionKey].attempts, deferred.attempts, 'no resumption is recorded inside the margin');
-
-  // Recovered: the loop resumes launching and says so, and the attention clears.
-  memory = recovered;
-  await runCycle(config, state, loopEffects(log, () => memory));
-  assert.deepEqual(log, ['dispatch:GY-44']);
-  assert.match(state.actions[memoryActionKey].detail, /^Launches resumed: host machine-a has 20\.0 GB of 62\.0 GB memory available again, above its 6\.2 GB floor \(deferred since /);
-  assert.equal(state.memory?.low, false);
-  assert.deepEqual(hostMemoryAttention(state.memory), []);
-  launched.length = 0;
-  await runDispatchTick(config, emptyDispatchCursor(config), dispatchEffects, () => at);
-  assert.ok(launched.includes('review'), 'reviewer launches resume (GitHub delivery requests no producer at submit)');
-});
-
-test('the reclaim pass is stamped with the cycle snapshot clock, not a later wall-clock read', async () => {
-  const config = { version: 1, url: 'https://graphyard.example', credentialFile: '/dev/null', cliPath: '/x', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host', masterAgentName: 'master', autoMerge: true, mergeMethod: 'merge', workers: [], reviewers: [], producers: [], run: masterRunSchema.parse({}) } as any;
-  const seen: Array<number | undefined> = [];
-  const observed = '2026-01-02T03:04:05.000Z';
-  const effects = { snapshot: async () => ({ work: [], now: observed }), agents: () => [], credentials: async () => ({}), closePane: () => {}, dispatch: async () => ({}), observeDeployment: async () => null,
-    recordDeployment: async () => ({}), merge: async () => ({}), persist: async () => {},
-    reclaim: async (_work: unknown, now?: number) => { seen.push(now); return { root: '/x', at: observed, applied: true, scanned: 0, idleMs: 0, removed: [], kept: [], freeBefore: null, freeAfter: null, freedBytes: 0, errors: [] }; } } as unknown as DaemonEffects;
-  await runCycle(config, emptyDaemonState(config), effects);
-  assert.deepEqual(seen, [Date.parse(observed)]);
 });

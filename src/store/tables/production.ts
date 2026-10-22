@@ -21,9 +21,8 @@ export const DELIVERY_EVENT_PREDICATE =
   "kind='github.observed' AND payload->'work'->'delivery'->>'mergedAt' IS NOT NULL";
 
 /**
- * Production deployment observations and the shipping pulse read from them. The pulse
- * also indexes the events ledger by delivery instant; that DDL travels with this module
- * because the events table itself is unchanged and the indexes exist for the pulse.
+ * Production deployment observations. The events ledger is also indexed by delivery instant;
+ * that DDL travels with this module because the events table itself is unchanged.
  */
 export const productionObservations = defineTable({
   name: 'production_observations', orderBy: 'id',

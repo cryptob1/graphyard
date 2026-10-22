@@ -4,7 +4,6 @@ import type { Work } from '../model.js';
 import { stallBoundMs, stalledItems, type ActionlessItem } from '../model/action-account.js';
 import { elapsed } from '../model/sessions.js';
 import { baseBreakHold, describeBaseBreak } from '../master/base-break-refresh.js';
-import type { LeadTimeReport } from '../pipeline-speed.js';
 import { baseFailureAttention } from '../daemon/cycle-base-failures.js';
 
 // The orphaned-supervisor builders live in their own module (GY-138); they are read from here too.
@@ -53,13 +52,6 @@ export const directMergeLine = (coordinator: any): { directMerge?: string } => c
 
 /** The merger setting (src/merger-mode.ts), in one line while the control plane is the merge writer; the key is `mergeWriter` because `merger` is the loop-merger presence report. */
 export const mergeWriterLine = (coordinator: any): { mergeWriter?: string } => coordinator?.mergeWriter?.line ? { mergeWriter: coordinator.mergeWriter.line } : {};
-
-/**
- * The one speed number (GY-1989) as the report's first field: the median released→merged lead time
- * over the last 10 merges with the previous 10's beside it, ahead of everything else so a reader
- * meets the number the loop optimizes for first. Absent while its read failed, never a guess.
- */
-export const leadTimeHeadline = (lead: LeadTimeReport | null | undefined): { leadTime?: LeadTimeReport } => lead ? { leadTime: lead } : {};
 
 /** The deployed generated-file manifest against the repository's, as installation attention; an unreadable manifest is the master's to fix. */
 export function generatedFilesAttention(root: string, coordinator: any): AttentionItem[] {

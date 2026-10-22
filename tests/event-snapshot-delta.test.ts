@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, applyWorkDelta, documentBefore, type WorkDelta } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { ledgerEntry, ledgerReplayColumns, reconstructTimeline } from '../src/pipeline-speed.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -85,13 +84,6 @@ test('unit:routine-heartbeat-delta — a lease renewal is a delta carrying the r
   const latest = await reload(w.id);
   assert.equal(beats.at(-1)!.payload.delta.lease.expiresAt, latest.lease!.expiresAt);
   assert.deepEqual(beats.at(-1)!.payload.details, { epoch: 1 }, 'the command details stay on the row');
-  // The projected replay row carries the lease and updatedAt of the delta, exactly as a full row would.
-  const projected = (await store.pool.query(`SELECT ${ledgerReplayColumns} FROM events WHERE work_id=$1 ORDER BY seq`, [w.id])).rows.map(ledgerEntry);
-  const renewed = projected.find(entry => Number(entry.seq) === Number(beats.at(-1)!.seq))!;
-  assert.equal(renewed.payload.work.lease.expiresAt, latest.lease!.expiresAt);
-  assert.equal(renewed.payload.work.updatedAt, latest.updatedAt);
-  // Replaying the rows whole or projected gives the same timeline.
-  assert.deepEqual(reconstructTimeline(projected), reconstructTimeline(ledger.map(row => ({ seq: row.seq, kind: row.kind, payload: row.payload, created_at: row.created_at }))));
 });
 
 test('unit:lifecycle-rows-keep-snapshots — the first save and every stage change keep the whole document, and the ledger stays append-only', async () => {

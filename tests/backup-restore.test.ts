@@ -11,10 +11,8 @@ import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
 import { Delivery } from '../src/delivery.js';
 import { defineScenario } from '../src/scenarios.js';
-import { ProofGrants, authorizedForProof } from '../src/proof-grants.js';
 import { recordIntake, recordLeadRuling } from '../src/delegation.js';
 import type { Principal } from '../src/model.js';
-import { projectFlow } from '../src/flow-analytics.js';
 import { backupDigest, backupSchema, createBackup, ledgerCounts, restoreBackup, verifyBackup } from '../src/backup.js';
 import { ledgerSeeded } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
@@ -49,10 +47,7 @@ after(async () => { if (pg) await pg.stop(); });
  * A ledger holding everything the roadmap says an upgrade and restore must preserve: an
  * assignment under a live lease with its registered workspace, a submitted candidate whose
  * lease the submission released, the append-only history behind them, two revisions of one
- * scenario, and a validation request that is still pending. Plus the tables an installation accumulates around them, and the proof-grant
- * ledger after the operator has moved it away from the environment seed: one producer
- * holds a pattern that exists only in the database, another has had its seeded pattern
- * revoked. Both are what a restore that re-seeded the environment would get wrong. And the
+ * scenario, and a validation request that is still pending. Plus the tables an installation accumulates around them. And the
  * delivery side of the same environment: an attested release build, the release selected
  * from it under an approval, the observer's lease and the observation that verified it,
  * then a second release selected over it and a rollback requested back to the first.
@@ -62,10 +57,6 @@ after(async () => { if (pg) await pg.stop(); });
 async function populate(store: Store) {
   const engine = new Engine(store, 120, 'test/repository');
   const validation = new Validation(engine, principals, 'test/repository');
-  const grants = new ProofGrants(store, principals);
-  assert.equal((await grants.seed()).length, 5, 'every producer is materialized from the environment');
-  await grants.grant(operator, builder.id, { patterns: ['unit:*'], reason: 'Builder attests unit evidence' }, id());
-  await grants.revoke(operator, auditor.id, { patterns: ['manual:audit'], reason: 'Audit authority withdrawn inside Graphyard' }, id());
   const first = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking', steps: ['Book'], expected: ['Booked'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts' }, id());
   const second = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking and cancellation', steps: ['Book', 'Cancel'], expected: ['Booked', 'Cancelled'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts', expectedRevision: first.revision }, id());
   assert.equal(second.revision, first.revision + 1);
@@ -133,8 +124,6 @@ async function snapshot(store: Store) {
   const resources = (await store.pool.query('SELECT resource, request_id FROM validation_resources ORDER BY resource')).rows;
   const artifacts = (await store.pool.query('SELECT id, request_id, attempt_id, name, digest, media_type, encode(bytes, \'hex\') AS bytes, expires_at FROM validation_artifacts ORDER BY id')).rows;
   const definitions = (await store.pool.query('SELECT kind, id, revision, document FROM validation_definitions ORDER BY kind, id, revision')).rows;
-  const grants = (await store.pool.query('SELECT principal_id, document FROM proof_grants ORDER BY principal_id')).rows;
-  const grantHistory = (await store.pool.query('SELECT seq, principal_id, document, created_at FROM proof_grant_history ORDER BY seq')).rows;
   const releases = (await store.pool.query('SELECT id, revision, document FROM releases ORDER BY id, revision')).rows;
   const approvals = (await store.pool.query('SELECT id, document FROM release_approvals ORDER BY id')).rows;
   const environments = (await store.pool.query('SELECT environment_id, document FROM delivery_environments ORDER BY environment_id')).rows;
@@ -144,25 +133,17 @@ async function snapshot(store: Store) {
   const intake = (await store.pool.query('SELECT id, origin, title, description, source_work_id, submitted_by, created_at FROM intake_items ORDER BY created_at, id')).rows;
   const polls = (await store.pool.query('SELECT registration_id, principal, polled_at, granted_request_id FROM validation_runner_polls ORDER BY registration_id')).rows;
   const rollbacks = (await store.pool.query('SELECT id, environment_id, generation, document, created_at FROM delivery_rollbacks ORDER BY created_at, id')).rows;
-  const flowFacts = (await store.pool.query('SELECT id, work_id, kind, observed_at, source_event, dedupe FROM flow_facts ORDER BY id')).rows;
-  const flowCheckpoint = (await store.pool.query('SELECT id, last_event FROM flow_projection ORDER BY id')).rows;
-  return { work, events, scenarios, requests, resources, artifacts, definitions, grants, grantHistory, releases, approvals, environments, observations, leases, rulings, intake, polls, rollbacks, flowFacts, flowCheckpoint };
+  return { work, events, scenarios, requests, resources, artifacts, definitions, releases, approvals, environments, observations, leases, rulings, intake, polls, rollbacks };
 }
 
 test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
   const source = new Store(url('source')); await source.init();
   const seeded = await populate(source);
-  // The flow projection has folded the ledger so far: durable facts plus the checkpoint
-  // row the migration seeds and the projection advances.
-  await projectFlow(source);
   const before = await snapshot(source);
   assert.ok(before.work.find(w => w.id === seeded.leasedId)!.lease, 'the fixture holds a live assignment');
   assert.equal(before.work.find(w => w.id === seeded.workId)!.lease, null, 'the submitted item released its lease at submission');
-  assert.ok(before.flowFacts.length > 0 && Number(before.flowCheckpoint[0].last_event) > 0, 'the fixture holds projected flow facts behind an advanced checkpoint');
   assert.equal(before.requests.find(r => r.id === seeded.requestId)!.document.state, 'collecting');
   assert.equal(before.scenarios.length, 2);
-  assert.deepEqual(before.grants.map(g => [g.principal_id, g.document.patterns]), [['auditor', []], ['builder', ['unit:*']], ['collector', ['e2e:booking']], ['observer', []], ['promoter', []]]);
-  assert.deepEqual(before.grantHistory.map(h => [Number(h.seq), h.principal_id, h.document.kind]), [[1, 'collector', 'seed'], [2, 'builder', 'seed'], [3, 'auditor', 'seed'], [4, 'observer', 'seed'], [5, 'promoter', 'seed'], [6, 'builder', 'grant'], [7, 'auditor', 'revoke']]);
   assert.equal(before.approvals.length, 2); assert.equal(before.observations.length, 1); assert.equal(before.leases.length, 1);
   assert.equal(before.environments[0].document.verification?.status, 'unobserved', 'the fixture holds a newly selected second release');
   assert.deepEqual(before.environments[0].document.history.map((h: any) => [h.releaseId, h.outcome]).filter((h: any) => h[1] === 'verified'), [['release-1', 'verified']], 'the first release was verified before it was superseded');
@@ -174,7 +155,6 @@ test('the documented backup and restore exercise preserves assignments, history,
   assert.equal(before.releases.length, 2, 'two releases, the second superseding the verified first');
 
   const backup = await createBackup(source.pool);
-  assert.ok(backup.sequences.some(s => s.name.endsWith('proof_grant_history_seq_seq') && s.value === 7), 'the grant history sequence travels with the backup');
   assert.ok(backup.sequences.some(s => s.name.endsWith('delivery_observations_seq_seq') && s.value === 1), 'the observation sequence travels with the backup');
   assert.equal(backup.schemaVersion, schemaVersion); assert.equal(verifyBackup(backup).format, 'graphyard-backup-v1');
   assert.deepEqual(Object.fromEntries(backup.tables.map(t => [t.name, t.rows.length])), await ledgerCounts(source.pool));
@@ -186,8 +166,7 @@ test('the documented backup and restore exercise preserves assignments, history,
   // A migrated target is empty except at the checkpoints the migration seeds; those are
   // replaced by the backup's rows rather than refused as occupied state.
   // GY-1833: the merger pin's marker is seeded too, so a backup carries the merger an install ran with.
-  assert.deepEqual(ledgerSeeded, ['flow_projection', 'merger_default_pin']);
-  assert.deepEqual((await snapshot(restored)).flowCheckpoint.map(r => [r.id, Number(r.last_event)]), [[1, 0]], 'the migration seeds the projection checkpoint');
+  assert.deepEqual(ledgerSeeded, ['merger_default_pin']);
   const result = await restoreBackup(restored.pool, backup);
   assert.equal(result.fromSchema, schemaVersion); assert.deepEqual(result.tablesLeftEmpty, []);
   assert.deepEqual(await ledgerCounts(restored.pool), await ledgerCounts(source.pool));
@@ -219,33 +198,7 @@ test('the documented backup and restore exercise preserves assignments, history,
   const artifactId = (await restored.pool.query('SELECT id FROM validation_artifacts WHERE request_id=$1', [request.id])).rows[0].id;
   const served = await validation.readArtifact(collector, request.id, artifactId);
   assert.ok(served.bytes.toString('utf8').includes('artifact-bytes-marker'));
-  // Proof authority is the restored ledger, not the environment: the release's bootstrap
-  // seed finds every producer materialized, the revoked pattern stays revoked, the grant
-  // that existed only in the database still authorizes, and new history appends after
-  // the restored history instead of colliding with it.
-  const grants = new ProofGrants(restored, principals);
-  assert.deepEqual(await grants.seed(), [], 'restart after restore does not re-seed the environment allowlist');
-  await restored.transaction(async db => {
-    assert.equal(await authorizedForProof(db, auditor, 'manual:audit'), false);
-    assert.equal(await authorizedForProof(db, builder, 'unit:after'), true);
-  });
-  assert.deepEqual((await grants.history(operator, auditor.id)).map(h => [h.seq, h.kind, h.effective]), [[3, 'seed', ['manual:audit']], [7, 'revoke', []]]);
-  const regranted = await grants.grant(operator, auditor.id, { patterns: ['manual:audit'], reason: 'Audit authority restored after the exercise', expectedRevision: 2 }, id());
-  assert.equal(regranted.revision, 3);
-  assert.deepEqual((await grants.history(operator, auditor.id)).map(h => h.seq), [3, 7, 8]);
   await source.close(); await restored.close();
-});
-
-test('a target the release already started against refuses a restore, because its seeded proof authority would sit beside the backup\'s', async () => {
-  const source = new Store(url('authority')); await source.init();
-  await populate(source);
-  const backup = await createBackup(source.pool);
-  const seeded = new Store(url('seeded')); await seeded.init();
-  // What `graphyard serve` does on first boot with producers in GRAPHYARD_PRINCIPALS.
-  assert.equal((await new ProofGrants(seeded, principals).seed()).length, 5);
-  await assert.rejects(restoreBackup(seeded.pool, backup), /proof_grants already holds 5 row\(s\).*graphyard db migrate/);
-  assert.deepEqual((await ledgerCounts(seeded.pool)).work_items, 0, 'the refused restore wrote nothing');
-  await source.close(); await seeded.close();
 });
 
 test('a tampered, truncated or newer-schema backup refuses, and a newer-schema database refuses this release', async () => {

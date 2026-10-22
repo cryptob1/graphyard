@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { BaseRefresh, BaseRefreshRequest } from './base-refresh.js';
 import type { LandingCheck, RevertedDelivery } from './landing-check.js';
 import type { MergeRefusal } from './merge-authorization.js';
-import { criteriaSchema, policySchema, resourcesSchema, type Criterion, type Lane } from './policy.js';
+import { criteriaSchema, policySchema, resourcesSchema, type Criterion } from './policy.js';
 import type { EvaluationAttempt, Evidence } from './evidence.js';
 import type { AgentReview, ReviewFailover, ReviewRequest } from './review.js';
 import type { Delivery, ReleaseDelivery } from './delivery.js';
@@ -231,7 +231,7 @@ export interface Work extends Create {
   // Durable state for a blocking lead ruling. History records the ruling; this
   // field is what the gate evaluator and the merge broker read independently.
   leadHold?: { action: BlockingRulingAction; rulingId: string; leadId: string; slice: SliceId; ruleId: string; reason: string; at: string } | null;
-  gates: Gate[]; violations: string[]; lane?: Lane; speedTarget?: number; // risk lane and its speed target (GY-883, model/policy.ts), stamped by the last evaluation
+  gates: Gate[]; violations: string[];
 }
 // One scope rule for every scoped read and mutation, so a route cannot answer
 // with data its own authorization would have refused.

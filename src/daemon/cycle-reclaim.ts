@@ -1,23 +1,21 @@
-// Concern: cycle step 3 — reclaim disk, bounded resources, lapsed leases and leftover panes.
-import { describeReclaim, describeStandingTmpPass, tmpPassErrors, graphyardWorktree, paneReclaimStatus, agentlessPaneAttentionBound, finishedSessionGraceMs } from '../master-resources.js';
-import { diskThresholdBytes } from '../master.js';
-import { worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { actionDetailMax, gigabytes, message, reclaimIntervalMs, reclaimSummarySchema, standingTmpKey } from './state.js';
+// Concern: cycle step 3 — end unbounded attempts, reconcile lapsed leases and sweep leftover panes.
+import { agentOwner, type AttentionItem, type HerdrAgent } from '../master.js';
+import type { HerdrPane } from '../master/herdr.js';
+import { actionDetailMax, message } from './state.js';
 import { readyToRetry } from './sessions.js';
-import { boundDetail, detailChanged } from './text.js';
+import { detailChanged } from './text.js';
 import { launchAppearanceMs, record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import type { Work } from '../model.js';
 import type { SessionHandle } from '../model/sessions.js';
 import { paneAlreadyGone } from '../request-settlement.js';
-import { planeUnavailable } from '../model/refusal.js';
 import { unsubmittedAttempt, unsubmittedAttemptText, workerReclaimBoundMs } from '../model/attempt-bound.js';
 import { checkPaneStillBelongs, endWorkerAttempt } from './cycle-resume.js';
-import type { DaemonAction, DaemonState } from './state.js';
-import type { DaemonEffects } from './effects.js';
+import type { DaemonAction } from './state.js';
 import { carriedCall, recordCarried, stepCallCarried, withinStepBudget } from './step-budget.js';
 
-export { standingTmpKey };
+/** How long a finished agent session's pane may stand before the sweep closes it. */
+export const finishedSessionGraceMs = 60_000;
 /** The most attempts an action row holds (storeAction clamps to the schema's bound): past it a run's count reads as a floor. */
 const actionAttemptsMax = 1000;
 /**
@@ -27,7 +25,75 @@ const actionAttemptsMax = 1000;
  */
 export const paneSweepLimit = 12;
 
-export { graphyardWorktree } from '../master-resources.js';
+/** The count of agentless panes standing in Graphyard worktrees past which attention is raised (GY-842). */
+export const agentlessPaneAttentionBound = 20;
+
+/**
+ * The item key and attempt epoch a Graphyard worktree path names (…/.graphyard/worktrees/GY-N-EPOCH,
+ * or anywhere beneath it), or null for any other directory. A worktree removed under its shell
+ * reads with Linux's ` (deleted)` suffix, which is kept apart as `deleted`.
+ */
+export function graphyardWorktree(cwd: string | undefined): { key: string; epoch: number; deleted: boolean } | null {
+  const match = /\/\.graphyard\/worktrees\/([A-Za-z][A-Za-z0-9]*-\d+)-(\d+)(?:\/[^]*?)?( \(deleted\))?\s*$/.exec(cwd ?? '');
+  return match ? { key: match[1], epoch: Number(match[2]), deleted: !!match[3] } : null;
+}
+
+export interface PaneReclaimStatus {
+  at: string;
+  /** Panes the host's runtime reports (`herdr pane list`); null while it cannot be read. */
+  panes: number | null;
+  /** Panes a Graphyard launch opened: the pane ids its sessions recorded. */
+  launched: number;
+  /** Agentless panes standing in Graphyard worktrees, recorded by a session or not: what the sweep will close. */
+  agentless: number;
+  /** The longest-standing agentless pane, by its session's recorded start or, unrecorded, its first sighting. */
+  oldest: { pane: string; work: string; kind: string; launchedAt: string } | null;
+  /** One attention item once agentless panes pass the bound, naming the counts and the remedy. */
+  attention: AttentionItem | null;
+}
+
+/**
+ * The pane picture of this host (GY-842, GY-1533): how many panes the runtime holds, how many a
+ * Graphyard launch recorded, and how many stand agentless in Graphyard worktrees — the runtime
+ * exited and left its shell, which holds a pty, a process and memory whether or not anything runs
+ * in it. Herdr held 621 panes on 26 September 2026, 584 of them Graphyard's, agentless; the host
+ * throttled and every session and test run on it slowed. On 7 October 246 bare shells in deleted
+ * worktrees stood for over a day while this reading said 6: it counted only the panes a session
+ * recorded, and the agent inventory it read never carries a bare shell. The reading is now the
+ * pane inventory's, exactly as the sweep's candidates are: every pane it reports with no agent
+ * whose cwd is a Graphyard worktree (present or deleted), recorded or not, except one whose exact
+ * item and epoch holds a live lease. A pane outside the worktrees is never counted, and never
+ * closed. Only the handles `hostId` recorded count as launched: a remote handle naming the same
+ * pane coordinate is another host's launch. The agentless count is 0 while the inventory cannot be
+ * read, since nothing can be seen or closed on it.
+ */
+export function paneReclaimStatus(panes: HerdrPane[] | null, work: Work[], agents: HerdrAgent[] | null, now: number, hostId: string, sighted: Record<string, string> = {}): PaneReclaimStatus {
+  const listed = new Set((panes ?? []).map(pane => pane.pane_id).filter((id): id is string => !!id));
+  // A launch's own record of its pane (GY-172): the handle every launcher registers, whatever its role.
+  const recorded = new Map<string, { work: Work; kind: string; launchedAt: string | null }>();
+  for (const item of work) for (const handle of item.sessions ?? []) if (handle.pane && handle.host === hostId)
+    recorded.set(handle.pane, { work: item, kind: handle.kind, launchedAt: Number.isFinite(Date.parse(handle.startedAt)) ? handle.startedAt : null });
+  // A pane with an agent in it is a live session by either inventory, whatever its state.
+  const withAgent = new Set((agents ?? []).filter(agent => !!agent.agent && !!agent.pane_id).map(agent => agent.pane_id!));
+  const leased = (tree: { key: string; epoch: number }) => work.some(item => item.key === tree.key && !!item.lease && item.lease.epoch === tree.epoch && Date.parse(item.lease.expiresAt) > now);
+  const agentless: { pane: string; work: string; kind: string; since: string | null }[] = [];
+  for (const pane of panes ?? []) {
+    if (!pane.pane_id || pane.agent || withAgent.has(pane.pane_id)) continue;
+    const tree = graphyardWorktree(pane.cwd);
+    if (!tree || leased(tree)) continue;
+    const record = recorded.get(pane.pane_id);
+    agentless.push({ pane: pane.pane_id, work: record?.work.key ?? tree.key, kind: record?.kind ?? 'unrecorded', since: record?.launchedAt ?? sighted[pane.pane_id] ?? null });
+  }
+  // The longest-standing: the earliest known start; a pane whose standing is undated ranks after every dated one.
+  const standing = (entry: { since: string | null }) => entry.since === null ? Number.POSITIVE_INFINITY : Date.parse(entry.since);
+  const oldest = agentless.length ? agentless.reduce((earliest, entry) => standing(entry) < standing(earliest) ? entry : earliest, agentless[0]) : null;
+  const reading = { panes: panes === null ? null : listed.size, launched: recorded.size, agentless: agentless.length,
+    oldest: oldest ? { pane: oldest.pane, work: oldest.work, kind: oldest.kind, launchedAt: oldest.since ?? 'an unrecorded time' } : null };
+  const attention: AttentionItem[] = agentless.length > agentlessPaneAttentionBound ? [{ subject: 'agentless panes',
+    text: `Herdr holds ${reading.panes ?? 'an unknown number of'} pane(s) on this host and ${agentless.length} of them stand agentless in Graphyard worktrees (past the ${agentlessPaneAttentionBound}-pane attention bound), the oldest pane ${reading.oldest!.pane} of ${reading.oldest!.work} (${reading.oldest!.kind}), standing since ${reading.oldest!.launchedAt}. Each is a shell holding a pty and memory, and enough of them slow every session and test run on the host`,
+    ...agentOwner('master', 'the loop sweeps them itself, a bounded number per cycle, once agentless past its launch bound; graphyard master run --once runs a pass now') }] : [];
+  return { ...reading, at: new Date(now).toISOString(), attention: attention[0] ?? null };
+}
 
 /**
  * 3c. Leftover panes are reclaimed (GY-842, GY-980, GY-1533). Every launch records its pane on the
@@ -191,87 +257,22 @@ export async function reclaimLaunchedPanes(cycle: Cycle) {
   }
 }
 
-/** Step 3: reclaim disk, the loop's own bounded resources, lapsed leases and leftover panes. */
-export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'preserveWork', 'reportCapacity'], reclaimStepWithin); // GY-1774: every call the step makes — the disk and resource reclaims, the inventories, every pane close — is bounded
+/**
+ * The assignment worktrees on this host whose attempt has ended: the item is delivered or closed, or
+ * the attempt's end is on the record, and no live lease or running session holds that epoch.
+ */
+export function endedAttemptWorktrees(work: Work[], hostId: string, now: number) {
+  return work.flatMap(item => item.workspaces.filter(space => space.host === hostId).filter(space => {
+    if (item.lease && item.lease.epoch === space.epoch && Date.parse(item.lease.expiresAt) > now) return false;
+    if ((item.sessions ?? []).some(handle => handle.kind === 'implementation' && handle.state === 'running' && (handle.epoch ?? Number(/:(\d+)$/.exec(handle.id)?.[1])) === space.epoch)) return false;
+    return item.stage === 'done' || !!item.pipeline?.attempts.some(attempt => attempt.epoch === space.epoch && attempt.endedAt != null);
+  }).map(space => ({ item, space })));
+}
+
+/** Step 3: end unbounded attempts, reconcile lapsed leases, remove ended attempts' worktrees and sweep leftover panes. */
+export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaimLease', 'preserveWork', 'reportCapacity'], reclaimStepWithin);
 async function reclaimStepWithin(cycle: Cycle) {
-  const { config, state, effects, now, snapshot, clock, performed, isolate, agents, open } = cycle;
-  // 3. Reclaim the disk the finished assignments are holding, before anything asks for more of
-  //    it. Every attempt and every rework checks the repository out again, so without this step
-  //    the host fills and the loop starts failing at whatever it happens to write next. A
-  //    finished worktree is removed with `git worktree remove` (GY-360), a bounded number per
-  //    pass and never a dirty or unpushed one; the dependency directories of the rest go next.
-  //    Branches and Graphyard's registered workspace records are never touched.
-  //    Scanning the worktree directory is not free, so it keeps to its own interval — except
-  //    while the last scan found free space below the configured threshold, when the host needs
-  //    every cycle it can get rather than a cadence.
-  const reclaimedAt = state.reclaim ? Date.parse(state.reclaim.at) : Number.NaN;
-  const below = (free: number | null | undefined, bound: number) => free !== null && free !== undefined && free < bound;
-  const pressed = below(state.reclaim?.freeBytes, diskThresholdBytes(config)) || below(state.reclaim?.rootFreeBytes, worktreeRootMinFreeBytes(config));
-  //    A worktree backlog larger than one pass's bound drains on consecutive cycles, not intervals.
-  const backlog = (state.reclaim?.treeBacklog ?? 0) > 0;
-  if (effects.reclaim && (pressed || backlog || !(Number.isFinite(reclaimedAt) && clock - reclaimedAt < reclaimIntervalMs))) {
-    try {
-      const report = await carriedCall(cycle, 'reclaim', 'reclaim', 'reclaim', () => effects.reclaim!(snapshot.work, clock), error => { throw error; });
-      state.reclaim = reclaimSummarySchema.parse({ at: report.at, scanned: report.scanned, removed: report.removed.length, kept: report.kept.length,
-        freedBytes: report.freedBytes, freeBytes: report.freeAfter === null ? null : Math.max(0, Math.round(report.freeAfter)), errors: [...report.errors, ...(report.trees?.errors ?? []), ...(report.checkouts?.errors ?? [])].map(entry => entry.slice(0, 500)).slice(0, 20),
-        checkouts: report.checkouts?.removed.length ?? 0, checkoutsOffVolume: (report.checkouts as { sharesVolume?: boolean } | undefined)?.sharesVolume === false ? report.checkouts?.removed.length ?? 0 : 0, rootFreeBytes: report.checkouts?.freeBytes == null ? null : Math.max(0, Math.round(report.checkouts.freeBytes)),
-        trees: report.trees?.removed.length ?? 0, treeBacklog: report.trees?.backlog ?? 0 });
-      const trees = report.trees?.removed.length ?? 0;
-      if (report.trees && (trees || report.trees.errors.length)) {
-        // A tree this pass's errors name is reported there; one held from an earlier refusal is kept like a dirty one (GY-1515).
-        const kept = report.trees.kept.filter(entry => !report.trees!.errors.some(error => error.startsWith(`${entry.path}: `)));
-        performed.push(await record(state, `reclaim:trees:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.trees.errors.length ? 'failed' : 'done',
-          detail: `Removed ${trees} finished worktree(s) with git worktree remove${report.trees.backlog ? `; ${report.trees.backlog} more are reclaimable and go on the next cycle (at most ${report.trees.limit} per cycle)` : ''}${kept.length ? `; ${kept.length} kept as dirty, unpushed, unregistered or refused by Git, first ${kept[0].path}: ${kept[0].reason}` : ''}${report.trees.errors.length ? `; ${report.trees.errors.length} could not be removed: ${report.trees.errors[0]}` : ''}`,
-          attempts: 1, cycle: state.cycle }, now(), effects.persist));
-      }
-      const orphans = report.checkouts?.removed.length ?? 0, failures = report.errors.length + (report.checkouts?.errors.length ?? 0);
-      if (orphans && !report.removed.length && !failures) {
-        performed.push(await record(state, `reclaim:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: 'done',
-          detail: `Reclaimed ${orphans} ephemeral checkout(s) no live session owned from ${report.checkouts!.root}, ${gigabytes(report.checkouts!.freeBytes)} free there`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-      } else if (report.checkouts?.errors.length && !report.removed.length && !report.errors.length) {
-        performed.push(await record(state, `reclaim:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: 'failed',
-          detail: `Reclaimed ${orphans} ephemeral checkout(s) from ${report.checkouts.root}; ${report.checkouts.errors.length} could not be removed: ${report.checkouts.errors[0]}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-      } else if (report.removed.length || report.errors.length) {
-        performed.push(await record(state, `reclaim:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done',
-          detail: `Reclaimed ${report.removed.length} dependency director${report.removed.length === 1 ? 'y' : 'ies'} from ${report.scanned} assignment worktree(s), ${gigabytes(report.freedBytes)} recovered, ${gigabytes(report.freeAfter)} free${orphans ? `; ${orphans} ephemeral checkout(s) no live session owned removed from ${report.checkouts!.root}` : ''}${report.errors.length ? `; ${report.errors.length} could not be removed: ${report.errors[0]}` : ''}`,
-          attempts: 1, cycle: state.cycle }, now(), effects.persist));
-      } else await effects.persist(state);
-    } catch (error) {
-      // GY-1774: a reclaim carried past the step's bound is recorded on the step's row by the call itself; the next cycle reclaims again, joining it.
-      if (!stepCallCarried(error)) performed.push(await record(state, `reclaim:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Worktree reclamation failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-    }
-  }
-
-  // 3a. Reclaim the loop's own bounded resources (GY-132): ledger records, agent names and
-  //     session slots, each within the bound docs/master-agent.md documents, recorded when it took any.
-  if (effects.reclaimResources) {
-    try {
-      const inventory = effects.herdr ? await carriedCall(cycle, 'reclaim', 'reclaim', 'herdr', () => effects.herdr!(), error => { throw error; }) : undefined;
-      const report = await carriedCall(cycle, 'reclaim', 'reclaim', 'reclaimResources', () => effects.reclaimResources!(snapshot.work, inventory ? (inventory.available ? inventory.agents : null) : agents), error => { throw error; });
-      const detail = describeReclaim(report);
-      if (detail) performed.push(await record(state, `reclaim:resources:${report.at}`, { kind: 'reclaim', work: null, principal: null, state: report.errors.length ? 'failed' : 'done', detail, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-      // A /tmp pass that removed 0 while the inode bound stands is recorded too (GY-1600), never dropped
-      // as a pass with nothing to say. One row stands for the whole run of such passes, its attempts
-      // the passes in it, so a bound that stands for days holds one row, not one per cycle crowding
-      // the ledger's bound; the run's row is filed under its last pass once a pass ends it. A row's
-      // attempts stop at their bound, so from that pass on the count is stated as a floor, never
-      // as a number it no longer holds. The /tmp pass's own errors fail it, another resource's do
-      // not, and the resources row above already carries their fault.
-      const standing = describeStandingTmpPass(report), run = state.actions[standingTmpKey];
-      if (standing) {
-        const passes = Math.min((run?.attempts ?? 0) + 1, actionAttemptsMax);
-        const count = passes >= actionAttemptsMax ? `${actionAttemptsMax} or more passes in a row` : `Pass ${passes} in a row`;
-        performed.push(await record(state, standingTmpKey, { kind: 'reclaim', work: null, principal: null, state: tmpPassErrors(report).length ? 'failed' : 'done',
-          detail: boundDetail(passes > 1 ? `${count}: ${standing}` : standing), attempts: passes, cycle: state.cycle }, now(), effects.persist));
-      } else if (run && report.tmpPass) {
-        state.actions[`reclaim:tmp:${run.at}`] = run;
-        delete state.actions[standingTmpKey];
-      }
-    } catch (error) {
-      if (!stepCallCarried(error)) performed.push(await record(state, `reclaim:resources:${new Date(clock).toISOString()}`, { kind: 'reclaim', work: null, principal: null, state: 'failed', detail: `Resource reclaim failed: ${message(error)}`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-    }
-  }
-
+  const { config, state, effects, now, clock, performed, isolate, open, snapshot } = cycle;
   // 3a'. Stop renewing an attempt past its no-submission bound (GY-1460).
   await stopUnboundedAttempts(cycle);
   // 3a''. A lease that lapsed with nothing submitted is cleared by the control plane's own
@@ -284,6 +285,18 @@ async function reclaimStepWithin(cycle: Cycle) {
       performed.push(await record(state, `reclaim:lease:${item.id}:${lease.epoch}`, { kind: 'reclaim', work: item.key, principal: lease.owner, state: 'done',
         detail: `${item.key}: the lease ${lease.owner} held under epoch ${lease.epoch} lapsed at ${lease.expiresAt} with nothing submitted; the loop asked the control plane to reconcile it`, attempts: 1, epoch: lease.epoch, cycle: state.cycle }, now(), effects.persist));
     });
+  }
+
+  // 3b. The loop removes an assignment worktree once its attempt ends (GY-2876); Git keeps one with
+  //     uncommitted changes, which is recorded once and retried on the action backoff.
+  if (effects.removeWorktree) for (const { item, space } of endedAttemptWorktrees(snapshot.work, config.hostId, clock)) {
+    const key = `worktree:${item.id}:${space.epoch}`, previous = state.actions[key];
+    if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) continue;
+    try {
+      if (await effects.removeWorktree(space.path)) performed.push(await record(state, key, { kind: 'reclaim', work: item.key, principal: null, epoch: space.epoch, state: 'done', detail: `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`, attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    } catch (error) {
+      performed.push(await record(state, key, { kind: 'reclaim', work: item.key, principal: null, epoch: space.epoch, state: 'failed', detail: `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`.slice(0, actionDetailMax), attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    }
   }
 
   // 3c. Reclaim the panes its ended launches left agentless (GY-842), and report what the host holds.

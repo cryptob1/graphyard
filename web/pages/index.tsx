@@ -11,11 +11,8 @@ import WorkersPage from './workers';
 import ScenarioLibrary from '../scenarios';
 import ValidationView from '../validation';
 import ReleasesView from '../releases';
-import ProofGrantsView from '../grants';
-import InsightsPage from './insights-flow';
 import TestsPage from './tests';
 import { DeliveryDefaults } from '../components/delivery-slices';
-import { readsFlowAnalytics } from '../step-moves';
 
 /**
  * The one navigation (GY-161): the sidebar and nothing beside it. Every page belongs to one of
@@ -27,7 +24,6 @@ export const sections = [
   { id: 'workers', icon: 'workers', label: 'Workers' },
   { id: 'shipped', icon: 'shipped', label: 'Shipped' },
   { id: 'tests', icon: 'tests', label: 'Tests' },
-  { id: 'insights', icon: 'insights', label: 'Insights' },
   { id: 'settings', icon: 'settings', label: 'Settings' },
 ] as const;
 export type Section = typeof sections[number]['id'];
@@ -60,19 +56,13 @@ export const views: readonly View[] = [
   { id: 'shipped', icon: '✓', label: 'Delivered', section: 'shipped', render: dashboard => <ShippedPage {...dashboard}/> },
   // Every agent session across every item (GY-116), its own sidebar entry (GY-161).
   { id: 'workers', icon: '⚙', label: 'Workers', section: 'workers', render: dashboard => <WorkersPage {...dashboard}/> },
-  // What waits on a release, beside what shipped: under Shipped since Insights became one page (GY-168).
+  // What waits on a release, beside what shipped.
   { id: 'validation', icon: '↻', label: 'Validation', section: 'shipped', visible: dashboard => configured(dashboard.features.validation), render: dashboard => <ValidationView api={dashboard.api} work={dashboard.work}/> },
   { id: 'releases', icon: '⇈', label: 'Releases', section: 'shipped', visible: dashboard => configured(dashboard.features.releases), render: dashboard => <ReleasesView api={dashboard.api} work={dashboard.work}/> },
-  // Insights is one page with no tabs (GY-168, design/dashboard/Insights.dc.html): headline numbers,
-  // the Flow panel, landed per day beside where the time goes, and the shipping pulse and flow
-  // analytics detail behind one Show details toggle. It reads the flow analytics routes, which an
-  // operator agent's scoped API refuses, so that role is not offered it.
-  { id: 'insights', icon: '◷', label: 'Insights', section: 'insights', visible: dashboard => readsFlowAnalytics(role(dashboard)), render: dashboard => <InsightsPage {...dashboard}/> },
   // Every test case with its latest trusted result and history (GY-162). It is shown even before the
   // first run, as never run, rather than hidden; operator agents' scoped API refuses its read.
   { id: 'tests', icon: '⚗', label: 'Tests', section: 'tests', visible: dashboard => role(dashboard) !== 'operator-agent', render: dashboard => <TestsPage api={dashboard.api} canEdit={role(dashboard) === 'admin'} setView={dashboard.setView}/> },
   { id: 'scenarios', icon: '✓', label: 'Test cases', section: 'settings', render: dashboard => <ScenarioLibrary api={dashboard.api} canEdit={role(dashboard) === 'admin'}/> },
-  { id: 'grants', icon: '⚷', label: 'Proof authority', section: 'settings', render: dashboard => <ProofGrantsView api={dashboard.api} work={dashboard.work} canEdit={role(dashboard) === 'admin'}/> },
   { id: 'automation', icon: '◇', label: 'Operator automation', section: 'settings', adminOnly: true, visible: dashboard => configured(dashboard.features.automation), render: dashboard => <AutomationPage operatorAgents={dashboard.operatorAgents} operatorAgentsError={dashboard.operatorAgentsError} setView={dashboard.setView}/> },
   // The agent registry: a Settings page for the identities that may read it, since it names hosts and login homes.
   // Every agent's runtime, account, role and launch policy is configured and shown here (GY-170).

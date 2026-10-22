@@ -3,7 +3,6 @@ import type { Work } from '../../src/model';
 import type { Board, OpenGroup } from '../groups';
 import type { IntegrationJob } from '../../src/coordination';
 import type { Features } from '../features';
-import type { StepTransition } from '../flow-replay';
 
 /**
  * The dashboard state every page reads and the actions it may take. The App in
@@ -31,11 +30,6 @@ export interface Dashboard {
   features: Features;
   editingRequirements: boolean; setEditingRequirements(value: boolean | ((value: boolean) => boolean)): void;
   codexAvailable: boolean;
-  /**
-   * Each item's recorded moves between the seven steps (the steps drill-down, read about once a
-   * minute), which start the "In step" clock; null or absent until they are read.
-   */
-  stepMoves?: StepTransition[] | null;
   /** Bumped on sign-out so a stale response never lands in a newer session. */
   sessionEpoch: RefObject<number>;
   api(path: string, data?: unknown): Promise<any>;
