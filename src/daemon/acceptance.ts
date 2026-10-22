@@ -274,7 +274,7 @@ async function drafting(cycle: Cycle, acceptance: AcceptanceEffects, goal: Goal,
       later(cycle, goal, 'post', acceptanceStepRetryMs); return note(goal, 'failed', `Opened ${named} for ${goal.key}, but its draft could not be recorded: ${message(error)}; it is posted again in ten minutes`, error);
     }
     pending.delete(goal.id);
-    return note(goal, 'done', `Opened ${named} for ${goal.key}${opened.pr === null ? ' for the merge writer, with no pull request' : ''}: ${result.draft.outcomes.map(entry => `${entry.id} (case ${entry.case.id})`).join(', ')}; it awaits an approver other than its author`);
+    return note(goal, 'done', `Opened ${named} for ${goal.key}${opened.pr === null ? ' for the merge writer, with no pull request' : ''}: ${result.draft.outcomes.map(entry => `${entry.id} (case ${entry.case.id})`).join(', ')}; it awaits approval`);
   }
   if (live.has(goal.id) || !due(cycle, goal, 'draft')) return;
   launch(cycle, acceptance, goal, 'draft');

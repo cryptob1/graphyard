@@ -10,7 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { acceptanceDraftSchema, applyGoalCommand, draftFiles, maxDraftRounds, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
+import { acceptanceDraftSchema, draftFiles, maxDraftRounds, protectedCaseRefusals, type Goal } from '../src/model/goal.js';
 import { registryRoles, roleSchema } from '../src/model/registry.js';
 import { checkContract, movedBindings, parseCase, parseContract } from '../src/e2e/case.js';
 import { goalCommands } from '../src/cli/goal.js';
@@ -138,7 +138,7 @@ function fakePulls() {
   return { pulls };
 }
 
-test('unit:acceptance-role-drafts-and-approval — the loop launches the acceptance role on an open goal, opens its draft as one pull request, and only an approver who did not author it approves', async () => {
+test('unit:acceptance-role-drafts-and-approval — the loop launches the acceptance role on an open goal, opens its draft as one pull request, and a worker cannot approve it', async () => {
   clearDrafts();
   assert.ok((registryRoles as readonly string[]).includes('acceptance'));
   assert.equal(roleSchema.parse({ name: 'acceptance', accounts: [], concurrency: 1 }).name, 'acceptance');
@@ -210,9 +210,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   // A draft whose case is optional, or not on uat, is no acceptance draft.
   assert.throws(() => acceptanceDraftSchema.parse({ outcomes: draftOf(goal.key, 'loose', false).outcomes }), /must be required/);
 
-  // The author never judges its own draft; a worker cannot either.
-  const self = await call(author, 'POST', `goals/${goal.key}/approve`, { reason: 'Looks right to me' });
-  assert.equal(self.status, 403); assert.match(self.text, /Self-approval refused/);
+  // A worker never judges a draft.
   assert.equal((await call(worker, 'POST', `goals/${goal.key}/approve`, { reason: 'ship it' })).status, 403);
   // The loop launches the approver's judgement, which refuses; its pull request is closed and the role drafts again answering the refusal.
   await cycle();
@@ -289,7 +287,7 @@ test('unit:acceptance-role-drafts-and-approval — the loop launches the accepta
   // The acceptance role has its own enablement: the diagnostician switched off holds no goal.
   const off = masterConfigSchema.parse({ ...config, run: { diagnostician: { enabled: false } } });
   assert.equal(acceptanceEffects(off, root, {} as never).settings.enabled, true);
-  assert.match(await readFile(join(root, 'src/daemon/effects-production.ts'), 'utf8'), /get acceptance\(\) \{ const config = current\(\); return config\.operatorAgent && config\.approver \? acceptanceEffects\(/);
+  assert.match(await readFile(join(root, 'src/daemon/effects-production.ts'), 'utf8'), /get acceptance\(\) \{ const config = current\(\); return config\.operatorAgent \? acceptanceEffects\(/);
 });
 
 /** A claimed item with its workspace, and the observation of a candidate changing `files` on its branch. */
@@ -306,7 +304,7 @@ async function claimed(plannedFiles: string[]) {
 }
 const changed = (path: string, status: 'modified' | 'removed' | 'added' = 'modified') => ({ path, status, sha: status === 'removed' ? null : 'c'.repeat(40), additions: 1, deletions: 1, binary: false, baseSha: status === 'added' ? null : 'd'.repeat(40) });
 
-test('unit:required-cases-protected — after the acceptance change merges, a candidate that modifies or deletes a required case or binding is refused at complete, and only an independently approved case change lets it through', async () => {
+test('unit:required-cases-protected — after the acceptance change merges, a candidate that modifies or deletes a required case or binding is refused at complete, and only an approved case change lets it through', async () => {
   // GY-2010: an acceptance change is the merge writer's: the land route records it merged only once
   // the base's first-parent history holds a merge of exactly the approved head. Its git, as read here.
   const merges = new Map<string, string>([['c'.repeat(40), 'a'.repeat(40)], ['f'.repeat(40), 'e'.repeat(40)]]);
@@ -350,7 +348,7 @@ test('unit:required-cases-protected — after the acceptance change merges, a ca
   // A new case, and a case no goal protects, are the implementation's own.
   assert.deepEqual(protectedCaseRefusals(work, observe([changed('e2e/cases/new-case.json', 'added'), changed('e2e/cases/board.json')] as never), [goal]), []);
 
-  // The decision path: a case change, judged by neither its requester nor an implementer of the item.
+  // The decision path: a requested case change, judged by an approver.
   assert.equal((await call(worker, 'POST', `goals/${goal.key}/case-change`, { work: work.key, cases: ['board'], reason: 'not protected here' })).status, 422);
   // A change for an item that does not exist yet is refused: whoever approved it could later implement that item.
   const future = await call(author, 'POST', `goals/${goal.key}/case-change`, { work: 'GY-999999', cases: ['setup-signup'], reason: 'for an item not yet created' });
@@ -362,11 +360,7 @@ test('unit:required-cases-protected — after the acceptance change merges, a ca
   assert.equal(requested.caseChanges.length, 1);
   const change = requested.caseChanges.at(-1)!;
   assert.equal(change.state, 'requested');
-  const own = await call(author, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'mine' });
-  assert.equal(own.status, 403); assert.match(own.text, /requested case change/);
   assert.equal((await call(worker, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'I built it' })).status, 403);
-  // Whoever implemented the item is refused whatever their role: the grounds are the item's implementers.
-  assert.throws(() => applyGoalCommand(requested, 'case-change-approve', { change: change.id, reason: 'I built it' }, { actor: approver, at: new Date().toISOString(), implementers: [approver.id] }), new RegExp(`implemented ${work.key}`));
   const approved: Goal = await ok(approver, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'The outcome is the same; only the path moved' });
   assert.equal(approved.caseChanges.at(-1)?.state, 'approved'); assert.equal(approved.caseChanges.at(-1)?.judgedBy, approver.id);
   assert.equal((await call(approver, 'POST', `goals/${goal.key}/case-change-approve`, { change: change.id, reason: 'again' })).status, 409);

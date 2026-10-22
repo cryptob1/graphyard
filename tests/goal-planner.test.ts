@@ -172,7 +172,7 @@ test('unit:planner-plan-validation — a plan covers every approved outcome, nam
   assert.match(prompts[1], /no item serves approved outcome billing/, 'the next run answers the refusal');
   await step();
   assert.equal(posted.length, 1); assert.equal(current.stage, 'plan-review'); assert.equal(current.plan?.author, planAuthor.id); assert.equal(current.planDrafts, 2);
-  assert.match(state.actions[`planner:${goal.id}`].detail, /Recorded GOAL-1's plan: ui after api; api; billing; it awaits an approver other than its author/);
+  assert.match(state.actions[`planner:${goal.id}`].detail, /Recorded GOAL-1's plan: ui after api; api; billing; it awaits approval/);
   // Past its plan rounds, a refused goal is the master's.
   assert.match(goalSummary({ ...goal, planDrafts: maxPlanRounds }).next!.who, new RegExp(`${maxPlanRounds} plans were refused`));
 
@@ -273,7 +273,7 @@ test('unit:plan-validation-accepts-declared-post-deploy-criterion — the plan p
     'the same item with the declaration removed is refused, naming the criterion and its observed phrase');
 });
 
-test('unit:planner-approval-and-dispatch-order — only an approver who did not write the plan approves it, only then are its items created and released with their dependencies, the dispatcher holds each until those are delivered, and the goal moves planned, delivering, delivered', async () => {
+test('unit:planner-approval-and-dispatch-order — only once an approver approves the plan are its items created and released with their dependencies, the dispatcher holds each until those are delivered, and the goal moves planned, delivering, delivered', async () => {
   const { clearPlans, currentGoal, planItemInput, planJudgementTool, planOrder, plansSettled, plannerStep, planTool, mergedItem } = await planner();
   clearPlans();
   // A goal whose acceptance merged, in the ledger as the land route leaves it.
@@ -322,9 +322,6 @@ test('unit:planner-approval-and-dispatch-order — only an approver who did not 
   await step(); await step();
   let current = await read();
   assert.equal(current.stage, 'plan-review'); assert.equal(current.plan?.author, planAuthor.id);
-  // Its author never approves it.
-  const own = await call(planAuthor, 'POST', `goals/${goal.key}/plan-approve`, { reason: 'Mine is good' });
-  assert.equal(own.status, 403); assert.match(own.text, /Self-approval refused: plan-author authored the plan of GOAL-1/);
   assert.equal((await call(planAuthor, 'POST', `goals/${goal.key}/release`, {})).status, 409, 'a plan awaiting approval releases nothing');
   assert.deepEqual(await allWork(), [], 'no item exists before the plan is approved');
   // The approver refuses: the goal is planned again, the refusal answered by the next run.

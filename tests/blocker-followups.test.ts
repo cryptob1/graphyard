@@ -99,7 +99,7 @@ function cycleOf(open: Work[], effects: Record<string, unknown>, clock: number, 
   return { cycle, performed, state };
 }
 
-test('unit:blocker-followups-probe-loop — probes run concurrently under a bound and per launch, a probe failing for two hours is reported to the master once, and decision prose with no decision is not cleared', async () => {
+test('unit:blocker-followups-probe-loop — probes run concurrently under a bound and per launch, and a probe failing for two hours is reported to the master once', async () => {
   // Five sandbox blockers in distinct worktrees: their probes overlap, never more than the bound at once.
   let active = 0, peak = 0;
   const recorded: { key: string; result: string }[] = [];
@@ -130,26 +130,6 @@ test('unit:blocker-followups-probe-loop — probes run concurrently under a boun
   const again = cycleOf([stuck], failing, start + blockerEscalateMs + 60_000, later.state);
   await blockerStep(again.cycle);
   assert.deepEqual(reports(again.performed), [], 'and not again');
-
-  // "Waiting for approval" on an item with no decision is the master's, never cleared by the loop.
-  const prose = blocked(9, 'Waiting for approval from the product owner before I continue');
-  assert.equal(classifyBlocker(prose.blocker).class, 'needs-decision');
-  const clears: string[] = [];
-  const noDecisions = cycleOf([prose], { decisions: async () => ({ decisions: [] }), recordBlockerProbe: async (item: Work, probe: { result: string }) => { clears.push(probe.result); } }, Date.now());
-  await blockerStep(noDecisions.cycle);
-  assert.equal(clears.length, 0, 'nothing is recorded as passing');
-  assert.ok(noDecisions.performed.some(action => /needs the master/.test(action.detail)), 'handed to the master');
-
-  // The same prose clears once a decision it was seen waiting on is judged.
-  const decision = { id: '5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b', action: 'requirements', input: {}, approvedBy: null };
-  let state = 'requested';
-  const watched = cycleOf([prose], { decisions: async () => ({ decisions: [{ ...decision, state }] }), recordBlockerProbe: async (_item: Work, probe: { result: string }) => { clears.push(probe.result); } }, Date.now());
-  (watched.state.approvals as any)[`watch:${decision.id}`] = { decision: decision.id, settledAt: null };
-  await blockerStep(watched.cycle);
-  assert.deepEqual(clears, ['fail']);
-  state = 'approved';
-  await blockerStep(cycleOf([prose], { decisions: async () => ({ decisions: [{ ...decision, state }] }), recordBlockerProbe: async (_item: Work, probe: { result: string }) => { clears.push(probe.result); } }, Date.now(), watched.state).cycle);
-  assert.deepEqual(clears, ['fail', 'pass']);
 });
 
 test('unit:blocker-followups-plane-and-base — a server error on the item\'s own request is the master\'s, not cleared on health, and a base that moved before the first probe counts as moved', async () => {

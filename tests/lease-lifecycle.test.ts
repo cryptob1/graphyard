@@ -119,15 +119,15 @@ test('integration:lease-release-on-submit: complete ends the lease with the cand
   replaced = await engine.execute(replacement, 'claim', replaced.id, {}, id());
   assert.equal(replaced.lease!.owner, replacement.id);
   assert.ok(replaced.epoch > replacedEpoch, 'under a new epoch');
-  // Rework that discards a live, unsubmitted lease records its end as history under the
-  // admin's own stopped-worker attestation, not as a silently vanished worker (GY-62).
+  // Rework that discards a live, unsubmitted lease records its end as history caused by the
+  // rework, not as a silently vanished worker (GY-62).
   let discarded = await claimed('lease-rework-discards');
   const discardedEpoch = discarded.epoch;
   discarded = await engine.execute(operator, 'rework', discarded.id, { reason: 'Reassigning an unfinished attempt', previousWorkerStopped: true }, id());
   assert.equal(discarded.lease, null);
   const stopped = await events(discarded, 'lease.expired');
   assert.equal(stopped.length, 1);
-  assert.deepEqual({ owner: stopped[0].payload.details.owner, epoch: stopped[0].payload.details.epoch, cause: stopped[0].payload.details.cause, attestation: stopped[0].payload.details.attestation.source }, { owner: worker.id, epoch: discardedEpoch, cause: 'stopped-by-attestation', attestation: 'rework' });
+  assert.deepEqual({ owner: stopped[0].payload.details.owner, epoch: stopped[0].payload.details.epoch, cause: stopped[0].payload.details.cause }, { owner: worker.id, epoch: discardedEpoch, cause: 'rework' });
 });
 
 test('manual:lease-lifecycle-docs: the generated worker instructions say complete ends the lease and forbid heartbeating after submission', () => {

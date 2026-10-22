@@ -57,9 +57,9 @@ test('unit:launch-supervisor-setup-is-starting — a launch whose supervisor is 
   // AC-2: the supervisor prints one line naming the item and epoch, before its first control-plane call.
   // The line comes from argv, ahead of the item lookup, the status read and every heartbeat.
   const { printed, events } = await printedSetupLine('GY-1023', 4);
-  assert.deepEqual(printed, ['graphyard: establishing containment for GY-1023 epoch 4']);
+  assert.deepEqual(printed, ['graphyard: starting supervision of GY-1023 epoch 4']);
   assert.equal(printed[0], setupLine('GY-1023', 4));
-  assert.deepEqual(events, ['printed graphyard: establishing containment for GY-1023 epoch 4', 'api work/GY-1023 after 1 line(s)'], 'the line is printed before the first control-plane call');
+  assert.deepEqual(events, ['printed graphyard: starting supervision of GY-1023 epoch 4', 'api work/GY-1023 after 1 line(s)'], 'the line is printed before the first control-plane call');
 
   // AC-1: the pane's last line is the launch command and the shell is not the foreground group:
   // the launch command is running, so the start is `starting`, never `absent`.
@@ -74,7 +74,7 @@ test('unit:launch-supervisor-setup-is-starting — a launch whose supervisor is 
   const announced = supervisorPane(() => `${echo}\n${printed[0]}\n`, () => 5200);
   const said = await observeStart('w1V:pC1', 'claude', command, announced.run);
   assert.equal(said.state, 'starting');
-  assert.equal(said.detail, 'the launch command is running, its supervisor setting up: "graphyard: establishing containment for GY-1023 epoch 4"');
+  assert.equal(said.detail, 'the launch command is running, its supervisor setting up: "graphyard: starting supervision of GY-1023 epoch 4"');
 
   // The shell is back in the foreground with nothing printed: the command never ran, so it is absent.
   const idle = supervisorPane(() => `${echo}\n`, () => 4100);
@@ -89,7 +89,7 @@ test('unit:launch-supervisor-setup-is-starting — a launch whose supervisor is 
   const slow = supervisorPane(elapsed => elapsed < 90_000 ? `${echo}\n${printed[0]}\n` : `${echo}\n${printed[0]}\n ▐▛███▛█   Claude Code v2.1.278\n∙ Crunching… (esc to interrupt)\n`, () => 5200, elapsed => elapsed < 90_000 ? null : 'claude');
   const started = await awaitRuntimeStart('w1V:pC1', 'claude', command, slow.run, slow.bounds);
   assert.ok(started.waitedMs >= 90_000 && started.waitedMs < 91_000, `started after ${started.waitedMs} ms`);
-  assert.equal(started.extended, 'the launch command is running, its supervisor setting up: "graphyard: establishing containment for GY-1023 epoch 4" at 60 s; waiting up to 120 s');
+  assert.equal(started.extended, 'the launch command is running, its supervisor setting up: "graphyard: starting supervision of GY-1023 epoch 4" at 60 s; waiting up to 120 s');
 
   // A supervisor that never finishes setting up is refused at the ceiling as still starting, with its line.
   const stuck = supervisorPane(() => `${echo}\n${printed[0]}\n`, () => 5200);
@@ -97,7 +97,7 @@ test('unit:launch-supervisor-setup-is-starting — a launch whose supervisor is 
   assert.ok(ceiling instanceof SessionStartError, String(ceiling));
   assert.equal(ceiling.startCase, 'still starting');
   assert.ok(stuck.elapsed() >= 120_000 && stuck.elapsed() < 121_000, `refused at ${stuck.elapsed()} ms`);
-  assert.match(ceiling.message, /^the claude runtime was still starting after 120 s in pane w1V:pC1 \(the launch command is running, its supervisor setting up: "graphyard: establishing containment for GY-1023 epoch 4"\)/);
+  assert.match(ceiling.message, /^the claude runtime was still starting after 120 s in pane w1V:pC1 \(the launch command is running, its supervisor setting up: "graphyard: starting supervision of GY-1023 epoch 4"\)/);
 
   // The shell in the foreground with only the command on screen fails at the 60 s bound, not the ceiling.
   const never = supervisorPane(() => `${echo}\n`, () => 4100);

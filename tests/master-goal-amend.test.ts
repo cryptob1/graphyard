@@ -78,7 +78,7 @@ test('unit:master-goal-amend — `graphyard master goal-amend GOAL-N REQUEST_ID`
   const request = (await store.list()).find(item => item.id === work.id)!.humanRequest!;
   await ok(operator, `work/${work.key}/answer`, { request: request.id, choice: 'agree' });
 
-  await ok(operator, 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: ['intent:create'], scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'Onboarding provisions the master operator agent' });
+  await ok(operator, 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: [], scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'Onboarding provisions the master operator agent' });
   // The master session: its own credential is the worker's, its operator-agent credential a private file outside the repository.
   const credentialFile = join(await temporaryDirectory('goal-amend-agent'), 'operator-agent.token');
   await writeFile(credentialFile, agent.token, { mode: 0o600 });

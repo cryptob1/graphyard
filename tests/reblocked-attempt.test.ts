@@ -162,7 +162,7 @@ const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 
 const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
 const coordinator: Principal = { id: 'coordinator', role: 'coordinator', sessionKind: 'ai' };
 const credentials = [operator, implementer, coordinator].map(principal => ({ ...principal, token: `reblocked-${principal.id}-${'x'.repeat(32)}` }));
-const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements'] };
+const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['policy:requirements'] };
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 const call = async (credential: string, path: string, body: unknown) => {

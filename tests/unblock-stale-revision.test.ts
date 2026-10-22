@@ -26,7 +26,7 @@ const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind:
 const roster = [operator, coordinator, implementer];
 const credentials = roster.map(principal => ({ ...principal, token: `unblock-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
-const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'intent:unblock'] };
+const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: [] };
 const root = fileURLToPath(new URL('..', import.meta.url));
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let masterRoot: string, credentialDirectory: string, config: MasterConfig;

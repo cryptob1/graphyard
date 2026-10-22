@@ -25,15 +25,11 @@ test('unit:step-calls-bounded — triage: a nested acceptance or planner phase t
   assert.equal(state.actions['carried:triage:acceptance'].state, 'done', 'a phase that ran through retires the row');
 });
 
-test('unit:step-calls-applied-once — differing holds, idle and active marks, and ends are different calls; a repeat of one is the same call', async () => {
+test('unit:step-calls-applied-once — differing holds are different calls; a repeat of one is the same call', async () => {
   const { callKey } = await helper();
   const hold = (reason: string, at = 'a') => ['account-1', { at, reason, role: 'worker', profile: 'p', work: 'GY-1', resetsAt: null }];
   assert.notEqual(callKey('holdAccount', hold('quota')), callKey('holdAccount', hold('rate limit')));
   assert.equal(callKey('holdAccount', hold('quota', 'a')), callKey('holdAccount', hold('quota', 'b')));
-  const session = { work: 'GY-1', trigger: 'blocked', launchedAt: 't', agentName: 'h' };
-  assert.notEqual(callKey('markEscalation', [{ ...session, idleSince: 'x' }]), callKey('markEscalation', [session]));
-  assert.equal(callKey('markEscalation', [{ ...session, idleSince: 'x' }]), callKey('markEscalation', [{ ...session, idleSince: 'y' }]));
-  assert.notEqual(callKey('endEscalation', [session, 'finished', null]), callKey('endEscalation', [session, 'dropped', null]));
 });
 
 test('unit:step-calls-bounded — triage: a phase starts nothing once the step budget is spent, and a finished handle record supersedes the owed running one', async () => {

@@ -335,10 +335,10 @@ test('integration:bootstrap-policy-authority keeps bootstrap mode away from work
 
 test('integration:bootstrap-policy-authority requires the explicit policy:bootstrap capability of an operator agent', async () => {
   const input = { title: 'Agent declares bootstrap', description: '', criteria: bootstrapCriteria('agent-authority'), reason: 'Harness ships with this change', policy: { checks: ['test'], review: true } };
-  await assert.rejects(engine.execute(agent(['intent:create', 'policy:requirements']), 'create', null, input, id()),
+  await assert.rejects(engine.execute(agent(['policy:requirements']), 'create', null, input, id()),
     /Capability policy:bootstrap is required/, 'policy:requirements alone does not authorize a deferral');
 
-  const declared = await engine.execute(agent(['intent:create', 'policy:bootstrap']), 'create', null, input, id());
+  const declared = await engine.execute(agent(['policy:bootstrap']), 'create', null, input, id());
   assert.equal(declared.criteria[0].bootstrap!.declaredBy, 'planner', 'the declaration is attributed to the operator agent, not the request');
 
   // An agent may still add requirements without the capability, and may withdraw a deferral.
@@ -355,7 +355,7 @@ test('integration:bootstrap-policy-authority requires the explicit policy:bootst
 });
 
 test('integration:bootstrap-policy-authority refuses a declaration outside the agent’s repository scope', async () => {
-  const outside = { ...agent(['intent:create', 'policy:bootstrap']), scope: { repositories: ['other/project'], workItems: ['*'] } };
+  const outside = { ...agent(['policy:bootstrap']), scope: { repositories: ['other/project'], workItems: ['*'] } };
   await assert.rejects(engine.execute(outside, 'create', null, { title: 'Out of scope', description: '', criteria: bootstrapCriteria('scoped-authority'), reason: 'Harness ships with this change', policy: { checks: ['test'], review: true } }, id()),
     /outside this operator-agent scope/);
 });

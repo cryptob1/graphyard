@@ -88,17 +88,12 @@ test('a candidate that lets every racing claim win cannot produce passing eviden
   assert.equal(inventory.executed, 1); assert.equal(inventory.skipped, requiredCases.length - 1); assert.equal(inventory.complete, false);
 });
 
-test('a candidate that lets a superseded owner reset review state cannot pass', async () => {
-  await withoutRefusal('/rereview', async weakened =>
-    assert.rejects(exercise(weakened, identities(), shortFences), /Unexpected status for/));
-});
-
 test('the recovery contract refuses to run without two distinct machine identities', async () => {
   await assert.rejects(exercise(url, [{ ...operator, token: 'r'.repeat(32) }, machines[0]], shortFences));
 });
 
 test('the trusted registry selects fixed inventories and rejects unknown proofs', () => {
-  assert.equal(contract('integration:herdr-recovery').requiredCases.length, 5);
+  assert.equal(contract('integration:herdr-recovery').requiredCases.length, 4);
   assert.deepEqual(contract('integration:claim-safety').requiredCases, contracts['integration:claim-safety'].requiredCases);
   // The refusal states the bootstrap ordering rule: a contract reaches protected main first.
   assert.throws(() => contract('integration:invented'), /Unknown trusted acceptance proof integration:invented\. This protected checkout registers integration:claim-safety, integration:herdr-recovery, integration:merge-authorization, unit:ci-proofs-enumeration; merge a contract to main before requiring its proof\./);

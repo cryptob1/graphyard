@@ -46,7 +46,7 @@ interface Harness {
   state: ReturnType<typeof emptyDaemonState>;
   trials: string[];
   events: { key: string; event: MergeRecordEvent }[];
-  decided: { key: string; action: string; reason: string; input: unknown }[];
+  reworked: { key: string; reason: string }[];
   step: () => Promise<void>;
 }
 
@@ -56,7 +56,7 @@ interface Harness {
  * exactly as the control plane's ledger would.
  */
 function harness(work: Work[], slowKeys: readonly string[]): Harness {
-  const made: Harness = { work, state: emptyDaemonState(config), trials: [], events: [], decided: [], step: async () => {} };
+  const made: Harness = { work, state: emptyDaemonState(config), trials: [], events: [], reworked: [], step: async () => {} };
   const ledgerEvents: { kind: string; payload: unknown; work: string }[] = [];
   // The record route (server/merge-record.ts): the payload it stores drops `kind`, an intent gains the item's key, a refusal records kind 'merge', and a reconciliation delivers the item.
   const fold = () => { const folded = foldMergeLedger(ledgerEvents as never); for (const entry of work) (entry as { mergeLedger?: unknown }).mergeLedger = folded[entry.key] ?? null; };
@@ -81,7 +81,7 @@ function harness(work: Work[], slowKeys: readonly string[]): Harness {
     },
   };
   const reads: MergeWriterReads = { ...ports, merger: async () => 'control-plane' };
-  const effects = { mergeWriter: reads, persist: async () => {}, decide: async (picked: Work, action: string, reason: string, input: unknown) => { made.decided.push({ key: picked.key, action, reason, input }); return { id: `d-${made.decided.length + 1}` }; } };
+  const effects = { mergeWriter: reads, persist: async () => {}, rework: async (picked: Work, reason: string) => { made.reworked.push({ key: picked.key, reason }); } };
   let clock = start;
   made.step = async () => {
     clock += 1000;
@@ -135,10 +135,10 @@ test('unit:repeated-trial-timeout-refused-to-rework — a head that times out it
   assert.deepEqual(state.mergeWriter.refusals.map(entry => [entry.key, entry.reason]), [['GY-1', refusals[0]!.reason]]);
   assert.deepEqual(state.mergeWriter.reworks.map(entry => [entry.key, entry.head, entry.reason]), [['GY-1', head, refusals[0]!.reason]]);
   assert.match(state.actions[`merge-writer:GY-1:${head}`]?.detail ?? '', /timed out its trial 2 times while other heads' trials passed: refused/);
-  // The rework is requested the next cycle, grounded exactly as a failed trial grounds one.
+  // The rework is applied the next cycle, grounded exactly as a failed trial grounds one.
   await step();
-  assert.deepEqual(made.decided.map(entry => [entry.key, entry.action]), [['GY-1', 'rework']]);
-  assert.equal((made.decided[0]!.input as { binding: string }).binding, `${head}:merge-writer-trial-failed`);
+  assert.deepEqual(made.reworked.map(entry => entry.key), ['GY-1']);
+  assert.match(made.reworked[0]!.reason, new RegExp(`the merge writer's trial of candidate ${head.slice(0, 12)} failed`));
   // The refused head is not retried without bound: the queue drops it for its trial-failure refusal,
   // and once the rework is applied no further trial runs.
   assert.equal(state.mergeWriter.queue.length, 0, 'the queue drops a head its trial-failure refusal holds');
@@ -159,5 +159,5 @@ test('unit:repeated-trial-timeout-refused-to-rework — a timeout where no other
   assert.deepEqual(made.trials, ['GY-9', 'GY-9'], 'alone on the queue the head keeps being tried');
   assert.deepEqual(state.mergeWriter.timeouts?.map(entry => [entry.key, entry.count, entry.othersPassed, entry.reason]) ?? [], [['GY-9', 1, false, null]], 'the second timeout counted nothing: no other head passed since the first');
   assert.equal(made.events.filter(({ event }) => (event as { kind: string }).kind === 'refused' && String((event as { reason?: string }).reason ?? '').startsWith(trialFailurePrefix)).length, 0);
-  assert.deepEqual([state.mergeWriter.refusals, state.mergeWriter.reworks, made.decided], [[], [], []]);
+  assert.deepEqual([state.mergeWriter.refusals, state.mergeWriter.reworks, made.reworked], [[], [], []]);
 });

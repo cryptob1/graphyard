@@ -10,10 +10,10 @@ const scope = z.object({
   repositories: z.array(z.string().trim().min(1).max(300)).min(1).max(20),
   workItems: z.array(z.string().trim().min(1).max(100)).max(200).default([]),
 }).strict().refine(v => new Set(v.repositories).size === v.repositories.length && new Set(v.workItems).size === v.workItems.length, 'Scope entries must be unique');
-const setupSchema = z.object({ id, displayName: z.string().trim().min(1).max(100), capabilities: z.array(z.enum(operatorCapabilities)).min(1).max(operatorCapabilities.length), scope, token, reason }).strict();
+const setupSchema = z.object({ id, displayName: z.string().trim().min(1).max(100), capabilities: z.array(z.enum(operatorCapabilities)).max(operatorCapabilities.length).default([]), scope, token, reason }).strict();
 const rotateSchema = z.object({ token, transitionSeconds: z.number().int().min(0).max(86400), reason }).strict();
 const revokeSchema = z.object({ reason }).strict();
-const configureSchema = z.object({ expectedRevision: z.number().int().positive(), capabilities: z.array(z.enum(operatorCapabilities)).min(1).max(operatorCapabilities.length), scope, reason }).strict();
+const configureSchema = z.object({ expectedRevision: z.number().int().positive(), capabilities: z.array(z.enum(operatorCapabilities)).max(operatorCapabilities.length).default([]), scope, reason }).strict();
 
 const digest = (secret: string) => createHash('sha256').update(secret).digest('hex');
 const fingerprint = (secret: string) => digest(secret).slice(0, 16);

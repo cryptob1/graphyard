@@ -17,7 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * unit:action-claim-keeps-observation — claiming, renewing and settling a row between an
  * observation's read and its save leaves the observation saved; any other change still refuses it.
  * unit:waked-observation-survives-loop-bookkeeping — GY-1257: the loop's own per-cycle writes (a
- * session it reports, the next action, gates and escalations each save re-derives or raises)
+ * session it reports, the next action and gates each save re-derives or raises)
  * between a woken observation's read and its save leave the observation saved; a change to the
  * submitted work still refuses it.
  * unit:observation-saved-on-revision-change — GY-1310: any save between an observation's read and
@@ -108,8 +108,8 @@ test('unit:waked-observation-survives-loop-bookkeeping — the loop\'s own bookk
   assert.equal(observed.observation?.at, taken.at, 'the woken observation lands');
   assert.ok((await reload(item.id)).sessions?.some(entry => entry.id === handle.id), 'the session the loop wrote meanwhile is kept');
 
-  // Next action, gates and escalations are bookkeeping too; the submitted work is not.
-  const bookkeeping = { ...moved, revision: moved.revision + 1, nextAction: null, gates: [], lane: 'high', escalations: [{ trigger: 'owed-decision', reason: 'loop attention', at: new Date().toISOString(), actor: 'master' }] } as unknown as Work;
+  // Next action and gates are bookkeeping too; the submitted work is not.
+  const bookkeeping = { ...moved, revision: moved.revision + 1, nextAction: null, gates: [], lane: 'high' } as unknown as Work;
   assert.ok(sameBesideBookkeeping(moved, bookkeeping), 'next action, gates and attention are the loop\'s bookkeeping');
   assert.ok(!sameBesideBookkeeping(moved, { ...moved, submission: { epoch: moved.submission!.epoch, pr: moved.submission!.pr + 1 } }), 'a moved submission is not');
   assert.ok(!sameBesideBookkeeping(moved, { ...moved, candidate: { ...moved.candidate!, sha: 'f'.repeat(40) } } as Work), 'a moved candidate is not');

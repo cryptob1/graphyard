@@ -66,14 +66,14 @@ export const laneSpeedTargets: Record<Lane, number> = { low: 30 * 60_000, medium
  * test, merge): which proof families the verdict requires of the change, and whether a rework
  * round waits for an approved two-party decision. Low lands with its required CI checks green and
  * one approving review — the producer-run proofs and manual attestations its criteria name are not
- * required of it, and its reworks are applied without an approver; medium adds its producer-run
- * proofs; high keeps the full path: producer proofs, manual attestations and approver decisions.
+ * required of it; medium adds its producer-run proofs; high keeps the full path: producer proofs
+ * and manual attestations.
  */
-export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean; reworkApprover: boolean }
+export interface LaneRequirements { producerProofs: boolean; manualAttestations: boolean }
 export function laneRequirements(lane: Lane): LaneRequirements {
-  return lane === 'low' ? { producerProofs: false, manualAttestations: false, reworkApprover: false }
-    : lane === 'medium' ? { producerProofs: true, manualAttestations: false, reworkApprover: false }
-    : { producerProofs: true, manualAttestations: true, reworkApprover: true };
+  return lane === 'low' ? { producerProofs: false, manualAttestations: false }
+    : lane === 'medium' ? { producerProofs: true, manualAttestations: false }
+    : { producerProofs: true, manualAttestations: true };
 }
 
 /**
@@ -108,14 +108,6 @@ export function observedPaths(observation: { scopeFiles?: readonly { path: strin
 export function itemLane(work: { observation?: Parameters<typeof observedPaths>[0] }): Lane {
   return determineLane(observedPaths(work.observation));
 }
-
-/**
- * Whether a rework round on this item waits for an independent approver (GY-883 AC-2): only in the
- * high lane. A low or medium item's rework decision is applied as soon as it is requested, with the
- * lane recorded as its ground — the requester's own authority to request it is checked as ever. A
- * change nobody has observed rides high, so it keeps its approver.
- */
-export const reworkNeedsApprover = (work: Parameters<typeof itemLane>[0]) => laneRequirements(itemLane(work)).reworkApprover;
 
 // Bootstrap mode: an operator may defer a criterion's proofs for the single change that
 // introduces the harness those proofs depend on. The proof is never dropped. It becomes a

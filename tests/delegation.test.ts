@@ -611,7 +611,7 @@ test('integration:intake-authority-routing — routine intake is autonomous, hum
     let outOfScope = await scopedEngine.execute(admin, 'create', null, input('scoped-hidden', 'infrastructure'), id());
     outOfScope = await scopedEngine.execute(admin, 'ready', outOfScope.id, {}, id());
     outOfScope = await scopedEngine.execute(workerB, 'claim', outOfScope.id, {}, id());
-    const setup = { id: `intake-agent-${randomUUID()}`, displayName: 'Intake agent', capabilities: ['intent:create'],
+    const setup = { id: `intake-agent-${randomUUID()}`, displayName: 'Intake agent', capabilities: [],
       scope: { repositories: ['owner/delegation'], workItems: [inScope.id] }, token: agentToken, reason: 'Human enabled scoped intake' };
     const registered = await fetch(`${scopedUrl}/api/operator-agents`, { method: 'POST',
       headers: { Authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() }, body: JSON.stringify(setup) });

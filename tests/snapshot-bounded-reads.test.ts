@@ -213,11 +213,10 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
       assert.deepEqual(control.state.reads.filter(read => read.path === 'work-snapshot').map(read => read.coordination), [true], `the sync attribution read is the coordination view\n${outcome.output}`);
     } finally { syncServer.closeAllConnections(); await new Promise<void>(resolve => { syncServer.close(() => resolve()); setTimeout(resolve, 2_000).unref(); }); await rm(cwd, { recursive: true, force: true }); }
 
-    // The watch supervisor's containment revalidation reads the same view (the source carries
-    // both workspace reads, and master status's read rides the coordination header from the
-    // report-cache module).
+    // The source carries the one workspace read, and master status's read rides the coordination
+    // header from the report-cache module.
     const workspaceSource = await readFile(new URL('../src/cli/workspace.ts', import.meta.url), 'utf8');
-    assert.equal(workspaceSource.split('work-snapshot?view=coordination').length - 1, 2, 'sync attribution and containment revalidation read the coordination view');
+    assert.equal(workspaceSource.split('work-snapshot?view=coordination').length - 1, 1, 'sync attribution reads the coordination view');
     assert.doesNotMatch(workspaceSource, /work-snapshot\?view=bounded/, 'no CLI read asks for the unbounded default');
     const statusSource = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
     assert.match(statusSource, /coordinationStep\(run => timedStep\('snapshot', run\), masterApi\)/, 'master status reads through the coordination snapshot step');
@@ -305,7 +304,7 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   // disclose nothing of the items outside its scope.
   const scopedKeys = [whole.body.work[4].key, whole.body.work[20].key] as string[];
   const scopedToken = `bounded-scoped-reader-${'s'.repeat(32)}`;
-  const provisioned = await fetch(`${url}/api/operator-agents`, { method: 'POST', headers: { Authorization: `Bearer ${operatorToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ id: 'scoped-reader', displayName: 'scoped-reader', capabilities: ['intent:create'], scope: { repositories: ['owner/project'], workItems: scopedKeys }, token: scopedToken, reason: 'A scoped reader pages only its own work' }) });
+  const provisioned = await fetch(`${url}/api/operator-agents`, { method: 'POST', headers: { Authorization: `Bearer ${operatorToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify({ id: 'scoped-reader', displayName: 'scoped-reader', capabilities: [], scope: { repositories: ['owner/project'], workItems: scopedKeys }, token: scopedToken, reason: 'A scoped reader pages only its own work' }) });
   assert.equal(provisioned.status, 200, await provisioned.text());
   const scopedNumbers = scopedKeys.map(key => Number(/(\d+)$/.exec(key)![1]));
   const firstScoped = await get('work-snapshot?view=full&pageSize=1', scopedToken);

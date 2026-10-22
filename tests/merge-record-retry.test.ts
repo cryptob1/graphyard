@@ -37,7 +37,7 @@ function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean
   const receipts = new Map((options.receipts ?? []).map(([key, event]) => [key, JSON.stringify(event)]));
   const sent: { key: string; input: string; answer: 'stored' | 'receipt' | 'refused' | 'lost' }[] = [];
   const lost = new Set<string>(), dropped = new Set<string>();
-  const decisions: { kind: string; head: string | undefined }[] = [];
+  const reworks: { head: string | undefined }[] = [];
   let reworked = false;
   let ledger: MergeLedgerState | null = options.ledger ?? null, pushes = 0, clock = start;
   const pushed = new Set<string>(ledger?.state === 'pushed' && ledger.mergeSha ? [ledger.mergeSha] : []);
@@ -76,11 +76,11 @@ function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean
     snapshot: async () => ({ work: work(), now: iso(start) }),
     closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    recordDeployment: async () => {}, persist: async () => {},
     mergeWriter: reads,
-    decide: async (item: Work, kind: string) => { decisions.push({ kind, head: item.candidate?.sha }); reworked = true; return { id: `decision-${decisions.length}` }; },
+    rework: async (item: Work) => { reworks.push({ head: item.candidate?.sha }); reworked = true; },
   } as unknown as DaemonEffects;
-  return { effects, sent, decisions, ledger: () => ledger, pushes: () => pushes };
+  return { effects, sent, reworks, ledger: () => ledger, pushes: () => pushes };
 }
 
 /** Runs cycles, letting each merge in flight settle, until the item is reconciled with nothing owed or `limit` cycles pass; answers every action detail. */
@@ -177,8 +177,8 @@ test('unit:merge-record-replay-identical — a failed trial\'s refusal whose rep
     assert.deepEqual(refusals.map(entry => entry.answer), ['lost', label === 'stored, reply lost' ? 'receipt' : 'stored'], `${label}: the refusal is sent, then replayed once: ${JSON.stringify(world.sent)}`);
     assert.equal(new Set(refusals.map(entry => `${entry.key}|${entry.input}`)).size, 1, `${label}: the replay is the identical input under the identical key`);
     assert.equal(world.ledger()?.state, 'refused', label);
-    assert.deepEqual(world.decisions, [{ kind: 'rework', head: candidate.sha }], `${label}: the rework the refusal grounds is requested exactly once: ${details.join(' | ')}`);
-    assert.ok(details.some(detail => /^Requested the rework the merge writer's refusal of GY-1 head [0-9a-f]+ grounds/.test(detail)), `${label}: ${details.join(' | ')}`);
+    assert.deepEqual(world.reworks, [{ head: candidate.sha }], `${label}: the rework the refusal grounds is applied exactly once: ${details.join(' | ')}`);
+    assert.ok(details.some(detail => /^Returned GY-1 to a worker on the merge writer's refusal of head [0-9a-f]+/.test(detail)), `${label}: ${details.join(' | ')}`);
     assert.deepEqual([state.mergeWriter.reworks, state.mergeWriter.unconfirmed, state.mergeWriter.inFlight], [[], undefined, null], `${label}: nothing is left owed`);
     assert.ok(!world.sent.some(entry => entry.answer === 'refused'), `${label}: no key is refused as reused`);
   }

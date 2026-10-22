@@ -140,14 +140,13 @@ test('integration:close-superseded — only a landed commit or a delivered item 
   assert.equal((await ok(coordinator, `work/${open.id}/close`, { kind: 'superseded', reason: 'Replaced', ref: delivered.key })).closure.ref, delivered.key);
 });
 
-test('integration:close-refusals — a live lease refuses, and only the master or an admin may close', async () => {
+test('integration:close-refusals — a live lease is ended by the close, and only the master or an admin may close', async () => {
   const work = await released('leased work');
-  const claimed = await ok(worker, `work/${work.id}/claim`, {}) as Work;
-  const leased = await call(coordinator, `work/${work.id}/close`, { kind: 'obsolete', reason: 'Not wanted' });
-  assert.equal(leased.status, 409); assert.match(JSON.stringify(leased.body), /live worker lease/);
-  await ok(worker, `work/${work.id}/release`, { epoch: claimed.epoch });
+  await ok(worker, `work/${work.id}/claim`, {});
   for (const principal of [worker, producer]) assert.equal((await call(principal, `work/${work.id}/close`, { kind: 'obsolete', reason: 'Not wanted' })).status, 403, principal.id);
-  assert.equal((await ok(operator, `work/${work.id}/close`, { kind: 'obsolete', reason: 'Not wanted' })).stage, 'done');
+  const closed = await ok(coordinator, `work/${work.id}/close`, { kind: 'obsolete', reason: 'Not wanted' }) as Work;
+  assert.equal(closed.stage, 'done'); assert.equal(closed.lease, null, 'the live lease ends with the closure');
+  assert.equal((await ok(operator, `work/${(await released('admin closes')).id}/close`, { kind: 'obsolete', reason: 'Not wanted' })).stage, 'done');
 });
 
 test('integration:close-withdraws-human-request — the parked human-only request is withdrawn and leaves the Needs-you list', async () => {

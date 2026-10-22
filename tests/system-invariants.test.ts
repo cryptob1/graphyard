@@ -103,11 +103,6 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
   const refusal = emptyInvariantRecord(), stalled = mergeable('GY-10');
   checkInvariants(refusal, { work: [stalled], now: clock });
   assert.equal(verdict(checkInvariants(refusal, { work: [{ ...stalled, gates: [{ name: 'merge', passed: false, reasons: ['GitHub reports the pull request behind'] }] } as Work], now: clock + 40 * minute }), 'merge-stall').holds, true);
-  // An approver the loop no longer watches (launched by hand, GY-403) is known by its name, which carries the item's key.
-  const byName = checkInvariants(emptyInvariantRecord(), { work: [delivered('GY-5', 41 * minute)], now: clock, agents: [{ name: 'graphyard-approver-gy-5-0a1b2c3d' }, { name: 'graphyard-approver-gy-6-0a1b2c3d' }] });
-  assert.equal(verdict(byName, 'lingering-sessions').holds, false);
-  assert.match(verdict(byName, 'lingering-sessions').reading, /approver session graphyard-approver-gy-5-0a1b2c3d on GY-5, 41 min after it was delivered/);
-  assert.deepEqual(verdict(byName, 'lingering-sessions').subjects, ['GY-5'], 'an approver for an item not delivered is not lingering');
   // A head change of the candidate's own starts the refresh count over.
   const churn = emptyInvariantRecord();
   for (const n of [0, 1, 2, 3]) checkInvariants(churn, { work: [refreshed('GY-8', n)], now: clock + n * minute });

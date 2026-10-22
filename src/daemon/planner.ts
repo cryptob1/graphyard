@@ -213,7 +213,7 @@ async function planning(cycle: Cycle, planner: PlannerEffects, goal: Goal, note:
       later(cycle, goal, 'post', planStepRetryMs); return note(goal, 'failed', `The plan for ${goal.key} could not be recorded: ${message(error)}; it is posted again in ten minutes`);
     }
     pending.delete(goal.id);
-    return note(goal, 'done', `Recorded ${goal.key}'s plan: ${result.plan.items.map(item => `${item.ref}${item.dependsOn.length ? ` after ${item.dependsOn.join(', ')}` : ''}`).join('; ')}; it awaits an approver other than its author`);
+    return note(goal, 'done', `Recorded ${goal.key}'s plan: ${result.plan.items.map(item => `${item.ref}${item.dependsOn.length ? ` after ${item.dependsOn.join(', ')}` : ''}`).join('; ')}; it awaits approval`);
   }
   if (live.has(goal.id) || !due(cycle, goal, 'plan')) return;
   launch(cycle, planner, goal, 'plan');

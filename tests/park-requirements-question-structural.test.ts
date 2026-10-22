@@ -78,7 +78,7 @@ test('unit:park-requirements-question-structural — GY-1818 AC-1: a goals-and-p
     const refusal = parkRefusal(body)!;
     assert.match(refusal, /^Not a human-only decision: the request asks whether this item's criteria are rewritten, revised or matched to another item's tests/, JSON.stringify(body));
     assert.match(refusal, /graphyard blocked GY-N EPOCH REASON/, 'the refusal names the conflict route');
-    assert.match(refusal, /graphyard master decide GY-N requirements/, 'the refusal names the requirements decision the master requests');
+    assert.match(refusal, /graphyard master requirements GY-N FILE REASON/, 'the refusal names the requirements revision the master makes');
     assert.equal(requirementsQuestionRefusal(body), refusal);
     // The server's own composition — parse, then refuse — says the same through the endpoint.
     assert.equal(parkRefusal(humanRequestSchema.parse({ epoch: 1, ...body })), refusal);

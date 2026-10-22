@@ -8,20 +8,6 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const read = (path: string) => readFile(join(root, path), 'utf8');
 const lines = (text: string) => text.split('\n').length;
 
-test('unit:cycle-decisions-headroom — src/daemon/cycle-decisions.ts and every split module stay within 600 lines', async () => {
-  const daemonFiles = [
-    'src/daemon/cycle-decisions.ts',
-    'src/daemon/cycle-approvers.ts',
-  ];
-  for (const file of daemonFiles) {
-    const text = await read(file);
-    const count = lines(text);
-    assert.ok(count <= 600, `${file} has ${count} lines; budget is 600 lines (AC-1)`);
-    const header = text.split('\n')[0];
-    assert.match(header, /^\/\/ Concern: \S.{10,}$/, `${file} opens with a "// Concern: …" header naming what it owns`);
-  }
-});
-
 test('unit:workspace-cli-headroom — src/cli/workspace.ts and every split module stay within 260 lines', async () => {
   const cliFiles = [
     'src/cli/workspace.ts',

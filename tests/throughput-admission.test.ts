@@ -192,7 +192,7 @@ test('unit:throughput-stall-null-after-admission — once the applied rule admit
   assert.equal(throughputStall(stale), null);
 });
 
-test('unit:throughput-attention-remedy-matches-record — the throughput attention never instructs master decide for a population rule already revised, approved and applied; it says none remains and names the re-measure, and only a stall under the applied rule carries the decision', async () => {
+test('unit:throughput-attention-remedy-matches-record — the throughput attention never instructs master decide for a population rule already revised, approved and applied; it says none remains and names the re-measure, and only a stall under the applied rule carries the requirements revision', async () => {
   const { throughputClaimVisibility, throughputRemeasureFrom } = await import('../src/throughput.js');
   const serving = { revision, version: '1' }, owner = { key: 'GY-1449' };
   for (const ownerItem of [null, owner]) {
@@ -205,11 +205,11 @@ test('unit:throughput-attention-remedy-matches-record — the throughput attenti
     assert.ok(attention.text.includes(`re-measures the serving release under the applied rule from ${throughputRemeasureFrom(stale.measuredAt)}`));
     assert.equal(attention.role, 'master'); assert.equal(attention.human, false);
   }
-  // A stall under the applied rule is a genuinely undecided question: it keeps the typed decision.
+  // A stall under the applied rule is a genuinely undecided question: it keeps the requirements revision.
   const genuine = verifyThroughput([claim, ...masterWindow()], now, { deployed });
   const decided = throughputClaimVisibility({ report: genuine, file: 'new.json' }, serving, throughputStallBound, null, owner);
   assert.ok(decided.stall);
-  assert.match(decided.attention!.next, /graphyard master decide GY-1449 requirements/);
+  assert.match(decided.attention!.next, /graphyard master requirements GY-1449 revision.json/);
   assert.doesNotMatch(decided.attention!.text, /No population-rule decision remains/);
 });
 

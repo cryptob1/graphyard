@@ -336,12 +336,12 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   const entry = read.evidence.at(-1)!;
   assert.deepEqual([entry.trusted, entry.producer, entry.sha, entry.baseSha, entry.result, entry.reading], [true, coordinator.id, serving, mergeSha, 'pass', { detail: reading.detail }]);
   assert.equal(loopObservation(read, new Date(now), [delivered]), null, 'the loop\'s reading on the later serving release ends the wait');
-  // The pass is on the serving release: a close naming another release, or none, is refused; so is one while a worker lease is live.
+  // The pass is on the serving release: a close naming another release, or none, is refused.
   await assert.rejects(close(coordinator, item.id, null), /names the release its reading was taken on/);
   await assert.rejects(close(coordinator, item.id, filed), /passing reading was taken on release bbbbbbbbbbbb, not aaaaaaaaaaaa/);
-  // The close judges the lease against the fixture-clocked store's `now` (clockedServices), so the fixture's own expiry — now + 24 h — stays live on any wall-clock date (GY-1799, superseding GY-1795's wall-clock lease).
+  // A live worker lease does not hold the close: the closure ends it.
   const leased = await plant({ ...followUp(0, { stage: 'build', epoch: 2, lease: { owner: worker.id, epoch: 2, expiresAt: iso(now + 24 * hour) }, candidate: { pr: 1174, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-y-2', createdAt: iso(now - hour) }, evidence: [{ ...entry, id: randomUUID() }] } as Partial<Work>), description: `Post-deploy follow-up: post-deploy:${delivered.id}:AC-2:${proof}:${filed}\n\nowed` } as Work);
-  await assert.rejects(close(coordinator, leased.id), /has a live worker lease/);
+  assert.equal(((await close(coordinator, leased.id)) as Work).lease, null);
   // The close as delivered-observation closes the item on the reading; since GY-2010 no pull request is touched or recorded.
   const closed = await closeWork(services, coordinator, item.id, { kind: 'delivered-observation', reason: `${read.key}'s reading passed on the serving release`, ref: serving }, randomUUID()) as Work;
   assert.deepEqual([closed.stage, closed.closure?.kind, closed.closure?.ref, closed.closure?.by, isClosed(closed)], ['done', 'delivered-observation', serving, coordinator.id, true]);
@@ -349,21 +349,4 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   assert.equal(audit.details.pullRequest, undefined, 'the closure records no pull request');
   assert.equal(closed.closure?.pullRequest, undefined);
   assert.equal((await store.pool.query("SELECT 1 FROM events WHERE work_id=$1 AND kind='work.pull-request-closed'", [item.id])).rowCount, 0);
-});
-
-test('unit:observation-reading-close-judges-fixture-clock — the delivered-observation close judges a live worker lease against the fixture clock it is handed, never the wall clock', async () => {
-  const delivered = await plant(parent);
-  const owed = async (extra: Partial<Work>) => plant({ ...followUp(0, { stage: 'build', epoch: 2, ...extra } as Partial<Work>), description: `Post-deploy follow-up: post-deploy:${delivered.id}:AC-2:${proof}:${filed}\n\nowed` } as Work);
-  const reading = { id: randomUUID(), producer: coordinator.id, trusted: true, executed: 1, skipped: 0, at: iso(now - 30 * 60_000), proof: own, sha: serving, baseSha: mergeSha, policyRevision: 1, result: 'pass' as const, reading: { detail: 'the advanced delivery log shows 0 failed deliveries in 24 hours' } };
-  // The lease expires a fixture-day after the fixture's `now`: judged against the clock the close is
-  // handed, it is live and the close refuses. Judged against the wall clock it reads expired and the
-  // item would close — the time bomb this proof pins shut.
-  const leased = await owed({ lease: { owner: worker.id, epoch: 2, expiresAt: iso(now + 24 * hour) }, evidence: [{ ...reading, id: randomUUID() }] });
-  const { closeWork } = await import('../src/server/close.js');
-  await assert.rejects(closeWork(clockedServices(), coordinator, leased.id, { kind: 'delivered-observation', reason: 'read', ref: serving }, randomUUID()), /has a live worker lease/);
-  // The same close through the same clocked path on an unleased twin closes: the refusal is the lease
-  // itself, judged live at the fixture's now, not the handed clock refusing everything.
-  const free = await owed({ evidence: [{ ...reading, id: randomUUID() }] });
-  const closed = await closeWork(clockedServices(), coordinator, free.id, { kind: 'delivered-observation', reason: 'read', ref: serving }, randomUUID()) as Work;
-  assert.deepEqual([closed.stage, closed.closure?.kind, isClosed(closed)], ['done', 'delivered-observation', true]);
 });

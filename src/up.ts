@@ -1106,7 +1106,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
     /**
      * GY-1915: the credential the goal step files with. Recording a goal needs admin or an operator
-     * agent holding intent:create, and since GY-1885 this install's own default credential is a
+     * agent, and since GY-1885 this install's own default credential is a
      * worker: handing the child no token filed with that worker and died with 403. The operator's
      * admin credential (as merger-setting resolves it: the saved file, else a host install's one-time
      * claim redeemed here once and held in memory), else the master's operator-agent identity
@@ -1131,7 +1131,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         // without touching the state the rerun replays (the merger-setting step resolves first too).
         const credential = await goalCredential();
         if (!credential) {
-          const missing = `neither the operator's admin credential nor the master's operator-agent credential (intent:create) is on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, and the install's worker credential holds no intent:create, so the goal cannot be filed`;
+          const missing = `neither the operator's admin credential nor the master's operator-agent credential is on this machine${state.operatorTokenFile ? ` (${state.operatorTokenFile} is unreadable)` : ''}, and a worker credential cannot file a goal`;
           throw new UpStop(`goal: ${missing}; place one on this machine and rerun ${rerun()}`, upExitCodes.prerequisite);
         }
         // The request id is saved before the first try: a rerun replays the same create, which the control plane answers once.

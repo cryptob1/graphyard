@@ -39,7 +39,7 @@ before(async () => {
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  const created = await request(token(operator), 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: ['decision:merge'], scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'The master agent' });
+  const created = await request(token(operator), 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: [], scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'The master agent' });
   assert.equal(created.status, 200, JSON.stringify(created.body));
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });

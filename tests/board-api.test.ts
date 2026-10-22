@@ -8,7 +8,6 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import { openHumanOnly } from '../src/model/human-request.js';
-import { maxAutomaticClears } from '../src/model/blocker-class.js';
 import { actorRole, groups, roleOf, type Board, type OpenGroup } from '../src/model/board.js';
 import { statusRoutes } from '../src/server/routes/status.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
@@ -40,8 +39,7 @@ const refusing = (reasons: Record<string, string[]>) => passed().map(gate => rea
 
 /**
  * The fixture board plus the shapes the incident had: an item blocked mid-attempt (GY-172, blocked
- * 90 minutes), a merge held by an escalation nobody resolved (GY-174), and
- * an item held behind the one it depends on (GY-175). GY-20 is parked on a human-only decision and
+ * 90 minutes) and an item held behind the one it depends on (GY-175). GY-20 is parked on a human-only decision and
  * GY-21 has passed every gate but the merge.
  */
 function scenario(): Work[] {
@@ -52,11 +50,8 @@ function scenario(): Work[] {
   const stuck = make('GY-172', 'Blocked item', { stage: 'build', stageEnteredAt: at(-90 * minute), blocker,
     lease: { owner: 'worker-a', epoch: 2, expiresAt: at(20 * minute) }, lastAssignment: { owner: 'worker-a', epoch: 2, displayName: 'Cedar', runtime: 'Claude', claimedAt: at(-90 * minute) } as Work['lastAssignment'],
     gates: refusing({ ready: [blocker], build: ['Worker has not submitted implementation for this attempt'] }) });
-  const held = make('GY-174', 'Held item', { stage: 'merge', stageEnteredAt: at(-45 * minute), submission: { epoch: 1, pr: 74 } as Work['submission'],
-    candidate: { sha: sha('h'), baseSha: sha('b'), pr: 74, branch: 'graphyard/gy-174-1', author: 'worker', createdAt: at(-2 * 60 * minute) } as Work['candidate'],
-    gates: refusing({ merge: ['Unresolved lease-loss escalation requires operator resolution: the builder lost contact'] }) });
   const waiting = make('GY-175', 'Held behind its dependency', { stage: 'ready', gates: refusing({ ready: ['Dependency GY-172 is unfinished'], build: ['Worker has not submitted implementation for this attempt'] }) });
-  return [...work, stuck, held, waiting];
+  return [...work, stuck, waiting];
 }
 
 /** GET /api/board, through the route the server registers, over a store holding `work`. */
@@ -79,7 +74,6 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
     assert.deepEqual({ group: item.group, actor: item.actor, command: item.command }, { group, actor, command }, key);
   };
   expect('GY-172', 'blocked', 'master', 'graphyard master unblock GY-172 REASON');
-  expect('GY-174', 'blocked', 'master', 'graphyard master decide GY-174 resolve REASON');
   expect('GY-175', 'up-next', 'held', null);
   // GitHub merges a candidate every gate passes (GY-1235): there is no command to run for it.
   expect('GY-21', 'moving', 'executor', null);
@@ -143,7 +137,6 @@ test('unit:master-status-board-owed — master status lists what the master owes
     assert.ok(stuck, `the blocked item is owed by the master: ${JSON.stringify(owed.map(item => item.key))}`);
     assert.equal(stuck.command, 'graphyard master unblock GY-172 REASON');
     assert.equal(stuck.group, 'blocked'); assert.equal(stuck.overdue, true);
-    assert.equal(owed.find(item => item.key === 'GY-174')?.command, 'graphyard master decide GY-174 resolve REASON', 'the unresolved escalation is owed too');
     // Only the master's items are in the owed list; everything else follows it, and nothing is dropped.
     assert.ok(owed.every(item => item.actor === 'master'));
     assert.ok(!owed.some(item => item.key === 'GY-21' || item.key === 'GY-20'), 'a merge the queue is running and a human-only decision are not the master\'s');
@@ -282,17 +275,6 @@ test('unit:board-blocked-classified-before-item-wait — a classified fault that
   assert.equal(plain.blockerSummary(failure, NOW).kind, 'outside-scope-test-failure');
   assert.doesNotMatch(plain.blockerSummary(failure, NOW).sentence, /GY-1234/);
   assert.equal(plain.blockerSummary('Waiting on GY-1689 to merge first', NOW).kind, 'item');
-});
-
-test('unit:board-blocked-spent-decision-names-master — a needs-decision blocker cleared maxAutomaticClears times names the master agent, not the approver', () => {
-  const decision = 'Waiting on the approver decision for this scope';
-  const { item } = blockedScenario(decision);
-  const fresh = plain.blockerSummary(decision, NOW, { ...item, blocker: decision, blockerProbe: null });
-  assert.equal(fresh.kind, 'needs-decision');
-  assert.match(fresh.sentence, /approver agent/);
-  const spent = plain.blockerSummary(decision, NOW, { ...item, blocker: decision, blockerProbe: { clears: maxAutomaticClears } as Work['blockerProbe'] });
-  assert.match(spent.sentence, /master agent/);
-  assert.doesNotMatch(spent.sentence, /approver|Graphyard clears/);
 });
 
 test('unit:board-blocked-next-action-no-echo — the item page Next-action paragraph points at the recorded blocker instead of repeating it', () => {

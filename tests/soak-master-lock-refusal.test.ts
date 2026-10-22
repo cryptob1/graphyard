@@ -39,7 +39,7 @@ test('unit:soak-lock-refusal-visible — over two simulated days the real loop h
   const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'soak-host',
     masterAgentName: 'graphyard-master-soak', autoMerge: true, mergeMethod: 'merge', workers: [] });
   const documented = await documentedInvariants();
-  assert.ok(documented.length >= 7, `docs/master-agent.md lists the per-cycle invariants: ${documented.join(', ')}`);
+  assert.ok(documented.length >= 6, `docs/master-agent.md lists the per-cycle invariants: ${documented.join(', ')}`);
 
   const start = Date.parse('2030-01-01T00:00:00Z');
   let elapsed = 0;

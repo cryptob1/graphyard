@@ -190,7 +190,6 @@ export const allowlist: Record<string, AllowlistEntry> = {
   'src/daemon/held-cli.ts': { subcommands: ['clone'], runs: 'the loop pinning a held CLI snapshot', credential: 'none: a --shared clone of the checkout\'s own object store', door: 'a --shared clone of the checkout\'s own object store: it never reaches the remote, so there is no network call to move' },
   'src/daemon/upgrade.ts': { subcommands: ['fetch'], runs: 'the loop\'s self-upgrade reading the base tip', credential: 'the coordinator checkout\'s own git credential', door: 'the self-upgrade decides whether to restart the loop that runs the merge writer, so it must read the base tip without it, from a writer that may be the one owed the restart' },
   'src/docs-sync.ts': { subcommands: ['fetch'], runs: 'the loop\'s docs-sync (branch and base reads)', credential: 'the coordinator checkout\'s own git credential', door: 'the fetches put a reviewed worker branch and its base into the coordinator\'s object store for an in-memory merge-tree and a detached worktree; the merge writer exposes no read of a branch it is not merging, and a failed fetch falls back to commits already held' },
-  'src/master/autonomy.ts': { subcommands: ['clone', 'fetch'], runs: 'the master cloning the approver\'s own copy (approverClone) and fetching its bound sha', credential: 'the coordinator checkout\'s own git credential for the bound-sha fetch; the clone itself is local', door: 'the clone is local (the approver\'s own unshared copy of the coordinator checkout) and never reaches the remote; the fetch reads a worker\'s bound sha into that copy, a branch the merge writer never handles, and a miss is tolerated' },
   'src/master/worktrees.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s cycle preparation (cycleBaseTip, one fetch per cycle)', credential: 'the coordinator checkout\'s own git credential', door: 'the worker launcher prepares worktrees from the base tip in the coordinator\'s own object store, once per cycle; the merge writer runs as a serial queue step and publishes no base read other processes can await, so routing it there would serialize every launch behind merges' },
   'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on', door: 'it is the merge writer: pushArgs is the door\'s own leased push, defined here and executed only by the writer\'s ports' },
   'src/server/routes/goals.ts': { subcommands: ['fetch'], runs: 'the server\'s land route judging a merge-writer landing', credential: 'none of its own: a compose container holds no SSH credential (GY-1922), so a failed fetch answers retryable 503 and records nothing', door: 'it runs in the server process, which cannot call the loop\'s merge writer; the fetch is best-effort and a failure falls back to the origin ref the writer\'s own post-push fetch leaves, so dropping it is a change to the land route\'s judgement, not a move' },
@@ -229,7 +228,6 @@ export const baseline = [
   'src/daemon/held-cli.ts',
   'src/daemon/upgrade.ts',
   'src/docs-sync.ts',
-  'src/master/autonomy.ts',
   'src/master/worktrees.ts',
   'src/merge-writer/executor.ts',
   'src/server/routes/goals.ts',
@@ -332,7 +330,6 @@ export const docsSyncWorkspaceCluster = [
   'src/cli/workspace-worktree.ts',
   'src/daemon/held-cli.ts',
   'src/docs-sync.ts',
-  'src/master/autonomy.ts',
   'src/master/worktrees.ts',
   'src/up.ts',
 ];

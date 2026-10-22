@@ -24,7 +24,7 @@ export const setupSteps = {
   reviewer: 'docs/setup-from-zero.md step 4 (reviewer and revert-approver Apps)',
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
-  releaseFiling: 'issue GRAPHYARD_RELEASE_TOKEN to an operator agent holding only intent:create (graphyard operator-agent setup FILE --token-stdin)',
+  releaseFiling: 'issue GRAPHYARD_RELEASE_TOKEN to an operator agent holding no capability, scoped to this repository (graphyard operator-agent setup FILE --token-stdin)',
   loopCode: 'rerun graphyard up --agent from this checkout (docs/setup-from-zero.md step 10, start the master)',
   unitOverrides: 'docs/setup-from-zero.md#troubleshooting-manual-steps (remove the drop-in)',
 } as const;
@@ -164,16 +164,15 @@ export function followUpFilingRefusal(actor: { id?: string; role?: string; capab
   if (!actor?.role) return 'the filing credential names no principal';
   if (actor.role === 'admin') return null;
   if (actor.role !== 'operator-agent') return `${actor.id} has role ${actor.role}, which cannot create work (Operator permission required)`;
-  if (!actor.capabilities?.includes('intent:create')) return `operator agent ${actor.id} lacks intent:create`;
   if (!repository || !actor.scope?.repositories?.includes(repository)) return `operator agent ${actor.id}'s scope does not include ${repository ?? 'the repository'}`;
   if (!actor.scope?.workItems?.includes('*')) return `operator agent ${actor.id} lacks wildcard work scope, which creating work requires`;
   return null;
 }
-/** Pure: what `actor` holds beyond `intent:create` over `repository` alone, or null when nothing. */
+/** Pure: what `actor` holds beyond creating work in `repository` alone, or null when nothing. */
 export function followUpFilingExcess(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[] } }, repository?: string | null) {
   if (actor.role === 'admin') return `${actor.id} is an admin, which can claim, approve and administer far beyond filing`;
-  const extra = (actor.capabilities ?? []).filter(capability => capability !== 'intent:create');
-  if (extra.length) return `operator agent ${actor.id} also holds ${extra.join(', ')}; the filing credential holds only intent:create`;
+  const extra = actor.capabilities ?? [];
+  if (extra.length) return `operator agent ${actor.id} also holds ${extra.join(', ')}; the filing credential holds no capability`;
   const otherRepositories = repository ? (actor.scope?.repositories ?? []).filter(other => other !== repository) : [];
   return otherRepositories.length ? `operator agent ${actor.id} can also create work in ${otherRepositories.join(', ')}; the filing credential is scoped to ${repository} alone` : null;
 }
@@ -181,7 +180,7 @@ export function followUpFilingExcess(actor: { id?: string; role?: string; capabi
 /**
  * GY-1614: whether the control plane would admit the follow-up a failed release candidate files
  * with GRAPHYARD_RELEASE_TOKEN, judged from the principal that token authenticates as, and whether
- * that principal holds more than the filing identity's `intent:create`.
+ * that principal holds more than the filing identity needs.
  */
 export function releaseFilingCheck(filing: NonNullable<SetupFromZeroInput['releaseFiling']>, repository: string | null): SetupCheck {
   const filingRepository = repository ?? filing.status?.repository;

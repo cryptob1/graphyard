@@ -65,7 +65,7 @@ test('unit:master-guide-carries-role-instructions — graphyard master guide pri
   assert.ok(stdout.startsWith(masterInstructions), 'the role instructions lead the guide');
   assert.equal(stdout, `${masterInstructions}\n${guide}\n`);
   // Every rule the AGENTS.md block carried is in the text the master now reads.
-  for (const rule of ['Autonomy is the default: act without asking.', 'graphyard master decide GY-N ACTION REASON', 'graphyard master approver GY-N DECISION', 'master browser app-permissions', 'Keep cycling: status, dispatch ready work', 'An item is delivered at merge', 'GitHub merges nothing and no pull request is opened.', 'Never use an administrative merge bypass']) assert.ok(stdout.replace(/\s+/g, ' ').includes(rule), `master guide states: ${rule}`);
+  for (const rule of ['Autonomy is the default: act without asking.', 'graphyard master create|release|unblock|requirements|rework|attest|close', 'master browser app-permissions', 'Keep cycling: status, dispatch ready work', 'An item is delivered at merge', 'GitHub merges nothing and no pull request is opened.', 'Never use an administrative merge bypass']) assert.ok(stdout.replace(/\s+/g, ' ').includes(rule), `master guide states: ${rule}`);
 });
 
 test('unit:agents-md-worker-block-only — sync regeneration renders the worker block and drops a master block; Graphyard\'s own AGENTS.md has none', async () => {

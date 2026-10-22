@@ -240,7 +240,7 @@ test('unit:status-degrades-per-section — master status still returns every oth
     assert.match(unavailable.error, /did not answer within|aborted due to timeout/);
     assert.equal(report.unavailable.length, 1, `only the goals section is unavailable: ${JSON.stringify(report.unavailable)}`);
     // Every other section is still there, built from the bounded snapshot.
-    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'throughput', 'terminalDecisions', 'runtime', 'timings'])
+    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'throughput', 'runtime', 'timings'])
       assert.ok(section in report && report[section] !== undefined, `master status returned its ${section} section`);
     assert.ok(report.work.length >= OPEN, 'the open items are reported');
 

@@ -178,11 +178,10 @@ test('unit:risk-class-shown — graphyard status GY-N prints risk, its reasons a
   assert.match(renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(work), item: normal })), /<dt>Risk<\/dt><dd class="risk-details">normal<small> · no sensitive path in the merge delta<\/small><\/dd>/);
 });
 
-test('unit:landability-verdict — the risk class reads beside the lane and gates github mode nothing: the policy never imports it, landability and lane rework read it only for a control-plane observation (GY-1528), the gates likewise (GY-1525), and the verdict suites stand unmodified', async () => {
+test('unit:landability-verdict — the risk class reads beside the lane and gates github mode nothing: the policy never imports it, landability reads it only for a control-plane observation (GY-1528), the gates likewise (GY-1525), and the verdict suites stand unmodified', async () => {
   assert.doesNotMatch(await read('src/model/policy.ts'), /risk-class/, 'src/model/policy.ts does not read the risk class');
-  // GY-1528: a control-plane candidate's manual: attestation (landability) and its rework approver
-  // (lane rework) follow the risk class; every read sits on a line that asks for that observation.
-  for (const file of ['src/model/landability.ts', 'src/server/lane-rework.ts']) {
+  // GY-1528: a control-plane candidate's manual: attestation (landability) follows the risk class; the read sits on a line that asks for that observation.
+  for (const file of ['src/model/landability.ts']) {
     const source = await read(file);
     assert.doesNotMatch(source, /classifyRisk|withRisk/, `${file} neither classifies a delta itself nor prints the class`);
     const reads = source.split('\n').filter(line => /\briskOf\(/.test(line));

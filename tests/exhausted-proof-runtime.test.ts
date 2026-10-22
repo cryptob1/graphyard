@@ -230,7 +230,7 @@ test('unit:acted-producer-failure-still-reworks — a head whose producer attemp
     assert.ok(abandoned, 'request is abandoned in cursor');
 
     const [attention] = dispatchFailureAttention({ abandoned: [{ requestId: unit.id, ...abandoned }] });
-    assert.match(attention.next, /requests a rework decision for GY-1127 on its next cycle/);
+    assert.match(attention.next, /returns GY-1127 to a worker on its next cycle/);
 
     const entry: ExhaustedProof = {
       requestId: unit.id,
