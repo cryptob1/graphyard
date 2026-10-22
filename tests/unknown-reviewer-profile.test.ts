@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
-import { workerLaunchStatus } from '../src/master/dispatch.js';
 import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -18,8 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *   --apply` runs, and the accounts checklist lines are green only once a worker and a reviewer
  *   profile exist.
  * - unit:unknown-profile-escalates: three consecutive review launches refused for an unknown
- *   reviewer profile raise one configuration attention naming the profile and the command that
- *   writes the profiles; the launch boundary then backs off to one attempt every five minutes
+ *   reviewer profile are counted; the launch boundary then backs off to one attempt every five minutes
  *   until the profiles change, and a launch past the profile lookup clears the fault.
  */
 
@@ -54,10 +52,10 @@ function work(clock: number): Work {
   } as unknown as Work;
 }
 
-test('unit:unknown-profile-escalates — three review launches refused for an unknown reviewer profile raise one configuration attention naming the profile and graphyard master environments --apply, later attempts back off to once per five minutes until the profiles change, and the attention rides master status', async () => {
+test('unit:unknown-profile-escalates — three review launches refused for an unknown reviewer profile are counted, later attempts back off to once per five minutes naming graphyard master environments --apply until the profiles change', async () => {
   const root = await reviewerMaster('unknown-reviewer-profile');
   // Late-bound so the file loads, and its cases fail, on a tree without the change (the proof's exercise).
-  const { readReviewerProfileRefusal, reviewerProfileRefusalAttention } = await import('../src/reviewer.js');
+  const { readReviewerProfileRefusal } = await import('../src/reviewer.js');
   let clock = 1_700_000_000_000;
   const launch = (name: string) => launchReview(root, work(clock), name, [], new Date(clock).toISOString(), { now: () => new Date(clock) });
   const config = await loadMasterConfig(root);
@@ -71,22 +69,6 @@ test('unit:unknown-profile-escalates — three review launches refused for an un
   assert.equal(counted?.profile, 'review-codex');
   assert.equal(counted?.refusals, 3);
   assert.equal(counted?.at, new Date(clock).toISOString());
-
-  // One configuration attention: the profile named, the command that writes the profiles named, owned by the master.
-  const [attention] = reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config));
-  assert.ok(attention, 'the attention stands at the limit');
-  assert.match(attention.subject, /review-codex/);
-  assert.match(attention.text, /graphyard master environments --apply/);
-  assert.equal(attention.next, 'Run graphyard master environments --apply; it writes the reviewer and worker profiles, and the loop\'s next review launch succeeds and clears this');
-  assert.equal(attention.role, 'master');
-  assert.equal(attention.human, false);
-  // Before the limit it stands down: the dispatcher's first widening retries are answer enough.
-  assert.deepEqual(reviewerProfileRefusalAttention({ version: 1, profile: 'review-codex', refusals: 2, at: counted!.at, profiles: counted!.profiles }), []);
-  // The profiles changed since the refusals (the missing one written, no launch yet to clear the record): the stale record raises nothing.
-  assert.deepEqual(reviewerProfileRefusalAttention(counted, { workers: config.workers, reviewers: [...config.reviewers, { name: 'review-codex', agentName: 'review-codex-1', kind: 'codex' }] as typeof config.reviewers }), [], 'a record of profiles since changed is stale');
-  // master status carries it beside the never-starting accounts (GY-417's wiring).
-  const status = await workerLaunchStatus(root, await loadMasterConfig(root));
-  assert.ok(status.items.some(item => item.subject === attention.subject && item.text.includes('graphyard master environments --apply')), 'master status raises the configuration attention');
 
   // Inside five minutes the launch boundary refuses the knock without making an attempt: nothing is recounted, the last attempt stands.
   clock += 60_000;
@@ -102,17 +84,15 @@ test('unit:unknown-profile-escalates — three review launches refused for an un
   assert.equal(again?.refusals, 4);
   assert.equal(again?.at, new Date(clock).toISOString());
 
-  // The profiles change: review-codex exists, the launch gets past the profile lookup, and the record — with it the attention and the backoff — is gone.
+  // The profiles change: review-codex exists, the launch gets past the profile lookup, and the record — with it the backoff — is gone.
   clock += 60_000;
   await saveReviewerProfile(root, { name: 'review-codex', agentName: 'review-codex-1', kind: 'codex' });
   await assert.rejects(launch('review-codex'), /uses the codex review provider/, 'the launch is refused no longer for the profile but by the item itself');
   assert.equal(await readReviewerProfileRefusal(config), null, 'the profiles changed, so the fault is over');
-  assert.deepEqual(reviewerProfileRefusalAttention(await readReviewerProfileRefusal(config)), []);
-  assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).items.length, 0, 'master status raises no attention once the profiles are written');
 });
 
 // Review thread on 28d1bbcb642f (reviewer.ts): a replacement profile the dispatcher now selects launches, so the obsolete record clears too.
-test('unit:unknown-profile-escalates — a launch through a replacement profile clears the refusal of the old name, so no obsolete attention stands while reviews launch', async () => {
+test('unit:unknown-profile-escalates — a launch through a replacement profile clears the refusal of the old name, so no obsolete record stands while reviews launch', async () => {
   const root = await reviewerMaster('unknown-reviewer-profile-replaced');
   const { readReviewerProfileRefusal } = await import('../src/reviewer.js');
   const clock = 1_700_000_000_000;
@@ -123,7 +103,6 @@ test('unit:unknown-profile-escalates — a launch through a replacement profile 
   assert.equal((await readReviewerProfileRefusal(config))?.refusals, 3);
   await assert.rejects(launch('review-y'), /uses the codex review provider/, 'the replacement gets past the profile lookup');
   assert.equal(await readReviewerProfileRefusal(config), null, 'the old name\'s record is gone once a review launches');
-  assert.equal((await workerLaunchStatus(root, await loadMasterConfig(root))).items.length, 0);
 });
 
 /** The private file the refusals are counted in: beside the master credential, outside the checkout. */

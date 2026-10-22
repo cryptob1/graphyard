@@ -1,8 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { rm, mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { execFileSync } from 'node:child_process';
+import { rm } from 'node:fs/promises';
 import { docsWords } from '../src/model/documentation.js';
 import {
   emptyProjectMemory,
@@ -22,12 +20,8 @@ import { workerPrompt } from '../src/master/dispatch.js';
 import { reviewPrompt } from '../src/reviewer.js';
 import { producerPrompt } from '../src/producer.js';
 import { piProducerPrompt } from '../src/runner/roles.js';
-import { buildMasterStatus } from '../src/master/status.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model/work.js';
-import { emptyDaemonState, writeDaemonState } from '../src/daemon/state.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master/profiles.js';
 // Time-bomb allowance (GY-1694): the 2026-10-02 instants are memory/answer timestamps that updateProjectMemoryFromWork only sorts; its 24 h merge window runs on Date.now() against mergedAt values also derived from Date.now().
 
 function createSampleMemory(): ProjectMemory {
@@ -306,79 +300,6 @@ test('unit:session-request-carries-project-memory — an unanswered human reques
   updateProjectMemoryFromWork(memory, unfinishedWork, Date.now());
   assert.equal(memory.notes.length, 0, 'Unanswered human requests must not be recorded');
   assert.equal(memory.changes.length, 0, 'Unmerged items must not be recorded');
-});
-
-test('unit:session-request-carries-project-memory — master status shows project memory', async () => {
-  const memory = createSampleMemory();
-  const dir = await temporaryDirectory('master-status');
-  try {
-    await writeProjectMemory(dir, memory);
-
-    // 1. buildMasterStatus directly
-    const status = buildMasterStatus(
-      { work: [], now: new Date().toISOString() },
-      [],
-      [],
-      {},
-      { pending: [], completed: [] },
-      'main',
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-      'graphyard',
-      { projectMemory: memory }
-    );
-
-    assert.ok(status.projectMemory, 'buildMasterStatus must include projectMemory');
-    assert.equal(status.projectMemory.notes.length, 3);
-    assert.equal(status.projectMemory.changes.length, 3);
-
-    // 2. masterStatusReport
-    const credentials = await temporaryDirectory('master-status-credentials');
-    const tokenFile = join(credentials, 'master.token');
-    await writeFile(tokenFile, 'dummy-token');
-    const config = masterConfigSchema.parse({
-      version: 1,
-      repository: 'owner/project',
-      baseBranch: 'main',
-      url: 'http://localhost:3000',
-      credentialFile: tokenFile,
-      cliPath: '/bin/graphyard.mjs',
-      hostId: 'test-host',
-      githubAppId: 12345,
-      masterAgentName: 'master-agent',
-      workers: [],
-      reviewers: [],
-      producers: [],
-    });
-
-    // master status shows the memory the loop's cursor holds.
-    // The cursor is read only from outside the repository's worktrees, so the root is a repository.
-    execFileSync('git', ['init', '-q', dir]);
-    const loop = emptyDaemonState(config);
-    loop.projectMemory = memory;
-    await writeDaemonState(config, loop);
-
-    const mockApi = async (path: string) => {
-      if (path === 'work-snapshot') return { work: [], now: new Date().toISOString() };
-      return {};
-    };
-
-    const report = await masterStatusReport(
-      dir,
-      config,
-      mockApi,
-      { actor: { id: 'coordinator-1' } },
-      { commit: null }
-    );
-
-    assert.ok(report.projectMemory, `masterStatusReport must include projectMemory: ${JSON.stringify(report.daemon).slice(0, 400)}`);
-    assert.equal(report.projectMemory.notes.length, 3);
-    assert.equal(report.projectMemory.changes.length, 3);
-  } finally {
-    await rm(dir, { recursive: true, force: true }).catch(() => {});
-  }
 });
 
 test('unit:session-request-carries-project-memory — file persistence round-trips to .graphyard/project-memory.json', async () => {

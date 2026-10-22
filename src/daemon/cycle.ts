@@ -8,6 +8,7 @@ import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
+import { hotspots } from './hotspots.js';
 import { profileHealth, clearProfileFailure, recordProfileFailure } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
@@ -196,7 +197,8 @@ async function dispatchStep(cycle: Cycle) {
   const open = snapshot.work.filter(item => item.stage !== 'done');
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
   const taken = launcher.held();
-  const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), new Set(), clock);
+  const hot = new Set(hotspots(open, clock).map(entry => entry.file));
+  const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
   for (const item of claimable) {
     const key = dispatchKey(item);
     if (launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) continue;

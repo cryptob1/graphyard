@@ -27,7 +27,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * for an hour from the moment a preview publishes its running record, and the loop restarts twice,
  * its previews dying with it. Every preview must end recorded, no preview start or
  * record write is duplicated, the published sites, checkouts and servers stay bounded by the
- * previews running, nothing is left at the end and every system invariant holds.
+ * previews running, and nothing is left at the end.
  */
 const minute = 60_000;
 const start = Date.parse('2030-06-01T00:00:00Z');
@@ -169,7 +169,7 @@ class World {
   }
 }
 
-test('unit:soak-item-preview — a simulated day of item previews on the real loop: base, head, superseded, failed, cancelled and delivered previews under refused records, lost replies and two loop restarts each start once per loop, are written once per state, end recorded with their checkouts, servers and published sites removed, and stay bounded while every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-item-preview — a simulated day of item previews on the real loop: base, head, superseded, failed, cancelled and delivered previews under refused records, lost replies and two loop restarts each start once per loop, are written once per state, end recorded with their checkouts, servers and published sites removed, and stay bounded', { timeout: 300_000 }, async () => {
   const root = await realpath(await temporaryDirectory('soak-item-preview')); made.push(root);
   const base = join(root, 'worktrees'); await mkdir(base);
   let now = start;
@@ -177,8 +177,7 @@ test('unit:soak-item-preview — a simulated day of item previews on the real lo
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), decide: async () => ({ id: 'none' }) } as unknown as DaemonEffects;
   let state = emptyDaemonState(config);
   const checkouts = async () => (await readdir(base)).filter(name => name.startsWith(previewCheckoutPrefix) && !name.endsWith('.owner'));
@@ -199,7 +198,6 @@ test('unit:soak-item-preview — a simulated day of item previews on the real lo
       assert.equal(world.published.get(doc.id), doc.preview?.state === 'running' ? doc.preview.id : undefined, `cycle ${cycle}: ${doc.key} publishes exactly its running preview's site`);
       assert.ok((doc.previewHistory ?? []).length <= previewHistoryLimit, `cycle ${cycle}: ${doc.key}'s preview history is bounded`);
     }
-    for (const check of state.invariants.report) assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`);
   }
   // Ending: each item's last preview is recorded ended, nothing serves, nothing is published, no checkout is left.
   const docs = [...world.docs.values()];

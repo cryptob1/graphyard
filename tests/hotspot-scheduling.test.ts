@@ -5,9 +5,8 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatchOrder, dispatchSort, dispatchStarvationMs, stageWaitMs } from '../src/coordination.js';
-import { hotBeside, hotFileSet, hotspots } from '../src/daemon/hotspots.js';
-import { dispatchKey } from '../src/daemon/reconcile.js';
-import { dispatchSchedule, masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { hotFileSet, hotspots } from '../src/daemon/hotspots.js';
+import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
 
@@ -15,7 +14,7 @@ import type { Work } from '../src/model.js';
 // item — but within one operator priority an item that touches no file two or more live attempts
 // are already changing is offered before one that does, and every ready item still dispatches in
 // the same cycle. Heat comes from in-flight items only, over the files each candidate was observed
-// to change (GY-1992), and the dispatch record names the contention so master status can show it.
+// to change (GY-1992).
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const workerToken = 'worker-token-'.padEnd(40, 'x');
@@ -58,8 +57,6 @@ test('unit:dispatch-prefers-non-overlapping — hotspots name the files two or m
   assert.deepEqual(hotspots([one, rework], clock), [], 'a submission sent back for rework is a peer waiting for a worker, not a claimant');
   assert.deepEqual(hotspots([one, expired, delivered], clock), [], 'an expired lease and done work are not claimants');
   assert.deepEqual([...hotFileSet(all, clock)].sort(), ['docs/protocol/leases.md', hotFile], 'hotFileSet is the set of hot files dispatchOrder reads');
-  assert.deepEqual(hotBeside(ready, hotspots(all, clock)), { file: hotFile, beside: ['GY-hotA', 'GY-hotB'] }, 'hotBeside names the first hot file the item touches and its claimants');
-  assert.equal(hotBeside(work('GY-cold', observed(['src/cold.ts'])), hotspots(all, clock)), null, 'an item touching no hot file records no contention');
 });
 
 test('unit:dispatch-prefers-non-overlapping — dispatchOrder offers items touching no hot file first within one priority; priority dominates; an empty hot set reproduces the old order', () => {
@@ -97,8 +94,7 @@ async function daemon(profiles: string[]) {
     agents: () => [], credentials: async items => Object.fromEntries(items.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: snapshotWork, now: iso(offsetMs) }),
     closeSession: () => {}, dispatch: async (item, profile) => { log.push(`${item.key}→${profile.name}`); },
- observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    persist: async () => {},
   };
   return { master, effects, log, state: emptyDaemonState(master), set: (items: Work[], atMs = 0) => { snapshotWork = items; offsetMs = atMs; }, cleanup: () => Promise.resolve() };
 }
@@ -118,25 +114,6 @@ test('unit:dispatch-prefers-non-overlapping — the durable loop offers the cold
     loop.set([...heat, onlyHotA, onlyHotB]);
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
     assert.deepEqual(loop.log.slice(2), ['GY-onlyB→one', 'GY-onlyA→two'], 'every ready item touches the hot file, so age decides — and they all still dispatch in one cycle');
-  } finally { await loop.cleanup(); }
-});
-
-test('unit:hotspot-overlap-recorded — the dispatch record names the hot file and the live attempts it starts beside; a cold dispatch names no contention', async () => {
-  const loop = await daemon(['one', 'two']);
-  try {
-    const heat = [claimed('GY-hotA', [hotFile]), claimed('GY-hotB', [hotFile])];
-    const cold = work('GY-cold', { createdAt: iso(-60_000) });
-    const warm = work('GY-warm', { createdAt: iso(-7_200_000), ...observed([hotFile]) });
-    loop.set([...heat, cold, warm]);
-    await runCycle(loop.master, loop.state, loop.effects, () => clock);
-    const warmRecord = loop.state.actions[dispatchKey(warm)];
-    assert.equal(warmRecord?.state, 'done');
-    assert.ok(warmRecord.detail.includes(`starts on ${hotFile}`), 'the record names the contended file');
-    assert.ok(warmRecord.detail.includes('GY-hotA') && warmRecord.detail.includes('GY-hotB'), 'the record names every live attempt already changing it');
-    assert.match(warmRecord.detail, /GY-882 hot spot/);
-    const coldRecord = loop.state.actions[dispatchKey(cold)];
-    assert.equal(coldRecord?.state, 'done');
-    assert.ok(!coldRecord.detail.includes('hot spot'), 'a cold dispatch records no contention');
   } finally { await loop.cleanup(); }
 });
 
@@ -171,15 +148,4 @@ test('unit:dispatch-ages-malformed-rows — an item whose stage time is unreadab
   const malformed = row('GY-bad', 'garbage', 'garbage');
   assert.deepEqual(dispatchSort([fresh, malformed], new Set(), now).map(w => w.key), ['GY-bad', 'GY-fresh'], 'the malformed row is aged ahead of a fresh item');
   assert.equal(dispatchOrder(malformed, malformed, new Set(), now), 0, 'the comparator stays defined (never NaN) on a malformed row');
-});
-
-test('unit:dispatch-schedule-follows-loop-order — master status reports the order the loop offers, with the hot set and the clock (GY-1040)', () => {
-  const live = claimed('GY-liveA', [hotFile]), other = claimed('GY-liveB', [hotFile]);
-  const hotSmall = work('GY-hotSmall', observed([hotFile]));
-  const coldBroad = work('GY-coldBroad', observed(['tests/', 'docs/']));
-  const starvingBroad = work('GY-starving', { stageEnteredAt: iso(-2 * dispatchStarvationMs) });
-  const all = [live, other, hotSmall, coldBroad, starvingBroad];
-  const loopOrder = dispatchSort([hotSmall, coldBroad, starvingBroad], hotFileSet(all, clock), clock).map(w => w.key);
-  assert.deepEqual(loopOrder, ['GY-starving', 'GY-coldBroad', 'GY-hotSmall'], 'starving first, then cold before hot, whatever the breadth');
-  assert.deepEqual(dispatchSchedule(all, clock).order.map(entry => entry.key), loopOrder);
 });

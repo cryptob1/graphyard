@@ -11,7 +11,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { openReviewConflict, reconcileReviewConflict, reviewConflictAttention } from '../src/model/review-conflict.js';
+import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster, sessionAgentName, type HerdrAgent } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type DispatchTick } from '../src/auto-dispatch.js';
@@ -282,22 +282,12 @@ test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUES
   assert.equal(openReviewConflict(again)?.at, conflict.at); assert.equal((await store.events(item.id)).filter(event => event.kind === 'review.conflicted').length, 1);
   item = again;
 
-  // master status names the item, the head and both sessions — the recorded one and the one the ledger never had.
-  const records = [{ id: randomUUID(), agentName: 'review-opencode-1', profile: 'opencode-reviewer', requestId: request.id, verdict: { reviewId: 501 } }];
-  const [attention] = reviewConflictAttention([item], records);
-  assert.equal(attention.subject, item.key);
-  assert.match(attention.text, new RegExp(`Review of ${item.key} head ${H.slice(0, 12)} \\(PR #119\\) is conflicted`));
-  assert.match(attention.text, /APPROVED \(review 501 at 2026-09-22T08:00:16Z\) from session review-opencode-1 \(opencode-reviewer/);
-  assert.match(attention.text, /CHANGES_REQUESTED \(review 502 at 2026-09-22T08:01:23Z\) from a session the reviewer ledger has no record of/);
-  assert.match(attention.text, /Neither verdict is acted on/);
-
   // The fresh review resolves it, and only that verdict is acted on.
   item = await engine.observe(item.id, item.revision, observed([{ id: 503, reviewer, sha: H, state: 'CHANGES_REQUESTED', submittedAt: '2026-09-22T08:30:00Z' }]));
   assert.equal(openReviewConflict(item), null);
   assert.equal(item.reviewConflict!.state, 'resolved'); assert.equal(item.reviewConflict!.resolvedBy!.id, 503);
   assert.equal((await store.events(item.id)).filter(event => event.kind === 'review.conflict-resolved').length, 1);
   assert.match(standingVerdict(item)!.reason, /requested changes/, 'the fresh verdict is the one the loop acts on');
-  assert.deepEqual(reviewConflictAttention([item], records), []);
 
   // A person is not the reviewer identity: approving and then requesting changes on one head is
   // their latest word, and that change request still blocks — no conflict, nothing withheld.

@@ -1,21 +1,18 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { rm, writeFile } from 'node:fs/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { atomicPrivateWrite, masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { exhaustedProofDetail, exhaustedProofKey, exhaustedProofRework, type ExhaustedProof } from '../src/daemon/rework.js';
-import { sessionRetryLimit } from '../src/producer.js';
-import { describeAttempts, dispatchFailureAttention, dispatchFailureLimit, emptyDispatchCursor, extractProducerAccountsOrRuntimes, instantExitReason, isUnactedProducerAttempt, runDispatchTick, unactedProducerAttempts, type DispatchEffects } from '../src/auto-dispatch.js';
+import { masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { exhaustedProofRework, type ExhaustedProof } from '../src/daemon/rework.js';
+import { describeAttempts, dispatchFailureLimit, emptyDispatchCursor, instantExitReason, isUnactedProducerAttempt, runDispatchTick, unactedProducerAttempts, type DispatchEffects } from '../src/auto-dispatch.js';
 
 // GY-1153: Producer attempts that never started (runtime quota, trust prompt, busy profiles)
-// send a correct candidate back to a worker as a rework.
+// do not spend a request on a healthy account.
 // AC-1: unit:never-started-producers-request-no-rework
-// AC-2: unit:acted-producer-failure-still-reworks
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -73,19 +70,6 @@ function dispatchEffects(items: () => Work[], log: string[], producers: any[]): 
   };
 }
 
-function decisionLoop(items: () => Work[], decided: { action: string; reason: string }[], exhausted: () => ExhaustedProof[]): DaemonEffects {
-  return {
-    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    snapshot: async () => ({ work: items(), now: iso(1_000), jobs: [] }),
-    closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(1_000), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
-    exhaustedProofs: async () => exhausted(),
-    rework: async (_work: Work, reason: string) => { decided.push({ action: 'rework', reason }); return {}; },
-    persist: async () => {},
-  } as unknown as DaemonEffects;
-}
-
 test('unit:never-started-producers-request-no-rework — replays GY-1127\'s three never-started attempts and asserts no rework is requested and the request is relaunched on a healthy account', async () => {
   const root = await temporaryDirectory('exhausted-proof-runtime-unstarted');
   try {
@@ -118,38 +102,6 @@ test('unit:never-started-producers-request-no-rework — replays GY-1127\'s thre
     assert.ok(abandoned, 'unit request is abandoned in cursor');
     assert.equal(abandoned?.group, 'unit');
 
-    // Attention item names the attempts, the runtime/account, and raises producer-runtime attention
-    const [attention] = dispatchFailureAttention({ abandoned: [{ requestId: unit.id, ...abandoned }] });
-    assert.ok(attention, 'attention item is raised');
-    assert.match(attention.text, /never started/);
-    assert.match(attention.text, /agy/);
-    assert.match(attention.text + ' ' + attention.next, /producer-runtime/);
-    assert.match(attention.next, /relaunches the request once an eligible producer account exists/);
-
-    // Replay in decision loop: assert no rework is requested
-    const entry: ExhaustedProof = {
-      requestId: unit.id,
-      work: abandoned.work,
-      sha: abandoned.sha,
-      group: abandoned.group ?? null,
-      proofs: abandoned.proofs ?? [],
-      attempts: abandoned.attempts,
-      reason: abandoned.reason,
-    };
-    const submitted = work({
-      key: 'GY-1127',
-      candidate: { sha: H, baseSha: B, pr: 1127, branch: 'graphyard/gy-1127-1', author: 'implementer' },
-      observation: observation({ sha: H, baseSha: B }, { at: iso(0) }),
-    });
-    const decided: { action: string; reason: string }[] = [];
-    const loopConfig = masterConfigSchema.parse({ ...config, autoMerge: true, workers: [] });
-    const state = emptyDaemonState(loopConfig);
-    const effects = decisionLoop(() => [submitted], decided, () => [entry]);
-
-    await runCycle(loopConfig, state, effects, () => clock + 1_000);
-    await runCycle(loopConfig, state, effects, () => clock + 2_000);
-    assert.equal(decided.length, 0, 'no rework is requested when every producer attempt never started');
-
     // Relaunch the request once an eligible producer account exists
     const healthyToken = join(root, 'claude-healthy.token');
     await writeFile(healthyToken, 'token-claude-'.padEnd(40, 'x'), { mode: 0o600 });
@@ -170,100 +122,7 @@ test('unit:never-started-producers-request-no-rework — replays GY-1127\'s thre
   }
 });
 
-test('unit:acted-producer-failure-still-reworks — a head whose producer attempts include at least one session that acted and failed to produce evidence still gets the GY-496 rework', async () => {
-  const root = await temporaryDirectory('exhausted-proof-runtime-acted');
-  try {
-    const token = join(root, 'coordinator.token');
-    await writeFile(token, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const agyToken = join(root, 'agy.token');
-    await writeFile(agyToken, 'agy-token-'.padEnd(40, 'x'), { mode: 0o600 });
-
-    const config = masterConfig(token);
-    const item = requested('unit:acted-producer-failure-still-reworks');
-    const unit = item.autoDispatch!.producers.find(request => request.group === 'unit')!;
-    assert.ok(unit, 'unit proof group is requested');
-
-    // Attempts include at least one session that acted and failed to produce evidence
-    const failedWithActed = [
-      {
-        requestId: unit.id,
-        state: 'failed',
-        attempt: 1,
-        profile: 'agy',
-        requestedAt: iso(-7_200_000),
-        closedAt: iso(-3_600_000),
-        resolution: 'never started: the session took up neither its request nor the re-prompt',
-      },
-      {
-        requestId: unit.id,
-        state: 'failed',
-        attempt: 2,
-        profile: 'agy',
-        requestedAt: iso(-7_100_000),
-        closedAt: iso(-3_500_000),
-        resolution: 'never started: the session took up neither its request nor the re-prompt',
-      },
-      {
-        requestId: unit.id,
-        state: 'failed',
-        attempt: 3,
-        profile: 'agy',
-        requestedAt: iso(-7_000_000),
-        closedAt: iso(-3_400_000),
-        resolution: 'the headless run ended (no-payload: run 3 found no test named unit:tmp-reclaim) without trusted evidence for unit:tmp-reclaim (missing)',
-      },
-      {
-        requestId: unit.id,
-        state: 'failed',
-        attempt: 4,
-        profile: 'agy',
-        requestedAt: iso(-6_900_000),
-        closedAt: iso(-3_300_000),
-        resolution: 'never started: the session took up neither its request nor the re-prompt',
-      },
-    ];
-
-    const log: string[] = [], cursor = emptyDispatchCursor(config);
-    await runDispatchTick(config, cursor, dispatchEffects(() => [item], log, failedWithActed), () => clock);
-
-    const abandoned = cursor.abandoned[unit.id];
-    assert.ok(abandoned, 'request is abandoned in cursor');
-
-    const [attention] = dispatchFailureAttention({ abandoned: [{ requestId: unit.id, ...abandoned }] });
-    assert.match(attention.next, /returns GY-1127 to a worker on its next cycle/);
-
-    const entry: ExhaustedProof = {
-      requestId: unit.id,
-      work: abandoned.work,
-      sha: abandoned.sha,
-      group: abandoned.group ?? null,
-      proofs: abandoned.proofs ?? [],
-      attempts: abandoned.attempts,
-      reason: abandoned.reason,
-    };
-    const submitted = work({
-      key: 'GY-1127',
-      candidate: { sha: H, baseSha: B, pr: 1127, branch: 'graphyard/gy-1127-1', author: 'implementer' },
-      observation: observation({ sha: H, baseSha: B }, { at: iso(0) }),
-    });
-    const decided: { action: string; reason: string }[] = [];
-    const loopConfig = masterConfigSchema.parse({ ...config, autoMerge: true, workers: [] });
-    const state = emptyDaemonState(loopConfig);
-    const effects = decisionLoop(() => [submitted], decided, () => [entry]);
-
-    await runCycle(loopConfig, state, effects, () => clock + 1_000);
-    assert.equal(decided.length, 0, 'the rework waits one cycle after the escalation');
-
-    await runCycle(loopConfig, state, effects, () => clock + 2_000);
-    assert.equal(decided.length, 1, 'the rework is applied when an attempt acted and failed');
-    assert.equal(decided[0].action, 'rework');
-    assert.match(decided[0].reason, /ended without trusted evidence/);
-  } finally {
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test('GY-1153 review follow-ups — a sole profile keeps its unstarted retries, mid-run limits still count as acted, and the attention names only profiles', async () => {
+test('GY-1153 review follow-ups — a sole profile keeps its unstarted retries, mid-run limits still count as acted', async () => {
   const root = await temporaryDirectory('exhausted-proof-runtime-followups');
   try {
     const token = join(root, 'coordinator.token');
@@ -290,12 +149,6 @@ test('GY-1153 review follow-ups — a sole profile keeps its unstarted retries, 
   assert.equal(isUnactedProducerAttempt('attempt 2 on agy: failed — the headless run ended (exit: provider limit notice) without trusted evidence for unit:a (missing)'), false);
   assert.equal(isUnactedProducerAttempt('attempt 1 on agy: failed — never started: the session left Herdr without acting on its request'), true);
   assert.equal(isUnactedProducerAttempt('the headless run could not start: spawn agy ENOENT'), true);
-  // The attention names the profiles the attempts ran on, never words lifted from a resolution.
-  assert.deepEqual(extractProducerAccountsOrRuntimes([
-    'attempt 1 on agy: failed — never started: profile is busy in the claude runtime',
-    'attempt 2 on claude-b: failed — never started: account exhausted',
-    'attempt 3 on agy: failed — never started',
-  ]), ['agy', 'claude-b']);
 });
 
 test('GY-1227 review follow-ups — shared unacted wording, unacknowledged sessions, empty attempts, settled-path profiles and a recovered sole profile', async () => {
@@ -310,7 +163,6 @@ test('GY-1227 review follow-ups — shared unacted wording, unacknowledged sessi
   // A spent entry with no recorded attempt is acted in both the escalation and the rework.
   const empty: ExhaustedProof = { requestId: 'r', work: 'GY-1127', sha: H, group: 'unit', proofs: ['unit:a'], attempts: [], reason: 'spent' };
   assert.equal(unactedProducerAttempts([]), false);
-  assert.match(exhaustedProofDetail(empty), /on its next cycle it returns GY-1127 to a worker/);
   assert.ok(exhaustedProofRework(work(), [empty]), 'the rework the escalation announced is delivered');
 
   const root = await temporaryDirectory('exhausted-proof-runtime-gy1227');

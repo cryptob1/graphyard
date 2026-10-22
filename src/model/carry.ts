@@ -96,13 +96,6 @@ export function diffUnchanged(merge: Pick<TipMerge, 'diff'> | null | undefined):
   const diff = merge?.diff;
   return !!diff?.reviewed && diff.reviewed === diff.tip;
 }
-/** How a decision's ground reads in status: `diff unchanged (patch-id 1a2b3c4d5e6f)`. */
-export function describeGround(ground: CarryGround | null | undefined): string | null {
-  if (!ground) return null;
-  if (ground.rule === 'diff unchanged') return `diff unchanged (patch-id ${ground.patchId!.slice(0, 12)})`;
-  if (ground.rule === 'diff changed') return `diff changed (patch-id ${ground.patchId!.slice(0, 12)} became ${ground.tipPatchId!.slice(0, 12)}); files rule`;
-  return 'files rule (the diff could not be compared)';
-}
 const list = (paths: string[]) => paths.length > 6 ? `${paths.slice(0, 6).join(', ')} and ${paths.length - 6} more` : paths.join(', ');
 
 /** The one reason that refuses every binding at once, or null when the tip qualifies for per-binding decisions. */

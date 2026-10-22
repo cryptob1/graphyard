@@ -13,7 +13,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { nextAction } from '../src/model/next-action.js';
 import { neededRework } from '../src/daemon/rework.js';
-import { describeDispatch } from '../src/master/status.js';
 
 // GY-135: a proof that passes against an unchanged tree proves nothing. A pass is trusted only
 // beside the producer's run of the same proof failing against a tree with its criterion's

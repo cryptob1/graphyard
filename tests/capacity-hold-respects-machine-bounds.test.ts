@@ -65,20 +65,15 @@ before(async () => {
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
-test('unit:capacity-hold-respects-machine-bounds — a held account is not re-selected, occupiesRoleBound blocks a second live session, and the spent epoch is counted once', async () => {
+test('unit:capacity-hold-respects-machine-bounds — a held account is not re-selected, a finished agent whose lease ended frees its profile, and the spent epoch is counted once', async () => {
   const capacity = await import('../src/model/capacity.js') as {
     accountHeldForRole?: (held: Record<string, { until?: string; resetsAt?: string | null }>, account: string, now: number) => boolean;
     workerAttemptLedger?: (work: Work, epoch: number) => { exhaustions: number; attempts: number; released: number; open: number; preservedCommit: string | null };
   };
-  const sessions = await import('../src/daemon/sessions.js') as {
-    occupiesRoleBound?: (profile: WorkerProfile, agent: HerdrAgent | undefined, work: readonly Work[], now: number) => boolean;
-  };
   assert.equal(typeof capacity.accountHeldForRole, 'function', 'GY-1708 exports accountHeldForRole');
   assert.equal(typeof capacity.workerAttemptLedger, 'function', 'GY-1708 exports workerAttemptLedger');
-  assert.equal(typeof sessions.occupiesRoleBound, 'function', 'GY-1708 exports occupiesRoleBound');
   const accountHeldForRole = capacity.accountHeldForRole!;
   const workerAttemptLedger = capacity.workerAttemptLedger!;
-  const occupiesRoleBound = sessions.occupiesRoleBound!;
 
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
   const now = Date.now();
@@ -106,7 +101,6 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   assert.equal(selected.account?.name, 'env-b', 'selection fails over to the next account; the held one is never re-selected');
 
   const profile = config.workers[0] as WorkerProfile;
-  const live: HerdrAgent = { name: profile.agentName, pane_id: 'pane-1', agent_status: 'working' };
   const finished: HerdrAgent = { name: profile.agentName, pane_id: 'pane-1', agent_status: 'done' };
   const filed = await ok(operator, 'POST', 'work', {
     title: 'bounds', 
@@ -114,8 +108,6 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   }) as Work;
   const ready = await ok(operator, 'POST', `work/${filed.id}/ready`, {}) as Work;
   const claimed = await ok(workerA, 'POST', `work/${ready.id}/claim`, {}) as Work;
-  assert.equal(occupiesRoleBound(profile, live, [claimed], now), true, 'a working agent under a live lease occupies the bound');
-  assert.equal(occupiesRoleBound(profile, finished, [claimed], now), true, 'a finished agent whose lease still owns it still occupies the bound');
 
   // End the attempt as capacity exhaustion would: released epoch, no live lease.
   await ok(coordinator, 'POST', `work/${claimed.id}/capacity`, {
@@ -127,7 +119,6 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   assert.equal(after.lease, null);
   const ledger = workerAttemptLedger(after, 1);
   assert.deepEqual(ledger, { exhaustions: 1, attempts: 1, released: 1, open: 0, preservedCommit: null }, 'the spent epoch is counted once');
-  assert.equal(occupiesRoleBound(profile, finished, [after], now), false, 'once the lease ends the finished agent no longer occupies the bound');
   assert.equal(reclaimableAgent(profile, finished, [after], now), true);
 
   // Dispatch after the hold: the spent account stays held; the profile is free for the redispatch.
@@ -156,10 +147,7 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
         epoch: next.epoch, host: 'loop-host', path: `/tmp/bounds/${next.id}`, branch: `graphyard/${next.key.toLowerCase()}-${next.epoch}`,
       });
     },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'n/a', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
     persist: async () => {},
-    reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,
   };
   const health = profileHealth(config.workers, { builder: { available: true, reason: null } }, herdr.agents, state, now, [after]);
   assert.equal(health[0].busy, false, 'finished agent with no live lease is not busy: the bound is free for redispatch');

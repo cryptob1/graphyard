@@ -7,7 +7,6 @@ import { temporaryDirectories, underTestRunner } from '../supervisor.js';
 import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { candidateSettingsSchema, mergeWriterSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
-import { invariantThresholdsSchema } from '../model/invariants.js';
 export { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory } from './checkout-git.js';
 
 const safeEnvironment = z.record(
@@ -426,8 +425,8 @@ export const masterConfigSchema = forwardTolerant(z.object({
     url: z.string().min(1).max(500),
     credentialFile: z.string().min(1).max(1000).refine(isAbsolute, 'upstream.credentialFile must be absolute'),
   }).strict().optional(),
-  // The system invariants' thresholds (GY-404, src/model/invariants.ts), each defaulting to the loop's bound.
-  invariants: invariantThresholdsSchema.optional(),
+  /** Retired (GY-2877): the system invariants' thresholds; a master.json written before keeps parsing. */
+  invariants: z.unknown().optional(),
 // GY-1960: master.json is forward-tolerant — fields a newer version wrote that this one does not
 // declare parse and are written back unchanged, so a rollback or a held-CLI snapshot opens the file.
 }).strict());

@@ -185,9 +185,7 @@ function loopEffects(work: Work[], dispatch: DaemonEffects['dispatch']) {
   const effects: DaemonEffects = {
     agents: () => [], credentials: async items => Object.fromEntries(items.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: structuredClone(work), now: new Date(Date.now() + offsetMs).toISOString() }),
-    closeSession: () => {}, dispatch,
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    closeSession: () => {}, dispatch, persist: async () => {},
   };
   return { effects, clock: () => Date.now() + offsetMs, advance: (ms: number) => { offsetMs += ms; } };
 }

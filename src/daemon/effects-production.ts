@@ -46,7 +46,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     if (memory && memory !== writtenMemory) await writeProjectMemory(root, state.projectMemory).then(() => { writtenMemory = memory; }, () => {});
     return writeDaemonState(current(), state);
   };
-  let cursor: DispatchCursor | null = null;
+  let cursor: DispatchCursor | null = null, ticking: Promise<unknown> | null = null;
   return Object.defineProperties({
     snapshot: deps.snapshot,
     agents: () => listHerdrAgents(run).catch(() => []),
@@ -58,11 +58,12 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     removeWorktree: path => removeAttemptWorktree(root, path, run),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
-    // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot.
-    dispatchTick: async snapshot => {
+    // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
+    // still running past its step's timeout is not started twice.
+    dispatchTick: snapshot => ticking ??= (async () => {
       cursor ??= await readDispatchCursor(root, current());
       return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run }));
-    },
+    })().finally(() => { ticking = null; }),
     masterSession: masterSessionEffects(root, current, run),
     promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     // The executor merges in this checkout's object store, pushes with the install's deploy key alone and records each step as the coordinator under one key per (step, commits).

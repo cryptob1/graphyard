@@ -247,15 +247,6 @@ export function capacityRetryAt(accounts: readonly Pick<CapacityAccount, 'resets
 /** One identity per capacity episode: the role and exactly which accounts are spent until when. */
 export const capacitySignature = (role: CapacityRole, accounts: readonly CapacityAccount[]) =>
   `${role}:${[...accounts].map(entry => `${entry.profile}/${entry.account}@${entry.resetsAt ?? 'unknown'}`).sort().join(',')}`;
-/** The one line `master status` and the dashboard say about a spent role. */
-export function describeCapacity(role: CapacityRole, accounts: readonly CapacityAccount[]) {
-  const retryAt = capacityRetryAt(accounts);
-  return `${role} capacity is exhausted on every configured account (${accounts.map(entry => `${entry.account} resets ${entry.resetsAt ?? 'at an unknown time'}`).join(', ')}); `
-    + `${role} launches are paused${retryAt ? ` until ${retryAt}` : ' until an account reports quota again'}, and nothing else is delayed`;
-}
-export function standingCapacity(work: { capacity?: CapacityState | null }, role?: CapacityRole): SpentCapacity[] {
-  return (work.capacity?.spent ?? []).filter(entry => !role || entry.role === role);
-}
 
 type AttemptWork = { capacity?: CapacityState | null; pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null };
 /** GY-1708: one epoch's exhaustion/attempt counts after mid-attempt limit (double-count shows as two rows). */

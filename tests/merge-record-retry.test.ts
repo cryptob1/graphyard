@@ -88,7 +88,7 @@ async function cyclesUntilDelivered(state: DaemonState, world: ReturnType<typeof
   const details: string[] = [];
   const now = () => start;
   for (let cycle = 0; cycle < limit && (world.ledger()?.state !== 'reconciled' || state.mergeWriter.unconfirmed?.length); cycle++) {
-    const result = await runCycle(config, state, world.effects, now);
+    const result = await runCycle(config, state, world.effects, now, undefined, line => details.push(line));
     details.push(...result.actions.map(action => action.detail));
     await mergeWriterIdle(state);
   }

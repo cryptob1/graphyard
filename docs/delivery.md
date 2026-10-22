@@ -3,11 +3,7 @@
 
 Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
 
-**The master loop deploys continuously** (compose/local installs): each new base tip runs `graphyard upgrade`'s steps (build, restart), then `/healthz?strict` must report the deployed commit; passing, the loop restarts onto it. The redeploy stamps from the deployed commit's tree, so `/healthz` names it while the loop runs a held snapshot. Failing the deploy or the health check, the recorded release is redeployed (`promotion.deploy`: `deploy of SHA failed at STEP: REASON; rolled back to SHA`); two tries until main moves, unless the tip migrated the database. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline. Main moves only by the merge writer's push. Base failures file nothing.
-
-The deploy runs off the cycle: the loop cycles on, starts no second meanwhile and records the settled success or rollback.
-
-A tip whose post-deploy E2E failed is not deployed again: the same commit fails identically, so the loop waits for main to move.
+**`graphyard-deploy.service` deploys continuously** (compose/local installs, beside `graphyard-master.service`; `master init` installs both): `graphyard upgrade --watch` fetches origin, and for each new base tip checks it out, builds, restarts the container or unit and checks `/healthz`; failing, it rolls back to the previous tip and waits for the next. It records the served tip in `.graphyard/deploy.json`; the loop restarts onto it. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline. Main moves only by the merge writer's push.
 
 ### E2E record credential
 
@@ -15,7 +11,7 @@ A tip whose post-deploy E2E failed is not deployed again: the same commit fails 
 
 ### One delivery path
 
-Exact-head gates merge; the loop deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)).
+Exact-head gates merge; the deploy unit deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)).
 
 ## Managed repositories
 
@@ -45,4 +41,4 @@ Rollback registrations carry `rollback.fencing` `provider`/`serialized`/`none` (
 
 ## Coordinator recovery
 
-Self-merge stalled the loop: `graphyard master recover [--to SHA] --admin-token-stdin` repins, restarts; deploys repin, keeping the new pin, the one it replaced and the one the running loop loaded from.
+Self-merge stalled the loop: `graphyard master recover [--to SHA] --admin-token-stdin` repins and restarts it.

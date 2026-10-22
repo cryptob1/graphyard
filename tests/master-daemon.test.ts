@@ -4,7 +4,7 @@ import { chmod, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { acquireDaemonLock, actionDetailMax, candidateKey, cycleFailureDelay, cycleFailureStart, daemonStatePath, daemonStateSchema, daemonSummary, dispatchKey, emptyDaemonState, noteCycleFailure, observeDeployment, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, retriedSnapshot, runCycle, runDaemon, snapshotRetryDelayMs, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { acquireDaemonLock, actionDetailMax, candidateKey, cycleFailureDelay, cycleFailureStart, daemonStatePath, daemonStateSchema, daemonSummary, dispatchKey, emptyDaemonState, noteCycleFailure, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, retriedSnapshot, runCycle, runDaemon, snapshotRetryDelayMs, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -56,8 +56,6 @@ function effects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): Da
     snapshot: async () => ({ work: [], now: iso(0) }),
     closeSession: pane => { log.push(`close:${pane}`); },
     dispatch: async item => { log.push(`dispatch:${item.key}`); },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async (item, observation) => { log.push(`record:${item.key}:${observation.sha.slice(0, 4)}`); },
     persist: async () => {},
     ...overrides,
   };
@@ -138,7 +136,7 @@ test('an interrupted cursor entry is resolved against Graphyard, never repeated 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('restarting the loop resumes the cursor without dispatching or requesting a review twice', async () => {
+test('restarting the loop resumes the cursor without dispatching twice', async () => {
   const { directory, token } = await privateDirectory();
   const workerCredential = join(directory, 'worker.token');
   await writeFile(workerCredential, workerToken, { mode: 0o600 });
@@ -163,16 +161,12 @@ test('restarting the loop resumes the cursor without dispatching or requesting a
     const recording = { ...shared, persist: async (value: DaemonState) => { persisted.push(JSON.parse(JSON.stringify(value))); } };
     await runCycle(master, state, recording, () => clock);
     assert.deepEqual(calls.filter(call => call.startsWith('dispatch')), ['dispatch:GY-42']);
-    assert.equal(calls.filter(call => call.startsWith('review')).length, 0);
-    const reviewActions = Object.values(state.actions).filter(action => action.kind === 'review');
-    assert.equal(reviewActions.length, 1);
 
     // Simulate a kill: keep only what reached disk, then restart from it.
     state = JSON.parse(JSON.stringify(persisted.at(-1)));
     await runCycle(master, state, recording, () => clock + 30_000);
     await runCycle(master, state, recording, () => clock + 60_000);
     assert.deepEqual(calls.filter(call => call.startsWith('dispatch')), ['dispatch:GY-42'], 'a restart must not dispatch the same attempt twice');
-    assert.equal(Object.values(state.actions).filter(action => action.kind === 'review').length, 1, 'a restart must not request a second review for the same candidate');
     assert.equal(state.cycle, 3);
     assert.equal(state.actions[dispatchKey(ready)].state, 'done');
   } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
@@ -220,7 +214,8 @@ test('one cycle closes finished sessions, dispatches, leaves proofs to CI and th
   await writeFile(workerCredential, workerToken, { mode: 0o600 });
   try {
     const master = config(token, { workers: [profile('codex', workerCredential)], run: { intervalSeconds: 20, proofWorkflow: 'acceptance.yml', deploymentShaField: 'commit' } });
-    const finished = work({ id: 'finished', key: 'GY-10', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: 'c'.repeat(40), authorizationRevision: 5 } });
+    const finished = work({ id: 'finished', key: 'GY-10', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: 'c'.repeat(40), authorizationRevision: 5 },
+      sessions: [{ id: 'codex-principal:1', kind: 'implementation', principal: 'codex-principal', epoch: 1, runtime: 'codex', host: 'machine-a', pane: 'pane-1', subject: 'GY-10', state: 'running' }] as Work['sessions'] });
     const ready = work();
     const acceptance = submitted({ id: 'acceptance', key: 'GY-44', stage: 'acceptance',
       criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['integration:loop', 'manual:witness'] }],
@@ -229,19 +224,16 @@ test('one cycle closes finished sessions, dispatches, leaves proofs to CI and th
     const proven = { id: 'e1', proof: 'integration:loop', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, producer: 'ci', trusted: true, result: 'pass' as const, executed: 4, skipped: 0, at: iso(0) };
     const mergeable = submitted({ id: 'mergeable', key: 'GY-45', stage: 'merge', evidence: [proven], gates: [{ name: 'merge', passed: true, reasons: [] }] });
     const deps = effects({
-      agents: () => closed ? [] : [{ name: 'agent-codex', pane_id: 'pane-1', agent_status: 'done' }],
       closeSession: pane => { closed = true; log.push(`close:${pane}`); },
-      snapshot: async () => ({ work: [finished, ready, acceptance, mergeable], now: iso(0) }),
-      observeDeployment: async delivered => ({ source: 'endpoint', sha: 'c'.repeat(40), at: iso(0), reason: null, deployed: delivered.map(item => item.key), pending: [] }),
+      snapshot: async () => ({ work: [closed ? { ...finished, sessions: [] } : finished, ready, acceptance, mergeable], now: iso(0) }),
     }, log);
     const state = emptyDaemonState(master);
     const result = await runCycle(master, state, deps, () => clock);
     // GY-1235: no proof is requested (CI runs the unit tests, UAT the end-to-end ones) and GitHub merges the green candidate.
     assert.deepEqual(log, ['close:pane-1', 'dispatch:GY-42']);
     const kinds = result.actions.map(action => `${action.kind}:${action.state}`);
-    for (const expected of ['close:done', 'dispatch:done', 'review:done', 'deployment:done']) assert.ok(kinds.includes(expected), `cycle should record ${expected}, recorded ${kinds.join(', ')}`);
+    for (const expected of ['close:done', 'dispatch:done']) assert.ok(kinds.includes(expected), `cycle should record ${expected}, recorded ${kinds.join(', ')}`);
     assert.ok(!kinds.some(kind => kind.startsWith('proof:') || kind.startsWith('merge:')), kinds.join(', '));
-    assert.equal(result.deployment!.deployed.length, 1);
     // Every cycle measures, whether or not it acted.
     assert.equal(result.metrics.cycle, 0);
     assert.equal(result.metrics.open, 3);
@@ -268,7 +260,7 @@ test('a disabled automatic merge keeps the loop cycling, never merges, and asks 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('an unhealthy profile is routed around and an exhausted reviewer is escalated, never approved', async () => {
+test('an unhealthy profile is routed around', async () => {
   const { directory, token } = await privateDirectory();
   const first = join(directory, 'first.token'), second = join(directory, 'second.token');
   await writeFile(first, workerToken, { mode: 0o600 }); await writeFile(second, workerToken, { mode: 0o600 });
@@ -283,21 +275,13 @@ test('an unhealthy profile is routed around and an exhausted reviewer is escalat
     assert.match(health[2].reason!, /unsupervised process/);
 
     const log: string[] = [];
-    const exhausted = submitted({
-      policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: [{ name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 }] } as any,
-      reviewFailovers: [{ profile: 'claude-reviewer', reviewerApp: 'claude-reviewer', runtime: 'claude', exhaustion: 'usage-limit', reason: 'quota', at: iso(0), sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, requestCommentId: 1, nextProfile: null }],
-    });
     const ready = work({ id: 'ready-1', key: 'GY-60' });
     const result = await runCycle(master, state, effects({
-      snapshot: async () => ({ work: [ready, exhausted], now: iso(0) }),
+      snapshot: async () => ({ work: [ready], now: iso(0) }),
       credentials: async () => ({ broken: { available: false, reason: 'Worker credential file is unreadable' }, spare: { available: true, reason: null }, observed: { available: true, reason: null } }),
     }, log), () => clock);
     assert.deepEqual(log.filter(entry => entry.startsWith('dispatch')), ['dispatch:GY-60']);
     assert.equal(result.actions.find(action => action.kind === 'dispatch')!.principal, 'spare-principal', 'the loop routes around the unhealthy profile');
-    const escalation = result.actions.find(action => action.kind === 'review' && /reviewer profile/.test(action.detail))!;
-    assert.match(escalation.detail, /exhausted for the current candidate/);
-    assert.match(escalation.detail, /never an approval/);
-    assert.equal(result.actions.some(action => action.kind === 'merge'), false, 'an exhausted reviewer never becomes a merge');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -324,82 +308,6 @@ test('a failed launch puts its profile in cool-off so the next cycle uses anothe
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('the loop records no per-item deployment and requests no per-item smoke proof: a merged item is delivered (GY-1981)', async () => {
-  const { directory, token } = await privateDirectory();
-  try {
-    const mergeSha = 'c'.repeat(40), serving = 'd'.repeat(40);
-    const smoky = work({ id: 'smoky', key: 'GY-50', stage: 'done', createdAt: iso(-5 * hour), policy: { checks: ['test'], review: true, deploySmoke: true }, delivery: { mergedAt: iso(-2 * hour), mergeSha, authorizationRevision: 5 } });
-    const plain = work({ id: 'plain', key: 'GY-51', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: 'e'.repeat(40), authorizationRevision: 6 } });
-    const log: string[] = [];
-    const deps = effects({
-      snapshot: async () => ({ work: [smoky, plain], now: iso(0) }),
-      observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(-hour), reason: null, deployed: ['GY-50', 'GY-51'], pending: [] }),
-    }, log);
-    const configured = config(token, { run: { intervalSeconds: 20, deploymentShaField: 'commit', smokeWorkflow: 'deploy-smoke.yml' } });
-    const state = emptyDaemonState(configured);
-    const result = await runCycle(configured, state, deps, () => clock);
-    assert.deepEqual(log, [], 'nothing is recorded on an item and no smoke workflow is requested');
-    assert.ok(!result.actions.some(action => action.kind === 'smoke' || (action.kind === 'deployment' && action.work)), 'no per-item deployment or smoke action');
-    // A per-item record a loop from before GY-1981 left interrupted resumes as done: nothing retries it.
-    state.actions['deployment:record:smoky:x'] = { kind: 'deployment', work: 'GY-50', principal: null, epoch: null, state: 'started', detail: 'Recording', attempts: 1, cycle: 0, at: iso(0) };
-    assert.deepEqual(reconcilePendingActions(state, [smoky, plain], clock).map(action => `${action.work}:${action.state}`), ['GY-50:done']);
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test('deployment verification reports the served commit and which delivered items it covers', async () => {
-  const { directory, token } = await privateDirectory();
-  try {
-    // Containment is git ancestry over the coordinator's own checkout, so the fixture is a real
-    // history: an earlier merge the release descends from, the release itself, and a merge on a
-    // branch the release does not contain.
-    const origin = join(directory, 'origin'), checkout = join(directory, 'checkout');
-    const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    execFileSync('git', ['init', '-q', '-b', 'main', origin]);
-    git(origin, 'config', 'user.email', 'loop@graphyard.example');
-    git(origin, 'config', 'user.name', 'Graphyard');
-    git(origin, 'commit', '--allow-empty', '-q', '-m', 'GY-1: earlier');
-    const earlier = git(origin, 'rev-parse', 'HEAD');
-    git(origin, 'commit', '--allow-empty', '-q', '-m', 'GY-2: release');
-    const head = git(origin, 'rev-parse', 'HEAD');
-    git(origin, 'checkout', '-q', '-b', 'unrelated');
-    git(origin, 'commit', '--allow-empty', '-q', '-m', 'GY-3: not on main');
-    const unrelated = git(origin, 'rev-parse', 'HEAD');
-    git(origin, 'checkout', '-q', 'main');
-    execFileSync('git', ['clone', '-q', origin, checkout]);
-    const delivered = [
-      work({ id: 'a', key: 'GY-1', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: earlier, authorizationRevision: 1 } }),
-      work({ id: 'b', key: 'GY-2', stage: 'done', delivery: { mergedAt: iso(-hour), mergeSha: head, authorizationRevision: 2 } }),
-      work({ id: 'c', key: 'GY-3', stage: 'done', delivery: { mergedAt: iso(0), mergeSha: unrelated, authorizationRevision: 3 } }),
-    ];
-    const calls: string[] = [];
-    const run = (command: string, args: string[]) => {
-      calls.push(`${command} ${args.join(' ')}`);
-      if (command === 'git') return execFileSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-      throw new Error(`unexpected ${args.join(' ')}`);
-    };
-    const unconfigured = await observeDeployment(config(token), delivered, run, fetch, () => clock, { root: checkout });
-    assert.equal(unconfigured.source, 'unavailable', 'without an endpoint no release is read, from GitHub or anywhere else');
-    assert.deepEqual(unconfigured.pending, ['GY-1', 'GY-2', 'GY-3']);
-    assert.equal(calls.filter(entry => entry.startsWith('gh ')).length, 0);
-
-    const endpoint = config(token, { run: { intervalSeconds: 20, deploymentUrl: 'https://app.example/version', deploymentShaField: 'build.commit' } });
-    const fetcher = (async () => new Response(JSON.stringify({ build: { commit: head.toUpperCase() } }))) as typeof fetch;
-    const fromEndpoint = await observeDeployment(endpoint, delivered, run, fetcher, () => clock, { root: checkout });
-    assert.equal(fromEndpoint.source, 'endpoint');
-    assert.equal(fromEndpoint.sha, head);
-    assert.deepEqual(fromEndpoint.deployed, ['GY-1', 'GY-2']);
-    assert.deepEqual(fromEndpoint.pending, ['GY-3'], 'a merge the running release does not contain is not deployed');
-    assert.deepEqual(fromEndpoint.containment, { release: head, settled: { 'GY-1': head, 'GY-2': head } }, 'what the release was shown to serve is retained for the next cycle');
-    assert.equal(fromEndpoint.requests, 0);
-
-    const silent = (async () => new Response(JSON.stringify({ ok: true }))) as typeof fetch;
-    const missing = await observeDeployment(endpoint, delivered, run, silent, () => clock, { root: checkout });
-    assert.equal(missing.source, 'unavailable');
-    assert.match(missing.reason!, /did not report a commit at build\.commit/);
-    assert.deepEqual(missing.pending, ['GY-1', 'GY-2', 'GY-3'], 'an unverifiable deployment leaves every delivery pending, never assumed live');
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
 test('the cursor stays bounded without discarding an unresolved action, and status reports the loop', () => {
   const { directory: _ } = { directory: '' };
   const state = emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project' }));
@@ -415,7 +323,6 @@ test('the cursor stays bounded without discarding an unresolved action, and stat
   state.lastCycleAt = iso(0);
   const live = daemonSummary(state, clock + 20_000, 20_000);
   assert.equal(live.running, true);
-  assert.equal(live.unresolved.length, 1);
   assert.equal(live.actions.length, 40);
   assert.equal(daemonSummary(state, clock + hour, 20_000).running, false, 'a loop that stopped cycling is not reported as running');
 });
@@ -450,27 +357,6 @@ test('candidate-scoped cursor keys change with the commit, the base, and the pol
   assert.equal(dispatchKey(work({ epoch: 1 })) === dispatchKey(work({ epoch: 2 })), false, 'a new attempt is a new dispatch');
 });
 
-test('a busy fleet is capacity, not an escalation; a fleet that cannot take work is escalated once', async () => {
-  const { directory, token } = await privateDirectory();
-  const credential = join(directory, 'worker.token');
-  await writeFile(credential, workerToken, { mode: 0o600 });
-  try {
-    const master = config(token, { workers: [profile('codex', credential)] });
-    const ready = work({ id: 'ready-1', key: 'GY-80' });
-    const busy = effects({ agents: () => [{ name: 'agent-codex', pane_id: 'pane-1', agent_status: 'working' }], snapshot: async () => ({ work: [ready], now: iso(0) }) });
-    const working = await runCycle(master, emptyDaemonState(master), busy, () => clock);
-    assert.equal(working.actions.some(action => action.kind === 'attention'), false, 'every worker working is normal capacity');
-    assert.equal(working.health[0].busy, true);
-
-    const broken = effects({ snapshot: async () => ({ work: [ready], now: iso(0) }), credentials: async () => ({ codex: { available: false, reason: 'Worker credential file is unreadable' } }) });
-    const state = emptyDaemonState(master);
-    const first = await runCycle(master, state, broken, () => clock);
-    assert.match(first.actions.find(action => action.kind === 'attention')!.detail, /No worker profile can take GY-80.*unreadable/);
-    const second = await runCycle(master, state, broken, () => clock + 20_000);
-    assert.equal(second.actions.some(action => action.kind === 'attention'), false, 'an unchanged escalation is stated once, not every cycle');
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
 test('record() bounds an over-long action detail instead of failing the cycle', async () => {
   const { directory, token } = await privateDirectory();
   const worker = join(directory, 'worker.token');
@@ -495,53 +381,21 @@ test('record() bounds an over-long action detail instead of failing the cycle', 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('a stable detail over the bound is recorded once, not re-recorded every cycle', async () => {
-  const { directory, token } = await privateDirectory();
-  const credential = join(directory, 'worker.token');
-  await writeFile(credential, workerToken, { mode: 0o600 });
-  try {
-    const master = config(token, { workers: [profile('codex', credential)] });
-    const ready = work({ id: 'ready-long', key: 'GY-179' });
-    const reason = `Worker credential file is unreadable: ${'y'.repeat(actionDetailMax * 2)}`;
-    const broken = effects({ snapshot: async () => ({ work: [ready], now: iso(0) }), credentials: async () => ({ codex: { available: false, reason } }) });
-    const state = emptyDaemonState(master);
-    const key = 'attention:dispatch:ready-long';
-    const first = await runCycle(master, state, broken, () => clock);
-    const escalation = state.actions[key];
-    assert.ok(escalation, 'the escalation is recorded');
-    assert.ok(escalation.detail.length <= actionDetailMax && escalation.detail.endsWith('…'), 'the stored detail is the bounded form');
-    assert.ok(first.actions.includes(escalation), 'the first cycle performed the escalation');
-    assert.equal(escalation.attempts, 1);
-    for (let cycle = 1; cycle <= 4; cycle++) {
-      const again = await runCycle(master, state, broken, () => clock + cycle * 20_000);
-      assert.equal(again.actions.some(action => action.kind === 'attention'), false, `cycle ${cycle} does not report the unchanged escalation again`);
-      assert.equal(state.actions[key], escalation, `cycle ${cycle} does not rewrite the stored action`);
-      assert.equal(state.actions[key].attempts, 1, `cycle ${cycle} leaves the attempts count unchanged`);
-    }
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
 test('unit:state-bounded-at-persist — no value over a schema bound can fail the cursor write or the cycle', async () => {
   const { directory, token } = await privateDirectory();
   const credential = join(directory, 'worker.token');
   await writeFile(credential, workerToken, { mode: 0o600 });
   try {
     const master = config(token, { workers: [profile('codex', credential)], run: { proofWorkflow: 'acceptance.yml' } });
-    // 250 deliveries against the 200-entry bound on `pending`, the case that stopped the fleet.
-    const delivered = Array.from({ length: 250 }, (_, index) => work({ id: `delivered-${index}`, key: `GY-${1000 + index}`, stage: 'done',
-      delivery: { mergedAt: iso(-hour + index), mergeSha: index.toString(16).padStart(40, 'c'), authorizationRevision: 5 } } as Partial<Work>));
     const ready = work({ id: 'ready', key: 'GY-7' });
     const mergeable = submitted({ id: 'mergeable', key: 'GY-8', stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
     // A proof list long enough that the silence subject quoting it runs past its 500-character bound.
     const proving = submitted({ id: 'proving', key: 'GY-9', stage: 'acceptance', criteria: [{ id: 'AC-1', text: 'Proven', proofs: Array.from({ length: 30 }, (_, index) => `unit:${'p'.repeat(90)}-${index}`) }],
       gates: [{ name: 'acceptance', passed: false, reasons: ['needs evidence'] }] });
-    const reason = `The deployment endpoint answered ${'d'.repeat(2000)}`;
-    let observe: () => Promise<any> = async () => ({ source: 'unavailable', sha: null, at: iso(0), reason, deployed: [], pending: delivered.map(item => item.key) });
     const written: DaemonState[] = [];
     // Every write is judged by the schema exactly as the cursor file is.
     const persist = async (next: DaemonState) => { written.push(daemonStateSchema.parse(JSON.parse(JSON.stringify(next)))); };
-    const deps = effects({ snapshot: async () => ({ work: [...delivered, ready, mergeable, proving], now: iso(0) }), persist,
-      observeDeployment: async () => observe() });
+    const deps = effects({ snapshot: async () => ({ work: [ready, mergeable, proving], now: iso(0) }), persist });
     const state = emptyDaemonState(master);
     // An attempt counter one short of its bound, due for a retry: the retry is attempt 1001.
     state.cycle = 40;
@@ -551,15 +405,6 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     assert.equal(state.cycle, 41);
     assert.equal(state.actions[dispatchKey(ready)].state, 'done', 'the retry that is attempt 1001 runs and is recorded');
     assert.equal(state.actions[dispatchKey(ready)].attempts, 1000, 'attempts are clamped to the bound, not reset');
-    assert.equal(state.deployment!.pending.length, 200, 'the newest 200 deliveries are kept');
-    assert.equal(state.deployment!.pending.at(-1), 'GY-1249');
-    assert.ok(state.deployment!.reason!.length <= 500 && state.deployment!.reason!.endsWith('…'));
-    // The failed observation keeps every delivery pending: the catch path is bounded too.
-    observe = async () => { throw new Error(reason); };
-    const again = await runCycle(master, state, deps, () => clock + 20_000);
-    assert.equal(again.metrics.cycle, 41);
-    assert.equal(state.deployment!.pending.length, 200);
-    assert.ok(state.deployment!.reason!.length <= 500);
     // A cursor that already holds over-long values — written by an older loop, or edited — is written within bounds.
     state.actions['legacy'] = { kind: 'merge', work: 'GY-8', principal: null, epoch: null, state: 'failed', detail: 'x'.repeat(5000), attempts: 5000, cycle: 0, at: iso(0) };
     state.profiles.codex = { failures: 1, reason: 'y'.repeat(3000), cooldownUntil: null };
@@ -567,45 +412,7 @@ test('unit:state-bounded-at-persist — no value over a schema bound can fail th
     const stored = JSON.parse(await readFile(daemonStatePath(master), 'utf8')) as DaemonState;
     assert.equal(stored.actions.legacy.attempts, 1000);
     assert.ok(stored.actions.legacy.detail.length <= actionDetailMax && stored.profiles.codex.reason!.length <= 500);
-    assert.ok(written.length > 0 && written.every(entry => entry.deployment === null || entry.deployment.pending.length <= 200));
-  } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test('unit:item-failure-isolated — one item whose handling throws fails only its own action, never the cycle', async () => {
-  const { directory, token } = await privateDirectory();
-  const credential = join(directory, 'worker.token');
-  await writeFile(credential, workerToken, { mode: 0o600 });
-  try {
-    const master = config(token, { workers: ['alpha', 'beta', 'gamma'].map(name => profile(name, credential)) });
-    const lease = (owner: string) => ({ owner, epoch: 1, expiresAt: iso(10 * 60_000) });
-    // Two workers sit at a prompt on their assignments; recording the first one's session handle throws.
-    const broken = work({ id: 'broken', key: 'GY-1', stage: 'build', epoch: 1, lease: lease('alpha-principal'), gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted'] }] });
-    const waiting = work({ id: 'waiting', key: 'GY-2', stage: 'build', epoch: 1, lease: lease('beta-principal'), gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted'] }] });
-    const ready = work({ id: 'ready', key: 'GY-3' });
-    const mergeable = submitted({ id: 'mergeable', key: 'GY-4', stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
-    const log: string[] = [];
-    const deps = effects({
-      snapshot: async () => ({ work: [broken, waiting, ready, mergeable], now: iso(0) }),
-      agents: () => [{ name: 'agent-alpha', pane_id: 'pane-a', agent_status: 'blocked' }, { name: 'agent-beta', pane_id: 'pane-b', agent_status: 'blocked' }],
-      recordSession: ((item: Work) => { if (item.key === 'GY-1') throw new TypeError("Cannot read properties of undefined (reading 'pane')"); log.push(`session:${item.key}`); return Promise.resolve(); }) as DaemonEffects['recordSession'],
-    }, log);
-    const state = emptyDaemonState(master);
-    const result = await runDaemon(master, state, deps, { once: true, intervalMs: 20_000, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], now: () => clock, log: () => {} });
-    assert.deepEqual(result.failed, [], 'the cycle is not counted as failed');
-    assert.equal(result.cycles.length, 1);
-    assert.equal(state.failures.consecutive, 0);
-    assert.equal(state.failures.total, 0);
-    const isolated = state.actions['isolated:session:broken'];
-    assert.equal(isolated?.state, 'failed', 'the failure is recorded against the item it was handling');
-    assert.equal(isolated.work, 'GY-1');
-    assert.match(isolated.detail, /reading 'pane'/);
-    // Every other item was still handled, in the same step and in every step after it.
-    // The ready item's session is registered before its launch dispatches (GY-172: every launch registers first).
-    // The green candidate is GitHub's to merge (GY-1235): the loop acts on it no further.
-    assert.deepEqual(log, ['session:GY-2', 'session:GY-3', 'dispatch:GY-3']);
-    assert.ok(Object.keys(state.actions).some(key => key.startsWith('session:blocked:beta:')), 'the other blocked worker is still recorded');
-    assert.equal(state.actions[dispatchKey(ready)].state, 'done');
-    assert.ok(result.cycles[0].actions >= 3, 'the isolated failure is one of the cycle\'s actions, beside every other item\'s');
+    assert.ok(written.length > 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

@@ -7,8 +7,6 @@ import type { SessionHandle } from '../src/model/sessions.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-import { buildMasterStatus, type HerdrAgent, type WorkerProfile } from '../src/master.js';
-import { sessionReport } from '../src/cli/master-status.js';
 import { workersView } from '../web/workers-view.js';
 import { boardFromStatus, classify, groupMeaning, nextActor, upNextMeaning } from '../web/groups.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
@@ -17,7 +15,7 @@ import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
 
 /**
- * GY-172 AC-3: the Workers page and its counts, `master status` and the Work page read only the one
+ * GY-172 AC-3: the Workers page and its counts and the Work page read only the one
  * session state. A session is shown running only while its latest observation is working or idle
  * and fresh; 'seen' is that observation's time — never the last time anything wrote the record —
  * and the Up next group says what an item is really waiting on. Every render here is over the
@@ -84,25 +82,6 @@ test('unit:ui-reads-session-state — the Workers page and its counts show a ses
   assert.match(rowOf(html, 'lost'), /Ended · stopped responding/);
   const open = html.slice(0, html.indexOf('<details class="finished-sessions">'));
   assert.ok(!open.includes('data-session="shell"') && !open.includes('data-session="lost"'), 'ended and lost sessions are never in the open table');
-});
-
-test('unit:ui-reads-session-state — master status reads the session state: running rows, and the assigned worker\'s session by its record rather than by the runtime', () => {
-  const work = board();
-  const report = sessionReport({ work, now: new Date(NOW).toISOString() });
-  assert.deepEqual(report.running.map(row => row.id).sort(), ['idle', 'working'], 'master status lists as running exactly what the Workers page does');
-  assert.deepEqual(report.running.map(row => row.seenAt).sort(), [at(-2 * minute), at(-minute)]);
-  assert.ok(!report.running.some(row => row.id === 'stale'));
-  assert.deepEqual(report.unseen.map(row => row.id), ['stale'], 'an open session whose observation went stale is listed unseen, never dropped from the status');
-
-  const worker = { name: 'worker-3', principal: 'worker-3', agentName: 'graphyard-worker-3', mode: 'launch', kind: 'claude', credentialFile: '/outside/w3.token', agentArgs: [], environment: {} } as unknown as WorkerProfile;
-  const held = (sessions: SessionHandle[]): Work => ({ ...work.find(w => w.key === 'GY-14')!, lease: { owner: 'worker-3', epoch: 1, expiresAt: at(30 * minute) }, sessions });
-  const attention = (item: Work, agents: HerdrAgent[]) => buildMasterStatus({ work: [item], now: new Date(NOW).toISOString() }, [worker], agents).work[0].attention;
-  const record = (fields: Partial<SessionHandle>) => handle({ id: 'worker-3:1', kind: 'implementation', principal: 'worker-3', epoch: 1, ...fields });
-  // The runtime lists nothing for the profile, but the session record is observed idle a minute ago: the worker is there.
-  assert.doesNotMatch(attention(held([record({ observed: 'idle', observedAt: at(-minute) })]), []) ?? '', /Assigned worker session/);
-  // The runtime says working, the record says the agent exited: the record is what is reported.
-  assert.equal(attention(held([record({ state: 'finished', observed: 'ended', observedAt: at(-minute), endedAt: at(-minute) })]), [{ name: 'graphyard-worker-3', agent_status: 'working', pane_id: 'w1V:x' }]), 'Assigned worker session is ended');
-  assert.equal(attention(held([record({ observed: 'working', observedAt: at(-20 * minute) })]), [{ name: 'graphyard-worker-3', agent_status: 'working', pane_id: 'w1V:x' }]), `Assigned worker session is not seen since ${at(-20 * minute)}`);
 });
 
 test('unit:ui-reads-session-state — the Work page lists as running only the sessions shown running, with when each was seen', () => {

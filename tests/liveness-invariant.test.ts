@@ -1,10 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -12,11 +8,7 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import type { NextAction } from '../src/model/action-kinds.js';
 import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction, settleDelivered } from '../src/model/actions.js';
 import { nextAction } from '../src/model/next-action.js';
-import { livenessCarry, livenessOf, livenessRetryLimit, livenessViolations, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
-import { livenessStatus } from '../src/cli/liveness-report.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
-import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
-import { masterConfigSchema } from '../src/master.js';
+import { livenessCarry, livenessOf, livenessRetryLimit, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): t0 (2026-09-20) drives a virtual clock (now = () => new Date(clock)) handed to settleDelivered and the retry rows; the Postgres half stamps and judges everything with the real clock.
 
@@ -120,16 +112,13 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   await strand(failed);
 
   const expected: [Work, ViolationClass, string][] = [[failed, 'failed-proof', 'request-rework'], [stale, 'stale-wait', 'attention']];
-  const found = livenessViolations(await store.list(), now());
   for (const [item, kind, successor] of expected) {
     const verdict = await judge(item);
     assert.equal(verdict.obligation, null, `${item.key} holds nothing`);
     assert.equal(verdict.violation?.class, kind, `${item.key}: ${JSON.stringify(verdict.violation)}`);
     assert.equal(verdict.violation!.successor?.kind, successor, `${item.key} is owed ${successor}`);
     assert.ok(verdict.violation!.ageMs >= 0 && Date.parse(verdict.violation!.since) <= Date.now(), 'with an age');
-    assert.ok(found.some(entry => entry.key === item.key), `${item.key} is listed among the violations`);
   }
-  assert.deepEqual(found.map(entry => entry.key).sort(), expected.map(([item]) => item.key).sort(), 'and nothing healthy is');
   // What the stale wait is owed, precisely: an escalation.
   const escalation = (await judge(stale)).violation!.successor!;
   assert.ok(escalation.inputs.kind === 'attention' && escalation.inputs.trigger === 'stale-wait', JSON.stringify(escalation));
@@ -267,44 +256,4 @@ test('unit:liveness-violations-detected — a pending producer request or a runn
   const requested = await judge(stale);
   assert.equal(requested.violation, null, `the pending request owns the wait: ${JSON.stringify(requested.violation)}`);
   assert.equal(requested.obligation!.dueAt, new Date(Date.parse(requestedAt) + 120 * 60_000).toISOString());
-});
-
-// ---- AC-3 ---------------------------------------------------------------------------------------
-
-test('unit:liveness-count-reported — master status reports the count of liveness violations and each one\'s age, and the count is zero once the fixture board settles', async () => {
-  // A board with a stranded item among healthy ones.
-  await released(); await claimed(); await candidate('pass');
-  const stranded = await candidate('fail');
-  await strand(stranded);
-  const board = { work: await store.list(), now: new Date(Date.now() + 1000).toISOString() };
-  const reported = livenessStatus(board);
-  assert.ok(reported.violations >= 1, 'the stranded item is counted');
-  assert.equal(reported.violations, reported.items.length);
-  const entry = reported.items.find(item => item.key === stranded.key)!;
-  assert.equal(entry.class, 'failed-proof');
-  assert.ok(entry.ageMs >= 1000 && Date.parse(entry.since) <= Date.parse(board.now), `with its age: ${JSON.stringify(entry)}`);
-  assert.equal(reported.oldestMs, Math.max(...reported.items.map(item => item.ageMs)));
-
-  // One reconciliation tick settles the board, and `master status` reports zero.
-  await engine.reconcile();
-  const settled = { work: await store.list(), now: new Date().toISOString() };
-  assert.deepEqual(livenessStatus(settled), { violations: 0, oldestMs: null, items: [] }, 'every open item holds an obligation');
-
-  const directory = await temporaryDirectory('liveness-status'), root = await temporaryDirectory('liveness-root');
-  try {
-    const credentialFile = join(directory, 'coordinator.token');
-    await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    execFileSync('git', ['init', '-q', root]);
-    const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)), repository,
-      baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
-    await writeDaemonState(master, emptyDaemonState(master));
-    const masterApi = async (path: string) => path === 'work-snapshot' ? settled : { decisions: [] };
-    const report = await masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }) as { liveness: ReturnType<typeof livenessStatus>; counts: Record<string, number> };
-    assert.equal(report.liveness.violations, 0, 'master status reports the count');
-    assert.deepEqual(report.liveness.items, []);
-    assert.equal(report.counts.livenessViolations, 0, 'and counts it');
-    const strandedStatus = await masterStatusReport(root, master, async (path: string) => path === 'work-snapshot' ? board : { decisions: [] }, { actor: { id: 'coordinator-1' } }, { commit: null }) as typeof report;
-    assert.equal(strandedStatus.liveness.violations, reported.violations, 'a board with a violation reads non-zero');
-    assert.ok(strandedStatus.liveness.items.every(item => typeof item.ageMs === 'number' && item.since), 'each with its age');
-  } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 });

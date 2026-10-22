@@ -660,7 +660,7 @@ test('the runner retries a lost acknowledgement response idempotently and starts
   } finally { await new Promise<void>(r => http.close(() => r())); await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('master run executes the durable loop as a supervised process and master status reports its cursor', async () => {
+test('master run executes the durable loop as a supervised process and master status reports its cycle', async () => {
   const root = await temporaryDirectory('master-run');
   const credentialDirectory = await temporaryDirectory('master-run-credentials');
   const credentialFile = join(credentialDirectory, 'coordinator.token');
@@ -702,22 +702,17 @@ test('master run executes the durable loop as a supervised process and master st
     assert.equal(JSON.parse(await readFile(cursor, 'utf8')).cycle, 2);
 
     const status = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
-    assert.equal(status.daemon.cycle, 2);
-    assert.ok(status.daemon.metrics, 'master status shows what the loop measured');
-    assert.deepEqual(status.daemon.unresolved, []);
+    assert.equal(status.loop.cycle, 2);
+    assert.deepEqual(status.loop.steps, ['snapshot', 'close', 'dispatch', 'merge writer', 'persist'], 'master status shows the steps the last cycle ran');
 
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once', '--interval', '2'], { cwd: root, env }), /whole seconds between 5 and 900/);
     proofScoped = true;
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), /refuses a credential that is also allowed to produce evidence/);
     // GY-59: a deployed server behind the CLI's merge protocol is refused as version skew by the loop, naming
-    // both commits, and master status reports the same skew without refusing. master merge runs no merge since
-    // GY-1235, so it only answers that the control plane merges.
+    // both commits. master merge runs no merge since GY-1235, so it only answers that the control plane merges.
     proofScoped = false; skewed = true;
     await assert.rejects(exec(process.execPath, [launcher, 'master', 'run', '--once'], { cwd: root, env }), new RegExp(`server runs an unknown commit, CLI expects [0-9a-f]{40}: deploy main first \\(server merge protocol ${MERGE_PROTOCOL - 1}, CLI merge protocol ${MERGE_PROTOCOL}`));
     assert.match((await exec(process.execPath, [launcher, 'master', 'merge', '--all'], { cwd: root, env })).stdout, /The control plane merges/);
-    const skewedStatus = JSON.parse((await exec(process.execPath, [launcher, 'master', 'status'], { cwd: root, env })).stdout);
-    assert.match(skewedStatus.versionSkew, /deploy main first/); assert.match(skewedStatus.cli.commit, /^[0-9a-f]{40}$/);
-    assert.deepEqual(skewedStatus.controlPlane.build, { commit: null, protocol: MERGE_PROTOCOL - 1 });
   } finally {
     await new Promise<void>(resolve => http.close(() => resolve()));
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });

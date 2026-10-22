@@ -53,14 +53,12 @@ test('unit:soak-cursor-forward-fields — over a simulated day of loop restarts,
     const effects: DaemonEffects = {
       agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
       snapshot: async () => { if (++cycles >= cyclesPerRun) process.emit('SIGUSR2' as NodeJS.Signals); return { work: [], now: iso() }; },
-      closeSession: () => {}, dispatch: async () => {},
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, persist, loadedRelease: release,
+      closeSession: () => {}, dispatch: async () => {}, persist, loadedRelease: release,
     };
     // Every other reload adopts a change, so the reload record is rewritten with a new declared reading.
     const reload = async () => { reloads++; return { config: master, changed: reloads % 2 ? ['maxWorkers'] : [], at: iso(), refused: null }; };
     const result = await runDaemon(master, state, effects, { intervalMs: 1, identity: { pid: process.pid, host: master.hostId }, signals: ['SIGUSR2'], now, log: () => {},
-      checkout: () => ({ root: '/', commit: null, modified: [], untracked: [] }), reload, wake: { sleep: async () => { elapsed += cycleMs; return []; } } });
+      reload, delay: async () => { elapsed += cycleMs; } });
     assert.deepEqual(result.failed, [], `restart ${restart}: no cycle failed`);
     elapsed += minute;
   }

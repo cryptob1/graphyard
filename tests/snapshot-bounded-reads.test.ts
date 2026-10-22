@@ -11,22 +11,17 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
-import { coordinationViewHeader } from '../src/server/work-view.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-864: CLI reads use a bounded snapshot: master status and the worker commands
+ * GY-864: CLI reads use a bounded snapshot: the worker commands
  * in src/cli/workspace.ts read the trimmed coordination snapshot or a single item by key, never
  * the full work-snapshot; and GET /api/work-snapshot is paged (cursor and page size) so any
  * remaining full reader streams instead of loading every document at once.
  *
- * unit:cli-reads-bounded-snapshot — against a recording control plane holding 900 items whose
- * delivered documents weigh 300 KB each, master status and the worker's sync are
- * driven for real: each issues no full work-snapshot read, and the bytes each reads stay flat
- * while the delivered weight grows.
+ * unit:cli-reads-bounded-snapshot — the worker's sync is driven for real and issues no full
+ * work-snapshot read.
  *
  * unit:work-snapshot-paged — against the real server, a paged walk (cursor, pageSize) of the
  * full and default views covers every item exactly once, a page reads only its own documents
@@ -75,92 +70,9 @@ const get = async (path: string, token = operatorToken) => {
   return { status: response.status, body: JSON.parse(text) as any, bytes: text.length };
 };
 
-/** A recording control plane: a ledger of 900 items whose delivered documents weigh 300 KB each. */
-function recordingControlPlane() {
-  const heavyBytes = 300 * 1024;
-  const state = { delivered: 890, reads: [] as { path: string; coordination: boolean }[], violations: [] as string[], bytes: 0 };
-  const items = (): Work[] => Array.from({ length: 900 }, (_, index): Work => {
-    const key = `GY-${index + 1}`, delivered = index < state.delivered;
-    return {
-      id: `work-${index + 1}`, key, stage: delivered ? 'done' : 'build', title: `Item ${index + 1}`,
-      dependencies: [], criteria: [], gates: [], violations: [], workspaces: [], evidence: [],
-      policy: { checks: [], review: false },
-      revision: 1, policyRevision: 1, epoch: 0,
-      lease: key === 'GY-900'
-        ? { owner: 'worker', epoch: 4, expiresAt: new Date(Date.now() + 600_000).toISOString() }
-        : delivered ? null : { owner: 'worker', epoch: 1, expiresAt: new Date(Date.now() + 600_000).toISOString() },
-      candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], observation: null,
-      ready: false, blocker: null, priority: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(),
-      ...(delivered ? { delivery: { mergeSha: hex('a'), mergedAt: new Date().toISOString() } } : {}),
-    } as unknown as Work;
-  });
-  // What one whole document weighs; only the single-item route ever materializes it.
-  const whole = (item: Work) => ({ ...item, history: 'x'.repeat(heavyBytes) });
-  const trimmed = (item: Work) => ({ ...item, history: undefined });
-  const json = (response: ServerResponse, body: unknown) => {
-    const text = JSON.stringify(body);
-    state.bytes += text.length;
-    response.setHeader('Content-Type', 'application/json');
-    response.end(text);
-  };
-  const httpServer = createServer((request: IncomingMessage, response: ServerResponse) => {
-    const [path, query = ''] = (request.url ?? '').split('?');
-    const view = new URLSearchParams(query).get('view');
-    if (request.method === 'GET' && path === '/api/work-snapshot') {
-      const coordination = view === 'coordination' || String(request.headers[coordinationViewHeader.toLowerCase()]) === 'coordination';
-      state.reads.push({ path: 'work-snapshot', coordination });
-      if (!coordination) { state.violations.push(`full work-snapshot read (${request.url})`); return json(response, { error: 'full reads are refused here' }); }
-      return json(response, { now: new Date().toISOString(), view: 'coordination', omitted: { evidence: 0, dispatchHistory: 0, queueHistory: 0, actionHistory: 0, sessions: 0 }, jobs: [], work: items().map(trimmed) });
-    }
-    const single = /^\/api\/work\/(GY-\d+)$/.exec(path);
-    if (request.method === 'GET' && single) {
-      state.reads.push({ path: `single ${single[1]}`, coordination: false });
-      return json(response, whole(items()[Number(single[1].slice(3)) - 1]));
-    }
-    if (request.method === 'GET' && path === '/api/work') return json(response, items());
-    if (request.method === 'GET' && path === '/api/status') return json(response, { baseBranch: 'main', repository: 'owner/project', actor: { id: 'worker-a', role: 'worker' } });
-    if (request.method === 'POST') return json(response, { recorded: true });
-    return json(response, { decisions: [] });
-  });
-  const listen = new Promise<string>(resolve => httpServer.listen(0, '127.0.0.1', () => resolve(`http://127.0.0.1:${(httpServer.address() as { port: number }).port}`)));
-  return { state, listen, close: () => new Promise<void>(resolve => { httpServer.close(() => resolve()); httpServer.closeAllConnections(); }) };
-}
-
-const masterFixture = async () => {
-  const root = await temporaryDirectory('bounded-reads-master');
-  const directory = await temporaryDirectory('bounded-reads-credentials');
-  const credentialFile = join(directory, 'coordinator.token');
-  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile,
-    cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a',
-    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  return { root, master, dispose: () => Promise.all([rm(root, { recursive: true, force: true }), rm(directory, { recursive: true, force: true })]) };
-};
-
 test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or single item, not full work-snapshot', async () => {
-  const control = recordingControlPlane();
-  const origin = await control.listen;
-  const { root, master, dispose: disposeFixture } = await masterFixture();
-  const weight = () => control.state.delivered * 300 * 1024;
-  try {
-    // Master status: one trimmed coordination read, and its bytes ignore the delivered weight.
-    const statusReads = async () => {
-      control.state.reads.length = 0; control.state.violations.length = 0; control.state.bytes = 0;
-      const coordinationApi = (path: string, credential?: string, timeoutMs?: number, headers?: Record<string, string>) =>
-        fetch(`${origin}/api/${path}`, { headers: { ...(headers ?? {}), Authorization: 'Bearer coordinator-token' } }).then(response => response.json());
-      await masterStatusReport(root, master, coordinationApi as unknown as Parameters<typeof masterStatusReport>[2], { actor: { id: 'coordinator-1' } }, { commit: null });
-      return { reads: [...control.state.reads], violations: [...control.state.violations], bytes: control.state.bytes };
-    };
-    const first = await statusReads();
-    assert.deepEqual(first.violations, [], 'master status issues no full work-snapshot read');
-    assert.deepEqual(first.reads.filter(read => read.path === 'work-snapshot').map(read => read.coordination), [true], 'master status reads the coordination view, by header, on the work-snapshot path');
-    assert.ok(first.bytes < 5_000_000 && weight() > 250_000_000, `master status read ${first.bytes} bytes of an otherwise ${weight()}-byte ledger`);
-    control.state.delivered = 40;
-    const second = await statusReads();
-    assert.deepEqual(second.violations, []);
-    assert.ok(second.bytes <= first.bytes && second.bytes < 5_000_000 && weight() < 15_000_000, `the bytes master status reads stay flat (${second.bytes} against ${first.bytes}) while the delivered weight drops from over 250 MB to under 15 MB`);
-    control.state.delivered = 890;
-
+  const control = { state: { reads: [] as { path: string; coordination: boolean }[], violations: [] as string[] } };
+  {
     // The worker's sync: the attribution read on a conflict is the trimmed coordination view.
     const cwd = await temporaryDirectory('bounded-reads-sync');
     const originRepo = join(cwd, 'origin'), clone = join(cwd, 'clone');
@@ -213,16 +125,11 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
       assert.deepEqual(control.state.reads.filter(read => read.path === 'work-snapshot').map(read => read.coordination), [true], `the sync attribution read is the coordination view\n${outcome.output}`);
     } finally { syncServer.closeAllConnections(); await new Promise<void>(resolve => { syncServer.close(() => resolve()); setTimeout(resolve, 2_000).unref(); }); await rm(cwd, { recursive: true, force: true }); }
 
-    // The source carries the one workspace read, and master status's read rides the coordination
-    // header from the report-cache module.
+    // The source carries the one workspace read.
     const workspaceSource = await readFile(new URL('../src/cli/workspace.ts', import.meta.url), 'utf8');
     assert.equal(workspaceSource.split('work-snapshot?view=coordination').length - 1, 1, 'sync attribution reads the coordination view');
     assert.doesNotMatch(workspaceSource, /work-snapshot\?view=bounded/, 'no CLI read asks for the unbounded default');
-    const statusSource = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
-    assert.match(statusSource, /coordinationStep\(masterApi\)/, 'master status reads through the coordination snapshot step');
-    const stepSource = await readFile(new URL('../src/cli/coordination-snapshot.ts', import.meta.url), 'utf8');
-    assert.match(stepSource, /read\('work-snapshot', undefined, undefined, \{ \[coordinationViewHeader\]: 'coordination' \}\)/, 'the coordination step sends the coordination header');
-  } finally { await control.close(); await disposeFixture(); }
+  }
 });
 
 test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with cursor and pageSize', async () => {

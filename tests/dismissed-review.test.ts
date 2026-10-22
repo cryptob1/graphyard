@@ -7,16 +7,15 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { liveReviewRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { buildMasterStatus, loadMasterConfig, setupMaster } from '../src/master.js';
+import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { bindReviewer, dismissalResolution, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
+import { bindReviewer, dismissalResolution, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile } from '../src/reviewer.js';
 import { sessionRetry, sessionRetryBaseMs, sessionRetryLimit } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-21 clock is the explicit now handed to reconcileReviews, runDispatchTick and sessionRetry; Date.now()-stamped ledger records are judged by attempt counts, not age.
 
-// Each test is named for the proof it produces: integration:dismissed-review-relaunches,
-// unit:unsatisfied-settled-request-visible and
+// Each test is named for the proof it produces: integration:dismissed-review-relaunches and
 // integration:master-review-forces-attempt.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -94,7 +93,6 @@ test('integration:dismissed-review-relaunches — a dismissed approval is record
     assert.equal(settled.state, 'failed');
     assert.equal(settled.verdict!.state, 'DISMISSED');
     assert.match(settled.resolution!, /the approval of a1ffffffffff was dismissed and head changed from a1ffffffffff to a2ffffffffff/);
-    assert.equal(summarizeReviews([settled]).completed[0].verdict, 'DISMISSED');
     const unsettled = sessionRetry([settled], first.id, Date.parse(settled.closedAt!) + sessionRetryBaseMs);
     assert.deepEqual([unsettled.settled, unsettled.launch, unsettled.attempts], [false, true, 1], 'the request is unanswered, to be launched afresh as its next attempt');
     // The control plane cancels the request for the replaced head and requests the new one.

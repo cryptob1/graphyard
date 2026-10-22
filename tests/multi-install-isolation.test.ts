@@ -4,15 +4,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { harnessDecision } from '../src/harness.js';
 import * as herdrModule from '../src/master/herdr.js';
-import { closeHerdrPane, listHerdrAgents, listHerdrPanes, observeHerdrAgents, stopCreatedHerdrTab } from '../src/master/herdr.js';
+import { closeHerdrPane, listHerdrAgents, observeHerdrAgents, stopCreatedHerdrTab } from '../src/master/herdr.js';
 import { liveMasterConfig, loadMasterConfig, masterConfigSchema, masterHarness, setupMaster, type MasterConfig } from '../src/master.js';
 import * as supervisorModule from '../src/supervisor.js';
 import { installLoopSupervisor, loopUnitText } from '../src/supervisor.js';
-import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -172,7 +169,6 @@ test('unit:unit-names-fail-closed — with no units.json, a legacy-named unit th
 
 // ---- Herdr scope ------------------------------------------------------------------------------
 
-const clockStart = Date.parse('2030-01-01T00:00:00Z');
 const worktree = '/repo/.graphyard/worktrees/GY-20-1';
 /** One Herdr server two installs share: identical names and worktree paths in workspace wA (ours) and wB (another install's). */
 function sharedHerdr() {
@@ -196,13 +192,7 @@ function sharedHerdr() {
   };
   return { panes, commands, run };
 }
-const sweepConfig = (workspace: string): MasterConfig => masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], herdrWorkspace: workspace });
-const unleased = { id: 'work-GY-20', key: 'GY-20', title: 'A pane', description: '', type: 'bug', priority: 0, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, 
-  stage: 'build', revision: 1, policyRevision: 1, createdAt: new Date(clockStart).toISOString(), updatedAt: new Date(clockStart).toISOString(), stageEnteredAt: new Date(clockStart).toISOString(),
-  ready: true, epoch: 1, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], sessions: [] } as unknown as Work;
-
-test('unit:herdr-scope-per-install — the install\'s workspace scopes every inventory and close, and the pane sweep leaves another install\'s matching panes untouched', async () => {
+test('unit:herdr-scope-per-install — the install\'s workspace scopes every inventory and close, and another install\'s matching panes are never touched', async () => {
   // Loading the master configuration scopes this process to its install's workspace.
   const root = await temporaryDirectory('herdr-scope'), credentials = await temporaryDirectory('herdr-scope-credentials');
   execFileSync('git', ['init', '-q', root]);
@@ -216,7 +206,6 @@ test('unit:herdr-scope-per-install — the install\'s workspace scopes every inv
   // The inventories every sweep reads list only the install's own panes, though names and paths match.
   const herdr = sharedHerdr();
   assert.deepEqual((await listHerdrAgents(herdr.run)).map(agent => agent.pane_id), ['wA:p1', 'wA:p2']);
-  assert.deepEqual((await listHerdrPanes(herdr.run)).map(pane => pane.pane_id), ['wA:p1', 'wA:p2']);
   assert.deepEqual((await observeHerdrAgents(herdr.run)).agents.map(agent => agent.pane_id), ['wA:p1', 'wA:p2']);
   assert.deepEqual((await listHerdrAgents(herdr.run, 'wB')).map(agent => agent.pane_id), ['wB:p1', 'wB:p2'], 'the other install sees only its own');
   assert.equal((await listHerdrAgents(herdr.run, null)).length, 4, 'an install with no workspace is unscoped');
@@ -226,28 +215,6 @@ test('unit:herdr-scope-per-install — the install\'s workspace scopes every inv
   await assert.rejects(stopCreatedHerdrTab(undefined, 'wB:t1', herdr.run), /belongs to workspace wB/);
   assert.ok(!herdr.commands.some(args => args[1] === 'close'), 'nothing was closed');
 
-  // The loop's pane sweep (GY-842, GY-980) over that inventory: the agentless shell in an unleased
-  // worktree is closed in the install's own workspace, and the identical one in wB never is.
-  const config = sweepConfig('wA');
-  const state = emptyDaemonState(config);
-  const effects = (at: number) => ({
-    agents: () => listHerdrAgents(herdr.run), credentials: async () => ({}),
-    snapshot: async () => ({ work: [{ ...unleased }], now: new Date(at).toISOString() }),
-    closeSession: (pane: string) => closeHerdrPane(pane, herdr.run),
-    herdr: () => observeHerdrAgents(herdr.run),
-    panes: async () => ({ panes: await listHerdrPanes(herdr.run), available: true }),
-    persist: async () => {}, recordSession: async () => {}, dispatch: async () => {},
-    merge: async () => ({ result: 'merged', merged: true }),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
-  }) as unknown as DaemonEffects;
-  await runCycle(config, state, effects(clockStart), () => clockStart);
-  const later = clockStart + launchAppearanceMs + 60_000;
-  await runCycle(config, state, effects(later), () => later);
-  assert.ok(!herdr.panes.has('wA:p1'), 'the install\'s own leftover shell is closed');
-  assert.ok(herdr.panes.has('wB:p1') && herdr.panes.has('wB:p2'), 'another install\'s matching panes are untouched');
-  assert.ok(!herdr.commands.some(args => args.some(arg => arg.startsWith('wB:'))), 'no command ever named a pane in wB');
-
   // A live reload the loop refuses keeps its scope: an edit that moves the workspace together with a
   // setting the loop is bound to leaves every sweep in wA, and only an accepted reload moves it.
   const live = liveMasterConfig(root, await loadMasterConfig(root));
@@ -256,7 +223,7 @@ test('unit:herdr-scope-per-install — the install\'s workspace scopes every inv
   const refused = await live.reload();
   assert.match(refused.refused ?? '', /baseBranch/);
   assert.equal(scope.herdrScope(), 'wA', 'a refused reload never moves the Herdr scope');
-  assert.deepEqual((await listHerdrPanes(herdr.run)).map(pane => pane.pane_id), ['wA:p2']);
+  assert.deepEqual((await listHerdrAgents(herdr.run)).map(agent => agent.pane_id), ['wA:p1', 'wA:p2']);
   await writeFile(join(root, '.graphyard/master.json'), JSON.stringify({ ...stored, herdrWorkspace: 'wB' }));
   assert.equal((await live.reload()).refused, null);
   assert.equal(scope.herdrScope(), 'wB', 'an accepted reload adopts the new workspace');

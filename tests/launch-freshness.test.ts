@@ -7,16 +7,14 @@ import type { Observation, Work } from '../src/model.js';
 import type { DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { assertReviewCandidate } from '../src/reviewer.js';
-import { dispatchFailureAttention, dispatchSummary, emptyDispatchCursor, launchWaitAttention, launchWaitLimit, launchWaits, reviewLaunchWaitAttentionMs, tickWaits, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { emptyDaemonState, observationWakeRetryMs, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDispatchCursor, launchWaitLimit, tickWaits, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-710. On 2026-09-26 review requests waited hours for a reviewer: every launch was refused with
  * "GitHub observation is missing or older than two minutes", and with ~250 open items observed a
  * few a minute, an item was read inside that bound only by chance. A launch now binds the request's
- * exact head and base, not the observation's age; a step that genuinely needs a fresh observation
- * wakes the item's observation job and retries once it lands; and a waiting launch is reported.
+ * exact head and base, not the observation's age, and a waiting launch is recorded.
  */
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -93,76 +91,7 @@ test('unit:launch-binds-head-not-age — a 20-minute-old observation of the requ
   });
 });
 
-/** A submitted item whose last observation carries a changes-requested verdict on its head: it needs rework. */
-function verdictItem(observedAt: string): Work {
-  return item(observedAt, { observation: observation(head, observedAt, { checks: [{ name: 'test', result: 'success', appId: 15368 }], reviews: [{ reviewer: 'independent-reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } as Partial<Observation>), autoDispatch: undefined } as Partial<Work>);
-}
-function daemonEffects(snapshot: () => Awaited<ReturnType<DaemonEffects['snapshot']>>, log: string[]): DaemonEffects {
-  return {
-    agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
-    snapshot: async () => snapshot(),
-    closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: snapshot().now, reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
-    wakeObservation: async work => { log.push(`wake:${work.key}`); },
-    rework: async work => { log.push(`rework:${work.key}`); },
-    persist: async () => {},
-  };
-}
-
-test('unit:stale-refusal-wakes-observation — a rework refused for a stale observation wakes the item\'s observation job at once, and the next attempt follows that observation', async () => {
-  const config = masterConfig('/outside/coordinator.token');
-  const state = emptyDaemonState(config);
-  const log: string[] = [];
-  // The observation is three minutes old: rework needs a fresh one.
-  let current = verdictItem(iso(-3 * minute));
-  let now = clock;
-  const effects = daemonEffects(() => ({ work: [current], now: new Date(now).toISOString(), jobs: [] }), log);
-
-  const first = await runCycle(config, state, effects, () => now);
-  assert.deepEqual(log, ['wake:GY-42'], 'the refusal wakes the observation job immediately, and decides nothing');
-  assert.match(first.actions.find(action => action.work === 'GY-42' && action.kind === 'judgement')!.detail, /rework waits for a fresh observation/);
-  assert.match(first.actions.find(action => action.kind === 'refresh')!.detail, /Woke the observation job of GY-42/);
-
-  // The next cycle, before the woken observation lands: no second wake, and still no attempt.
-  now = clock + 30_000;
-  await runCycle(config, state, effects, () => now);
-  assert.deepEqual(log, ['wake:GY-42'], 'one wake stands until its observation lands; the rework is not retried on a timer');
-
-  // The woken observation lands: the very next cycle requests the rework.
-  const landed = clock + 40_000;
-  current = verdictItem(new Date(landed).toISOString());
-  now = clock + 45_000;
-  await runCycle(config, state, effects, () => now);
-  assert.deepEqual(log, ['wake:GY-42', 'rework:GY-42'], 'the second attempt follows the observation');
-
-  // A wake that brought no observation within its bound is sent again.
-  const again: string[] = [];
-  const againState = emptyDaemonState(config);
-  let againNow = clock;
-  const stale = verdictItem(iso(-3 * minute));
-  const againEffects = daemonEffects(() => ({ work: [stale], now: new Date(againNow).toISOString(), jobs: [] }), again);
-  await runCycle(config, againState, againEffects, () => againNow);
-  againNow = clock + observationWakeRetryMs;
-  await runCycle(config, againState, againEffects, () => againNow);
-  assert.deepEqual(again, ['wake:GY-42', 'wake:GY-42']);
-
-  // A wake the server refused stands for nothing: it is sent again on the next cycle, not five minutes on.
-  const refusedWakes: string[] = [];
-  const refusedState = emptyDaemonState(config);
-  let refusedNow = clock, failWake = true;
-  const refusedEffects = { ...daemonEffects(() => ({ work: [stale], now: new Date(refusedNow).toISOString(), jobs: [] }), refusedWakes),
-    wakeObservation: async (work: Work) => { refusedWakes.push(`wake:${work.key}`); if (failWake) throw new Error('resync refused'); } };
-  await runCycle(config, refusedState, refusedEffects, () => refusedNow);
-  failWake = false; refusedNow = clock + 30_000;
-  await runCycle(config, refusedState, refusedEffects, () => refusedNow);
-  assert.deepEqual(refusedWakes, ['wake:GY-42', 'wake:GY-42'], 'a failed wake is retried on the next cycle');
-  refusedNow = clock + 60_000;
-  await runCycle(config, refusedState, refusedEffects, () => refusedNow);
-  assert.deepEqual(refusedWakes, ['wake:GY-42', 'wake:GY-42'], 'the delivered wake then stands');
-});
-
-test('unit:launch-wait-reported — master status reports each waiting launch with how long it has waited and why, and a review waiting over 15 minutes raises attention', async () => {
+test('unit:launch-wait-reported — the dispatch tick records each waiting launch on its cursor, keeping the longest-waiting reviews past its bound', async () => {
   await withToken(async token => {
     // No reviewer profile: the review request waits, and the tick records why.
     const config = masterConfig(token, { reviewers: [] });
@@ -172,31 +101,6 @@ test('unit:launch-wait-reported — master status reports each waiting launch wi
     const tick = await runDispatchTick(config, cursor, dispatchEffects(() => [waiting, fresh], []), () => clock);
     assert.equal(tick.waiting.length, 2);
     assert.deepEqual(cursor.lastTick!.waits.map(wait => wait.requestId).sort(), [reviewRequest().id, 'b8693b4c-0000-4000-8000-000000000002']);
-
-    const rows = launchWaits([waiting, fresh], cursor, clock);
-    assert.deepEqual(rows.map(row => [row.work, row.kind, row.waitedMs]), [['GY-42', 'review', 20 * minute], ['GY-43', 'review', 5 * minute]]);
-    assert.ok(rows.every(row => /no reviewer profile/.test(row.reason)), 'each wait says why');
-    assert.equal(rows[0].requestedAt, iso(-20 * minute));
-
-    const attention = launchWaitAttention(rows);
-    assert.equal(attention.length, 1, 'only the review waiting past fifteen minutes is attention');
-    assert.equal(attention[0].subject, 'GY-42');
-    assert.match(attention[0].text, /has waited 20 min/);
-    assert.match(attention[0].text, /no reviewer profile/);
-    assert.ok(20 * minute > reviewLaunchWaitAttentionMs && 5 * minute < reviewLaunchWaitAttentionMs);
-
-    // What `master status` reports: the dispatcher summary carries the waits, and its attention raises the long one.
-    const summary = dispatchSummary(cursor, clock, 10_000, [], [waiting, fresh]);
-    assert.deepEqual(summary.waiting, rows);
-    assert.deepEqual(dispatchFailureAttention(summary), attention);
-
-    // A refusal still standing is reported as the wait's reason too, with its next attempt.
-    const refused = emptyDispatchCursor(config);
-    refused.failures[reviewRequest().id] = { kind: 'review', work: 'GY-42', sha: head, attempts: 4, reason: 'a reviewer launch failed', at: iso(-minute), nextAt: iso(minute) };
-    const [row] = launchWaits([waiting], refused, clock);
-    assert.match(row.reason, /launch refused 4 time\(s\): a reviewer launch failed; next attempt at/);
-    // A request the item no longer holds waits for nothing.
-    assert.deepEqual(launchWaits([item(iso(0), { autoDispatch: { review: null, producers: [], history: [] } } as Partial<Work>)], cursor, clock), []);
 
     // Past the cursor's bound the most recent waits drop, never the longest: reviews first, oldest first.
     const many = Array.from({ length: launchWaitLimit + 5 }, (_, n) => ({ kind: 'review' as const, work: `GY-${n}`, requestId: `request-${n}`, sha: head, reason: 'waiting', requestedAt: iso(-n * minute) }));

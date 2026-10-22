@@ -9,7 +9,6 @@ import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewLedgerLockStaleMs, saveReviewerProfile, updateReviewLedger } from '../src/reviewer.js';
-import { reconcileLedgers } from '../src/cli/master-status.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-05 submittedAt is a past verdict literal that reconcile records without comparing it to a clock; the gh stub's submitted_at and the item timestamps come from Date.now().
@@ -61,10 +60,10 @@ async function readOnlyLockFs(at: 'mkdir' | 'open' | 'write', code = 'EROFS') {
     }) as typeof fs.open };
 }
 /**
- * Runs `body` as master status runs on the host: GRAPHYARD_DATA_HOME set, and a `gh` on PATH that
+ * Runs `body` as the loop runs on the host: GRAPHYARD_DATA_HOME set, and a `gh` on PATH that
  * answers the review list with the reviewer's approval of the head.
  */
-async function asMasterStatus<T>(dataHome: string, body: () => Promise<T>): Promise<T> {
+async function onHost<T>(dataHome: string, body: () => Promise<T>): Promise<T> {
   const bin = await temporaryDirectory('ledger-lock-gh');
   const reviews = JSON.stringify([{ id: 77, user: { login: 'graphyard-reviewer[bot]' }, state: 'APPROVED', commit_id: H, submitted_at: new Date(Date.now() + 60_000).toISOString() }]);
   await writeFile(join(bin, 'gh'), `#!/bin/sh\ncase "$*" in *pulls/64/reviews) printf '%s' '${reviews}' ;; *) printf '[]' ;; esac\n`, { mode: 0o755 });
@@ -79,7 +78,7 @@ async function asMasterStatus<T>(dataHome: string, body: () => Promise<T>): Prom
   }
 }
 
-test('unit:review-ledger-lock-erofs-degrades — a read-only ledger lock location runs the read-modify-write lockless, reconcile completes and master status reports reviews available', async () => {
+test('unit:review-ledger-lock-erofs-degrades — a read-only ledger lock location runs the read-modify-write lockless, reconcile completes', async () => {
   const dataHome = await temporaryDirectory('ledger-lock-erofs-data');
   const { root, cleanup } = await boundMaster();
   try {
@@ -108,28 +107,20 @@ test('unit:review-ledger-lock-erofs-degrades — a read-only ledger lock locatio
     await assert.rejects(updateReviewLedger(root, () => {}, { environment: { GRAPHYARD_DATA_HOME: dataHome }, fs: await readOnlyLockFs('open', 'EIO') }), /EIO/);
 
     if (!runsAsRoot) {
-      // Master status, on a real filesystem: the managed data root is unwritable, so the lock cannot be made there.
+      // On a real filesystem: the managed data root is unwritable, so the lock cannot be made there.
       const readOnlyHome = await temporaryDirectory('ledger-lock-readonly-home');
       await chmod(readOnlyHome, 0o500);
       try {
-        await asMasterStatus(join(readOnlyHome, 'graphyard'), async () => {
+        await onHost(join(readOnlyHome, 'graphyard'), async () => {
           const ledger = await readReviewLedger(root);
-          await updateReviewLedger(root, current => { current.reviews = ledger.reviews.map(record => ({ ...record, state: 'pending', verdict: undefined, closedAt: undefined })); }, { environment: { GRAPHYARD_DATA_HOME: dataHome } });
-          const status = await reconcileLedgers(root, config, { work: [] }, { available: false });
-          assert.deepEqual(status.reviewRuntime, { available: true, reason: null }, 'master status reports runtime.reviews available');
-          // GitHub reviews are no longer read (GY-2010): the pending pull-request session settles cancelled, saved lockless.
-          assert.equal(status.reviewRecords[0]!.state, 'cancelled', 'and the pending session reconciled');
-
           // The ledger itself unwritable (the whole checkout read-only): the pass still completes, returns the
-          // reconciled records and says they were left unsaved; it never reports the capability unavailable.
+          // reconciled records and says they were left unsaved.
           await updateReviewLedger(root, current => { current.reviews = ledger.reviews.map(record => ({ ...record, state: 'pending', verdict: undefined, closedAt: undefined })); }, { environment: { GRAPHYARD_DATA_HOME: dataHome } });
           await chmod(join(root, '.graphyard'), 0o500);
           try {
             const unsaved = await reconcileReviews(root, config, { run: herdrRun, observe: () => verdict() });
             assert.equal(unsaved.reviews[0]!.verdict?.state, 'APPROVED');
             assert.match((unsaved as { unsaved?: string }).unsaved ?? '', /review ledger .*cannot be written \(EACCES/);
-            const readOnlyStatus = await reconcileLedgers(root, config, { work: [] }, { available: false });
-            assert.equal(readOnlyStatus.reviewRuntime.available, true);
           } finally { await chmod(join(root, '.graphyard'), 0o700); }
         });
       } finally { await chmod(readOnlyHome, 0o700); await rm(readOnlyHome, { recursive: true, force: true }); }

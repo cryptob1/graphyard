@@ -7,7 +7,6 @@ import { join, resolve } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { runChild } from '../src/child-runner.js';
 import { releaseHeldBranch, releaseUnderFailure, reserveReleasingHold } from '../src/master/worktrees.js';
-import { workspaceDispatchFailure } from '../src/master/dispatch.js';
 import { workspaceCommands } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 
@@ -114,7 +113,6 @@ test('unit:worktree-hold-followups — a refused failure release is reported as 
   const failure = await releaseUnderFailure(refused, 3, 'fatal: hook failed').then(() => null, (error: unknown) => error);
   assert.ok(failure instanceof Error);
   assert.match(failure.message, /^Git worktree creation failed: fatal: hook failed\. The claim could not be released as a workspace failure \(Lease missing.*\), so epoch 3 is spent rather than handed back\.$/);
-  assert.equal(workspaceDispatchFailure(failure.message), true, 'the failure still names the workspace, not the profile');
 
   const root = await host();
   try {

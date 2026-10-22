@@ -4,13 +4,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountStartFailureAttention, accountStartFailurePath, clearAccountStartFailures, readAccountStartFailures, readProfileLaunchRecords, workerLaunchRows } from '../src/master/dispatch.js';
+import { accountStartFailurePath, clearAccountStartFailures, readAccountStartFailures, readProfileLaunchRecords } from '../src/master/dispatch.js';
 import { atomicPrivateWrite, awaitRuntimeStart, dispatchWork, loadMasterConfig, observeStart, runtimeScreens, SessionStartError, setupMaster, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import type { FleetClient, FleetProbe } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
 // Time-bomb allowance (GY-1694): the 2026-09-25 `clock` is the ScreenPane's virtual start clock, advanced only by wait() and handed via bounds(); Date.now()/new Date() stamp the credential expiry and the dispatch observedAt.
 
 // GY-417: a runtime's start is judged from the runtime's own screen, and a launch whose preferred
@@ -165,58 +164,30 @@ test('unit:start-failure-fallback-visible — a launch whose preferred account\'
     assert.ok(dispatched.fallback!.note.endsWith('; launched on claude-b'), dispatched.fallback!.note);
     assert.deepEqual(dispatched.fallback!.failed.map(failure => [failure.account, failure.kind]), [['opencode-a', 'opencode']]);
 
-    // The record the launcher keeps beside its reservation says the same, and master status joins it
-    // onto the profile's row: a slot running Claude under an opencode-named profile is on the record.
+    // The record the launcher keeps beside its reservation says the same: a slot running Claude
+    // under an opencode-named profile is on the record.
     const records = await readProfileLaunchRecords(root, [profile]);
     assert.equal(records[profile.name].runtime, 'claude');
     assert.equal(records[profile.name].account, 'claude-b');
     assert.deepEqual(records[profile.name].failedAccounts.map(failure => failure.account), ['opencode-a']);
-    const rows = workerLaunchRows([profile], records);
-    assert.equal(rows[profile.name].runtime, 'claude');
-    assert.equal(rows[profile.name].account, 'claude-b');
-    assert.ok(rows[profile.name].fallback!.startsWith('opencode-a failed to start: ') && rows[profile.name].fallback!.endsWith('; launched on claude-b'), rows[profile.name].fallback!);
-    assert.deepEqual(workerLaunchRows([{ name: 'never-dispatched' }], records), {}, 'a profile with no dispatch raises nothing');
 
-    // The account's consecutive failures are counted: one so far, no attention yet.
+    // The account's consecutive failures are counted.
     assert.equal((await readAccountStartFailures(master))['opencode-a'].failures, 1);
-    assert.deepEqual(accountStartFailureAttention(await readAccountStartFailures(master), launcher), []);
 
-    // A second, then a third launch on the same broken account: at three in a row, exactly one
-    // attention item names the account and its runtime — the launches fell back, so nothing else shows it.
+    // A second, then a third launch on the same broken account.
     await (await dispatch(new Set(['claude']))).dispatched;
     assert.equal((await readAccountStartFailures(master))['opencode-a'].failures, 2);
-    assert.deepEqual(accountStartFailureAttention(await readAccountStartFailures(master), launcher), []);
     await (await dispatch(new Set(['claude']))).dispatched;
     const failures = await readAccountStartFailures(master);
     assert.equal(failures['opencode-a'].failures, 3);
-    const items = accountStartFailureAttention(failures, launcher);
-    assert.equal(items.length, 1);
-    assert.equal(items[0].subject, 'opencode-a never starts');
-    assert.ok(items[0].text.includes('opencode-a (runtime opencode)'), items[0].text);
-    assert.ok(items[0].text.includes('failed to start 3 launches in a row'), items[0].text);
-    assert.ok(items[0].text.includes('command still echoing'), 'the item carries the last start refusal');
-    assert.equal(items[0].role, 'master');
-    assert.match(items[0].next, /master environments --apply/);
 
-    // Exercise the public report too: persisted launch data must reach master status,
-    // not merely remain available through the record-reading helpers.
-    const report = await masterStatusReport(root, { ...master, workers: [profile] },
-      async path => path === 'work-snapshot' ? { work: [], now: new Date().toISOString() } : { decisions: [] },
-      { actor: { id: 'coordinator-1' } }, { commit: null });
-    const worker = report.workers.find(worker => worker.profile === profile.name) as unknown as { runtime: string; account: string; fallback: string };
-    assert.equal(worker.runtime, 'claude');
-    assert.equal(worker.account, 'claude-b');
-    assert.match(worker.fallback, /opencode-a failed to start: .*; launched on claude-b/);
-    assert.equal(report.attentionItems.filter(item => item.subject === 'opencode-a never starts').length, 1);
-
-    // A launch on the account that starts clears its run of failures, and the attention with it.
+    // A launch on the account that starts clears its run of failures.
     const healthy = await dispatch(new Set(['opencode']));
     assert.deepEqual(healthy.pane.kinds, ['opencode']);
     assert.equal(healthy.dispatched.fallback, null);
     const after = await readProfileLaunchRecords(root, [profile]);
     assert.deepEqual(after[profile.name].failedAccounts, [], 'a dispatch without a fallback records none');
     assert.deepEqual(await readAccountStartFailures(master), {});
-    assert.deepEqual(accountStartFailureAttention(await readAccountStartFailures(master), launcher), []);
 
     // A profile whose every account failed to start says so instead of dying on the last one alone.
     const lone: WorkerProfile = { ...profile, name: 'opencode-only', accounts: ['opencode-a'] };
@@ -266,7 +237,7 @@ test('unit:start-failure-fallback-visible — a worker role the agent registry d
     assert.deepEqual(chosen, ['opencode-a', 'opencode-a']);
     assert.deepEqual(ended.map(([id]) => id), ['session-1', 'session-2'], 'both registry sessions are given back at once');
     assert.ok(ended[1][1].includes('opencode-a already failed to start under this dispatch'), ended[1][1]);
-    // The failure is counted like any other, so three dispatches in a row raise the attention item.
+    // The failure is counted like any other.
     assert.equal((await readAccountStartFailures(master))['opencode-a'].failures, 1);
   } finally { await cleanup(); }
 });

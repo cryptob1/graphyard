@@ -12,8 +12,6 @@ import { actionIdleMs } from '../src/model/actions.js';
 import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
 import { actionAccount, actionJudgment, nextAction, refusalAction } from '../src/model/next-action.js';
 import { accountOutcome, actionlessItems, stallBoundMs, stalledItems, type AccountOutcome } from '../src/model/action-account.js';
-import { stalledItemAttention } from '../src/cli/master-status.js';
-import { actionableSubjects } from '../src/master-daemon.js';
 import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
@@ -33,7 +31,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  *   states, collects every refusal it words, and proves no state yields an item with a failing
  *   gate and no answer.
  * - `unit:actionless-item-visible` asserts an item with no action and nothing moving it is named
- *   by master status, by the coordination loop's inventory and by the dashboard, with how long it
+ *   by the control plane and by the dashboard, with how long it
  *   has held its gate and what is missing — counted apart from items waiting on another item.
  */
 
@@ -249,7 +247,7 @@ const gatesFailingAt = (first: string, reasons: string[]): Gate[] => {
   return order.map(name => ({ name, passed: order.indexOf(name) < order.indexOf(first), reasons: name === first ? reasons : order.indexOf(name) < order.indexOf(first) ? [] : ['later'] }));
 };
 
-test('unit:actionless-item-visible — an item with no action and nothing moving it is named by master status, by the loop and on the dashboard, with how long it has held its gate and what is missing; items waiting on another item are counted apart', () => {
+test('unit:actionless-item-visible — an item with no action and nothing moving it is named by the control plane and on the dashboard, with how long it has held its gate and what is missing; items waiting on another item are counted apart', () => {
   const now = new Date('2026-09-21T12:00:00.000Z');
   const held = new Date(now.getTime() - 3 * 3_600_000).toISOString();
   const shell = (key: string, overrides: Partial<Work>): Work => ({
@@ -291,23 +289,6 @@ test('unit:actionless-item-visible — an item with no action and nothing moving
   assert.equal(stallBoundMs, actionIdleMs);
   assert.deepEqual(stalledItems(world, new Date(Date.parse(held) + stallBoundMs - 1000)).map(entry => entry.key), []);
   assert.deepEqual(stalledItems(world, new Date(Date.parse(held) + stallBoundMs + 1000)).map(entry => entry.key), ['GY-MUTE']);
-
-  // Master status names it, with the gate, the elapsed time, what is missing, and who answers.
-  const attention = stalledItemAttention({ work: world, now: now.toISOString() });
-  assert.equal(attention.length, 1);
-  assert.equal(attention[0].subject, 'GY-MUTE');
-  assert.match(attention[0].text, /has held its review gate for 3h0m with no action named and nothing moving it/);
-  assert.match(attention[0].text, /defect in the control plane rather than in the item/);
-  assert.match(JSON.stringify(attention[0]), /graphyard master create/);
-  assert.deepEqual(stalledItemAttention({ work: [blocked, building], now: now.toISOString() }), [], 'an item something is moving raises nothing');
-
-  // The coordination loop counts it as a subject, so its wait accumulates against the silence
-  // bound instead of being absent from every measure the loop keeps.
-  const subjects = actionableSubjects({ autoMerge: true, run: { proofWorkflow: false } } as any, world, now.getTime());
-  const escalation = subjects.find(subject => subject.work === 'GY-MUTE' && subject.kind === 'attention');
-  assert.ok(escalation, 'the loop has a subject for it');
-  assert.match(escalation!.detail, /holds its review gate with no action, no dependency and no recorded human need/);
-  assert.equal(subjects.some(subject => subject.work === 'GY-DEP' && subject.kind === 'attention'), false);
 
   // The dashboard names it too, and reads the same items as stalled as the control plane does.
   assert.deepEqual(stalledCards(computed, now.getTime()).map(card => card.item.key), stalledItems(world, now, 0).map(entry => entry.key),

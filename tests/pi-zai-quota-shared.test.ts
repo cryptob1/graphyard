@@ -1,14 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { observeAccount } from '../src/fleet.js';
-import { loadMasterConfig, setupMaster, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, failoverKey, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import type { Work } from '../src/model.js';
 import { accountIneligibility } from '../src/model/registry-sessions.js';
 import { applyRegistryMutation, emptyRegistry, foldObservation } from '../src/model/registry.js';
 
@@ -60,48 +55,4 @@ test('unit:pi-zai-quota-shared — a Pi account on a zai/ model reads the shared
   await observe(60_000);
   assert.equal(pi.quota?.state, 'available', 'available again once the probe reports the credit available');
   assert.equal(accountIneligibility(registry, pi, clock + 61_000, 'host'), null);
-});
-
-const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const envelope = 'Error: 429 {"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2030-01-04 00:00:00"}';
-
-test('unit:pi-zai-quota-shared — a live worker pane ending on pi\'s 429 code 1310 envelope is failed over at the next liveness check and its account held until the reset; prose about a limit is not', async () => {
-  const root = await temporaryDirectory('zai-liveness'), credentials = await temporaryDirectory('zai-liveness-credentials');
-  execFileSync('git', ['init', '-q', root]);
-  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials },
-    (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch);
-  // A claude profile whose registry selection launched a Pi session, as graphyard-opencode-1's did.
-  const profile = { name: 'opencode-primary', principal: 'worker-a', agentName: 'graphyard-opencode-1', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' } as WorkerProfile;
-  const config: MasterConfig = { ...await loadMasterConfig(root), workers: [profile] };
-
-  for (const [tail, spent] of [[envelope, true], ['The limit exhausted path is covered; Weekly/Monthly Limit Exhausted handling is tested.', false]] as const) {
-    const work = { id: 'work-GY-1', key: 'GY-1', title: 'Pi on spent credit', description: '', type: 'bug', priority: 0, dependencies: [],
-      criteria: [{ id: 'AC-1', text: 'Done', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, plannedFiles: [], stage: 'build', revision: 4, policyRevision: 1,
-      createdAt: iso(-7_200_000), updatedAt: iso(), stageEnteredAt: iso(-60_000), ready: true, epoch: 2, lease: { owner: 'worker-a', epoch: 2, expiresAt: iso(600_000) },
-      workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [] } as unknown as Work;
-    const agents: HerdrAgent[] = [{ name: 'graphyard-opencode-1', pane_id: 'pane-1', agent: 'pi', agent_status: 'idle', cwd: '/repo/.graphyard/worktrees/GY-1-2' }];
-    const held: { account: string; resetsAt: string | null }[] = [], prompted: string[] = [];
-    const effects: DaemonEffects = {
-      agents: () => agents, credentials: async () => ({}), snapshot: async () => ({ work: [work], now: iso() }), closeSession: () => {}, dispatch: async () => {},
-      observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(), reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {}, persist: async () => {},
-      sessionOutput: () => `● Reading GY-1 before editing.\n\n${tail}\n`,
-      selectedAccount: async () => ({ environment: 'pi-a', kind: 'pi' }),
-      holdAccount: async (account, observed) => { held.push({ account, resetsAt: observed.resetsAt }); },
-      reportCapacity: async () => work,
-      preserveWork: async () => ({ state: 'clean', detail: 'nothing uncommitted' }),
-      promptSession: async (_agent, text) => { prompted.push(text); },
-    };
-    const state = emptyDaemonState(config);
-    await runCycle(config, state, effects, () => clock);
-    const failover = state.actions[failoverKey('worker', work, 2)];
-    if (spent) {
-      assert.equal(failover?.state, 'done', failover?.detail);
-      assert.deepEqual(held, [{ account: 'pi-a', resetsAt: reset }], 'the launch account is held until the notice\'s UTC reset');
-      assert.deepEqual(prompted, [], 'no idle re-prompt is waited for');
-    } else {
-      assert.equal(failover, undefined, 'an agent\'s prose about a limit is not its provider\'s notice');
-      assert.deepEqual(held, []);
-    }
-  }
 });

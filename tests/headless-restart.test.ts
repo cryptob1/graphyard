@@ -18,9 +18,6 @@ import type { RunResult } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 records are sessionRetry fixtures judged on the now handed beside them; Date.now() stamps only real-clock records.
 
-/** The coordinator checkout the loop reads at its start (GY-857), clean: this test is not about it. */
-const cleanCheckout = () => ({ root: '/', commit: null, modified: [], untracked: [] });
-
 // GY-453. Headless Pi runs are detached from the process that launched them: a restart of the loop
 // or an executor leaves them running, and the restarted process adopts them from the run registry
 // on disk and applies each result exactly once. Driven against a fake Pi (a node script printing Pi
@@ -171,52 +168,6 @@ test('unit:headless-run-survives-restart an adopted run keeps its managed checko
   } finally { await cleanup(); }
 });
 
-test('unit:headless-run-survives-restart a run an executor launched is re-adopted by the loop on its next cycle once that executor restarts, and applied once', async () => {
-  const { root, start, applied, adopters, cleanup } = await fixture();
-  try {
-    // An executor on this host launched a headless producer run and is watching it (here: a live
-    // process that is not this one holds the run's watch claim).
-    const { started, release, meta } = await start('run-5', 'graphyard-producer-gy-5');
-    detachRuns();
-    const claim = join(started.run.directory!, 'watch.claim');
-    await writeFile(claim, `${process.ppid}:${processIdentity(process.ppid) ?? ''}:watch`);
-
-    // The loop runs its cycles beside it; each one looks for runs no live process watches.
-    const host = new EventEmitter(), lines: string[] = [];
-    let calls = 0, restarted: () => Promise<void> = async () => {};
-    const executorRestarted = new Promise<void>(resolve => { restarted = async () => { resolve(); }; });
-    const config = { url: 'https://graphyard.example', repository: 'owner/project', run: { intervalSeconds: 30 } } as never;
-    const effects = { persist: async () => {}, snapshot: async () => { throw new Error('the control plane is offline'); },
-      adoptRuns: async () => {
-        const adopted = await adoptRuns(root, adopters);
-        calls++;
-        if (calls === 2) {
-          assert.deepEqual(adopted, [], 'a run a live executor watches is left to it');
-          // `master executors restart`: the executor's process ends; the run, detached, does not.
-          await writeFile(claim, `${process.ppid}:1:watch`);
-          await restarted();
-        }
-        if (adopted.length) { host.emit('SIGUSR2'); }
-        return adopted;
-      } } as unknown as DaemonEffects;
-    const loop = runDaemon(config, emptyDaemonState(config), effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], checkout: cleanCheckout, process: host as never, log: line => lines.push(line) });
-    await executorRestarted;
-    await loop;
-    assert.ok(runAlive(meta), 'the executor\'s restart left the run running');
-    assert.ok(calls >= 3, 'the loop adopts on its start and again on later cycles');
-    assert.ok(lines.some(line => /adopted 1 headless run\(s\) no live process was watching: graphyard-producer-gy-5 \(producer for GY-1\)/.test(line)), lines.join('\n'));
-
-    // The loop that adopted it stopped too (and signalled nothing); the next one picks it up again and applies it once.
-    const [adopted] = await adoptRuns(root, adopters);
-    assert.equal(adopted?.name, 'graphyard-producer-gy-5');
-    await release();
-    await adopted.settled;
-    assert.deepEqual(applied, [{ subject: 'run-5', ok: true, reason: null }], 'the result was applied exactly once');
-    detachRuns();
-    assert.deepEqual(await adoptRuns(root, adopters), [], 'an applied run is never adopted again');
-  } finally { await cleanup(); }
-});
-
 test('unit:headless-run-survives-restart a run another live process watches is left to it, and a dead watcher\'s run is taken over', async () => {
   const { root, start, applied, adopters, cleanup } = await fixture();
   try {
@@ -243,9 +194,9 @@ test('unit:restart-leaves-runs the loop\'s shutdown signals no headless run, log
     const lines: string[] = [];
     const config = { url: 'https://graphyard.example', repository: 'owner/project', run: { intervalSeconds: 30 } } as never;
     const persisted: unknown[] = [];
-    const effects = { persist: async (state: unknown) => { persisted.push(state); }, snapshot: async () => { throw new Error('the control plane is offline'); } } as unknown as DaemonEffects;
+    const effects = { persist: async (state: unknown) => { persisted.push(state); }, snapshot: async () => { throw new Error('the control plane is offline'); }, agents: () => [], credentials: async () => ({}) } as unknown as DaemonEffects;
     // A planned restart: the loop is stopped by its signal, and its shutdown hook runs.
-    const result = await runDaemon(config, emptyDaemonState(config), effects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], checkout: cleanCheckout, log: line => lines.push(line) });
+    const result = await runDaemon(config, emptyDaemonState(config), effects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: line => lines.push(line) });
     assert.equal(result.cycles.length + result.failed.length, 1);
     assert.ok(lines.some(line => /stopping: left 1 headless run\(s\) running, detached/.test(line)), lines.join('\n'));
     await delay(200);
@@ -255,9 +206,9 @@ test('unit:restart-leaves-runs the loop\'s shutdown signals no headless run, log
     // The next loop adopts it on start, and its result is applied once when it ends.
     const next: string[] = [];
     const adoptEffects = { ...effects, adoptRuns: () => adoptRuns(root, adopters) } as unknown as DaemonEffects;
-    const restarted = runDaemon(config, emptyDaemonState(config), adoptEffects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], checkout: cleanCheckout, log: line => next.push(line) });
+    const restarted = runDaemon(config, emptyDaemonState(config), adoptEffects, { once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: line => next.push(line) });
     await restarted;
-    assert.ok(next.some(line => /adopted 1 headless run\(s\) left running by a restart: graphyard-producer-gy-4 \(producer for GY-1\)/.test(line)), next.join('\n'));
+    assert.ok(next.some(line => /adopted 1 headless run\(s\): graphyard-producer-gy-4 \(producer for GY-1\)/.test(line)), next.join('\n'));
     // Its shutdown left the adopted run running too; a third watcher applies it.
     assert.ok(runAlive(meta));
     const [third] = await adoptRuns(root, adopters);

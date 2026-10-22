@@ -15,10 +15,6 @@ export const reconciliationRefusalPrefix = 'Reconciliation by decision ';
 export const unauthorizedMergeViolation = 'Merge observed without a prior authorization for this candidate';
 /** True for an item held at the merge stage by an observed merge its gates did not pass (GY-92). */
 export const mergedWithoutAuthorization = (work: Work) => work.stage !== 'done' && !!work.observation?.merged && work.violations.includes(unauthorizedMergeViolation);
-export function refusedReconciliation(work: Pick<Work, 'violations'>): { decision: string; violation: string } | null {
-  const violation = work.violations.find(entry => entry.startsWith(reconciliationRefusalPrefix));
-  return violation ? { decision: violation.slice(reconciliationRefusalPrefix.length).split(' ')[0], violation } : null;
-}
 /**
  * GY-831. The guarded merge's refusal the loop reported for one candidate, kept on documents from
  * before the control plane became the merge writer: `rereview` cleared the carried approval so the

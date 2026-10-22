@@ -11,7 +11,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { harnessDecision } from '../src/harness.js';
-import { blockerCommands, branchRestoration, buildMasterStatus, sessionHarnessPlan, unrunnableRemedies, workerHarnessPlan } from '../src/master.js';
+import { blockerCommands, branchRestoration, sessionHarnessPlan, unrunnableRemedies, workerHarnessPlan } from '../src/master.js';
 import { parseLocalScopeDiff } from '../src/sync.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -243,8 +243,7 @@ test('integration:unrunnable-remedy-reported — a blocker naming a command no l
   assert.deepEqual(blockerCommands(unquoted.work.blocker!), ['git push --mirror origin']);
 
   const all = await store.list();
-  const status = buildMasterStatus({ work: all, now: new Date().toISOString() }, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, launcher);
-  const reported = status.unrunnableRemedies.filter(entry => [unrunnable.work.key, runnable.work.key, unquoted.work.key].includes(entry.key));
+  const reported = unrunnableRemedies(all, { cliPath: launcher, baseBranch: 'main' }).filter(entry => [unrunnable.work.key, runnable.work.key, unquoted.work.key].includes(entry.key));
   assert.deepEqual(reported.map(entry => entry.key), [unrunnable.work.key, unquoted.work.key], 'a blocker whose command the worker may run is an ordinary blocker');
   const [defect] = reported;
   assert.equal(defect.command, `git push --force origin ${unrunnable.branch}`);
@@ -253,21 +252,10 @@ test('integration:unrunnable-remedy-reported — a blocker naming a command no l
   assert.deepEqual(defect.deniedBy.map(entry => entry.role), ['reviewer', 'producer', 'master']);
   assert.ok(defect.deniedBy.every(entry => entry.rule === 'Bash(git push:*)'));
   assert.equal(reported[1].rule, 'Bash(git push *--mirror*)');
-  // The report reads as a defect with an agent owner, never as a wait on a human shell.
-  const item = status.attentionItems.find(entry => entry.subject === unrunnable.work.key && /no session Graphyard launches may run/.test(entry.text))!;
-  assert.ok(item, JSON.stringify(status.attentionItems));
-  assert.match(item.text, new RegExp(`git push --force origin ${unrunnable.branch.replace(/[/-]/g, '\\$&')}`));
-  assert.match(item.text, /worker .*Bash\(git push \*--force\*\)/);
-  assert.match(item.text, /Graphyard defect, not a wait on a human shell/);
-  assert.equal(item.human, false);
-  assert.equal(item.role, 'master');
-  assert.ok(status.counts.unrunnableRemedies >= 2);
   // The same judgement, pure: an unblocked or delivered item is never reported.
   assert.deepEqual(unrunnableRemedies([{ ...unrunnable.work, blocker: null }], { cliPath: launcher, baseBranch: 'main' }), []);
   assert.deepEqual(unrunnableRemedies([{ ...unrunnable.work, stage: 'done' }], { cliPath: launcher, baseBranch: 'main' }), []);
   // A worker runtime that loads no generated rules could run it, so nothing is reported for it.
   assert.equal(unrunnableRemedies([unrunnable.work], { cliPath: launcher, baseBranch: 'main', workerKinds: ['claude'] }).length, 1);
   assert.deepEqual(unrunnableRemedies([unrunnable.work], { cliPath: launcher, baseBranch: 'main', workerKinds: ['claude', 'codex'] }), []);
-  // Nothing in the report points at a human: the item is not parked and no human request stands.
-  assert.ok(!status.humanRequests.some(request => request.work === unrunnable.work.key || request.work === unrunnable.work.id));
 });

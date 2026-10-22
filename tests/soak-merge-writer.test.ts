@@ -1,14 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { mergeWriterIdle, mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { baseMovedReason, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
-import { systemInvariants } from '../src/model/invariants.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -24,8 +21,7 @@ import type { Work } from '../src/model.js';
  * it to rework, GY-2079); and the rework decision route refuses a few requests before taking them.
  * The writer must deliver every
  * item exactly once, push every merge commit exactly once, run one merge at a time, request each
- * owed rework exactly once, keep its state bounded, and hold every system invariant
- * docs/master-agent.md#system-invariants names.
+ * owed rework exactly once, and keep its state bounded.
  */
 const minute = 60_000;
 const start = Date.parse('2030-05-01T00:00:00Z');
@@ -34,7 +30,6 @@ const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`the merge writer step called GitHub (${String(name)})`); } });
-const docs = fileURLToPath(new URL('../docs/master-agent.md', import.meta.url));
 
 /** The day's script, by item ordinal. */
 const items = 150, submitEveryMs = 9 * minute, cycleMs = 2 * minute, cycles = (24 * 60) / 2;
@@ -147,7 +142,7 @@ class World {
   };
 }
 
-test('unit:soak-merge-writer — a simulated day on the real loop: every submitted head is delivered exactly once with exactly one push of its merge commit, one merge in flight at a time, moved tips re-trialled within the bound then queued again, failed trials reworked exactly once through refused rework requests, crashes between push and record reconciled without a second push, record outages retried, state bounded, and every system invariant docs/master-agent.md names holding', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-writer — a simulated day on the real loop: every submitted head is delivered exactly once with exactly one push of its merge commit, one merge in flight at a time, moved tips re-trialled within the bound then queued again, failed trials reworked exactly once through refused rework requests, crashes between push and record reconciled without a second push, record outages retried, and state bounded', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submit(n, 1, start + n * submitEveryMs);
@@ -155,11 +150,9 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: reads, rework: world.rework } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
-  const invariantNames = new Set<string>();
   let failedCycles = 0;
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * cycleMs; world.cycle = cycle;
@@ -170,7 +163,6 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
     await mergeWriterIdle(state);
     assert.ok(state.mergeWriter.queue.length <= mergeWriterKeptQueue && state.mergeWriter.refusals.length <= mergeWriterKeptRefusals && state.mergeWriter.reworks.length <= mergeWriterKeptReworks, `cycle ${cycle}: the state is bounded`);
     assert.ok(world.widest <= 1, `cycle ${cycle}: one merge in flight`);
-    for (const check of state.invariants.report) { invariantNames.add(check.invariant); assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`); }
   }
   assert.equal(failedCycles, 0, 'no merge failed for a cause the script did not inject');
   // Every item delivered exactly once, each on its own merge commit, each pushed exactly once, main's chain holding every one.
@@ -212,25 +204,21 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
     const submittedAt = Date.parse(item.stageEnteredAt), mergedAt = Date.parse(item.delivery!.mergedAt);
     assert.ok(mergedAt - submittedAt <= 120 * minute, `${item.key} waited ${(mergedAt - submittedAt) / minute} minutes`);
   }
-  // The state round-trips, the summary reports it, and every invariant the guide names was judged.
+  // The state round-trips and the summary reports it.
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).mergeWriter, state.mergeWriter);
   const summary = daemonSummary(state, now, config.run.intervalSeconds * 1000, config.hostId).mergeWriter;
   assert.deepEqual([summary.queue, summary.inFlight, summary.reworks], [[], null, []]);
   assert.ok(summary.refusals.length <= mergeWriterKeptRefusals && summary.refusals.length > 0);
-  const guide = readFileSync(docs, 'utf8');
-  const section = guide.slice(guide.indexOf('### System invariants'), guide.indexOf('## Research and diagnosis'));
-  for (const invariant of systemInvariants) { assert.ok(section.includes(`\`${invariant}\``), `docs/master-agent.md#system-invariants names ${invariant}`); assert.ok(invariantNames.has(invariant), `${invariant} was judged over the day`); }
 });
 
-test('unit:soak-merge-writer-batch — GY-2088: half a day on the real loop with heads queued faster than one trial each, merged four at a time: every head is delivered exactly once at its own merge commit on main, no commit is pushed twice, one merge is in flight at a time, failed and timed-out trials are reworked exactly once after the batch falls back to single heads, crashes and record outages recover, fewer pushes than heads land the day, and every system invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-writer-batch — GY-2088: half a day on the real loop with heads queued faster than one trial each, merged four at a time: every head is delivered exactly once at its own merge commit on main, no commit is pushed twice, one merge is in flight at a time, failed and timed-out trials are reworked exactly once after the batch falls back to single heads, crashes and record outages recover, and fewer pushes than heads land the day', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now), count = 120, dayCycles = 360;
   for (let n = 1; n <= count; n++) world.submit(n, 1, start + n * 3 * minute);
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(4), rework: world.rework } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   for (let cycle = 0; cycle < dayCycles; cycle++) {
@@ -239,7 +227,6 @@ test('unit:soak-merge-writer-batch — GY-2088: half a day on the real loop with
     await runCycle(config, state, effects, () => now);
     await mergeWriterIdle(state);
     assert.ok(world.widest <= 1, `cycle ${cycle}: one merge in flight`);
-    for (const check of state.invariants.report) assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`);
   }
   const final = world.snapshot();
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => item.key), [], 'every head is delivered');

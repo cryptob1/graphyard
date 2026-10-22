@@ -1,26 +1,16 @@
-import { after, before, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
-import { Engine } from '../src/engine.js';
-import { server } from '../src/server.js';
-import { Store } from '../src/store.js';
-import { emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { classifyRuntimePrompt, inspectProfileAccounts, masterConfigSchema, observedExhaustions, preservePartialWork, recordObservedExhaustion, readEnvironmentLog, selectAccount, type MasterConfig } from '../src/master.js';
+import { classifyRuntimePrompt } from '../src/master.js';
 import { detectRuntimeExhaustion } from '../src/master/environments.js';
 import { parseResetTime } from '../src/model/capacity.js';
-import type { Principal, Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-09 `now` is explicit and the Oct 10/12 resets carry no year, so parseResetTime rolls them forward past any real Date.now(); the integration cycle clocks from Date.now()+skew.
+
+// Time-bomb allowance (GY-1694): the 2026-10-09 `now` is explicit and the Oct 10/12 resets carry no year, so parseResetTime rolls them forward past any real Date.now().
 
 // GY-1566: a Claude worker launched onto a spent account printed its limit notice and then its
 // usage-limit menu, and sat blocked on it for 32 minutes: Herdr reported the pane blocked, the
 // supervisor kept renewing the lease, and nothing failed it over. The menu is now read as the
 // account's exhaustion, with the reset time its notice names; the loop never chooses on it — one
-// choice spends money, which only a person may do — and fails the session over instead.
+// choice spends money, which only a person may do.
 
 /** The screen GY-1565 epoch 3 stood on, as Claude Code drew it. */
 const limitMenu = `● Reading GY-1565 before editing.
@@ -100,135 +90,4 @@ test('unit:runtime-limit-menu-detected — Claude\'s usage-limit menu is the acc
     assert.notEqual(classifyRuntimePrompt(prose, now)?.kind, 'usage-limit', prose);
     if (!prose.includes(notice)) assert.equal(detectRuntimeExhaustion(prose, 'claude', now), null, prose);
   }
-});
-
-const repository = 'owner/runtime-limit-menu';
-const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
-const workerA: Principal = { id: 'worker-a', role: 'worker', sessionKind: 'ai' };
-const coordinator: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
-const credentials = [operator, workerA, coordinator].map(principal => ({ ...principal, token: `menu-${principal.id}-${'x'.repeat(32)}` }));
-const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, home: string, worktrees: string[];
-
-const ok = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  const result = await response.json() as any;
-  assert.equal(response.status, 200, JSON.stringify(result));
-  return result;
-};
-const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
-const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-
-interface Herdr { agents: { name: string; pane_id: string; agent_status: string }[]; output: Record<string, string> }
-/** The loop as `master run` wires it, with Herdr an inventory the test controls and the launcher its control-plane calls. */
-function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
-  const now = () => Date.now() + clock.skewMs;
-  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[], keys: [] as string[][] };
-  const effects: DaemonEffects = {
-    agents: () => herdr.agents,
-    herdr: () => ({ agents: herdr.agents, available: true }),
-    credentials: () => inspectProfileAccounts(config, 'worker', config.workers, Object.fromEntries(config.workers.map(profile => [profile.name, { available: true, reason: null as string | null }])), { quota: false, now, cacheMs: 0 }),
-    snapshot: async () => { const snapshot = await ok(coordinator, 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: new Date(Date.parse(snapshot.now) + clock.skewMs).toISOString() }; },
-    closeSession: pane => { herdr.agents = herdr.agents.filter(agent => agent.pane_id !== pane); },
-    dispatch: async (work, profile) => {
-      const selected = await selectAccount(config, 'worker', profile, { quota: false, now, cacheMs: 0, work: work.key });
-      const claimed = await ok(workerA, 'POST', `work/${work.id}/claim`, {}) as Work;
-      await ok(workerA, 'POST', `work/${work.id}/workspace`, { epoch: claimed.epoch, host: 'loop-host', path: worktrees[claimed.epoch - 1], branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` });
-      herdr.agents.push({ name: profile.agentName, pane_id: `pane-${profile.name}-${calls.dispatch.length}`, agent_status: 'working' });
-      calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
-    },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
-    persist: async () => {},
-    sessionOutput: agent => herdr.output[agent.name!] ?? '',
-    answerSession: (_agent, keys) => { calls.keys.push(keys); },
-    reportCapacity: (work, event) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,
-    selectedAccount: async (role, profile) => readEnvironmentLog(config).then(log => log.selected[`${role}:${profile}`] ?? null),
-    holdAccount: (account, observed) => recordObservedExhaustion(config, account, observed, now()),
-    preserveWork: async (work, epoch) => preservePartialWork(work.workspaces.find(entry => entry.epoch === epoch)!.path, `${work.key} attempt ${epoch} interrupted by provider quota exhaustion`),
-  };
-  return { calls, cycle: (state: DaemonState) => runCycle(config, state, effects, now) };
-}
-
-before(async () => {
-  const port = Number(process.env.GRAPHYARD_RUNTIME_LIMIT_MENU_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1566);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('runtime-limit-menu-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('limit_menu_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/limit_menu_test`); await store.init();
-  engine = new Engine(store, 300, repository); engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
-  http = server(engine, credentials);
-  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
-  url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  home = await temporaryDirectory('runtime-limit-menu-home');
-  for (const account of ['env-a', 'env-b']) {
-    await mkdir(join(home, account), { recursive: true });
-    await writeFile(join(home, account, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'not-a-real-token', refreshToken: 'not-a-real-token' } }));
-  }
-  // Each attempt's own worktree, with one commit the failover may build on.
-  worktrees = [];
-  for (const epoch of [1, 2]) {
-    const worktree = await temporaryDirectory(`runtime-limit-menu-worktree-${epoch}`);
-    git(worktree, 'init', '-q', '-b', 'graphyard/attempt'); await writeFile(join(worktree, 'README.md'), 'base\n');
-    git(worktree, 'add', '-A'); git(worktree, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'base');
-    worktrees.push(worktree);
-  }
-});
-after(async () => { http?.close(); await store?.close(); await database?.stop(); });
-
-test('unit:blocked-limit-menu-fails-over — a worker blocked on the usage-limit menu is ended, its account held until the parsed reset, and its item redispatched to a healthy account by the loop alone', async () => {
-  const config = masterConfigSchema.parse({
-    version: 1, url, credentialFile: join(home, 'coordinator.token'), cliPath: join(process.cwd(), 'bin/graphyard.mjs'),
-    repository, baseBranch: 'main', githubAppId: 4242, hostId: 'loop-host', masterAgentName: 'graphyard-master-limit-menu',
-    workers: [{ name: 'builder', principal: workerA.id, agentName: 'agent-builder', mode: 'launch', kind: 'claude', credentialFile: join(home, 'builder.token'), accounts: ['env-a', 'env-b'] }],
-    environments: [{ name: 'env-a', kind: 'claude', home: join(home, 'env-a') }, { name: 'env-b', kind: 'claude', home: join(home, 'env-b') }],
-  }) as MasterConfig;
-  const herdr: Herdr = { agents: [], output: {} }, clock = { skewMs: 0 };
-  const { calls, cycle } = loop(config, herdr, clock);
-  let work = await ok(operator, 'POST', 'work', { title: 'limit menu', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }] }) as Work;
-  work = await ok(operator, 'POST', `work/${work.id}/ready`, {}) as Work;
-
-  // The loop's host is not in the notice's zone: the reset is read in the zone the notice names.
-  const zone = process.env.TZ;
-  process.env.TZ = 'Asia/Kolkata';
-  try {
-    const state = emptyDaemonState(config);
-    await cycle(state);
-    assert.deepEqual(calls.dispatch, [{ work: work.key, profile: 'builder', account: 'env-a' }], 'the attempt runs on the first account');
-
-    // Blocked on the agent's own prose about a quota (GY-402): not the provider, so no failover.
-    herdr.agents[0].agent_status = 'blocked';
-    herdr.output['agent-builder'] = '● Update(src/limit-menu.ts)\n  ⎿ tmp disk quota is exhausted (a known local issue). Clearing the tsx cache, then rerunning.\n';
-    clock.skewMs += 20_000;
-    await cycle(state);
-    assert.equal(state.actions[failoverKey('worker', work, 1)], undefined, 'the agent\'s prose about a quota fails nothing over');
-    work = await reload(work.id);
-    assert.equal(work.lease?.epoch, 1, 'the attempt is still live');
-    assert.deepEqual(Object.keys(await observedExhaustions(config)), [], 'no account is held on prose');
-
-    // Blocked on Claude's usage-limit menu: the session is ended, never answered, in this one cycle.
-    herdr.output['agent-builder'] = limitMenu;
-    clock.skewMs += 20_000;
-    await cycle(state);
-    const failover = state.actions[failoverKey('worker', work, 1)];
-    assert.equal(failover?.state, 'done', failover?.detail);
-    assert.match(failover.detail, /exhausted env-a mid-session \(You've hit your weekly limit/);
-    assert.deepEqual(calls.keys, [], 'the loop never chooses on the menu, least of all "Switch to usage credits"');
-    // Its supervisor stops on the ended lease, and its pane goes with it.
-    herdr.agents = herdr.agents.filter(agent => agent.name !== 'agent-builder');
-    work = await reload(work.id);
-    assert.equal(work.lease, null, 'the lease is released');
-    assert.equal(work.pipeline!.attempts[0].end, 'released');
-    const exhaustion = work.capacity!.exhaustions[0];
-    assert.equal(exhaustion.account, 'env-a');
-    assert.equal(exhaustion.reason, notice);
-    assert.ok(exhaustion.resetsAt && Date.parse(exhaustion.resetsAt) > Date.now(), 'the reset is parsed from the notice');
-    assert.equal(new Date(exhaustion.resetsAt).toLocaleString('en-US', { timeZone: 'America/Los_Angeles', month: 'short', day: 'numeric', hour: 'numeric' }), 'Oct 10, 10 PM', 'read in the zone the notice names');
-    assert.equal((await observedExhaustions(config))['env-a']?.until, exhaustion.resetsAt, 'the spent account is held until it resets');
-
-    // The next cycle redispatches the item onto the healthy account, with no master action.
-    clock.skewMs += 20_000;
-    await cycle(state);
-    assert.deepEqual(calls.dispatch.at(-1), { work: work.key, profile: 'builder', account: 'env-b' });
-    assert.equal((await reload(work.id)).lease?.epoch, 2);
-  } finally { if (zone === undefined) delete process.env.TZ; else process.env.TZ = zone; }
 });

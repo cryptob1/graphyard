@@ -17,7 +17,7 @@ import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
 import { discoverHostLogins, fleetRoleHealth, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
-import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
+import { NoHealthyAccountError, atomicPrivateWrite, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
 import { FleetOverview, pastesCredential } from '../web/pages/fleet.js';
@@ -420,7 +420,7 @@ test('integration:registry-live-capacity — capacity is a registry change with 
 // ---------------------------------------------------------------------------
 // AC-4 — unit:registry-visibility
 // ---------------------------------------------------------------------------
-test('unit:registry-visibility — master status and the dashboard show each account\'s runtime, model, role eligibility, live sessions, quota and reset time, and the reason any account is ineligible', () => {
+test('unit:registry-visibility — the fleet view and the dashboard show each account\'s runtime, model, role eligibility, live sessions, quota and reset time, and the reason any account is ineligible', () => {
   const at = '2026-09-20T12:00:00.000Z', now = Date.parse(at), context = { actor: 'operator', at }, resetsAt = '2026-09-20T17:00:00.000Z';
   let registry = emptyRegistry();
   const change = (kind: Parameters<typeof applyRegistryMutation>[1], input: unknown) => { registry = applyRegistryMutation(registry, kind, input, context).registry; };
@@ -459,18 +459,6 @@ test('unit:registry-visibility — master status and the dashboard show each acc
   assert.match(sessionEnded(session({ role: 'master', work: null }), undefined, now + 49 * hour)!, /older than any session runs/);
   const settled = structuredClone(registry); settled.sessions.push(session({ id: 'newer', selectedAt: new Date(now + 1000).toISOString() }));
   assert.deepEqual(settleSessions(settled, [], new Date(now + 2000).toISOString()).map(entry => entry.endReason), ['superseded by the claude-a session launched for GY-5']);
-
-  // master status: the same facts, per account, with every blocked role raised as the master's own attention.
-  const status = buildMasterStatus({ work: [], now: at }, [], [], {}, { pending: [], completed: [] }, 'main', { fleet: view });
-  const row = status.fleet!.accounts.find(account => account.account === 'claude-b')!;
-  assert.deepEqual([row.runtime, row.model, row.roles, row.quota, row.resetsAt, row.eligible, row.ineligible], ['claude', 'opus', ['worker (2 of 3)', 'reviewer (2 of 2)', 'producer (1 of 1)'], 'exhausted', resetsAt, false, `claude-b quota is exhausted until ${resetsAt} (weekly window spent)`]);
-  assert.deepEqual(status.fleet!.accounts.find(account => account.account === 'claude-a')!.liveSessions, [{ role: 'worker', work: 'GY-5', since: at }]);
-  assert.deepEqual(status.fleet!.ineligible.map(entry => entry.account), ['claude-a', 'claude-b', 'codex-a', 'codex-out', 'idle']);
-  const raised = status.attentionItems.filter(item => item.subject === 'fleet');
-  assert.ok(raised.length >= 3 && raised.every(item => item.role === 'master' && !item.human && /graphyard master registry/.test(item.next)), 'the master resolves fleet attention itself, in the registry');
-  assert.equal(status.counts.attention, raised.length);
-  assert.equal(buildMasterStatus({ work: [], now: at }, [], []).fleet, null, 'a control plane before the registry reports none');
-  assert.match(buildMasterStatus({ work: [], now: at }, [], [], {}, { pending: [], completed: [] }, 'main', { fleet: fleetView(emptyRegistry(), now) }).fleet!.next!, /master registry propose --apply/);
 
   // Dashboard: the page renders the same view.
   const page = renderToStaticMarkup(createElement(FleetOverview, { fleet: view }));

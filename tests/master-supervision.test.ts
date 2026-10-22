@@ -6,19 +6,17 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { agentRuntimeRun, agentRuntimeTimeoutMs, listHerdrAgents, masterConfigSchema, masterHarness, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
-import { daemonEffects, emptyDaemonState, runDaemon, writeDaemonState } from '../src/master-daemon.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
-import { loopSupervisorEvidence } from '../src/cli/master-setup.js';
+import { agentRuntimeRun, agentRuntimeTimeoutMs, listHerdrAgents, masterConfigSchema, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
+import { daemonEffects, emptyDaemonState, runDaemon } from '../src/master-daemon.js';
 import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js';
 import { installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
-import { perInstallUnits } from '../src/install/units.js';
+import { deployUnitOf, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-10-07 upgrade.last.at is a cursor record loopSupervisorEvidence reads for its `self` flag, never aged; Date.now() only measures how long the bounded runs took.
+// Time-bomb allowance (GY-1694): Date.now() only measures how long the bounded runs took.
 
 /**
  * Each test is named for the proof it produces (GY-114): integration:setup-installs-supervisor,
- * unit:supervision-reported, unit:unsupervised-host-stated, integration:runtime-calls-bounded,
+ * unit:unsupervised-host-stated, integration:runtime-calls-bounded,
  * manual:supervisor-onboarding-review and integration:supervisor-install-explicit-only.
  *
  * GY-84 promised that "a supervised deployment restarts it automatically". Nothing installed that
@@ -38,6 +36,8 @@ const masterSource = () => readdirSync(fileURLToPath(new URL('../src/master', im
 const supervisedUser = String(process.getuid?.() ?? '');
 /** A new install names its loop for its repository (GY-1441); a unit placed by hand under the legacy name is an older install's. */
 const loopUnit = perInstallUnits('owner/project').master;
+/** The deploy unit installed beside the loop's (GY-2877). */
+const deployUnit = deployUnitOf({ master: loopUnit });
 
 async function repository() {
   const root = await temporaryDirectory('supervision');
@@ -121,7 +121,7 @@ test('integration:setup-installs-supervisor — setup writes, enables and starts
 
     // It is enabled (so it returns after a reboot), started now, and this user lingers.
     assert.deepEqual(changes(first.calls),
-      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', loopUnit], ['loginctl', 'enable-linger']]);
+      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', loopUnit], ['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable', '--now', deployUnit], ['loginctl', 'enable-linger']]);
     assert.deepEqual({ installed: setup.supervisor!.installed, enabled: setup.supervisor!.enabled, active: setup.supervisor!.active, linger: setup.supervisor!.linger },
       { installed: true, enabled: true, active: true, linger: true });
     // It reports what it installed, in the words of the commands it ran.
@@ -149,76 +149,9 @@ test('integration:setup-installs-supervisor — setup writes, enables and starts
     assert.equal(rewritten.supervisor!.state, 'updated');
     assert.match(await readFile(unitPath, 'utf8'), new RegExp(`^WatchdogSec=${loopWatchdogSeconds(120)}$`, 'm'));
     assert.deepEqual(changes(retuned.calls).map(call => call.slice(0, 3)),
-      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']], 'a rewritten unit is reloaded, enabled and restarted, in that order');
+      [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']], 'a rewritten unit is reloaded, enabled (beside the deploy unit) and restarted, in that order');
     assert.ok(rewritten.supervisor!.performed.includes(`systemctl --user restart ${loopUnit}`), 'and setup says the loop was restarted');
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(home, { recursive: true, force: true }); }
-});
-
-test('unit:supervision-reported — master status reports whether the loop is supervised, and names the command that fixes it', async () => {
-  const directory = await temporaryDirectory('supervision-status');
-  const root = await repository();
-  const home = await temporaryDirectory('supervision-status-home');
-  try {
-    const credential = join(directory, 'coordinator.token');
-    await writeFile(credential, coordinatorToken, { mode: 0o600 });
-    const master = config(credential);
-    await writeDaemonState(master, emptyDaemonState(master));
-    const masterApi = async (path: string) => path === 'work-snapshot' ? { work: [], now: new Date().toISOString() } : { decisions: [] };
-    const report = (host: NonNullable<Parameters<typeof masterStatusReport>[5]>['supervisorHost']) =>
-      masterStatusReport(root, master, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null }, { supervisorHost: host });
-
-    // Installed, enabled and running: the setup section says so and raises nothing. The unit is
-    // placed as an operator's install would leave it; status only ever reads.
-    await mkdir(join(home, '.config/systemd/user'), { recursive: true });
-    await writeFile(join(home, '.config/systemd/user', loopUnitName), loopUnitText({ root, cliPath: launcher, repository: 'owner/project', intervalSeconds: 20 }));
-    const healthyHost = hostStub();
-    const healthy = await report({ ...healthyHost.host, home });
-    assert.deepEqual({ supported: healthy.setup.supervisor.supported, installed: healthy.setup.supervisor.installed, enabled: healthy.setup.supervisor.enabled, active: healthy.setup.supervisor.active, linger: healthy.setup.supervisor.linger },
-      { supported: true, installed: true, enabled: true, active: true, linger: true });
-    assert.deepEqual(healthy.setup.attention, []);
-    assert.equal(healthy.attentionItems.some(item => /supervis/i.test(item.text)), false, 'a supervised loop is not an attention item');
-    // Lingering is read for this user by name: `show-user` with no user describes the login manager.
-    assert.ok(healthyHost.calls.some(call => call[0] === 'loginctl' && call[1] === 'show-user' && call[2] === supervisedUser && call.includes('--property=Linger')),
-      `status asks loginctl about user ${supervisedUser}: ${JSON.stringify(healthyHost.calls.filter(call => call[0] === 'loginctl'))}`);
-    assert.equal(changes(healthyHost.calls).length, 0, 'status changes nothing on the host');
-
-    // Disabled: the loop runs now but nothing brings it back, and the fix is named exactly.
-    const disabled = await report({ ...hostStub({ enabled: 'disabled' }).host, home });
-    assert.equal(disabled.setup.supervisor.enabled, false);
-    const item = disabled.attentionItems.find(entry => /installed but disabled/.test(entry.text));
-    assert.ok(item, `the disabled supervisor is reported: ${JSON.stringify(disabled.setup.attention)}`);
-    assert.equal(item!.subject, 'setup'); assert.equal(item!.human, false); assert.equal(item!.role, 'master');
-    assert.equal(item!.next, `systemctl --user enable --now ${loopUnitName}`);
-    assert.ok(disabled.setup.attention.includes(item!.text), 'and it is in the setup section the master reads');
-    // The command the item names is one the master may run without an operator keypress.
-    const allow = masterHarness(root, master, 'claude').allow.map(rule => rule.rule);
-    assert.ok(allow.includes(`Bash(${item!.next})`), `the master's harness grants ${item!.next}`);
-
-    // Stopped, and missing altogether: each says what is not happening and what starts it again.
-    const stopped = await report({ ...hostStub({ active: 'inactive' }).host, home });
-    assert.ok(stopped.attentionItems.some(entry => /installed but not running/.test(entry.text) && entry.next === `systemctl --user start ${loopUnitName}`));
-    const bare = await temporaryDirectory('supervision-bare');
-    try {
-      const missing = await report({ ...hostStub({ enabled: 'not-found', active: 'inactive' }).host, home: bare });
-      assert.equal(missing.setup.supervisor.installed, false);
-      const absent = missing.attentionItems.find(entry => /no supervisor installed/.test(entry.text));
-      assert.ok(absent, 'an installation with no supervisor is named, not assumed self-healing');
-      assert.match(absent!.text, /nothing restarts it after a crash or a reboot/);
-      assert.match(absent!.next, /master init/);
-    } finally { await rm(bare, { recursive: true, force: true }); }
-
-    // Not lingering: enabled, running, and still down after the next reboot, with the fix named.
-    const unlingering = await report({ ...hostStub({ linger: 'no' }).host, home });
-    assert.equal(unlingering.setup.supervisor.linger, false);
-    const reboot = unlingering.attentionItems.find(entry => /may not start at boot/.test(entry.text));
-    assert.ok(reboot, 'a user manager that does not start at boot is reported');
-    assert.match(reboot!.next, /^loginctl enable-linger/);
-
-    // A supervisor that cannot be read at all is unverified, never reported as healthy.
-    const unreadable = await report({ platform: 'linux', home, run: (command: string, args: string[]) => { if (args[1]?.startsWith('is-')) throw new Error('systemd is not answering'); return ''; } });
-    assert.equal(unreadable.setup.supervisor.enabled, null);
-    assert.ok(unreadable.attentionItems.some(entry => /could not be verified/.test(entry.text)));
-  } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); await rm(home, { recursive: true, force: true }); }
 });
 
 test('unit:unsupervised-host-stated — a host that can have no supervisor is told so at setup, with what to run instead', async () => {
@@ -260,51 +193,6 @@ test('unit:unsupervised-host-stated — a host that can have no supervisor is to
     // And setup still completes: the configuration it wrote is the whole point of running it.
     assert.match(await readFile(join(root, '.graphyard/master.json'), 'utf8'), /"repository": "owner\/project"/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
-});
-
-test('unit:loop-supervision-probe-vantage — a probe that cannot reach the user manager does not read a loop the cursor records under its unit as unsupervised', async () => {
-  const directory = await temporaryDirectory('supervision-vantage');
-  const root = await repository();
-  try {
-    const credential = join(directory, 'coordinator.token');
-    await writeFile(credential, coordinatorToken, { mode: 0o600 });
-    const master = config(credential);
-    // Inside a worker's or the doctor's bwrap sandbox the user bus is masked: the probe is refused.
-    const sandboxed = { platform: 'linux' as const, run: (command: string, args: string[]) => {
-      if (command === 'systemctl' && args.includes('show-environment')) throw new Error('Failed to connect to user scope bus via local transport: Connection refused');
-      return '';
-    } };
-    const observed = await loopSupervision({ root, cliPath: launcher }, sandboxed);
-    assert.deepEqual({ supported: observed.supported, unreachable: observed.unreachable }, { supported: false, unreachable: true });
-
-    // The cursor records the loop re-executing itself through its unit (upgrade.last.self): the
-    // sandboxed reading cannot verify, and says so, rather than asserting a host-supervision gap.
-    const state = emptyDaemonState(master);
-    state.upgrade.last = { at: '2026-10-07T01:53:02.179Z', from: '4ab97caebf96', to: 'a4ce5261cf7f', code: true, executors: 'restarted: No executor is registered on vishrog', self: true };
-    await writeDaemonState(master, state);
-    const evidence = await loopSupervisorEvidence(root, master, null);
-    assert.deepEqual(evidence, { unit: null, reexecuted: true });
-    for (const recorded of [evidence, { unit: loopUnitName, reexecuted: false }]) {
-      const items = loopSupervisionAttention(observed, recorded);
-      assert.equal(items.length, 1, JSON.stringify(items));
-      assert.doesNotMatch(items[0].text, /not supervised on this host/);
-      assert.match(items[0].text, /could not be verified from this vantage/);
-      assert.match(items[0].text, /Connection refused/);
-      assert.match(items[0].next, new RegExp(`systemctl --user status ${loopUnitName.replace('.', '\\.')} from a host shell outside any sandbox`));
-      assert.doesNotMatch(items[0].next, /restart|master run/);
-    }
-
-    // With nothing on the cursor, the unreachable manager is still named as no supervision, and a
-    // platform with no systemd at all is named the same whatever the cursor holds.
-    await writeDaemonState(master, emptyDaemonState(master));
-    const none = await loopSupervisorEvidence(root, master, null);
-    assert.deepEqual(none, { unit: null, reexecuted: false });
-    assert.match(loopSupervisionAttention(observed, none)[0].text, /not supervised on this host/);
-    assert.match(loopSupervisionAttention(observed)[0].text, /not supervised on this host/);
-    const darwin = await loopSupervision({ root, cliPath: launcher }, { platform: 'darwin' });
-    assert.equal(darwin.unreachable, undefined);
-    assert.match(loopSupervisionAttention(darwin, { unit: loopUnitName, reexecuted: true })[0].text, /not supervised on this host/);
-  } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 });
 
 test('integration:runtime-calls-bounded — a hung agent runtime fails its step, the cycle keeps going, and the loop still answers its stop signal', async () => {
@@ -469,7 +357,7 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     const replacement = await installLoopSupervisor(unit(other), replaced.host, { replace: true });
     assert.equal(replacement.wrote, 'updated');
     assert.match(await readFile(unitPath, 'utf8'), new RegExp(`^WorkingDirectory=${other}$`, 'm'));
-    assert.deepEqual(changes(replaced.calls).map(call => call.slice(0, 3)), [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']]);
+    assert.deepEqual(changes(replaced.calls).map(call => call.slice(0, 3)), [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']]);
 
     // 5. The shared test guard: under the test runner, a home outside the system temporary
     //    directory is refused at the installer, whatever the test passed and before it reads or

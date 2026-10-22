@@ -44,8 +44,6 @@ function effects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: iso(0) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
     persist: async () => {},
     ...overrides,
   };

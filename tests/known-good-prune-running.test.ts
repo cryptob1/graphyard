@@ -24,18 +24,18 @@ async function world() {
 }
 const short = (sha: string) => sha.slice(0, 12);
 
-test('unit:known-good-prune-running — two newer pins keep the pin the running loop loaded from; pins no process runs are still removed', async () => {
+test('unit:known-good-prune-running — newer pins keep the pin the running loop loaded from and the last good pin; pins no process runs are removed', async () => {
   const w = await world();
   await pinKnownGood({ installDir: w.installDir, repository: w.repository }, w.shas[0], run);
   const loop = { installDir: w.installDir, repository: w.repository, loadedFrom: join(realpathSync(join(w.pins, short(w.shas[0]))), 'a.txt') };
   await pinKnownGood(loop, w.shas[1], run);
   await pinKnownGood(loop, w.shas[2], run);
   assert.ok(existsSync(join(w.pins, short(w.shas[0]), 'a.txt')), 'the loop still runs from its pin');
-  for (const sha of w.shas.slice(1)) assert.ok(existsSync(join(w.pins, short(sha))));
+  assert.equal(existsSync(join(w.pins, short(w.shas[1]))), false, 'a pin no process runs is removed');
+  assert.ok(existsSync(join(w.pins, short(w.shas[2]))), 'the last good pin is kept');
 
   // No process runs from the first pin of a second install: two newer pins remove it.
   const v = await world();
   for (const sha of v.shas) await pinKnownGood({ installDir: v.installDir, repository: v.repository }, sha, run);
-  assert.equal(existsSync(join(v.pins, short(v.shas[0]))), false);
-  for (const sha of v.shas.slice(1)) assert.ok(existsSync(join(v.pins, short(sha))));
+  assert.deepEqual(v.shas.map(sha => existsSync(join(v.pins, short(sha)))), [false, false, true], 'only the last good pin is kept');
 });

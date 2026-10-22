@@ -8,7 +8,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { buildMasterStatus } from '../src/master.js';
 import { closeWork } from '../src/server/close.js';
 import { closeRequest } from '../src/cli/master-close.js';
 import { isClosed, isDelivered, type Principal, type Work } from '../src/model.js';
@@ -84,10 +83,6 @@ test('integration:close-obsolete — a stuck item closed as obsolete is terminal
   assert.deepEqual([numbers.open, numbers.stuck, numbers.shippedThisWeek], [0, 0, 0]);
   assert.equal(plainStatus(closed, Date.now()).tone, 'shipped');
   assert.match(plainStatus(closed, Date.now()).sentence, /^Closed as obsolete: Auto-generated noise/);
-  const status = buildMasterStatus({ work: snapshot.work, now: snapshot.now }, [], []);
-  assert.equal(status.counts.closed, 1);
-  assert.ok(!status.work.some(row => row.key === work.key), 'master status lists it in no active row');
-  assert.deepEqual(status.closed.map(row => [row.key, row.kind]), [[work.key, 'obsolete']]);
   // The dashboard: nothing under Shipped, one row in the closed history below it.
   const page = renderToStaticMarkup(createElement(ShippedPage, { work: snapshot.work, status: null, observedAt: Date.parse(snapshot.now), setSelected: () => {} } as unknown as Dashboard));
   assert.match(page, /Nothing has shipped yet/);

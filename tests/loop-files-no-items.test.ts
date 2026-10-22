@@ -5,7 +5,6 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { baseFailureStep, baseFailureAttention } from '../src/daemon/cycle-base-failures.js';
 import { advisoryIdle, advisoryStep, emptyMergeWriterState } from '../src/daemon/cycle-merge-writer.js';
 import { daemonStatePath, readDaemonState } from '../src/daemon/state.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
@@ -13,11 +12,9 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 
-// GY-2186: the loop files no work item on its own. A cycle that sees a test failing on the base
-// branch, a flaky test past its rerun, a failing advisory test after a merge, exhausted docs
-// headroom — plus every recurring fault class at any count — makes
-// no work-item request: each is a master-status attention line, and the loop's effects expose no
-// filing route at all.
+// GY-2186: the loop files no work item on its own. A cycle that sees a flaky test past its rerun
+// or a failing advisory test after a merge makes no work-item request, and the loop's effects
+// expose no filing route at all.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T12:00:00Z');
@@ -43,20 +40,13 @@ function item(key: string, overrides: Partial<Work> = {}): Work {
 const delivered = () => item('GY-87', { title: "GY-87's throughput claim", delivery: { mergedAt: iso(-2 * hour), mergeSha: sha('m'), authorizationRevision: 1,
   deployment: { sha: serving, mergeSha: sha('m'), source: 'endpoint', observedAt: iso(-hour), covers: 'exact', at: iso(-hour), observer: 'coordinator-1' } } } as Partial<Work>);
 
-test('unit:loop-files-no-items — a cycle with a failing base test, a flaked rerun, a failing advisory test, saturated docs headroom files nothing and raises no escalation', async t => {
+test('unit:loop-files-no-items — a cycle with a flaked rerun, a failing advisory test, saturated docs headroom files nothing and raises no escalation', async t => {
   const root = await temporaryDirectory('loop-files-no-items');
   t.after(() => rm(root, { recursive: true, force: true }));
   const master = config(), state = emptyDaemonState(master);
   const work: Work[] = [delivered()];
 
-  // 1. A test failing on the base branch: the merge ledger holds the writer's refusal, which the
-  // base-failure step reads and raises as the attention line, never a filing.
-  const head = sha('candidate'), tip = sha('basetip');
-  const held = item('GY-100', { stage: 'review', candidate: { sha: head, baseSha: tip } } as Partial<Work>);
-  held.mergeLedger = { key: 'GY-100', state: 'refused', head, baseTip: tip, mergeSha: null, risk: null, intentAt: iso(-minute), pushedAt: null, observedTip: null,
-    refusal: { kind: 'merge', reason: `base failure: tests tests/base-failing.test.ts fail on the base tip ${tip} too: tests/base-failing.test.ts unit:base-failing` }, events: 1 } as Work['mergeLedger'];
-  work.push(held);
-
+  const tip = sha('basetip');
   // 2. A test that failed once and passed on the rerun: the trial's flake, carried on the merge ledger.
   work.push(item('GY-101', { stage: 'review', candidate: { sha: sha('flakehead'), baseSha: tip } } as Partial<Work>)).constructor;
   const flaky = work.at(-1)!;
@@ -69,8 +59,6 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work.map(entry => ({ ...entry })), now: iso(0), jobs: [] }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'endpoint', sha: serving, at: iso(0), reason: null, deployed: ['GY-87'], pending: [], requests: 0 }),
-    recordDeployment: async () => {},
     persist: async () => {},
   };
   await runCycle(master, state, effects, () => clock);
@@ -84,14 +72,6 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
   }
   assert.deepEqual(escalations, [], `no owner escalation is raised: ${JSON.stringify(escalations)}`);
   assert.deepEqual(Object.keys(state.actions).filter(key => key.includes('throughput:owner')), [], 'no throughput owner record');
-
-  // 3. The base failure and the flake are the attention lines that name them.
-  const baseFailures = await baseFailureStep({ state, effects, snapshot: { work, now: iso(0) }, clock, isolate: async () => undefined } as never);
-  assert.equal(baseFailures.size, 0);
-  const lines = baseFailureAttention(Object.values(state.baseFailures), master.baseBranch);
-  assert.equal(lines.length, 1, JSON.stringify(lines));
-  assert.match(lines[0]!.text, /Base branch main fails the trial test "tests\/base-failing\.test\.ts unit:base-failing"/);
-  assert.match(lines[0]!.text, /no rework is requested for it and GY-999 \(P0\) repairs it|no rework is requested for it$/, 'no item is filed and none promised by the loop');
 
   // 4. A failing advisory test after a merge: one log line, no work item, no refusal.
   const logs: string[] = [], errors = console.error;
@@ -125,8 +105,7 @@ test('unit:no-flake-or-advisory-items — a test that fails then passes on rerun
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: [flaky], now: iso(0), jobs: [] }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    persist: async () => {},
   };
   await runCycle(master, state, effects, () => clock);
   const filings = Object.values(state.actions).filter(action => action.kind === 'fault' && /^Filed |flake/i.test(action.detail));
@@ -191,7 +170,6 @@ test('unit:diagnostician-removed-cursor-loads — a cursor still carrying diagno
   // Everything the loop still reads survived; the retired keys did not.
   assert.equal((loaded as unknown as Record<string, unknown>).diagnoses, undefined, 'the diagnoses record is dropped on read');
   assert.equal(loaded.mergeWriter.advisory?.ran.length, 1, 'the advisory run ledger loads');
-  assert.equal(Object.values(loaded.baseFailures)[0]!.item, 'GY-999', 'a base-failure record with its old item key loads');
   // And it round-trips: the next read loads the written-back cursor without the retired keys.
   await writeFile(file, JSON.stringify({ ...loaded }));
   const again = JSON.parse(await readFile(file, 'utf8'));

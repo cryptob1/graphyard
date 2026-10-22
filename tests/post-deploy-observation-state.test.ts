@@ -1,8 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatchable } from '../src/coordination.js';
-import { buildMasterStatus } from '../src/master.js';
-import { dispatchSchedule } from '../src/master/status.js';
 import { upNextHold } from '../src/model/board.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
 import * as model from '../src/model.js';
@@ -32,7 +30,6 @@ test('unit:observation-item-not-dispatched — the dispatcher skips an all-manua
   assert.equal(dispatchable(observing, now), false);
   assert.equal(dispatchable(withCode, now), true);
   assert.equal(dispatchable(handDriven, now), true);
-  assert.deepEqual(dispatchSchedule([observing, withCode, handDriven], now).order.map(entry => entry.key).sort(), ['GY-2', 'GY-3']);
   assert.notEqual(nextAction(observing, [observing], new Date(now))?.kind, 'dispatch');
   assert.equal(nextAction(withCode, [withCode], new Date(now))?.kind, 'dispatch');
 });
@@ -66,16 +63,7 @@ test('unit:observation-class-needs-the-follow-up-reading — a head-anchored cod
 });
 
 test('unit:observation-item-counted-waiting — it counts as waiting with what it waits for, and still waiting, on the loop\'s close, once a recorded pass has ended the reading\'s wait', () => {
-  const snapshot = (...work: Work[]) => buildMasterStatus({ now: iso(now), work } as never, [], []);
   const windowed = item(4, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'merged 7 days before' } });
-  const status = snapshot(item(1), windowed, item(2, { criteria: code }));
-  assert.equal(status.counts.ready, 1);
-  assert.equal(status.counts.waiting, 2);
-  const row = (key: string) => status.work.find(entry => entry.key === key)!;
-  assert.match(row('GY-1').observing!, /manual:post-deploy\/rate-on-serving-release on the serving release/);
-  assert.match(row('GY-4').observing!, new RegExp(`first exist at ${iso(now + 6 * hour)}`));
-  assert.equal(row('GY-2').observing, null);
-
   // The window closing makes the reading owed, not the item dispatchable: only a recorded trusted reading ends the wait.
   const read = item(5, { evidence: [reading()] as never });
   assert.equal(loopObservation(read, new Date(now)), null);
@@ -91,11 +79,6 @@ test('unit:observation-item-counted-waiting — it counts as waiting with what i
   assert.deepEqual([actionAccount(windowed, [windowed], later).wait?.kind, actionAccount(windowed, [windowed], later).wait?.on], ['window', 'loop']);
   assert.equal(nextAction(item(1), [item(1)], new Date(now)), null, 'an unwindowed one is due at once, on the loop');
   // GY-1779: a recorded pass leaves the item open only until the loop closes it in the same step: it waits on the loop's close, never counted ready and never escalated.
-  const after = buildMasterStatus({ now: iso(now + 7 * hour), work: [windowed, read] } as never, [], []);
-  assert.deepEqual([after.counts.ready, after.counts.waiting], [0, 2]);
-  const closing = after.work.find(entry => entry.key === 'GY-5')!;
-  assert.match(closing.observing!, /the loop's close of GY-5 as delivered-observation on release aaaaaaaaaaaa/);
-  assert.deepEqual([closing.observationDue, closing.observationPassedOn, closing.attention], [true, 'a'.repeat(40), null]);
   assert.deepEqual([actionAccount(read, [read], later).action, actionAccount(read, [read], later).wait?.on], [null, 'loop']);
 });
 
@@ -104,9 +87,4 @@ test('unit:observation-wait-names-reading — a windowed wait names the observat
   const wait = actionAccount(windowed, [windowed], new Date(now)).wait!;
   assert.match(wait.detail, /first exist at/);
   assert.doesNotMatch(wait.detail, /dispatches it then/);
-  const later = iso(now + 7 * hour);
-  const status = buildMasterStatus({ now: later, work: [windowed] } as never, [], []), row = status.work[0]!;
-  assert.equal(row.attention, null);
-  assert.match(row.observing!, /the loop records in its deployment-verification step/);
-  assert.deepEqual((status as { pendingReadings: { key: string; due: boolean }[] }).pendingReadings.map(entry => [entry.key, entry.due]), [['GY-4', true]]);
 });

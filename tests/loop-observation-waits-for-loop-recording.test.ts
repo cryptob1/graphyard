@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dispatchable } from '../src/coordination.js';
-import { buildMasterStatus } from '../src/master.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
 import { reconcileActions } from '../src/model/actions.js';
 import { livenessFallback } from '../src/model/liveness.js';
@@ -12,10 +11,9 @@ import * as model from '../src/model.js';
 import type { Work } from '../src/model.js';
 
 // GY-1779: a loop-owned observation item whose reading is due waits on the loop's own recording — kind
-// window, on the loop — and never produces an escalate action with trigger operator-proof; master
-// status lists it under the loop's pending readings with the loop's last record, never as a stalled
-// gate; an unsubmitted pre-GY-1762 worker candidate left in build (GY-1725, #1172) waits the same way;
-// and only the loop's recorded reading, bound to the release it was taken on, ends the wait.
+// window, on the loop — and never produces an escalate action with trigger operator-proof; an unsubmitted
+// pre-GY-1762 worker candidate left in build (GY-1725, #1172) waits the same way; and only the loop's
+// recorded reading, bound to the release it was taken on, ends the wait.
 const loopObservation = (work: Work, at: Date, all: Work[] = []) => (model as unknown as { loopObservation: (work: Work, at: Date, all: Work[]) => { due: boolean; waitingFor: string } | null }).loopObservation(work, at, all);
 const hour = 3_600_000, now = Date.parse('2026-10-13T12:00:00.000Z');
 const iso = (at: number) => new Date(at).toISOString();
@@ -67,38 +65,6 @@ test('unit:loop-observation-waits-for-loop-recording — a due reading is a wind
   const queuedRead = { ...read, actionQueue: { actions: [], history: [] } } as Work;
   assert.ok(reconcileActions(queuedRead, [parent, queuedRead], new Date(now + 48 * hour)).every(entry => entry.action.kind !== 'attention' && entry.action.kind !== 'dispatch'), 'a recorded pass queues no escalation and no dispatch, however long it stays open');
   assert.equal(livenessFallback(read, [parent, read], new Date(now + 48 * hour)), null);
-});
-
-test('unit:loop-observation-waits-for-loop-recording — master status lists a due item under the loop\'s pending readings with the loop\'s last record, counted waiting and never as a stalled-gate attention item, in build as in ready', () => {
-  const due = item(1724), inBuild = item(1725, { stage: 'build', epoch: 3, stageEnteredAt: iso(now - 30 * hour), candidate: { pr: 1172, sha: sha('d'), baseSha: sha('e'), author: 'bot', branch: 'graphyard/gy-1725-3', createdAt: iso(now - 5 * hour) } } as Partial<Work>);
-  const windowed = item(1728, { observationWindow: { notBefore: iso(now + 6 * hour), basis: 'criterion-window', detail: 'later' } });
-  const loop = { projectMemory: null, actions: {
-    [`reading:${due.id}`]: { kind: 'deployment', work: 'GY-1724', principal: null, state: 'waiting', detail: 'GY-1724\'s reading is due on release bbbbbbbbbbbb and cannot be taken from this host: the App\'s advanced delivery log needs a browser sign-in', attempts: 2, cycle: 9, at: iso(now - 300_000) },
-    [`reading:close:${due.id}:${filed}`]: { kind: 'deployment', work: 'GY-1724', principal: null, state: 'waiting', detail: 'another key', attempts: 1, cycle: 2, at: iso(now - 3 * hour) },
-  } };
-  const status = buildMasterStatus({ now: iso(now), work: [parent, due, inBuild, windowed] } as never, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, 'graphyard', loop as never);
-  const row = (key: string) => status.work.find(entry => entry.key === key)!;
-  for (const key of ['GY-1724', 'GY-1725']) {
-    assert.equal(row(key).attention, null, `${key} raises no attention line`);
-    assert.equal(row(key).observationDue, true);
-    assert.match(row(key).observing!, /the loop records in its deployment-verification step/);
-  }
-  assert.ok(!status.attentionItems.some(entry => entry.subject === 'GY-1724' || entry.subject === 'GY-1725'), 'no gate attention item, so the faults step derives no stalled-gate fault');
-  assert.deepEqual([status.counts.ready, status.counts.waiting], [0, 3]);
-  const pending = (status as { pendingReadings: { key: string; stage: string; proofs: string[]; due: boolean; notBefore: string | null; candidate: { pr: number } | null; loop: { state: string; detail: string; at: string; ageMs: number } | null }[] }).pendingReadings;
-  assert.deepEqual(pending.map(entry => [entry.key, entry.stage, entry.due, entry.candidate?.pr ?? null]).sort(), [['GY-1724', 'ready', true, null], ['GY-1725', 'build', true, 1172], ['GY-1728', 'ready', false, null]]);
-  const listed = pending.find(entry => entry.key === 'GY-1724')!;
-  assert.deepEqual([listed.proofs, listed.notBefore, listed.loop?.state, listed.loop?.ageMs], [[own], iso(now - hour), 'waiting', 300_000]);
-  assert.match(listed.loop!.detail, /cannot be taken from this host/);
-  assert.equal(pending.find(entry => entry.key === 'GY-1725')!.loop, null);
-  // A recorded pass still open is listed the same way, with the release it passed on, and raises no attention line however long it stays open.
-  const read = item(1726, { stageEnteredAt: iso(now - 30 * hour), evidence: [reading()] as never });
-  const later = buildMasterStatus({ now: iso(now), work: [parent, read] } as never, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, 'graphyard', { projectMemory: null, actions: {} } as never);
-  const readRow = later.work.find(entry => entry.key === 'GY-1726')!;
-  assert.deepEqual([readRow.attention, readRow.observationDue, readRow.observationPassedOn, later.counts.ready, later.counts.waiting], [null, true, serving, 0, 1]);
-  assert.match(readRow.observing!, /the loop's close of GY-1726 as delivered-observation on release bbbbbbbbbbbb/);
-  const listedRead = (later as { pendingReadings: { key: string; due: boolean; passedOn: string | null }[] }).pendingReadings;
-  assert.deepEqual(listedRead.map(entry => [entry.key, entry.due, entry.passedOn]), [['GY-1726', true, serving]]);
 });
 
 test('unit:loop-observation-waits-for-loop-recording — only the loop\'s recorded reading ends the wait: bound to the filed release, or marked as the loop\'s on the later release the control plane serves; a worker\'s attestation on its own candidate does not', async () => {

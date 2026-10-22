@@ -3,15 +3,12 @@
 // The loop used to run from the checkout that is also the repository under change, so when Graphyard
 // merged its own broken change the loop that had to act was the broken one. The pin is a detached
 // linked worktree under `<installDir>/coordinator/<sha12>`, built there, and `coordinator/current` is a
-// symlink moved by rename only after production verified the SHA. The previous pin is kept so
-// `graphyard master recover` can repoint at it; the one before that is removed unless this process
-// (the running loop) loaded its modules from it (GY-2760).
+// symlink moved by rename. Only the last good pin is kept, and the one this process (the running
+// loop) loaded its modules from (GY-2760); `graphyard master recover` rebuilds an older one.
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { installDirectory } from '../install/secrets.js';
-import { installIdFor } from '../install/types.js';
+import { type ChildRun } from '../child-runner.js';
 
 export const knownGoodDirectory = (installDir: string) => join(installDir, 'coordinator');
 /** The CLI the master unit runs while a pin exists. */
@@ -38,31 +35,11 @@ export function knownGoodState(installDir: string): KnownGoodState | null {
 /** The launcher `dist/cli.js` when the build emitted none: the TypeScript sources run through tsx, as bin/graphyard.mjs does. */
 export const launcher = ["import { tsImport } from 'tsx/esm/api';", "await tsImport('../src/cli.ts', import.meta.url);", ''].join('\n');
 
-/** A pin that failed after production verified its SHA: kept on disk so every cycle retries it, never the promotion. */
-export interface PendingPin { sha: string; error: string; failedAt: string; attempts: number }
-const pendingFile = (installDir: string) => join(knownGoodDirectory(installDir), 'pending.json');
-/** Retry no sooner than this after a failed pin, so a standing failure costs one `npm ci` per window, not per cycle. */
-export const pinRetryMs = 10 * 60_000;
-
-export function pendingPin(installDir: string): PendingPin | null {
-  try {
-    const pending = JSON.parse(readFileSync(pendingFile(installDir), 'utf8'));
-    return fullSha.test(pending?.sha) && typeof pending.failedAt === 'string' ? { sha: pending.sha, error: String(pending.error ?? ''), failedAt: pending.failedAt, attempts: Number.isInteger(pending.attempts) ? pending.attempts : 1 } : null;
-  } catch { return null; }
-}
-function writePending(installDir: string, pending: PendingPin | null) {
-  mkdirSync(knownGoodDirectory(installDir), { recursive: true });
-  if (!pending) { rmSync(pendingFile(installDir), { force: true }); return; }
-  writeFileSync(`${pendingFile(installDir)}.tmp`, `${JSON.stringify(pending, null, 2)}\n`);
-  renameSync(`${pendingFile(installDir)}.tmp`, pendingFile(installDir));
-}
-const failureText = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 500);
-
 /**
  * Pin `sha`: a detached worktree at `coordinator/<sha12>` with `npm ci` and `npm run build` run in it,
  * then `current` repointed by renaming a fresh symlink over it, so a reader sees the old pin or the new
- * one, never neither. Any failure removes the new worktree and leaves the pin as it was. The pin before
- * the previous one is removed last.
+ * one, never neither. Any failure removes the new worktree and leaves the pin as it was. Every other
+ * pin is removed last.
  */
 export async function pinKnownGood(git: KnownGoodGit, sha: string, run: ChildRun): Promise<KnownGoodState> {
   sha = sha.toLowerCase();
@@ -89,89 +66,13 @@ export async function pinKnownGood(git: KnownGoodGit, sha: string, run: ChildRun
   renameSync(staging, join(directory, 'current'));
   writeFileSync(`${stateFile(git.installDir)}.tmp`, `${JSON.stringify(next, null, 2)}\n`);
   renameSync(`${stateFile(git.installDir)}.tmp`, stateFile(git.installDir));
-  // Everything but the new pin, the one it replaced and the one this process runs from goes, the older pin first.
-  const keep = new Set([short(sha), next.previous ? short(next.previous) : '']);
+  // Everything but the new pin and the one this process runs from goes.
+  const keep = new Set([short(sha)]);
   const loaded = git.loadedFrom ?? loadedModule;
   for (const entry of readdirSync(directory)) {
     const path = join(directory, entry);
     if (keep.has(entry) || !/^[0-9a-f]{12}$/.test(entry) || !lstatSync(path).isDirectory() || loaded.startsWith(realpathSync(path) + sep)) continue;
     await worktree('remove', '--force', path).catch(() => rmSync(path, { recursive: true, force: true }));
   }
-  if (pendingPin(git.installDir)) writePending(git.installDir, null);
   return next;
-}
-
-/**
- * The loop's per-cycle retry of a pin that failed after verification. A pending pin is verified serving
- * state, so a newer promotion tag (written before its own verify) never discards it; only a successful pin
- * of that SHA or of a later verified one (which clears the file) ends it. One inside the retry window waits.
- * Returns the pin still failing, or null.
- */
-export async function retryPendingPin(git: KnownGoodGit, run: ChildRun): Promise<PendingPin | null> {
-  const pending = pendingPin(git.installDir), now = git.now?.() ?? new Date();
-  if (!pending) return null;
-  if (knownGoodState(git.installDir)?.sha === pending.sha) { writePending(git.installDir, null); return null; }
-  if (now.getTime() - Date.parse(pending.failedAt) < pinRetryMs) return pending;
-  try { await pinKnownGood(git, pending.sha, run); return null; }
-  catch (error) {
-    const failed = { ...pending, error: failureText(error), failedAt: now.toISOString(), attempts: pending.attempts + 1 };
-    writePending(git.installDir, failed);
-    return failed;
-  }
-}
-
-/** Pin `sha` only when production serves it; a failed verification leaves the pin unchanged. */
-export async function pinAfterVerify(git: KnownGoodGit, sha: string, run: ChildRun, verify: () => Promise<{ verified: boolean }>): Promise<KnownGoodState | null> {
-  if (!(await verify()).verified) return null;
-  return pinKnownGood(git, sha, run);
-}
-
-/** A release's `verify` that pins the SHA it confirmed; a pin that fails is the loop's to retry, never a verification failure. */
-export function pinningVerify<V extends { verified: boolean }>(git: KnownGoodGit, run: ChildRun, verify: (sha: string) => Promise<V>, onFailure: (error: unknown) => void = () => {}) {
-  return async (sha: string): Promise<V> => {
-    const verified = await verify(sha);
-    if (verified.verified) await pinKnownGood(git, sha, run).catch(error => {
-      try { writePending(git.installDir, { sha: sha.toLowerCase(), error: failureText(error), failedAt: (git.now?.() ?? new Date()).toISOString(), attempts: 1 }); } catch { /* the doctor still sees the stale pin */ }
-      onFailure(error);
-    });
-    return verified;
-  };
-}
-
-/** How many promotions production is ahead of the pin, from the promoted SHAs newest first; null when the pin is not among them. */
-export function promotionsBehind(pinned: string, promoted: string[]): number | null {
-  const index = promoted.findIndex(sha => sha === pinned);
-  return index < 0 ? null : index;
-}
-
-/** The `graphyard doctor` line; FAIL when the pin is more than one promotion behind production (or no longer a promoted SHA). */
-export function coordinatorDoctorLine(pinned: string | null, production: string | null, behind: number | null, failing: PendingPin | null = null) {
-  const label = (sha: string | null) => sha ? short(sha) : 'none';
-  const line = `coordinator: pinned ${label(pinned)} (production ${label(production)})${failing ? `; pinning ${label(failing.sha)} has failed ${failing.attempts} time(s), last: ${failing.error}` : ''}`;
-  const same = !!pinned && !!production && (pinned.startsWith(production) || production.startsWith(pinned));
-  const stale = !!pinned && !!production && !same && (behind === null || behind > 1);
-  return { line: stale || failing ? `FAIL ${line}` : line, ok: !stale && !failing };
-}
-
-/** The tag prefix the retired release-candidate pipeline recorded each promotion under. */
-const productionTagPrefix = 'rc-production/';
-/** The promoted SHAs newest first, read from the repository's `rc-production/` tags; empty when unreadable. */
-export async function promotedShas(root: string, run: ChildRun = defaultChildRun): Promise<string[]> {
-  try {
-    const out = await run('git', ['-C', root, 'for-each-ref', '--sort=-refname', '--format=%(contents)%00', `refs/tags/${productionTagPrefix}`], { timeoutMs: 10_000 });
-    return out.split('\0').flatMap(body => { try { return [String(JSON.parse(body.trim()).sha).toLowerCase()]; } catch { return []; } });
-  } catch { return []; }
-}
-
-/** `graphyard doctor`'s coordinator line for this install's pin against production's SHA; a FAIL sets exit code 1. Prints nothing with no pin and no production. */
-export async function coordinatorDoctor(root: string, repository: string | null | undefined, production: { serving?: string | null } | null | undefined, options: { run?: ChildRun; print?: (line: string) => void; installDir?: string } = {}) {
-  const { run = defaultChildRun, print = (line: string) => console.error(line) } = options;
-  try {
-    const installDir = options.installDir ?? installDirectory(installIdFor(repository ?? '')), pinned = knownGoodState(installDir), failing = pendingPin(installDir), serving = production?.serving ?? null;
-    if (!pinned && !serving && !failing) return null;
-    const doctor = coordinatorDoctorLine(pinned?.sha ?? null, serving, pinned ? promotionsBehind(pinned.sha, await promotedShas(root, run)) : null, failing);
-    print(doctor.line);
-    if (!doctor.ok) process.exitCode = 1;
-    return doctor;
-  } catch { return null; }
 }

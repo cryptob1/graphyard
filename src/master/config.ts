@@ -10,7 +10,7 @@ import { serverOrigin, loadConnection, managedInstructions } from '../repository
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { APP_PENDING, checkoutLauncherOf, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withReviewerDefaults, withRoleDefaults } from './profiles.js';
+import { APP_PENDING, checkoutLauncherOf, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
 import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
@@ -513,4 +513,3 @@ export function liveMasterConfig(root: string, initial: MasterConfig, load: (roo
   };
   return live;
 }
-export type LiveMasterConfig = ReturnType<typeof liveMasterConfig>;

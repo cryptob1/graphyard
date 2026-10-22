@@ -9,7 +9,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { ChildRun } from '../src/child-runner.js';
-import { coordinatorDoctor, coordinatorDoctorLine, knownGoodCli, knownGoodDirectory, knownGoodState, launcher, pendingPin, pinAfterVerify, pinKnownGood, pinningVerify, promotionsBehind, retryPendingPin } from '../src/master/known-good.js';
+import { knownGoodCli, knownGoodDirectory, knownGoodState, launcher, pinKnownGood } from '../src/master/known-good.js';
 import { loopUnitText } from '../src/supervisor.js';
 import { operationsCommand } from '../src/cli/master/operations.js';
 import type { MasterSession } from '../src/cli/master/session.js';
@@ -61,76 +61,26 @@ test('unit:known-good-pin-atomic — a pin is a detached worktree under coordina
   await assert.rejects(pinKnownGood(w.pin, 'abc', w.run), /full 40-character/);
 });
 
-test('unit:known-good-keeps-previous — the pin before the previous one is removed, the previous one stays for recover, and pinning the pinned SHA changes nothing', async () => {
+test('unit:known-good-keeps-last-pin — a new pin removes every older one, keeping the previous SHA on record for recover, and pinning the pinned SHA changes nothing', async () => {
   const w = await world();
   const directory = knownGoodDirectory(w.installDir);
   await pinKnownGood(w.pin, w.shas[0], w.run);
   const second = await pinKnownGood(w.pin, w.shas[1], w.run);
   assert.equal(second.previous, w.shas[0]);
-  assert.ok(existsSync(join(directory, short(w.shas[0]))));
-  const third = await pinKnownGood(w.pin, w.shas[2], w.run);
-  assert.equal(third.previous, w.shas[1]);
-  assert.equal(existsSync(join(directory, short(w.shas[0]))), false, 'the pin before the previous one is removed');
+  assert.equal(existsSync(join(directory, short(w.shas[0]))), false, 'the pin it replaced is removed');
   assert.ok(existsSync(join(directory, short(w.shas[1]))));
-  assert.equal(readlinkSync(join(directory, 'current')), short(w.shas[2]));
+  assert.equal(readlinkSync(join(directory, 'current')), short(w.shas[1]));
   const calls = w.calls.length;
-  assert.deepEqual(await pinKnownGood(w.pin, w.shas[2], w.run), third);
+  assert.deepEqual(await pinKnownGood(w.pin, w.shas[1], w.run), second);
   assert.equal(w.calls.length, calls);
-  assert.equal(git(w.repository, 'worktree', 'list').split('\n').length, 3);
+  assert.equal(git(w.repository, 'worktree', 'list').split('\n').length, 2);
 });
-
-test('unit:known-good-pin-after-verify — the pin moves only after production verifies the promoted SHA; a failed verify leaves it unchanged', async () => {
-  const w = await world();
-  await pinKnownGood(w.pin, w.shas[0], w.run);
-  const verifying = (verified: boolean) => async (sha: string) => ({ served: verified ? sha : w.shas[0], verified });
-  assert.equal(await pinAfterVerify(w.pin, w.shas[1], w.run, async () => ({ verified: false })), null);
-  assert.equal(knownGoodState(w.installDir)!.sha, w.shas[0]);
-  const refused = await pinningVerify(w.pin, w.run, verifying(false))(w.shas[1]);
-  assert.equal(refused.verified, false);
-  assert.equal(knownGoodState(w.installDir)!.sha, w.shas[0]);
-  const failures: unknown[] = [];
-  w.failBuild(true);
-  assert.equal((await pinningVerify(w.pin, w.run, verifying(true), error => failures.push(error))(w.shas[1])).verified, true, 'a pin that fails never fails the verification');
-  assert.equal(failures.length, 1); assert.equal(knownGoodState(w.installDir)!.sha, w.shas[0]);
-  w.failBuild(false);
-  assert.equal((await pinningVerify(w.pin, w.run, verifying(true))(w.shas[1])).verified, true);
-  assert.deepEqual([knownGoodState(w.installDir)!.sha, knownGoodState(w.installDir)!.previous], [w.shas[1], w.shas[0]]);
-});
-
 test('unit:master-unit-uses-known-good — ExecStart runs coordinator/current/dist/cli.js once a pin exists and the checkout path before', async () => {
   const w = await world();
   const input = { root: w.repository, cliPath: '/checkout/bin/graphyard.mjs', repository: 'owner/project', intervalSeconds: 60, execPath: '/usr/bin/node', installDir: w.installDir };
   assert.match(loopUnitText(input), /^ExecStart=\/usr\/bin\/node \/checkout\/bin\/graphyard\.mjs master run$/m);
   await pinKnownGood(w.pin, w.shas[0], w.run);
   assert.match(loopUnitText(input), new RegExp(`^ExecStart=/usr/bin/node ${knownGoodDirectory(w.installDir)}/current/dist/cli\\.js master run$`, 'm'));
-});
-
-test('unit:known-good-doctor-line — doctor prints the pinned and production SHAs and FAILs when the pin is more than one promotion behind', () => {
-  const [a, b, c] = ['a', 'b', 'c'].map(letter => letter.repeat(40));
-  assert.deepEqual(coordinatorDoctorLine(a, a, 0), { line: `coordinator: pinned ${'a'.repeat(12)} (production ${'a'.repeat(12)})`, ok: true });
-  assert.deepEqual(coordinatorDoctorLine(b, c, promotionsBehind(b, [c, b, a])), { line: `coordinator: pinned ${'b'.repeat(12)} (production ${'c'.repeat(12)})`, ok: true });
-  assert.deepEqual(coordinatorDoctorLine(a, c, promotionsBehind(a, [c, b, a])), { line: `FAIL coordinator: pinned ${'a'.repeat(12)} (production ${'c'.repeat(12)})`, ok: false });
-  assert.equal(coordinatorDoctorLine(a, c, promotionsBehind(a, [c, b])).ok, false, 'a pin that is no longer a promoted SHA fails');
-  assert.equal(coordinatorDoctorLine(null, c, null).ok, true);
-});
-
-test('unit:known-good-doctor-line — doctor reads the install pin and the rc-production tags: one promotion behind passes, two FAIL with exit code 1, nothing pinned and nothing served prints nothing', async () => {
-  const w = await world();
-  await pinKnownGood(w.pin, w.shas[0], w.run);
-  const tag = (index: number) => git(w.repository, 'tag', '-a', `rc-production/rc-${index}`, '-m', JSON.stringify({ id: `rc-${index}`, sha: w.shas[index], at: new Date(Date.UTC(2026, 9, 8, index)).toISOString() }), w.shas[index]);
-  tag(0); tag(1);
-  const lines: string[] = [], exitCode = process.exitCode;
-  const doctor = (serving: string | null) => coordinatorDoctor(w.repository, 'owner/project', { serving }, { run: w.run, installDir: w.installDir, print: line => lines.push(line) });
-  try {
-    assert.equal((await doctor(w.shas[1]))?.ok, true, 'one promotion behind production passes');
-    assert.equal(lines[0], `coordinator: pinned ${short(w.shas[0])} (production ${short(w.shas[1])})`);
-    tag(2);
-    assert.equal((await doctor(w.shas[2]))?.ok, false, 'two promotions behind fails');
-    assert.equal(lines[1], `FAIL coordinator: pinned ${short(w.shas[0])} (production ${short(w.shas[2])})`);
-    assert.equal(process.exitCode, 1);
-    assert.equal(await coordinatorDoctor(w.repository, 'owner/project', null, { run: w.run, installDir: join(w.installDir, 'none'), print: line => lines.push(line) }), null);
-    assert.equal(lines.length, 2);
-  } finally { process.exitCode = exitCode; }
 });
 
 let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
@@ -218,29 +168,3 @@ test('unit:known-good-launcher-parses — the fallback dist/cli.js is two real l
   execFileSync(process.execPath, ['--check', file]);
 });
 
-test('unit:known-good-pending-retry — a pin that fails after verification is kept pending, shown by the doctor, retried after the window and cleared once it lands', async () => {
-  const w = await world();
-  await pinKnownGood(w.pin, w.shas[0], w.run);
-  const at = (minutes: number) => ({ ...w.pin, now: () => new Date(Date.UTC(2026, 9, 8, 0, minutes)) });
-  w.failBuild(true);
-  await pinningVerify(at(0), w.run, async sha => ({ verified: true, served: sha }))(w.shas[1]);
-  assert.deepEqual([pendingPin(w.installDir)?.sha, pendingPin(w.installDir)?.attempts], [w.shas[1], 1]);
-  const doctor = coordinatorDoctorLine(w.shas[0], w.shas[1], 1, pendingPin(w.installDir));
-  assert.equal(doctor.ok, false); assert.match(doctor.line, /^FAIL .*has failed 1 time/);
-  assert.equal((await retryPendingPin(at(5), w.run))?.attempts, 1, 'inside the window nothing is attempted');
-  assert.equal((await retryPendingPin(at(11), w.run))?.attempts, 2, 'still failing is recorded');
-  // A later release promoted but not verified serving (production still serves shas[1]) never discards the pending pin.
-  assert.equal((await retryPendingPin(at(22), w.run))?.attempts, 3, 'a newer unverified promotion keeps the pending pin retrying');
-  assert.equal(pendingPin(w.installDir)?.sha, w.shas[1]);
-  w.failBuild(false);
-  assert.equal(await retryPendingPin(at(40), w.run), null);
-  assert.equal(knownGoodState(w.installDir)!.sha, w.shas[1]);
-  assert.equal(pendingPin(w.installDir), null);
-  w.failBuild(true);
-  await pinningVerify(at(50), w.run, async sha => ({ verified: true, served: sha }))(w.shas[2]);
-  assert.equal(pendingPin(w.installDir)?.sha, w.shas[2], 'a later verified pin that fails replaces the pending one');
-  w.failBuild(false);
-  assert.equal(await retryPendingPin(at(65), w.run), null);
-  assert.equal(knownGoodState(w.installDir)!.sha, w.shas[2]);
-  assert.equal(pendingPin(w.installDir), null);
-});

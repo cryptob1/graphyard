@@ -5,7 +5,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { cycleFailureAttentionAfter, cycleFailureCeiling, cycleFailureCeilingMs, cycleFailureDelay, daemonStateSchema, daemonSummary, emptyDaemonState, loopAttention, loopLiveness, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { cycleFailureCeiling, cycleFailureCeilingMs, cycleFailureDelay, daemonStateSchema, daemonSummary, emptyDaemonState, loopLiveness, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 iso() values are the stub snapshot's own now and deployment stamp handed back to the daemon; Date.now() only measures how long the loop waited between retries, or offsets it by the stall hold the backoff test skips.
@@ -33,8 +33,6 @@ function effects(overrides: Partial<DaemonEffects> = {}): DaemonEffects {
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: iso(0) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
     persist: async () => {},
     ...overrides,
   };
@@ -94,7 +92,7 @@ test('unit:cycle-failure-survived — a rejection escaping the cycle or the relo
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('unit:cycle-failure-backoff — consecutive failures wait longer each time up to the ceiling, reset on the first success, and past three raise an attention item naming the failing call', async () => {
+test('unit:cycle-failure-backoff — consecutive failures wait longer each time up to the ceiling, reset on the first success, and the cursor names the failing call', async () => {
   // The schedule: the interval, doubled per consecutive failure, to five minutes or the interval itself.
   assert.deepEqual([1, 2, 3, 4, 5, 6, 10].map(failures => cycleFailureDelay(failures, 20_000)), [20_000, 40_000, 80_000, 160_000, 300_000, 300_000, 300_000]);
   assert.equal(cycleFailureCeilingMs, 300_000);
@@ -103,7 +101,6 @@ test('unit:cycle-failure-backoff — consecutive failures wait longer each time 
   assert.equal(cycleFailureCeiling(null), 300_000);
   assert.equal(cycleFailureCeiling(180_000), 90_000, 'under a watchdog the ceiling is half the window, so a backoff is never restarted as a hang');
   assert.deepEqual([1, 2, 3, 4, 5].map(failures => cycleFailureDelay(failures, 20_000, cycleFailureCeiling(180_000))), [20_000, 40_000, 80_000, 90_000, 90_000]);
-  assert.equal(cycleFailureAttentionAfter, 3);
 
   const { directory, token } = await privateDirectory();
   try {
@@ -128,20 +125,11 @@ test('unit:cycle-failure-backoff — consecutive failures wait longer each time 
     assert.equal(state.failures.consecutive, 0);
     assert.equal(state.failures.total, 5);
     assert.ok(log.some(line => /recovered after 5 failed cycle\(s\)/.test(line)), log.join('\n'));
-    // Under `master status`: the count and reason under daemon.failures, an attention item once
-    // three cycles in a row have failed, the loop is waiting on purpose.
-    const two = states.find(entry => entry.failures.consecutive === 2)!, three = states.find(entry => entry.failures.consecutive === 3)!, five = states.find(entry => entry.failures.consecutive === 5)!;
+    // Under `master status`: the count and reason under daemon.failures.
+    const three = states.find(entry => entry.failures.consecutive === 3)!, five = states.find(entry => entry.failures.consecutive === 5)!;
     const summary = (entry: DaemonState, at: number) => daemonSummary(entry, at, 5, 'machine-a');
     assert.equal(summary(three, Date.parse(three.failures.last!.at)).failures.consecutive, 3);
     assert.equal(summary(three, Date.parse(three.failures.last!.at)).failures.last?.reason, 'The operation was aborted due to timeout');
-    const attention = (entry: DaemonState, at: number) => { const view = summary(entry, at); return loopAttention({ liveness: view.liveness, failures: view.failures }); };
-    assert.deepEqual(attention(two, Date.parse(two.failures.last!.at)), [], 'two failures are a retry, not attention');
-    const raised = attention(three, Date.parse(three.failures.last!.at));
-    assert.equal(raised.length, 1);
-    assert.match(raised[0].text, /failed 3 consecutive cycles, the last \(cycle 2 at .*\) in the snapshot call: The operation was aborted due to timeout/);
-    assert.match(raised[0].text, /keeps cycling in-process/);
-    assert.equal(raised[0].role, 'master');
-    assert.match(raised[0].next, /daemon\.failures/);
     // Mid-backoff the lag exceeds two intervals, and the loop is still running: its next cycle is announced.
     const dueAt = Date.parse(five.failures.last!.nextAt);
     const waiting = loopLiveness(five, dueAt - 1, 5, 'machine-a');
@@ -173,9 +161,7 @@ test('unit:detached-rejection-survived — an unhandled rejection or uncaught ex
       const state = emptyDaemonState(master);
       let cycles = 0;
       const effects = {
-        agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {}, merge: async () => ({}),
-        observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-        recordDeployment: async () => {}, persist: async () => {},
+        agents: () => [], credentials: async () => ({}), closeSession: () => {}, dispatch: async () => {}, persist: async () => {},
         snapshot: async () => {
           cycles += 1;
           // A detached promise, as an approver watch or a Herdr read nobody awaited would leave behind.

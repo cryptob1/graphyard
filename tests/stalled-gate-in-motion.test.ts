@@ -7,11 +7,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { actorlessSubmissions } from '../src/cli/actorless-submissions.js';
-import { syncConflict } from '../src/daemon/rework.js';
-import { reviewNeed } from '../src/model/dispatch.js';
-import { baseRefreshConflict } from '../src/model/base-refresh.js';
-import { coordinationSnapshot } from '../src/server/work-view.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1557: two `actorless` submissions (GY-1522, GY-1526) were counted while the product's own remedy
@@ -29,11 +24,9 @@ interface Instance {
 const instances: Instance[] = JSON.parse(readFileSync(fileURLToPath(new URL('./fixtures/gy-1557-stalled-gate.json', import.meta.url)), 'utf8'));
 const shift = (at: string, ms: number) => new Date(Date.parse(at) + ms).toISOString();
 const minute = 60_000;
-const baseConflictWaitBoundMs = 30 * minute;
 async function holds() {
   const declared = await import('../src/model/behind-base.js');
   assert.equal(typeof declared.observeBaseHold, 'function', 'the observation write records the hold\'s first sighting');
-  assert.equal(typeof declared.baseHoldSightedAt, 'function', 'the actorless bound reads the sighting');
   return declared;
 }
 
@@ -58,45 +51,8 @@ function submitted(instance: Instance, overrides: Partial<Work> = {}): Work {
     headObserved: { pr: instance.pr, sha: instance.sha, at: instance.headObservedAt }, ...(instance.holdSightedAt ? { baseHold: { sha: instance.sha, at: instance.holdSightedAt } } : {}), baseRefresh,
     autoDispatch: { review: null, producers: [], history: [] }, actionQueue: { actions: [], history: [] }, gates: [], violations: [], proofGaps: [], scopeRequest: null, containmentQuarantine: null, ...overrides } as unknown as Work;
 }
-/** The item as the loop reads it, with the actorless lines master status reports at `at`. */
-function stalledGate(stored: Work, at: string) {
-  const [work] = coordinationSnapshot({ work: [stored] }).work;
-  assert.equal((work as unknown as { pipeline?: unknown }).pipeline, undefined, 'the loop reads the item without its pipeline timeline');
-  return { work, reported: actorlessSubmissions([work], new Date(at)) };
-}
-
-for (const instance of instances.filter(entry => entry.kind === 'actorless')) {
-  const confirmed = !!instance.conflicts?.length;
-  test(`manual:fault-class-stalled-gate — ${instance.id}: a hold the base's late move opened is in motion for the bound from its sighting, not from the submission`, () => {
-    const work = submitted(instance);
-    // The reading the instance recorded: a sync is the missing actor, nothing named, hours or minutes past the 5-minute actorless bound.
-    assert.equal(reviewNeed(work, [work], new Date(instance.at)).state, 'base-not-contained');
-    const { work: viewed, reported } = stalledGate(work, instance.at);
-    assert.ok(viewed.headObserved, 'the coordination view keeps the head observation the bound is read from');
-    assert.equal(reported.length, 1, 'master status still names the line, so the wait stays visible');
-    assert.match(reported[0].text, /no rework request and no named wait; missing a sync rework/);
-    assert.match(reported[0].text, confirmed ? /cannot be brought onto it without resolving a conflict/ : /GitHub reports a merge conflict with that base/);
-    assert.match(reported[0].text, new RegExp(`has been submitted for ${Math.round((Date.parse(instance.at) - Date.parse(instance.claimedAt!)) / minute)}m`), 'dated from the stage entry, as the instance was');
-    // The loop's own remedy stands on the record: the confirmed conflict grounds its rework request; GitHub's conflict is its sync rework decision.
-    if (confirmed) assert.ok(baseRefreshConflict(viewed), 'the control plane\'s test merge confirmed the conflict');
-    else assert.ok(syncConflict(viewed), 'the routine decision step requests the sync rework for this head');
-  });
-
-}
-
-for (const instance of instances.filter(entry => entry.kind === 'actorless')) {
-  const confirmed = !!instance.conflicts?.length;
-  test(`unit:base-hold-bound — ${instance.id}: the actorless bound runs from the hold's first sighting`, async () => {
-    const { baseHoldSightedAt } = await holds();
-    const { work: viewed, reported } = stalledGate(submitted(instance), instance.at);
-    assert.ok(confirmed ? viewed.baseRefresh?.conflictSince : viewed.baseHold, 'the coordination view keeps the sighting record');
-    assert.equal(baseHoldSightedAt(viewed), confirmed ? instance.conflicts![0]!.at : instance.holdSightedAt);
-    assert.equal(reported[0].inMotionUntil, shift(baseHoldSightedAt(viewed)!, baseConflictWaitBoundMs));
-  });
-}
-
-test('unit:base-hold-sighting — the hold\'s first sighting is set once per head, kept while the hold stands across base moves, cleared when it clears, and read from the control plane\'s first confirmed conflict when one stands', async () => {
-  const { observeBaseHold, baseHoldSightedAt } = await holds();
+test('unit:base-hold-sighting — the hold\'s first sighting is set once per head, kept while the hold stands across base moves, and cleared when it clears', async () => {
+  const { observeBaseHold } = await holds();
   const instance = instances.find(entry => entry.subject === 'GY-1526')!;
   const work = submitted(instance, { baseHold: null, observation: { ...submitted(instance).observation, mergeable: null, conflicting: false } } as unknown as Partial<Work>);
   const t = (n: number) => shift(instance.submittedAt!, n * minute);
@@ -105,20 +61,15 @@ test('unit:base-hold-sighting — the hold\'s first sighting is set once per hea
   work.observation = { ...work.observation!, at: t(1), baseTip: 'e'.repeat(40), baseTree: 'e'.repeat(40), mergeable: false, conflicting: true };
   observeBaseHold(work, t(1));
   assert.deepEqual(work.baseHold, { sha: instance.sha, at: t(0) }, 'the base moving under a conflicting head keeps the sighting');
-  assert.equal(baseHoldSightedAt(work), t(0));
   work.observation = { ...work.observation!, at: t(2), mergeable: true, conflicting: false };
   observeBaseHold(work, t(2));
   assert.equal(work.baseHold, null, 'a head GitHub reports mergeable stands under no hold');
-  assert.equal(baseHoldSightedAt(work), null);
   work.observation = { ...work.observation!, at: t(3), mergeable: false, conflicting: true };
   observeBaseHold(work, t(3));
   assert.deepEqual(work.baseHold, { sha: instance.sha, at: t(3) }, 'a hold that returns is a new sighting');
   work.candidate = { ...work.candidate!, sha: 'd'.repeat(40) }; work.observation = { ...work.observation!, at: t(4), candidate: work.candidate };
   observeBaseHold(work, t(4));
   assert.deepEqual(work.baseHold, { sha: 'd'.repeat(40), at: t(4) }, 'a hold on a new head is a new sighting');
-  // The control plane's confirmed conflict dates the hold from its first conflict on the head, whatever the observation write recorded.
-  const earlier = instances.find(entry => entry.subject === 'GY-1522')!;
-  assert.equal(baseHoldSightedAt(submitted(earlier, { baseHold: { sha: earlier.sha, at: earlier.observedAt } } as Partial<Work>)), earlier.conflicts![0]!.at);
 });
 
 // ---- the observation write records the sighting -------------------------------------------------

@@ -1,16 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { readFile } from 'node:fs/promises';
 import { fileURLToPath } from 'node:url';
-import { actionableSubjects, cycleDelay, daemonSummary, emptyDaemonState, loopAttention, loopLiveness, mergeableCandidate, neededRework, progressAttention, runCycle, runDaemon, standingVerdict, watchdogPlan, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
+import { daemonSummary, emptyDaemonState, loopLiveness, neededRework, runCycle, runDaemon, standingVerdict, watchdogPlan, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
 // Time-bomb allowance (GY-1694): the 2031-03-01 clockStart is the loop's injected now and every verdict/lease instant and loopLiveness call takes it explicitly; new Date() only stamps an empty snapshot for a lockless status.
 
 /**
@@ -191,8 +186,6 @@ function plane(scripts: Script[], options: { hostId?: string; delivered?: number
       if (round(target) === 'die') target.lease = { ...target.lease, expiresAt: iso(now + minute) };
       recompute(target);
     },
-    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(clockStart), reason: 'No deployment endpoint is configured in this exercise', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
     // The master's operator-agent rework (POST work/:id/rework), applied by the server at once.
     rework: async (item, reason) => {
       if (refusals.rework > 0) { refusals.rework--; throw new Error(`Graphyard refused work/${item.id}/rework (503): the control plane is restarting`); }
@@ -253,63 +246,6 @@ test('integration:unattended-full-cycle — with no master session and no human 
   assert.equal(neededRework(reviewed)?.binding, `${item.candidate!.sha}:verdict:graphyard-reviewer[bot]`);
 });
 
-test('integration:no-actionable-silence — every cycle records what it could act on and what it did, an actionable item stays named while nothing can act on it', async () => {
-  const simulation = plane([{ key: 'GY-400', rounds: ['pass'] }]);
-  // A two-minute cycle, so cycling every two simulated minutes is a healthy loop rather than a
-  // stalled one: this proof is about the work standing still, not about the loop's own liveness.
-  // The loop runs from a fixture checkout that records its units, so the harness remedy validates it and, with no Claude settings installed, has nothing to journal (GY-1662).
-  const recorded = await temporaryDirectory('silence-checkout');
-  await mkdir(join(recorded, '.graphyard'), { recursive: true });
-  await writeFile(join(recorded, installUnitsFile), JSON.stringify(perInstallUnits('owner/project')));
-  const master = config({ cliPath: join(recorded, 'bin/graphyard.mjs'), workers: [profile('claude-a')], run: { intervalSeconds: 120 } });
-  const state = emptyDaemonState(master);
-  // The one worker profile has no usable credential, so nothing can claim the ready item: the
-  // pipeline has something actionable and no way to act on it, which is exactly the silence GY-84
-  // is about. The loop escalates once and then has nothing left to record.
-  const effects = simulation.effects({ credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: false, reason: 'Worker credential is unreadable' }])) });
-  state.lock = { id: 'lock', pid: process.pid, host: master.hostId, startedAt: simulation.iso(), heartbeatAt: simulation.iso() };
-
-  const first = await cycle(state, master, simulation, effects, minute);
-  assert.equal(first.metrics.actionable, 1, 'the cycle records what it could act on, not only what it did');
-  // The subject the wake reads names the item and what holds it, for as long as nothing can act.
-  assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()).map(subject => [subject.kind, subject.work]), [['dispatch', 'GY-400']]);
-  assert.match(actionableSubjects(master, simulation.work, simulation.now())[0].detail, /GY-400 is claimable and waiting for a worker/);
-  assert.deepEqual(steps(first.actions), ['attention:GY-400:done'], 'and what it did: the attention line naming the profile it cannot use');
-
-  let last = first;
-  // Over an hour of stillness: the progress watchdog's bound, not the responsive cadence's.
-  for (let pass = 0; pass < 32; pass++) last = await cycle(state, master, simulation, effects, 2 * minute);
-  assert.equal(last.metrics.actionable, 1, 'the item is still measured while nothing can act on it');
-  const liveness = loopLiveness(state, simulation.now(), master.run.intervalSeconds * 1000, master.hostId);
-  assert.equal(liveness.state, 'running', 'the loop is cycling: the stillness is in the work, not in the loop');
-  // The progress watchdog (GY-1980) is the one bound over stillness now: one line naming the item.
-  const attention = progressAttention(simulation.work, null, simulation.now());
-  assert.equal(attention.length, 1);
-  assert.equal(attention[0].subject, 'GY-400');
-  assert.match(attention[0].text, /Nothing has progressed for \d+ minutes \(since \d{4}-.*\): GY-400 has been in build since/);
-  assert.equal(attention[0].human, false);
-
-  // The credential comes back: the same subject is acted on, and the watchdog's oldest-open-item
-  // instant moves with it.
-  const healthy = simulation.effects();
-  const acted = await cycle(state, master, simulation, healthy, minute);
-  assert.ok(acted.actions.some(action => action.kind === 'dispatch' && action.state === 'done'));
-
-  // The inventory follows the work rather than a fixed list: a claimed, submitted attempt asks
-  // nothing of the dispatcher, what it is still missing is named, and a delivery asks nothing.
-  // Since GY-1235 no head owes the loop a proof and a green candidate is GitHub's to merge.
-  const underway = actionableSubjects(master, simulation.work, simulation.now());
-  assert.deepEqual(underway.map(subject => subject.kind), [], `${underway.map(subject => subject.detail).join('; ')}`);
-  simulation.github.merging = false;
-  simulation.advance(minute); // the reviewer approves and CI reports
-  assert.ok(mergeableCandidate(simulation.work[0]));
-  assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()), [], 'with every gate green the candidate is GitHub\'s to merge, not the loop\'s');
-  simulation.github.merging = true;
-  await cycle(state, master, simulation, healthy, minute);
-  assert.equal(simulation.work[0].stage, 'done');
-  assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()), [], 'a delivered item asks nothing of the loop');
-});
-
 test('integration:loop-liveness — an absent or stalled loop is the top attention item with the command that restarts it, the loop keeps its supervisor\'s watchdog fed per cycle, and the packaged unit restarts it without a person', async () => {
   const master = config({ workers: [] });
   const intervalMs = master.run.intervalSeconds * 1000;
@@ -321,12 +257,7 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   assert.equal(absent.state, 'absent');
   assert.match(absent.detail, /No master loop holds this repository and none has ever cycled/);
   assert.match(absent.restart, /^graphyard master restart/);
-  const absentItems = loopAttention({ liveness: absent });
-  assert.equal(absentItems[0].subject, 'loop');
-  assert.equal(absentItems[0].role, 'master');
-  assert.equal(absentItems[0].human, false);
-  assert.match(absentItems[0].next, /graphyard master restart/);
-  assert.match(absentItems[0].next, /systemctl --user restart graphyard-master/);
+  assert.match(absent.restart, /systemctl --user restart graphyard-master/);
 
   // A lock whose process is gone on this host is an absence, not a stall.
   state.lock = { id: 'lock', pid: 2 ** 22 - 1, host: master.hostId, startedAt: new Date(clockStart).toISOString(), heartbeatAt: new Date(now - minute).toISOString() };
@@ -340,13 +271,9 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   // A live process that has not completed a cycle for more than two intervals is stalled.
   state.lock = { ...state.lock, pid: process.pid };
   assert.equal(loopLiveness(state, now, intervalMs, master.hostId).state, 'stalled');
-  const stalled = loopAttention({ liveness: loopLiveness(state, now, intervalMs, master.hostId) });
-  assert.match(stalled[0].text, /has not completed a cycle for 60s, past the two-interval bound of 40s/);
-  assert.match(stalled[0].next, /graphyard master restart/);
   // Inside two intervals it is simply running, and raises nothing.
   state.lastCycleAt = new Date(now - 30_000).toISOString();
   assert.equal(loopLiveness(state, now, intervalMs, master.hostId).state, 'running');
-  assert.deepEqual(loopAttention({ liveness: loopLiveness(state, now, intervalMs, master.hostId) }), []);
   // The same judgement reaches `master status` through the daemon summary it reads.
   const summary = daemonSummary(state, now, intervalMs, master.hostId);
   assert.equal(summary.liveness.state, 'running');
@@ -355,14 +282,12 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   // alive after every completed cycle, so a cycle that hangs becomes a restart.
   const simulation = plane([{ key: 'GY-600', rounds: ['pass'] }]);
   const notified: string[] = [];
-  const log: string[] = [];
   const supervised = emptyDaemonState(master);
   await runDaemon(master, supervised, simulation.effects({ notify: signal => { notified.push(signal); } }), {
-    once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: simulation.now, log: line => log.push(line), signals: [],
+    once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: simulation.now, log: () => {}, signals: [],
     environment: { NOTIFY_SOCKET: '/run/user/1000/systemd/notify', WATCHDOG_USEC: String(180 * 1_000_000) },
   });
   assert.deepEqual(notified, ['ready', 'alive']);
-  assert.match(log.join('\n'), /cycle 0 complete with 1 open, 1 actionable, \d+ action\(s\)/, 'the cycle log carries both halves');
   const unsupervised: string[] = [];
   await runDaemon(master, emptyDaemonState(master), simulation.effects({ notify: signal => { unsupervised.push(signal); } }), {
     once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: simulation.now, log: () => {}, signals: [], environment: {},
@@ -374,28 +299,6 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   assert.equal(watchdogPlan({ NOTIFY_SOCKET: '/run/notify', WATCHDOG_USEC: String(180 * 1_000_000) }, intervalMs).refusal, null);
   const tight = watchdogPlan({ NOTIFY_SOCKET: '/run/notify', WATCHDOG_USEC: String(30 * 1_000_000) }, intervalMs);
   assert.match(tight.refusal!, /watchdog window \(30s\) is not longer than two cycle intervals \(40s\)/);
-  const noted = emptyDaemonState(master);
-  await runDaemon(master, noted, simulation.effects(), { once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: simulation.now, log: () => {}, signals: [],
-    environment: { NOTIFY_SOCKET: '/run/notify', WATCHDOG_USEC: String(30 * 1_000_000) } });
-  assert.ok(Object.values(noted.actions).some(action => action.kind === 'attention' && /watchdog window/.test(action.detail)), 'the mismatch is recorded where master status reads it');
-
-  // The report `master status` prints puts it first, ahead of every work item, and counts it.
-  const directory = await temporaryDirectory('loop');
-  const root = await temporaryDirectory('loop-root');
-  try {
-    const credential = join(directory, 'coordinator.token');
-    await writeFile(credential, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    execFileSync('git', ['init', '-q', root]);
-    const reported = config({ credentialFile: credential, workers: [] });
-    await writeDaemonState(reported, emptyDaemonState(reported));
-    const masterApi = async (path: string) => path === 'work-snapshot' ? { work: [], now: new Date().toISOString() } : { decisions: [] };
-    const report = await masterStatusReport(root, reported, masterApi, { actor: { id: 'coordinator-1' } }, { commit: null });
-    assert.equal(report.attentionItems[0].subject, 'loop', `the top attention item: ${JSON.stringify(report.attentionItems[0])}`);
-    assert.match(report.attentionItems[0].text, /No master loop holds this repository/);
-    assert.match(report.attentionItems[0].next, /graphyard master restart/);
-    assert.equal(report.counts.attention, 1, 'and it is counted, so a quiet installation is not reported as all clear');
-    assert.equal((report.daemon as { liveness: { state: string } }).liveness.state, 'absent');
-  } finally { await rm(directory, { recursive: true, force: true }); await rm(root, { recursive: true, force: true }); }
 
   // And the packaged deployment restarts the loop on its own, however it stopped.
   const unit = await readFile(new URL('../examples/master/graphyard-master.service', import.meta.url), 'utf8');

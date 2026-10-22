@@ -7,10 +7,9 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { agentStartCeilingMs, agentStartTimeoutMs, awaitRuntimeStart, buildMasterStatus, launchCommand, launchCommandLimit, launchDelivery, loadMasterConfig, paneLastLine, saveProducerProfile, SessionStartError, setupMaster, startAgentSession, writeLaunchFiles, type HerdrAgent } from '../src/master.js';
+import { agentStartCeilingMs, agentStartTimeoutMs, awaitRuntimeStart, launchCommand, launchCommandLimit, launchDelivery, loadMasterConfig, paneLastLine, saveProducerProfile, SessionStartError, setupMaster, startAgentSession, writeLaunchFiles, type HerdrAgent } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
-import { summarizeReviews } from '../src/reviewer.js';
-import { launchProducer, producerPrompt, readProducerLedger, summarizeProducers } from '../src/producer.js';
+import { launchProducer, producerPrompt, readProducerLedger } from '../src/producer.js';
 import { bounded, dispatchFailureReasonLimit, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { autonomyContract } from '../src/autonomy.js';
@@ -303,7 +302,7 @@ test('unit:start-bound-reads-the-pane — before a start is declared failed the 
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('integration:launch-refusal-names-the-screen — a producer launch refused at start is recorded by the dispatcher, the item\'s attention text and master status with the pane\'s last non-empty line, not the CLI\'s JSON error', async () => {
+test('integration:launch-refusal-names-the-screen — a producer launch refused at start is recorded by the dispatcher with the pane\'s last non-empty line, not the CLI\'s JSON error', async () => {
   const { root, cleanup } = await installed();
   try {
     const config = await loadMasterConfig(root);
@@ -330,16 +329,6 @@ test('integration:launch-refusal-names-the-screen — a producer launch refused 
     }
     assert.ok(closed.includes('w1V:pR6'), 'the tab of a refused start is closed');
     assert.equal((await readProducerLedger(root)).producers.length, 0, 'no session was recorded');
-    // The item's attention text and master status carry the pane's line.
-    const failures = Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, kind: failure.kind, attempts: failure.attempts, reason: failure.reason, at: failure.at, nextAt: failure.nextAt }));
-    const status = buildMasterStatus({ work: [item], now: new Date().toISOString() }, [], [], {}, summarizeReviews([]), 'main', undefined, { producers: summarizeProducers((await readProducerLedger(root)).producers), failures });
-    const row = status.work[0];
-    assert.match(row.attention!, /^Automatic producer launch for GY-121 refused 1 time\(s\): the claude runtime never started within 30 s in pane w1V:pR6 \(command still echoing\); the pane last showed: "vish@host ~\/code\/project ❯ GY=/);
-    assert.ok(row.attention!.includes(echoLine), 'the attention text carries the pane\'s last line');
-    assert.equal(row.attentionOwner?.role, 'master');
-    const producer = row.dispatch!.producers.find(entry => entry.failure)!;
-    assert.ok(producer.failure!.reason.includes(echoLine), 'master status shows the pane\'s last line on the request');
-    assert.equal(JSON.stringify(status).includes('agent target'), false);
   } finally { await cleanup(); }
 });
 
