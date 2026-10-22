@@ -55,7 +55,7 @@ Stop worker; [rework](#recovery-recipes) `--previous-worker-stopped`; next resub
 
 ## Proof authority
 
-A principal proves exactly its roster entry's `--proof` patterns (`graphyard principal add ID --role producer|admin --proof PATTERN`); admins included, nothing is granted at runtime.
+A principal proves exactly its roster entry's `--proof` patterns (`graphyard principal add ID --role producer|coordinator|admin --proof PATTERN`); admins included, nothing is granted at runtime.
 
 ## Credentials
 

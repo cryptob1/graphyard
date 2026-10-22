@@ -187,7 +187,7 @@ const proofPattern = /^(unit|integration|e2e|manual):[A-Za-z0-9._*:/-]+$/;
  * One `graphyard principal add` entry, judged as `plannedPrincipals` judges the planner's: a
  * producer is created only with an explicit lane grant (`--grant`) or proof seed (`--proof`), since
  * an ungranted producer would be a standing credential with no lane; a grant names a producer lane
- * and a proof seed names bootstrap proof authority, so no other role holds either.
+ * and a proof seed names proof authority, held by a producer, an admin or (for readings) a coordinator.
  */
 export function rosterEntry(input: { id: string; role?: string; sessionKind?: string; grants?: string[]; proofs?: string[] }): RosterPrincipal {
   if (!principalIdPattern.test(input.id)) throw new Error('A principal id is 1 to 100 letters, digits, dots, underscores and dashes, starting with a letter or digit');
@@ -203,7 +203,8 @@ export function rosterEntry(input: { id: string; role?: string; sessionKind?: st
   if (badProofs.length) throw new Error(`Unknown proof ${badProofs.join(', ')}; --proof takes unit:*, integration:*, e2e:* or manual:* patterns`);
   if (role === 'producer' && !grants.length && !proofs.length) throw new Error(`A producer is created only with an explicit grant (--grant ${principalGrants.join('|')}) or proof seed (--proof unit:*|integration:*|e2e:*|manual:*): an ungranted producer would be a standing credential with no lane, and widening it later is never automatic`);
   if (role !== 'producer' && grants.length) throw new Error(`A grant names a producer lane; ${role} ${input.id} holds none. Use --role producer`);
-  if (role !== 'producer' && role !== 'admin' && proofs.length) throw new Error(`A proof seed names proof authority; ${role} ${input.id} holds none. Use --role producer or admin`);
+  // A coordinator's patterns authorize only the loop's readings; evidence submission still refuses it.
+  if (role !== 'producer' && role !== 'admin' && role !== 'coordinator' && proofs.length) throw new Error(`A proof seed names proof authority; ${role} ${input.id} holds none. Use --role producer, coordinator or admin`);
   if (grants.includes(observeShaGrant) && (grants.length > 1 || proofs.length)) throw new Error(`${observeShaGrant} is held by a dedicated observer principal, beside no other grant or proof; add a separate principal for it`);
   return { id: input.id, role, sessionKind, ...(proofs.length ? { proofs } : {}), ...(grants.length ? { grants } : {}), source: 'principal' };
 }
