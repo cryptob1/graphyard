@@ -13,6 +13,8 @@ import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js
 import { detachRuns } from '../runner/registry.js';
 import { besideCursor } from './state-cursor.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
+import { cliCommit } from '../protocol-version.js';
+import { loopCodeRoot } from './checkout-state.js';
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
 export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
@@ -60,13 +62,14 @@ export async function adoptHeadlessRuns(effects: DaemonEffects, log: (line: stri
 export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-restart');
 
 /**
- * Why the loop should restart now, or null: the deploy unit recorded a serving commit other than the
- * one this process loaded, or a confined master filed a restart request.
+ * Why the loop should restart now, or null: the deploy unit serves a commit other than the one this
+ * process loaded and the checkout holds it, so a restart loads it; or a confined master filed a
+ * restart request. `head` reads the commit the loop's code checkout holds.
  */
-export function restartCause(config: Pick<MasterConfig, 'credentialFile'>, root: string, loaded: string | null): string | null {
+export function restartCause(config: Pick<MasterConfig, 'credentialFile' | 'cliPath'>, root: string, loaded: string | null, head = () => cliCommit(loopCodeRoot(config.cliPath, root))): string | null {
   if (existsSync(loopRestartRequestPath(config))) return 'a master restart was requested';
   const serving = readDeployRecord(deployRecordPath(root))?.tip ?? null;
-  return serving && loaded && serving !== loaded ? `the deploy unit serves ${serving.slice(0, 12)}, not ${loaded.slice(0, 12)} this loop loaded` : null;
+  return serving && loaded && serving !== loaded && head() === serving ? `the deploy unit serves ${serving.slice(0, 12)}, not ${loaded.slice(0, 12)} this loop loaded` : null;
 }
 
 /** `systemctl --user --no-block restart` of the unit this loop runs under, ended by the stop it causes. */

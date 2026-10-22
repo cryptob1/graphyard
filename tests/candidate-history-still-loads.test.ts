@@ -18,7 +18,7 @@ const sha = 'a'.repeat(40), promoted = 'b'.repeat(40);
 let database: EmbeddedPostgres | null = null, store: Store | null = null, http: ReturnType<typeof server> | null = null;
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
-test('unit:candidate-history-still-loads — a cursor carrying the removed candidate, soak, seal-check, dispatch and run fields loads with mainSha, promotedSha, promotedAt and behind; a candidate promotion event still reads', { timeout: 120_000 }, async () => {
+test('unit:candidate-history-still-loads — a cursor carrying the removed candidate, soak, seal-check, dispatch and run fields still loads; a candidate promotion event still reads', { timeout: 120_000 }, async () => {
   const promotion = {
     checkedAt: '2026-10-18T00:00:00.000Z', mainSha: sha, promotedSha: promoted, promotedAt: '2026-10-17T23:00:00.000Z', behind: 2,
     ledgerReadAt: '2026-10-17T23:59:00.000Z', inFlight: true, runsReadAt: '2026-10-17T23:59:00.000Z', dispatchedAt: '2026-10-17T23:50:00.000Z', lastDispatchAt: '2026-10-17T23:50:00.000Z',
@@ -30,8 +30,7 @@ test('unit:candidate-history-still-loads — a cursor carrying the removed candi
   };
   const cursor = daemonStateSchema.parse({ version: 1, url: 'http://127.0.0.1:4310', repository: 'owner/history', promotion,
     mainWatch: { checkedAt: '2026-10-18T00:00:00.000Z', tip: sha, unknown: [], frozen: { sha, since: '2026-10-17T00:00:00.000Z' } } });
-  assert.deepEqual(cursor.promotion, { checkedAt: promotion.checkedAt, mainSha: sha, promotedSha: promoted, promotedAt: promotion.promotedAt, behind: 2, reason: null });
-  assert.ok(cursor.mainWatch, 'the retired main watch (GY-1519) state still loads, untouched');
+  assert.ok(cursor.promotion && cursor.mainWatch, 'the retired promotion reading (GY-2877) and main watch (GY-1519) still load, untouched');
 
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1984;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('candidate-history'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });

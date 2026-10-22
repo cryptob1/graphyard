@@ -78,9 +78,10 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
     assert.equal(git(checkout, 'rev-parse', 'HEAD'), b, 'the checkout is on the new tip');
     assert.equal(readDeployRecord(file)?.tip, b, 'the served tip is recorded');
     // The loop restarts itself onto the tip the deploy unit serves.
-    const config = { credentialFile: join(root, 'coordinator.token') };
-    assert.match(restartCause(config, root, a) ?? '', new RegExp(`serves ${b.slice(0, 12)}, not ${a.slice(0, 12)}`));
-    assert.equal(restartCause(config, root, b), null);
+    const config = { credentialFile: join(root, 'coordinator.token'), cliPath: join(checkout, 'bin', 'graphyard.mjs') }, head = () => git(checkout, 'rev-parse', 'HEAD');
+    assert.match(restartCause(config, root, a, head) ?? '', new RegExp(`serves ${b.slice(0, 12)}, not ${a.slice(0, 12)}`));
+    assert.equal(restartCause(config, root, b, head), null);
+    assert.equal(restartCause(config, root, a, () => a), null, 'a checkout that does not hold the served tip is no restart: the restart would load the same commit again');
 
     // A tip whose health check fails is rolled back to the previous tip, and waits for the next one.
     const c = await commit('C');

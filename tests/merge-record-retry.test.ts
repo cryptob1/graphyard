@@ -75,8 +75,7 @@ function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: work(), now: iso(start) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(start), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    persist: async () => {},
     mergeWriter: reads,
     rework: async (item: Work) => { reworks.push({ head: item.candidate?.sha }); reworked = true; },
   } as unknown as DaemonEffects;
