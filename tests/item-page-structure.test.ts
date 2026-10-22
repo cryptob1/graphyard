@@ -180,8 +180,8 @@ test('unit:item-page-technical-collapsed — gate internals, sessions with attac
 test('the Activity section reads the kinds the ledger records — command names and the control plane\'s own facts — and never calls a page of history the full history', () => {
   // Every command is recorded under its own name (src/engine.ts save(db, work, actor, command, …)); each reads as what happened.
   // Typed over every command: a command added to the engine without a plain label fails typecheck here.
-  const commands: Record<Command, true> = { create: true, ready: true, requirements: true, reviewpolicy: true, unblock: true, rework: true, resolve: true, recover: true, claim: true, rereview: true, mechanicalplan: true,
-    heartbeat: true, quarantine: true, launch: true, settle: true, autosettle: true, release: true, workspace: true, submit: true, blocked: true, defer: true, window: true, evidence: true,
+  const commands: Record<Command, true> = { create: true, ready: true, requirements: true, unblock: true, rework: true, claim: true, mechanicalplan: true,
+    heartbeat: true, release: true, workspace: true, submit: true, blocked: true, defer: true, window: true, evidence: true,
     reading: true, revoke: true, session: true, request: true };
   for (const command of Object.keys(commands)) assert.notEqual(activityLabel(command), 'Updated', `command ${command} has a plain label`);
   assert.deepEqual(['create', 'ready', 'claim', 'submit', 'rework', 'review.requested', 'merge.execution.committed', 'delivery.verified', 'human.requested', 'github.observed'].map(activityLabel),

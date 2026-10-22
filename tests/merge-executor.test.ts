@@ -13,7 +13,7 @@ import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterRead
 import { baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstParentHolds, mergeOne, mergeQueue, nextToMerge, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { defaultDeployKeyFile, defaultMergeWriterRetrials, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { deliveredReason, otherHeadRefusal, unheldShaRefusal, unintendedShaRefusal } from '../src/server/merge-record.js';
-import { mergeWriterApprover, mergeWriterTrialGround, reworkGround, trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
+import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import { masterConfigSchema } from '../src/master.js';
 import { mergeLedgerRefusals, pushRefusal, trialRefusal, type Principal, type Work } from '../src/model.js';
@@ -288,14 +288,14 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
 /** The key of the merge in flight, read without narrowing the state for the assertions that follow. */
 const inFlightKey = (state: DaemonState) => (state.mergeWriter.inFlight as { key: string } | null)?.key ?? null;
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`the merge writer step called GitHub (${String(name)})`); } });
-function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => number; mergeWriter: MergeWriterReads | null | undefined; decide?: DaemonEffects['decide'] }) {
+function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => number; mergeWriter: MergeWriterReads | null | undefined; rework?: DaemonEffects['rework'] }) {
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: await world.work(), now: iso(world.now()) }),
     closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(world.now()), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, mergeWriter: world.mergeWriter, ...(world.decide ? { decide: world.decide } : {}),
+    recordDeployment: async () => {}, persist: async () => {},
+    github: githubDouble, merge: githubDouble, mergeWriter: world.mergeWriter, ...(world.rework ? { rework: world.rework } : {}),
   } as unknown as DaemonEffects;
 }
 /** Reads over fake ports, switched by `merger`. */
@@ -338,44 +338,42 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   assert.equal(reconcile.mergeWriter.inFlight, null, 'no new merge starts in the cycle that reconciled');
   assert.ok(settled.actions.some(action => /^Reconciled an open intent of GY-1/.test(action.detail)));
   assert.equal(reconcile.mergeWriter.lastMergeAt, iso(start));
-  // A trial that fails: the refusal is kept, and the rework it grounds is requested with the writer's binding.
+  // A trial that fails: the refusal is kept, and the rework it grounds is applied.
   const failing = fakePorts({ failTrial: true });
-  const decided: { key: string; action: string; reason: string; input: unknown }[] = [];
+  const decided: { key: string; reason: string }[] = [];
   const reworked = emptyDaemonState(config);
-  const failingEffects = effectsFor({ work: () => work, now, mergeWriter: fakeReads(failing.ports, async () => 'control-plane'), decide: async (target, action, reason, input) => { decided.push({ key: target.key, action, reason, input }); return { id: randomUUID() }; } });
+  const failingEffects = effectsFor({ work: () => work, now, mergeWriter: fakeReads(failing.ports, async () => 'control-plane'), rework: async (target, reason) => { decided.push({ key: target.key, reason }); } });
   await runCycle(config, reworked, failingEffects, now); await mergeWriterIdle(reworked);
   const refusedCycle = await runCycle(config, reworked, failingEffects, now);
   assert.deepEqual(reworked.mergeWriter.refusals.map(entry => [entry.key, entry.reason]), [['GY-1', `${trialFailurePrefix}: tests tests/item.test.ts`]]);
-  assert.deepEqual(decided, [{ key: 'GY-1', action: 'rework', ...trialFailureRework(work[1]!, sha('head1'), `${trialFailurePrefix}: tests tests/item.test.ts`) } as unknown as typeof decided[number]]);
-  assert.equal(decided[0]!.input && (decided[0]!.input as { binding: string }).binding, `${sha('head1')}:${mergeWriterTrialGround}`);
+  assert.deepEqual(decided, [{ key: 'GY-1', reason: trialFailureRework(work[1]!, sha('head1'), `${trialFailurePrefix}: tests tests/item.test.ts`).reason }]);
   assert.ok(refusedCycle.actions.some(action => action.state === 'failed' && /refused: trial failed: tests tests\/item\.test\.ts/.test(action.detail)));
   assert.deepEqual(reworked.mergeWriter.reworks, [], 'a confirmed request owes nothing');
-  assert.ok(refusedCycle.actions.some(action => action.state === 'done' && /^Requested the rework the merge writer's refusal of GY-1 head/.test(action.detail)));
+  assert.ok(refusedCycle.actions.some(action => action.state === 'done' && /^Returned GY-1 to a worker on the merge writer's refusal of head/.test(action.detail)));
   // A base that moved past the bound leaves the head queued and asks for no rework.
   const moved = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip, sha('tip3'), sha('tip4'), sha('tip5')] });
   const requeued = emptyDaemonState(config); decided.length = 0;
-  const movedEffects = effectsFor({ work: () => work, now, mergeWriter: fakeReads(moved.ports, async () => 'control-plane'), decide: async (target, action, reason, input) => { decided.push({ key: target.key, action, reason, input }); return { id: randomUUID() }; } });
+  const movedEffects = effectsFor({ work: () => work, now, mergeWriter: fakeReads(moved.ports, async () => 'control-plane'), rework: async (target, reason) => { decided.push({ key: target.key, reason }); } });
   await runCycle(config, requeued, movedEffects, now); await mergeWriterIdle(requeued); await runCycle(config, requeued, movedEffects, now);
   assert.deepEqual([decided, requeued.mergeWriter.refusals[0]?.reason], [[], baseMovedReason(4)]);
 });
 
-test('integration:executor-trial-failure-rework-no-approver — a rework request the plane fails is kept on state.mergeWriter.reworks and asked for again every cycle until the server confirms it, exactly once; one the snapshot shows applied (the item reworked, on a new head or done) is settled without a request; without the decision effects it waits, naming the command', async () => {
+test('integration:executor-trial-failure-rework-no-approver — a rework the plane fails is kept on state.mergeWriter.reworks and applied again every cycle until it lands, exactly once; one the snapshot shows applied (the item reworked, on a new head or done) is settled without a request; without the master identity it waits, naming the command', async () => {
   const work = [submitted(1, 30), submitted(2, 5)], now = () => start;
   const failing = fakePorts({ failTrial: mergeSha => mergeSha === sha(`merge:${sha('head1')}:${tip}`) });
   let refuse = 2;
-  const decided: { key: string; binding: string }[] = [];
-  const decide: DaemonEffects['decide'] = async (target, _action, _reason, input) => { if (refuse-- > 0) throw new Error('route down (HTTP 503)'); decided.push({ key: target.key, binding: (input as { binding: string }).binding });
-    // The server applies a trial-failure rework with the writer as its approver (GY-1524), so the confirmed request shows on the snapshot the next cycle reads: the item is returned to a worker.
-    const applied = work.find(entry => entry.key === target.key); if (applied) (applied as { reworkRequested?: boolean }).reworkRequested = true;
-    return { id: randomUUID() }; };
+  const decided: { key: string }[] = [];
+  const rework: DaemonEffects['rework'] = async target => { if (refuse-- > 0) throw new Error('route down (HTTP 503)'); decided.push({ key: target.key });
+    // The applied rework shows on the snapshot the next cycle reads: the item is returned to a worker.
+    const applied = work.find(entry => entry.key === target.key); if (applied) (applied as { reworkRequested?: boolean }).reworkRequested = true; };
   const state = emptyDaemonState(config);
-  const effects = effectsFor({ work: () => failing.world(work), now, mergeWriter: fakeReads(failing.ports, async () => 'control-plane'), decide });
+  const effects = effectsFor({ work: () => failing.world(work), now, mergeWriter: fakeReads(failing.ports, async () => 'control-plane'), rework });
   await runCycle(config, state, effects, now); await mergeWriterIdle(state);
   const first = await runCycle(config, state, effects, now);
   assert.deepEqual(decided, [], 'the first request failed');
   assert.deepEqual(state.mergeWriter.reworks.map(entry => [entry.key, entry.head, entry.attempts, entry.lastError]), [['GY-1', sha('head1'), 1, 'route down (HTTP 503)']], 'the rework is kept with its failure');
   const key = mergeWriterReworkKey('GY-1', sha('head1'));
-  assert.ok(first.actions.some(action => action.state === 'failed' && /was not requested \(attempt 1\); it is asked for again next cycle: route down/.test(action.detail)), JSON.stringify(first.actions.map(action => action.detail)));
+  assert.ok(first.actions.some(action => action.state === 'failed' && /was not applied \(attempt 1\); it is applied again next cycle: route down/.test(action.detail)), JSON.stringify(first.actions.map(action => action.detail)));
   assert.equal(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).mergeWriter.reworks.length, 1, 'the pending rework survives a restart through the persisted state');
   // The refused head is out of the queue; the second item is merged meanwhile, and the pending request is retried each cycle.
   assert.equal(inFlightKey(state), 'GY-2');
@@ -385,26 +383,26 @@ test('integration:executor-trial-failure-rework-no-approver — a rework request
   assert.equal(state.mergeWriter.reworks[0]?.attempts, 2);
   assert.ok(second.actions.some(action => action.state === 'failed' && /\(attempt 2\)/.test(action.detail)));
   const third = await runCycle(config, state, effects, now);
-  assert.deepEqual(decided, [{ key: 'GY-1', binding: `${sha('head1')}:${mergeWriterTrialGround}` }], 'the third cycle\'s request succeeded; it was made once');
+  assert.deepEqual(decided, [{ key: 'GY-1' }], 'the third cycle\'s rework succeeded; it was applied once');
   assert.deepEqual(state.mergeWriter.reworks, [], 'confirmed, the rework is owed no more');
   assert.equal(state.actions[key]?.state, 'done');
-  assert.ok(third.actions.some(action => /^Requested the rework the merge writer's refusal of GY-1 head/.test(action.detail)));
+  assert.ok(third.actions.some(action => /^Returned GY-1 to a worker on the merge writer's refusal of head/.test(action.detail)));
   await runCycle(config, state, effects, now);
   assert.equal(decided.length, 1, 'no further request once confirmed');
   // The server applied an earlier request whose answer was lost: the snapshot shows the item reworked, and nothing is requested.
   const lost = emptyDaemonState(config);
   lost.mergeWriter.reworks = [{ key: 'GY-1', id: 'w1', head: sha('head1'), reason: `${trialFailurePrefix}: tests tests/item.test.ts`, refusedAt: iso(start), attempts: 3, lastError: 'route down' }, { key: 'GY-2', id: 'w2', head: sha('head2'), reason: `${trialFailurePrefix}: tests tests/item.test.ts`, refusedAt: iso(start), attempts: 1, lastError: null }];
   const applied = [{ ...work[0]!, reworkRequested: true } as Work, { ...work[1]!, candidate: { ...work[1]!.candidate!, sha: sha('head2-next') } } as Work];
-  const settled = await runCycle(config, lost, effectsFor({ work: () => applied, now, mergeWriter: fakeReads(fakePorts().ports, async () => 'control-plane'), decide }), now);
+  const settled = await runCycle(config, lost, effectsFor({ work: () => applied, now, mergeWriter: fakeReads(fakePorts().ports, async () => 'control-plane'), rework }), now);
   assert.deepEqual([lost.mergeWriter.reworks, decided.length], [[], 1], 'both are settled without a request');
   assert.ok(settled.actions.some(action => /grounds is applied: the snapshot shows the item returned to a worker/.test(action.detail)) && settled.actions.some(action => /the snapshot shows the item on a new head/.test(action.detail)), JSON.stringify(settled.actions.map(action => action.detail)));
-  // Without the decision effects the record waits, naming the command the operator runs. A fresh
+  // Without the master identity the record waits, naming the command the operator runs. A fresh
   // snapshot: the item above was returned to a worker when its request was confirmed.
   const waiting = emptyDaemonState(config);
   waiting.mergeWriter.reworks = [{ key: 'GY-1', id: 'w1', head: sha('head1'), reason: `${trialFailurePrefix}: tests tests/item.test.ts`, refusedAt: iso(start), attempts: 0, lastError: null }];
   const waited = await runCycle(config, waiting, effectsFor({ work: () => [submitted(1, 30)], now, mergeWriter: fakeReads(fakePorts().ports, async () => 'control-plane') }), now);
-  assert.equal(waiting.mergeWriter.reworks[0]?.lastError, 'this loop runs without the decision effects');
-  assert.ok(waited.actions.some(action => action.state === 'failed' && new RegExp(`graphyard master decide GY-1 rework '\\{"previousWorkerStopped":true,"binding":"${sha('head1')}:${mergeWriterTrialGround}"\\}' REASON`).test(action.detail)), JSON.stringify(waited.actions.map(action => action.detail)));
+  assert.equal(waiting.mergeWriter.reworks[0]?.lastError, 'this loop runs without the master identity');
+  assert.ok(waited.actions.some(action => action.state === 'failed' && /graphyard master rework GY-1 REASON/.test(action.detail)), JSON.stringify(waited.actions.map(action => action.detail)));
 });
 
 test('unit:merge-writer-status — master status and the daemon summary show mergeWriter.queue (oldest first), inFlight, lastMergeAt and refusals; the loop\'s own effects wire the reads with the merge-record post under one key per step; docs/delivery-redesign.md Merge writer states the sequence and the reconcile rule within 80 net words', async () => {
@@ -684,7 +682,7 @@ test('integration:merge-record-refuses-unheld-sha — a reconciled naming a merg
   assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'reconciled', mergeSha: 'a'.repeat(40), observedTip: 'a'.repeat(40) })).status, 409);
 });
 
-test('integration:executor-trial-failure-rework-no-approver — a merge.refused naming a failed trial of the current head folds onto the item, reopens its test gate and is the rework\'s ground: the server applies the rework with graphyard-merge-writer as its approver and no approver decision, the loop\'s request carrying the head:merge-writer-trial-failed binding', async () => {
+test('integration:executor-trial-failure-rework-no-approver — a merge.refused naming a failed trial of the current head folds onto the item, reopens its test gate and is the rework\'s ground: the rework is applied at once with no approver decision', async () => {
   const w = await submittedItem(7);
   const head = heads[7]!;
   const reason = `${trialFailurePrefix}: tests tests/app.test.ts`;
@@ -694,19 +692,10 @@ test('integration:executor-trial-failure-rework-no-approver — a merge.refused 
   assert.deepEqual([doc.mergeLedger?.state, doc.mergeLedger?.head, doc.mergeLedger?.refusal], ['refused', head, { kind: 'merge', reason }]);
   assert.ok(doc.gates.find(gate => gate.name === 'test')!.reasons.includes(trialRefusal(head, doc.candidate!.baseSha)), 'the refusal stands where the trial would');
   assert.equal(trialFailedGround(doc), `the merge writer's trial of candidate ${head.slice(0, 12)} failed (${reason})`);
-  assert.equal(reworkGround(doc, []), trialFailedGround(doc), 'the ground the lane rework reads');
   assert.equal(nextToMerge([doc], snapshotLedger([doc]), start), null, 'the refused head waits for its rework, not a second trial');
   const rework = trialFailureRework(doc, head, reason);
-  const decided = await request(token(admin), `work/${w.id}/decide`, { action: 'rework', reason: rework.reason, input: rework.input });
-  assert.equal(decided.status, 200, JSON.stringify(decided.body));
-  assert.deepEqual([decided.body.state, decided.body.approvedBy], ['applied', mergeWriterApprover]);
-  assert.match(decided.body.approvalReason, /the merge writer is the rework's approver and no approver decision is needed \(GY-1524\)/);
-  const listed = await request(token(admin), `work/${w.id}/decisions`, undefined, randomUUID(), 'GET');
-  const decision = listed.body.decisions.find((entry: { id: string }) => entry.id === decided.body.id);
-  assert.deepEqual([decision.state, decision.approvedBy, decision.input.binding], ['applied', mergeWriterApprover, `${head}:${mergeWriterTrialGround}`]);
-  const approval = (await store.pool.query("SELECT actor, payload FROM events WHERE work_id=$1 AND kind='decision.approved'", [w.id])).rows[0];
-  assert.deepEqual([approval.actor, approval.payload.approver, approval.payload.groundKind], [mergeWriterApprover, { id: mergeWriterApprover, role: 'merge-writer' }, mergeWriterTrialGround]);
-  assert.equal((await store.pool.query("SELECT count(*)::int AS n FROM events WHERE work_id=$1 AND kind='decision.requested' AND payload->>'action'='rework'", [w.id])).rows[0].n, 1);
+  const applied = await request(token(admin), `work/${w.id}/rework`, { reason: rework.reason, previousWorkerStopped: true });
+  assert.equal(applied.status, 200, JSON.stringify(applied.body));
   doc = await document(w.id);
   assert.equal(doc.reworkRequested, true, 'the item returns to a worker');
   assert.equal(doc.lease, null);

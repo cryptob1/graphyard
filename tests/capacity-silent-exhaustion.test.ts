@@ -1,21 +1,14 @@
-import { after, before, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
-import { Engine } from '../src/engine.js';
-import { server } from '../src/server.js';
-import { Store } from '../src/store.js';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import {
   headlessTimeoutLimit, headlessTimeoutLimitCharge, runTimeoutLimit, silentPaneExhaustion, silentPaneExhaustionReason,
 } from '../src/model/capacity.js';
 import {
-  approverProfile, approverRoleHealth, approverSessionName, holdRepeatedLimitAccount, masterConfigSchema, observedExhaustions, recordEnvironmentLog,
-  recordObservedExhaustion, repeatedLimitAccount, selectAccount, selectApproverAccount, selectionKey, sessionAccount, type MasterConfig,
+  holdRepeatedLimitAccount, masterConfigSchema, observedExhaustions, recordEnvironmentLog,
+  repeatedLimitAccount, selectAccount, selectionKey, sessionAccount, type MasterConfig,
 } from '../src/master.js';
-import type { Principal, Work } from '../src/model.js';
 import type { RunEvent } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -24,46 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // readable provider limit both hold the account the launch spent and fail the role over. Idle is
 // not silent spend: Herdr reports a long or silent command as idle while it still runs.
 // Fixed clocks are numeric epochs (no Date.parse/Date.UTC of a calendar day); Date.now() only
-// drives the live approver-loop fixtures and relative holds.
-
-const repository = 'owner/silent-exhaustion';
-const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
-const coordinator: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
-const credentials = [operator, coordinator].map(principal => ({ ...principal, token: `silent-${principal.id}-${'x'.repeat(32)}` }));
-const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
-let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, home: string;
-
-const call = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
-  const response = await fetch(`${url}/api/${path}`, { method, headers: { Authorization: `Bearer ${token(principal)}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, ...(body === undefined ? {} : { body: JSON.stringify(body) }) });
-  return { status: response.status, body: await response.json() as any };
-};
-const ok = async (principal: Principal, method: 'GET' | 'POST', path: string, body?: unknown) => {
-  const result = await call(principal, method, path, body);
-  assert.equal(result.status, 200, JSON.stringify(result.body));
-  return result.body;
-};
-const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
-const fresh = () => store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
-
-before(async () => {
-  const port = Number(process.env.GRAPHYARD_SILENT_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 55);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('silent-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('silent_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/silent_test`); await store.init();
-  engine = new Engine(store, 300, repository); engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
-  http = server(engine, credentials);
-  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
-  url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  home = await temporaryDirectory('silent-home');
-  await mkdir(join(home, 'env-a'), { recursive: true }); await mkdir(join(home, 'env-b'), { recursive: true });
-  await writeFile(join(home, 'env-a/.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'not-a-real-token', refreshToken: 'not-a-real-token' } }));
-  await writeFile(join(home, 'env-b/auth.json'), JSON.stringify({ tokens: { access_token: 'not-a-real-token' } }));
-});
-after(async () => {
-  await new Promise<void>(resolve => http.close(() => resolve()));
-  await store.close();
-  await database.stop();
-});
+// drives the relative holds.
 
 const limitError = '429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-03 08:27:35"}';/** 2026-10-01T22:22:33.900Z as a millisecond epoch — handed to limit detectors as their fixed now. */
 const limitNow = 1_790_893_353_900;
@@ -110,23 +64,23 @@ test('unit:hold-charged-to-selected-account — sessionAccount and repeatedLimit
   const credentialFile = join(root, 'coordinator.token');
   await writeFile(credentialFile, 'token', { mode: 0o600 });
   const config = { credentialFile } as Pick<MasterConfig, 'credentialFile'>;
-  await recordEnvironmentLog(config, [], [], { key: selectionKey('approver', approverProfile), environment: 'claude-c', kind: 'claude', at: new Date().toISOString(), work: 'GY-1701' });
+  await recordEnvironmentLog(config, [], [], { key: selectionKey('reviewer', 'reviewer-a'), environment: 'claude-c', kind: 'claude', at: new Date().toISOString(), work: 'GY-1701' });
   await recordEnvironmentLog(config, [], [], { key: selectionKey('doctor', 'doctor'), environment: 'zai-a', kind: 'pi', at: new Date().toISOString(), work: null });
-  assert.equal((await sessionAccount(root, config, 'approver', approverProfile, { work: 'GY-1701' }))?.environment, 'claude-c');
+  assert.equal((await sessionAccount(root, config, 'reviewer', 'reviewer-a', { work: 'GY-1701' }))?.environment, 'claude-c');
   assert.equal((await sessionAccount(root, config, 'doctor', 'doctor'))?.environment, 'zai-a');
   const base = Date.now();
   const exhaustion = (requestId: string, offsetMs: number) => ({
-    at: new Date(base + offsetMs).toISOString(), role: 'approver' as const, account: 'claude-c', profile: approverProfile, reason: 'silent', resetsAt: null, requestId,
+    at: new Date(base + offsetMs).toISOString(), role: 'reviewer' as const, account: 'claude-c', profile: 'reviewer-a', reason: 'silent', resetsAt: null, requestId,
     recordedBy: 'loop', owner: null, runtime: 'claude', partialWork: { state: 'not-applicable' as const, detail: 'n/a' },
   });
-  // Distinct sessions share one decision/request id across failover relaunches — they still count.
+  // Distinct sessions share one request id across failover relaunches — they still count.
   const work = { key: 'GY-1', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('same-decision', 0), exhaustion('same-decision', 60_000)] } };
-  assert.equal(repeatedLimitAccount(work, base + 60_000, 'approver')?.account, 'claude-c');
+  assert.equal(repeatedLimitAccount(work, base + 60_000, 'reviewer')?.account, 'claude-c');
   const duplicateReport = { key: 'GY-1', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('req-1', 0), exhaustion('req-1', 0)] } };
-  assert.equal(repeatedLimitAccount(duplicateReport, base, 'approver'), null, 'the same instant reported twice is one session');
+  assert.equal(repeatedLimitAccount(duplicateReport, base, 'reviewer'), null, 'the same instant reported twice is one session');
 });
 
-test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAccount before selectApproverAccount keeps a repeatedly spent pane account out of selection', async () => {
+test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAccount before selectAccount keeps a repeatedly spent pane account out of selection', async () => {
   const dir = await temporaryDirectory('pane-repeat-hold');
   const credentialFile = join(dir, 'coordinator.token');
   await writeFile(credentialFile, 'token', { mode: 0o600 });
@@ -140,167 +94,20 @@ test('integration:no-repeat-launch-into-silent-account — holdRepeatedLimitAcco
     reviewers: [{ name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['env-a', 'env-b'] }],
   }) as MasterConfig;
   const base = Date.now();
-  const exhaustion = (role: 'approver' | 'reviewer', offsetMs: number) => ({
-    at: new Date(base + offsetMs).toISOString(), role, account: 'env-a', profile: role === 'approver' ? approverProfile : 'reviewer-a', reason: 'quota', resetsAt: null,
+  const exhaustion = (role: 'reviewer', offsetMs: number) => ({
+    at: new Date(base + offsetMs).toISOString(), role, account: 'env-a', profile: 'reviewer-a', reason: 'quota', resetsAt: null,
     requestId: 'shared-request', recordedBy: 'loop', owner: null, runtime: 'claude', partialWork: { state: 'not-applicable' as const, detail: 'n/a' },
   });
-  const work = { key: 'GY-1701', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('approver', 0), exhaustion('approver', 60_000)] } };
-  assert.equal(repeatedLimitAccount(work, base + 60_000, 'approver')?.account, 'env-a');
-  const placed = await holdRepeatedLimitAccount(config, work, base + 60_000, {}, 'approver');
-  assert.equal(placed?.account, 'env-a');
-  assert.ok((await observedExhaustions(config, base + 60_000))['env-a']);
-  const chosen = await selectApproverAccount(config, work.key, 'approver-agent', { quota: false, cacheMs: 0, registry: undefined });
-  assert.equal(chosen.account?.name, 'env-b', 'real selection path skips the repeatedly held pane-role account');
-  // Reviewer selection after the assumed hold lapses: two spent sessions sharing one request id
-  // still re-hold before selectAccount (the launchReview path).
+  // Two spent reviewer sessions sharing one request id hold before selectAccount (the launchReview path).
   const reviewWork = { key: 'GY-1701', epoch: 2, capacity: { escalations: [], exhaustions: [exhaustion('reviewer', 0), exhaustion('reviewer', 90_000)] } };
   assert.equal(repeatedLimitAccount(reviewWork, base + 90_000, 'reviewer')?.account, 'env-a');
-  const afterLapse = base + 90_000 + 3_600_000 + 1;
-  assert.equal((await observedExhaustions(config, afterLapse))['env-a'], undefined, 'the earlier hold has lapsed');
-  const reviewHold = await holdRepeatedLimitAccount(config, reviewWork, afterLapse, {}, 'reviewer');
+  const at = base + 90_000;
+  const reviewHold = await holdRepeatedLimitAccount(config, reviewWork, at, {}, 'reviewer');
   assert.equal(reviewHold?.account, 'env-a');
+  assert.ok((await observedExhaustions(config, at))['env-a']);
   const reviewProfile = config.reviewers[0]!;
-  const reviewChosen = await selectAccount(config, 'reviewer', reviewProfile, { quota: false, cacheMs: 0, now: () => afterLapse, work: reviewWork.key });
+  const reviewChosen = await selectAccount(config, 'reviewer', reviewProfile, { quota: false, cacheMs: 0, now: () => at, work: reviewWork.key });
   assert.equal(reviewChosen.account?.name, 'env-b', 'launchReview\'s selectAccount path skips the repeatedly held reviewer account');
-});
-
-type Herdr = { agents: { name: string; pane_id: string; agent_status: string }[]; output: Record<string, string> };
-const loginsOnly = (now: () => number) => ({ quota: false, now, cacheMs: 0 });
-const definition = (title: string) => ({ title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
-  origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: 'src/a.ts — a finding' }] } } });
-
-async function silentApproverLoop(label: string) {
-  await fresh();
-  const dir = await temporaryDirectory(`silent-${label}`);
-  const credentialFile = join(dir, 'coordinator.token');
-  await writeFile(credentialFile, token(coordinator), { mode: 0o600 });
-  const config = masterConfigSchema.parse({
-    version: 1, url, credentialFile, cliPath: join(process.cwd(), 'bin/graphyard.mjs'), repository, baseBranch: 'main',
-    githubAppId: 1, hostId: 'silent-host', masterAgentName: 'gy-master', autoMerge: true, mergeMethod: 'merge', workers: [],
-    environments: [{ name: 'env-a', kind: 'claude', home: join(home, 'env-a') }, { name: 'env-b', kind: 'codex', home: join(home, 'env-b') }],
-    reviewers: [{ name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude', agentArgs: [], approvals: 'auto', environment: {}, accounts: ['env-a', 'env-b'] }],
-    run: { launchStartSeconds: 60 },
-  }) as MasterConfig;
-  const herdr: Herdr = { agents: [], output: {} };
-  const clock = { skewMs: 0 };
-  const now = () => Date.now() + clock.skewMs;
-  const decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null }[] = [];
-  const launches: (string | null)[] = [];
-  const effects = {
-    agents: () => herdr.agents,
-    herdr: () => ({ agents: herdr.agents, available: true }),
-    sessionOutput: (agent: { name?: string | null }) => herdr.output[agent.name!] ?? '',
-    closeSession: (pane: string) => { herdr.agents = herdr.agents.filter(agent => agent.pane_id !== pane); },
-    holdAccount: (account: string, observed: Parameters<typeof recordObservedExhaustion>[2]) => recordObservedExhaustion(config, account, observed, now()),
-    reportCapacity: (work: Work, event: unknown) => ok(coordinator, 'POST', `work/${work.id}/capacity`, event) as Promise<Work>,
-    decide: async (_work: Work, action: string, _reason: string, input: unknown) => { const entry = { id: `decision-${label}-${decisions.length + 1}`, action, state: 'requested', input: input ?? {}, approvedBy: null }; decisions.push(entry); return entry; },
-    decisions: async () => ({ decisions }),
-    approver: async (work: Work, decision: string) => {
-      const chosen = await selectApproverAccount(config, work.key, 'approver-agent', { ...loginsOnly(now), registry: undefined });
-      const agentName = approverSessionName(work, decision), pane = `pane-${launches.length}`;
-      herdr.agents.push({ name: agentName, pane_id: pane, agent_status: 'idle' });
-      launches.push(chosen.account?.name ?? null);
-      return { agentName, pane, account: chosen.account?.name ?? null, runtime: chosen.account?.kind ?? null, session: `registry-${launches.length}` };
-    },
-    roleHealth: async () => ({ approver: await approverRoleHealth(config, loginsOnly(now)) }),
-    snapshot: async () => { const snapshot = await ok(coordinator, 'GET', 'work-snapshot'); return { work: snapshot.work as Work[], now: new Date(now()).toISOString() }; },
-    endRegistrySession: async () => {},
-    persist: async () => {},
-    credentials: async () => ({}),
-    dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'none', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
-    idleScreenPauseMs: 0,
-  } as unknown as DaemonEffects;
-  const filed = await ok(operator, 'POST', 'work', definition(`silent ${label}`)) as Work;
-  const work = await ok(coordinator, 'POST', `work/${filed.id}/triage`, { judgement: { outcome: 'close', reason: 'Not worth doing' } }) as Work;
-  return { config, herdr, clock, decisions, launches, work, now, cycle: (state: DaemonState) => runCycle(config, state, effects, now) };
-}
-
-/** Mark the live approver pane as ended (`done`) with an empty screen — the silent-death shape. */
-function endSilent(herdr: Herdr, name: string) {
-  const agent = herdr.agents.find(entry => entry.name === name);
-  assert.ok(agent, name);
-  agent.agent_status = 'done';
-  herdr.output[name] = '';
-}
-
-test('integration:approver-silent-exhaustion-failover — a silent ended approver past its start bound holds its launch account and the decision continues on another', async () => {
-  const { config, herdr, clock, decisions, launches, work, cycle } = await silentApproverLoop('failover');
-  const state = emptyDaemonState(config);
-  await cycle(state);
-  assert.deepEqual(launches, ['env-a']);
-  assert.equal(Object.values(state.approvals)[0].account, 'env-a');
-  const name = approverSessionName(work, decisions[0].id);
-  endSilent(herdr, name);
-  clock.skewMs += 61_000;
-  const detection = await cycle(state);
-  const failover = detection.actions.find(action => action.kind === 'failover');
-  assert.ok(failover, JSON.stringify(detection.actions));
-  assert.equal(failover.state, 'done', failover.detail);
-  assert.match(failover.detail, /without working|without a readable provider limit notice|ended without working/);
-  const held = (await observedExhaustions(config, Date.now() + clock.skewMs))['env-a'];
-  assert.ok(held, 'env-a is held');
-  assert.equal(held.role, 'approver');
-  assert.equal((await reload(work.id)).capacity!.exhaustions.at(-1)!.account, 'env-a');
-  assert.deepEqual(launches, ['env-a', 'env-b']);
-  assert.equal(Object.values(state.approvals)[0].account, 'env-b');
-});
-
-test('integration:approver-silent-exhaustion-failover — an idle pane whose screen still moves is not spent (long-command protection)', async () => {
-  const { config, herdr, clock, decisions, launches, work, cycle } = await silentApproverLoop('idle-busy');
-  const state = emptyDaemonState(config);
-  await cycle(state);
-  const name = approverSessionName(work, decisions[0].id);
-  let ticks = 0;
-  Object.defineProperty(herdr.output, name, { configurable: true, enumerable: true, get: () => `⏺ Bash(npm test)\n  ⎿ running ${++ticks}` });
-  clock.skewMs += 61_000;
-  const detection = await cycle(state);
-  assert.equal(detection.actions.find(action => action.kind === 'failover'), undefined, JSON.stringify(detection.actions));
-  assert.deepEqual(launches, ['env-a'], 'no replacement while the idle command may still be running');
-  assert.equal((await observedExhaustions(config, Date.now() + clock.skewMs))['env-a'], undefined);
-});
-
-test('integration:approver-silent-exhaustion-failover — a done pane whose screen shows its decision is not silent exhaustion', async () => {
-  const { config, herdr, clock, decisions, work, cycle } = await silentApproverLoop('done-worked');
-  const state = emptyDaemonState(config);
-  await cycle(state);
-  const decision = decisions[0].id;
-  const name = approverSessionName(work, decision);
-  const agent = herdr.agents.find(entry => entry.name === name)!;
-  agent.agent_status = 'done';
-  herdr.output[name] = `${decision}\nAPPROVED\n`;
-  clock.skewMs += 61_000;
-  const detection = await cycle(state);
-  const silent = detection.actions.find(action => action.kind === 'failover' && /without working|without a readable provider limit notice|ended without working/.test(action.detail ?? ''));
-  assert.equal(silent, undefined, `silent exhaustion must not charge a done pane that shows its decision: ${JSON.stringify(detection.actions)}`);
-  assert.equal((await observedExhaustions(config, Date.now() + clock.skewMs))['env-a'], undefined);
-  assert.equal((await reload(work.id)).capacity?.exhaustions.length ?? 0, 0, 'no capacity exhaustion was recorded');
-});
-
-test('integration:no-repeat-launch-into-silent-account — after a silent death selection skips the held account', async () => {
-  const { config, herdr, clock, decisions, launches, work, cycle, now } = await silentApproverLoop('no-repeat');
-  const state = emptyDaemonState(config);
-  await cycle(state);
-  endSilent(herdr, approverSessionName(work, decisions[0].id));
-  clock.skewMs += 61_000;
-  await cycle(state);
-  assert.deepEqual(launches, ['env-a', 'env-b']);
-  const next = await selectAccount(config, 'approver', { name: approverProfile, accounts: ['env-a', 'env-b'], kind: 'claude' }, { ...loginsOnly(now), work: work.key });
-  assert.equal(next.account?.name, 'env-b', 'selection hands the other account, never the silently spent one');
-  await assert.rejects(selectAccount(config, 'approver', { name: approverProfile, accounts: ['env-a'], kind: 'claude' }, { ...loginsOnly(now), work: work.key }), /exhausted|no healthy|spent|quota|NoHealthy/i);
-});
-
-test('integration:replay-approver-silent-deaths — GY-1701\'s silent claude-c deaths hold on the first and leave the decision for another account', async () => {
-  const { config, herdr, clock, decisions, launches, work, cycle } = await silentApproverLoop('replay-1701');
-  const state = emptyDaemonState(config);
-  await cycle(state);
-  endSilent(herdr, approverSessionName(work, decisions[0].id));
-  clock.skewMs += 61_000;
-  await cycle(state);
-  assert.ok((await observedExhaustions(config, Date.now() + clock.skewMs))['env-a']);
-  assert.equal(launches.at(-1), 'env-b');
-  assert.equal((await reload(work.id)).capacity!.exhaustions.filter(entry => entry.account === 'env-a').length, 1);
 });
 
 test('unit:run-timeout-limit-signal — headlessTimeoutLimitCharge holds every named limit attempt with its own reset', () => {

@@ -130,7 +130,7 @@ test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a f
   // The loop: one tick dispatches, and records no "No worker profile can take" escalation.
   const dispatched: string[] = [];
   const effects: DaemonEffects = {
-    agents: async () => drained(), herdr: () => ({ agents: drained(), available: true }), stopSupervisor: () => {},
+    agents: async () => drained(), herdr: () => ({ agents: drained(), available: true }),
     credentials: async configured => available(configured), snapshot: async () => ({ work: items, now: observedAt }),
     closeSession: () => {}, dispatch: async (item, chosen) => { dispatched.push(`${item.key}:${chosen.name}`); return {}; },
  recordDeployment: async () => {}, persist: async () => {},

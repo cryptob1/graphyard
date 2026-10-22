@@ -308,7 +308,8 @@ export async function stopUnboundedAttempts(cycle: Cycle) {
     const attempt = unsubmittedAttempt(item, clock);
     if (!attempt?.reclaim || !attempt.live) continue;
     const profile = config.workers.find(worker => worker.principal === attempt.owner);
-    if (!profile) continue;
+    // Another host's attempt is that host's loop to stop: only this one can reach its pane.
+    if (!profile || item.workspaces.some(space => space.epoch === attempt.epoch && space.host !== config.hostId)) continue;
     await isolate('session', item, item.key, async () => {
       const key = unboundedAttemptKey(item, attempt.epoch), previous = state.actions[key];
       if (previous?.state === 'done' || (previous && !readyToRetry(previous, state.cycle))) return;

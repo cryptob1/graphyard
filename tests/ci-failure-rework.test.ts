@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { routineDecision } from '../src/master-daemon.js';
+import { neededRework } from '../src/daemon/rework.js';
 import type { Work } from '../src/model.js';
 
 // 2026-09-25: GY-245's refreshed head a3b75653db55 failed its required `test` check and nothing
@@ -22,7 +22,7 @@ function item(checks: Check[], extra: Partial<Work> = {}): Work {
     ...extra,
   } as unknown as Work;
 }
-const decide = (work: Work) => routineDecision(work, { autoMerge: true }, Date.parse(at));
+const decide = (work: Work) => neededRework(work);
 
 test('unit:failed-ci-requests-rework — since GY-2010 a pull-request-era CI check stored as failed on the current head requests no rework: the merge writer\'s trial is the only test, and its refusal grounds the round', () => {
   // Every shape that used to ask for a `<head>:ci:<checks>` round now asks for nothing.

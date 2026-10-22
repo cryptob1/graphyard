@@ -332,7 +332,7 @@ test('integration:launch-refusal-names-the-screen — a producer launch refused 
     assert.equal((await readProducerLedger(root)).producers.length, 0, 'no session was recorded');
     // The item's attention text and master status carry the pane's line.
     const failures = Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, kind: failure.kind, attempts: failure.attempts, reason: failure.reason, at: failure.at, nextAt: failure.nextAt }));
-    const status = buildMasterStatus({ work: [item], now: new Date().toISOString() }, [], [], {}, {}, summarizeReviews([]), 'main', undefined, { producers: summarizeProducers((await readProducerLedger(root)).producers), failures });
+    const status = buildMasterStatus({ work: [item], now: new Date().toISOString() }, [], [], {}, summarizeReviews([]), 'main', undefined, { producers: summarizeProducers((await readProducerLedger(root)).producers), failures });
     const row = status.work[0];
     assert.match(row.attention!, /^Automatic producer launch for GY-121 refused 1 time\(s\): the claude runtime never started within 30 s in pane w1V:pR6 \(command still echoing\); the pane last showed: "vish@host ~\/code\/project ❯ GY=/);
     assert.ok(row.attention!.includes(echoLine), 'the attention text carries the pane\'s last line');

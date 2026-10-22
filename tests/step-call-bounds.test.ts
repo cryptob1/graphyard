@@ -4,20 +4,18 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { decisionBudgetMs, decisionCallBoundMs, decisionCallCarried } from '../src/daemon/decision-budget.js';
 import { launchAppearanceMs } from '../src/daemon/effects.js';
 import { idleLeaseMs } from '../src/daemon/cycle-resume.js';
-import { overlongMarker } from '../src/daemon/reblocked-attempts.js';
 import type { Observation, Work } from '../src/model.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import type { DaemonAction } from '../src/daemon/state.js';
 import type { BlockerProbeResult } from '../src/daemon/blocker-probes.js';
 
 /**
- * GY-1774: every loop step that calls an approver, a decision or a session is bounded like the decisions step (GY-1766).
+ * GY-1774: every loop step that calls a session or the control plane is bounded under one shared helper (GY-1766).
  * A call that does not answer within the bound returns the step, stays owed with its carried attempt recorded, and is
  * retried next cycle; the retry joins the call still in flight, so its effect is applied once; a call that answers in
- * time is applied exactly as before. The decisions step keeps its GY-1766 behaviour through the shared helper.
+ * time is applied exactly as before.
  */
 
 /** The helper under test, loaded inside each case so a tree without it fails the case rather than the file (the verify exercise reverts the sources). */
@@ -60,8 +58,7 @@ function effects(work: Work[], overrides: Partial<DaemonEffects>, agents: HerdrA
     closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    decide: async () => ({ id: 'decision-1' }), decisions: async () => ({ decisions: [] }),
-    approver: async () => ({ agentName: 'graphyard-approver', pane: 'pane-1' }), persist: async () => {},
+    persist: async () => {},
     stepCallBoundMs: 30,
     ...overrides,
   } as DaemonEffects;
@@ -96,9 +93,8 @@ test('unit:step-calls-bounded — a bounded call past the per-call bound rejects
   const capped = sb.boundedCalls(effects([], { closeSession: slow.call as DaemonEffects['closeSession'], stepCallBoundMs: 10_000 } as Partial<DaemonEffects>), {}, () => clock, () => 20, { step: 'reclaim', calls: ['closeSession'] });
   await assert.rejects(capped.closeSession('pane-9') as Promise<void>, /the reclaim step's budget passed before pane pane-9's closeSession call answered \(10000 ms per call, 20 ms left\); the call stays owed/);
   assert.equal(sb.stepBudgetMs(60_000), 30_000, 'the step budget is the decisions step\'s two-fifths share, never under the actionable cadence');
-  assert.equal(decisionBudgetMs(60_000), sb.stepBudgetMs(60_000), 'the decisions step shares it');
-  assert.equal(decisionCallBoundMs, 10_000, 'and the 10 s per-call bound');
-  assert.equal(decisionCallCarried('the decisions step\'s 10000 ms per-decision bound passed before x answered; the decision stays owed and is retried next cycle'), true, 'and the carried reading');
+  assert.equal(sb.stepCallBoundMs, 10_000, 'and the 10 s per-call bound');
+  assert.equal(sb.stepCallCarried('the decisions step\'s 10000 ms per-decision bound passed before x answered; the decision stays owed and is retried next cycle'), true, 'and the carried reading');
 });
 
 test('unit:step-calls-applied-once — a retried call joins the one in flight under the same key, a changed argument makes its own call, and an answer within the bound is applied as before', async () => {
@@ -137,9 +133,9 @@ test('unit:step-calls-applied-once — a retried call joins the one in flight un
   await assert.rejects(joining.closeSession('pane-5') as Promise<void>, error => sb.stepCallCarried(error) && !sb.carriedCallSent(error) && /joining the call still in flight/.test((error as Error).message));
   assert.equal(spent.calls.length, 1, 'the retry joined the close in flight');
   // An answer within the bound is the effect's own answer, untouched.
-  const base = effects([], { decide: async (_work, action) => ({ id: `decided-${action}` }) });
-  const quick = sb.boundedCalls(base, {}, () => clock, () => 10_000, { step: 'dispatch', calls: ['decide'] });
-  assert.deepEqual(await quick.decide!(item('GY-1'), 'rework', 'why'), { id: 'decided-rework' });
+  const base = effects([], { rework: async (work, reason) => ({ reworked: `${work.key}: ${reason}` }) });
+  const quick = sb.boundedCalls(base, {}, () => clock, () => 10_000, { step: 'dispatch', calls: ['rework'] });
+  assert.deepEqual(await quick.rework!(item('GY-1'), 'why'), { reworked: 'GY-1: why' });
   assert.equal(sb.unboundedEffects(quick), base, 'the effects beneath a bound are reachable for a launch that holds no cycle');
   const ended = sb.boundedCalls(effects([], { closeSession: slow.call as DaemonEffects['closeSession'] }), {}, () => clock, () => null, { step: 'triage', calls: ['closeSession'] });
   const pass = ended.closeSession('pane-3') as Promise<void>;
@@ -192,61 +188,6 @@ test('unit:step-calls-bounded — reclaim: a leftover pane close that does not a
   assert.equal(never.calls.length, 1, 'an inventory read that does not answer returns the step; the sweep waits for the next read');
 });
 
-test('unit:step-calls-bounded — approvers: an approver launch that does not answer returns the decisions step, leaves the decision owed with no fault, and the next cycle joins the launch in flight', async () => {
-  const sb = await helper();
-  const slow = hanging<{ agentName: string; pane: string }>(), work = item('GY-3');
-  const fx = effects([work], { approver: slow.call as DaemonEffects['approver'] });
-  const state = emptyDaemonState(config());
-  const result = await cycle(state, fx, clock);
-  assert.equal(slow.calls.length, 1, 'the approver was launched');
-  const recorded = result.actions.filter(action => action.kind === 'decision' && action.work === 'GY-3');
-  assert.ok(recorded.some(action => action.state === 'done' && /the approvers step's 30 ms per-call bound passed before GY-3's approver call answered; the call stays owed and is retried next cycle/.test(action.detail)), JSON.stringify(recorded));
-  assert.ok(!recorded.some(action => action.state === 'failed'), 'a carried launch is not a failure');
-  await cycle(state, fx, clock + 60_000);
-  assert.equal(slow.calls.length, 1, 'the next cycle joined the launch still in flight');
-  slow.answer({ agentName: 'graphyard-approver', pane: 'pane-1' });
-  await new Promise(resolve => setTimeout(resolve, 5));
-  await cycle(state, fx, clock + 120_000);
-  assert.ok(Object.values(state.approvals).some(watch => watch.agentName === 'graphyard-approver'), 'the launch that answered is applied once, on the watch');
-});
-
-test('unit:step-calls-bounded — approvers: with no Herdr read configured, the runtime inventory read the step takes in its place is bounded the same: carried, it leaves the decision owed with no fault, and the next cycle joins the read in flight', async () => {
-  const sb = await helper();
-  const slow = hanging<HerdrAgent[]>(), work = item('GY-3');
-  // The cycle's own observation reads the inventory before any step and is not this item's; the read that hangs is the approvers step's, the first taken after the decision is requested. The later cycles' retries join the read in flight or consume its answer, so they make no read of their own.
-  let requested = false;
-  const fx = effects([work], { herdr: undefined, decide: async () => { requested = true; return { id: 'decision-1' }; }, agents: ((...args: unknown[]) => requested ? slow.call(...args) : []) as DaemonEffects['agents'] });
-  const state = emptyDaemonState(config());
-  const result = await cycle(state, fx, clock);
-  assert.equal(slow.calls.length, 1, 'the approvers step read the inventory through agents()');
-  const recorded = result.actions.filter(action => action.kind === 'decision' && action.work === 'GY-3');
-  assert.ok(recorded.some(action => /the approvers step's 30 ms per-call bound passed before the agents call answered; the call stays owed and is retried next cycle/.test(action.detail)), JSON.stringify(recorded));
-  assert.ok(!recorded.some(action => action.state === 'failed'), 'a carried inventory read is not a failure');
-  requested = false;
-  await cycle(state, fx, clock + 60_000);
-  assert.equal(slow.calls.length, 1, 'the next cycle joined the read still in flight');
-  slow.answer([]);
-  await new Promise(resolve => setTimeout(resolve, 5));
-  await cycle(state, fx, clock + 120_000);
-  assert.ok(Object.values(state.approvals).some(watch => watch.work === 'GY-3' && watch.agentName === 'graphyard-approver'), `the read that answered is consumed once and the approver launched: ${JSON.stringify(Object.values(state.approvals))}`);
-});
-
-test('unit:step-calls-bounded — blockers: launching the approver of a needs-decision blocker is bounded; carried, it is retried next cycle and joins the launch in flight', async () => {
-  const sb = await helper();
-  const decision = '5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b', slow = hanging<{ agentName: string; pane: string }>();
-  const work = quiet('GY-4', { blocker: `Waiting on decision ${decision}, already requested; its approver was never launched`, blockerProbe: null } as Partial<Work>);
-  const fx = effects([work], { approver: slow.call as DaemonEffects['approver'], decisions: async () => ({ decisions: [{ id: decision, action: 'requirements', state: 'requested', input: {}, approvedBy: null }] }),
-    recordBlockerProbe: async () => work } as Partial<DaemonEffects>);
-  const state = emptyDaemonState(config());
-  await cycle(state, fx, clock);
-  assert.equal(slow.calls.length, 1, 'the approver was launched');
-  const row = state.actions[`blocker:approver:${work.id}:${decision}`];
-  assert.ok(sb.carriedRow(row), `the launch is recorded carried: ${JSON.stringify(row)}`);
-  assert.match(row.detail, /the blockers step's 30 ms per-call bound passed before GY-4's approver call answered/);
-  await cycle(state, fx, clock + 60_000);
-  assert.equal(slow.calls.length, 1, 'the next cycle joined the launch in flight');
-});
-
 test('unit:step-calls-bounded — resume: an idle re-prompt that does not answer returns the step, is recorded carried and is re-sent next cycle, joining it', async () => {
   const sb = await helper();
   const slow = hanging(), agents = [{ name: 'graphyard-claude-a', pane_id: 'pane-1', agent_status: 'idle', agent: 'claude' } as HerdrAgent];
@@ -265,48 +206,14 @@ test('unit:step-calls-bounded — resume: an idle re-prompt that does not answer
   assert.equal(slow.calls.length, 1, `the next cycle re-sent the prompt (${key}) and joined the one in flight`);
 });
 
-test('unit:step-calls-bounded — review-cap: withdrawing a capped change request is bounded; carried, it is retried next cycle and joins the withdrawal in flight', async () => {
-  const sb = await helper();
-  const slow = hanging();
-  const reviewer = { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: iso(-86_400_000) };
-  const work = item('GY-6', { pipeline: { reworkRounds: 3, attempts: [], submittedAt: iso(-3_600_000), interventions: { blocked: 0, requirements: 0 }, resubmittedAt: null } } as unknown as Partial<Work>);
-  work.observation = { ...work.observation!, reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha, state: 'CHANGES_REQUESTED', id: 77, body: 'Nit: rename the variable', submittedAt: iso(-60_000) }] } as Observation;
-  const fx = effects([work], { withdrawReview: slow.call as DaemonEffects['withdrawReview'] } as Partial<DaemonEffects>), cfg = config({ reviewer });
-  const state = emptyDaemonState(cfg);
-  await cycle(state, fx, clock, cfg);
-  assert.equal(slow.calls.length, 1, 'the withdrawal was sent');
-  const [key, row] = carriedRows(state, sb).find(([, row]) => row.kind === 'review') ?? [];
-  assert.ok(row, `the withdrawal is recorded carried: ${JSON.stringify(Object.keys(state.actions))}`);
-  assert.match(row!.detail, /the review-cap step's 30 ms per-call bound passed before GY-6's withdrawReview call answered/);
-  await cycle(state, fx, clock + 60_000, cfg);
-  assert.equal(slow.calls.length, 1, `the next cycle retried the withdrawal (${key}) and joined the one in flight`);
-});
-
-test('unit:step-calls-bounded — dispatch: the cap decision of an item held at its attempt cap is bounded; carried, it is requested again next cycle and joins the request in flight', async () => {
-  const sb = await helper();
-  const slow = hanging<{ id: string }>();
-  const end = (epoch: number, hoursAgo: number) => ({ role: 'worker', cause: 'interrupted', epoch, profile: 'claude-a', account: null, runtime: 'claude', reason: `${overlongMarker} on epoch ${epoch}: ran 9h0m, past the 8h0m maximum for its role`, resetsAt: null, partialWork: { state: 'kept', detail: 'kept' }, at: iso(-hoursAgo * 3_600_000), owner: 'graphyard-claude-a', recordedBy: 'graphyard-master-project' });
-  const work = quiet('GY-7', { capacity: { exhaustions: [end(1, 30), end(2, 20), end(3, 10)], escalations: [] } } as unknown as Partial<Work>);
-  const fx = effects([work], { decide: slow.call as DaemonEffects['decide'] }), cfg = config({ workers: [profile()] });
-  const state = emptyDaemonState(cfg);
-  await cycle(state, fx, clock, cfg);
-  assert.equal(slow.calls.length, 1, `the cap decision was requested: ${JSON.stringify(Object.keys(state.actions))}`);
-  const row = state.actions[`retry:cap-request:${work.id}`];
-  assert.ok(sb.carriedRow(row), `the request is recorded carried: ${JSON.stringify(row)}`);
-  assert.match(row.detail, /the dispatch step's 30 ms per-call bound passed before GY-7's decide call answered/);
-  await cycle(state, fx, clock + 60_000, cfg);
-  assert.equal(slow.calls.length, 1, 'the next cycle requested it again and joined the request in flight');
-});
-
 test('unit:step-calls-bounded — every named step runs under the shared bound with the calls the item names, and the triage record passes through once the step has ended', async () => {
   const sb = await helper();
   const steps: Record<string, { file: string; calls: string[] }> = {
-    blockers: { file: 'cycle-blockers.ts', calls: ['approver', 'closeSession', 'deferWindow', 'probeBlocker', 'decisions', 'approverLaunches', 'recordBlockerProbe', 'recordSession'] },
-    dispatch: { file: 'cycle-dispatch.ts', calls: ['decide', 'approver', 'agents', 'roleHealth', 'escalationSessions', 'reportCapacity', 'planeHealth', 'hostMemory', 'decisions', 'recordDecomposition', 'recordResearch'] },
-    'review-cap': { file: 'cycle-review-cap.ts', calls: ['withdrawReview', 'wakeObservation', 'decisions'] },
-    sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'escalationSessions', 'recordSession', 'stopSupervisor', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork', 'endEscalation', 'markEscalation', 'relaunchEscalation', 'containment'] },
-    resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'stopSupervisor', 'recordSession', 'preserveWork', 'reportCapacity', 'containment', 'controlPlaneClock', 'settleContainment'] },
-    reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'containment', 'controlPlaneClock', 'settleContainment', 'preserveWork', 'reportCapacity'] },
+    blockers: { file: 'cycle-blockers.ts', calls: ['closeSession', 'deferWindow', 'probeBlocker', 'recordBlockerProbe', 'recordSession'] },
+    dispatch: { file: 'cycle-dispatch.ts', calls: ['agents', 'roleHealth', 'reportCapacity', 'planeHealth', 'hostMemory', 'recordDecomposition', 'recordResearch'] },
+    sessions: { file: 'cycle-sessions.ts', calls: ['closeSession', 'endSession', 'relaunch', 'answerSession', 'promptSession', 'launchedSessions', 'sessionOutput', 'herdr', 'recordSession', 'reportCapacity', 'holdAccount', 'selectedAccount', 'preserveWork'] },
+    resume: { file: 'cycle-resume.ts', calls: ['promptSession', 'closeSession', 'recordSession', 'preserveWork', 'reportCapacity'] },
+    reclaim: { file: 'cycle-reclaim.ts', calls: ['panes', 'closeSession', 'reclaim', 'herdr', 'reclaimResources', 'reclaimLease', 'preserveWork', 'reportCapacity'] },
     triage: { file: 'cycle-triage.ts', calls: ['recordTriage'] },
     master: { file: 'cycle-master.ts', calls: ['promptSession', 'herdr', 'sessionOutput', 'endRegistrySession', 'holdAccount', 'closeSession'] },
   };
@@ -314,11 +221,6 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
     const source = readFileSync(`${root}src/daemon/${file}`, 'utf8');
     assert.match(source, new RegExp(`withinStepBudget\\(cycle, '${step}', \\[${calls.map(call => `'${call}'`).join(', ')}\\]`), `${file} runs the ${step} step under the shared bound with its calls`);
   }
-  const decisions = readFileSync(`${root}src/daemon/cycle-decisions.ts`, 'utf8');
-  assert.match(decisions, /boundedDecisions\(boundedCalls\(await decisionReads\(.*\), cycle\.heldDecisions, now, \(\) => budgetLeft\(\), \{ step: 'approvers', calls: approverCalls \}\)/, 'the approvers step\'s calls are bounded within the decisions step');
-  assert.match(decisions, /const approverCalls: readonly \(keyof DaemonEffects\)\[\] = \['approver', 'endRegistrySession', 'resume', 'withdraw', 'closeSession', 'herdr', 'agents', 'approverLaunches', 'approverLaunch', 'sessionOutput', 'recordSession', 'holdAccount', 'reportCapacity', 'reconcileSessions'\]/);
-  // The approvers' isolation is carried-aware like every bounded step's.
-  assert.match(readFileSync(`${root}src/daemon/cycle-approvers.ts`, 'utf8'), /isolate = carriedIsolate\(carried, 'approvers'\)/);
   // The preservation an ended attempt makes (sessions, resume, reclaim) carries like any other call: no failed preserve, no fault.
   assert.match(readFileSync(`${root}src/daemon/preserve.ts`, 'utf8'), /if \(stepCallCarried\(error\)\) \{ await recordCarried\(/);
   // Triage: the record is bounded while the step runs; once the step has returned its budget is gone, so the step's own effects pass through, and cycle-triage.ts bounds a late record by the per-call bound alone (below).
@@ -339,68 +241,6 @@ test('unit:step-calls-bounded — every named step runs under the shared bound w
 });
 
 // --- the review's findings on b396b7b3, each pinned (GY-1774 rework) -----------------------------------------------
-
-test('unit:step-calls-bounded — review-cap: a withdrawal in flight across cycles is one send, never counted toward the filing cap; a carried observation wake after the withdrawal is retried until it answers', async () => {
-  const sb = await helper();
-  const { cappedReworkBinding, cappedRevisionMark } = await import('../src/daemon/decisions.js');
-  const { cappedEscalationKey, cappedFilingKey, maxCappedFilingAttempts, reviewCapStep } = await import('../src/daemon/cycle-review-cap.js');
-  const { emptyHeldDecisions } = await import('../src/daemon/decision-reads.js');
-  const reviewer = 'graphyard-reviewer[bot]', H = 'f1ea5b764ac7'.padEnd(40, '0');
-  const cfg = config({ reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: iso(-86_400_000) } });
-  const capped = (body: string) => {
-    const work = item('GY-10', { candidate: { sha: H, baseSha: base, pr: 1047, branch: 'graphyard/gy-10-5', author: 'implementer' }, epoch: 5, pipeline: { attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds: 4, interventions: { blocked: 0, requirements: 0 } } } as unknown as Partial<Work>);
-    work.observation = { ...work.observation!, candidate: work.candidate, reviews: [{ reviewer, sha: H, state: 'CHANGES_REQUESTED', id: 4242, submittedAt: iso(-900_000), body }] } as Observation;
-    return work;
-  };
-  const decision = (state: 'requested' | 'refused') => ({ id: '334c52c6-467e-4fe4-b81f-2c761e07a066', action: 'rework', state, input: { binding: cappedReworkBinding(H, reviewer), previousWorkerStopped: true },
-    reason: `[Decided from the GitHub observation taken at ${iso(-800_000)} of candidate ${H}; if the item has moved since, this request no longer describes it.] ${cappedRevisionMark(1)} GY-10 is in review round 5, past its cap of 3.`,
-    approvedBy: null, refusal: state === 'refused' ? { approver: 'graphyard-approver-project', reason: 'The finding is real but not blocking.', at: iso(-600_000) } : null });
-  const run = (work: Work, overrides: Partial<DaemonEffects>) => {
-    const state = emptyDaemonState(cfg), performed: unknown[] = [];
-    const fx = effects([work], { decisions: async () => ({ decisions: [decision('refused')] }), stepCallBoundMs: 30, ...overrides } as Partial<DaemonEffects>);
-    let tick = clock;
-    const step = async () => { state.cycle++; tick += 60_000; await returns(reviewCapStep({ config: cfg, state, effects: fx, performed, now: () => tick, open: [work], snapshot: { work: [work], now: iso(tick - clock) }, heldDecisions: emptyHeldDecisions(), isolate: async (_kind: unknown, _item: unknown, _name: unknown, body: () => Promise<unknown>) => body() } as never)); };
-    return { state, step, work };
-  };
-  // A nits-only change request: the withdrawal hangs across more cycles than the cap allows failures — one send, joined each cycle, no escalation.
-  const withdrawal = hanging();
-  const nits = run(capped('The helper could be named more clearly.'), { withdrawReview: withdrawal.call as DaemonEffects['withdrawReview'] });
-  const key = cappedFilingKey(nits.state as never, { sha: H, reviewId: 4242 }), work = capped('nits');
-  for (let n = 0; n < maxCappedFilingAttempts + 1; n++) await nits.step();
-  const row = nits.state.actions[cappedFilingKey(work, { sha: H, reviewId: 4242 })];
-  assert.equal(withdrawal.calls.length, 1, `one withdrawal was sent across ${maxCappedFilingAttempts + 1} cycles: ${key}`);
-  assert.ok(sb.carriedRow(row), `the withdrawal is carried: ${JSON.stringify(row)}`);
-  assert.equal(row!.attempts, 1, 'the row counts the one send');
-  assert.equal(nits.state.actions[cappedEscalationKey(work, H)], undefined, 'a withdrawal still in flight is never escalated as failed');
-  withdrawal.answer(undefined);
-  await new Promise(resolve => setTimeout(resolve, 5));
-  await nits.step();
-  assert.equal(nits.state.actions[cappedFilingKey(work, { sha: H, reviewId: 4242 })]?.state, 'done', 'once the withdrawal answered, the retry consumed it');
-  assert.equal(withdrawal.calls.length, 1);
-  // A refused capped rework: the withdrawal answers, the observation wake hangs — the wake is carried on its own row and retried, joining the one in flight, until it answers.
-  const wake = hanging();
-  const refused = run(capped('BLOCKING: former hotspot files exceed their size budgets.'), { withdrawReview: async () => {}, wakeObservation: wake.call as DaemonEffects['wakeObservation'] });
-  await refused.step();
-  const filing = refused.state.actions[cappedFilingKey(work, { sha: H, reviewId: 4242 })], wakeKey = `${cappedFilingKey(work, { sha: H, reviewId: 4242 })}:wake`;
-  assert.equal(filing?.state, 'done', `the withdrawal is done: ${JSON.stringify(filing)}`);
-  assert.match(filing!.detail, /its observation wake was carried to the next cycle, which retries it so the owed request-rework is cancelled/);
-  assert.ok(sb.carriedRow(refused.state.actions[wakeKey]), `the wake is carried on its own row: ${JSON.stringify(refused.state.actions[wakeKey])}`);
-  assert.equal(wake.calls.length, 1);
-  await refused.step();
-  assert.equal(wake.calls.length, 1, 'the next cycle retried the wake and joined the one in flight');
-  assert.ok(sb.carriedRow(refused.state.actions[wakeKey]));
-  // The withdrawal that owes the wake dismissed the change request: the next snapshot reads no capped review on the head, and the owed wake is still retried, found by its row alone.
-  refused.work.observation = { ...refused.work.observation!, reviews: [] } as Observation;
-  await refused.step();
-  assert.equal(wake.calls.length, 1, 'with the change request gone from the snapshot the wake is still retried, joining the one in flight');
-  assert.ok(sb.carriedRow(refused.state.actions[wakeKey]), `still carried once the capped review reads null: ${JSON.stringify(refused.state.actions[wakeKey])}`);
-  wake.answer(undefined);
-  await new Promise(resolve => setTimeout(resolve, 5));
-  await refused.step();
-  assert.equal(refused.state.actions[wakeKey]?.state, 'done', `the wake answered: ${JSON.stringify(refused.state.actions[wakeKey])}`);
-  assert.match(refused.state.actions[wakeKey]!.detail, /its observation woken so the owed request-rework is cancelled/);
-  assert.equal(wake.calls.length, 1, 'woken once');
-});
 
 test('unit:step-calls-bounded — triage: the record a settled run makes after the step is bounded by the per-call bound; carried, the next cycle records it again in the step, carried on the item\'s row, joining the write, and the one after consumes its answer', async t => {
   const sb = await helper();
@@ -706,7 +546,7 @@ test('unit:step-calls-applied-once — the step-level helpers: a carried read an
   await sb.withinStepBudget(stepCycle(state), 'resume', ['recordSession'], bounded => sb.owedWrite(bounded, 'handle:GY-13:1', { kind: 'session', work: 'GY-13' }, 'Recording GY-13\'s handle', 'recordSession', write));
   assert.ok(sb.carriedRow(state.actions['owed:handle:GY-13:1']), 'the write is owed on its row');
   assert.equal(handles.calls.length, 1);
-  await sb.withinStepBudget(stepCycle(state), 'blockers', ['approver'], async () => {});
+  await sb.withinStepBudget(stepCycle(state), 'blockers', ['probeBlocker'], async () => {});
   assert.equal(handles.calls.length, 1, 'a step that does not bound the call leaves it owed');
   assert.ok(sb.carriedRow(state.actions['owed:handle:GY-13:1']));
   await sb.withinStepBudget(stepCycle(state), 'sessions', ['recordSession'], async () => {});

@@ -21,11 +21,11 @@ test('unit:operator-agent-502-status — an empty or HTML 502 answer to an opera
     fetcher: (async () => new Response(body, { status })) as typeof fetch });
   const work = { id: 'w', key: 'GY-1' } as never;
   for (const body of ['', '<html>Bad gateway</html>']) {
-    const proxy = await answer(body, 502).withdraw!(work, 'd' as never, 'r').catch((error: unknown) => error) as RefusedResponse;
+    const proxy = await answer(body, 502).rework!(work, 'r').catch((error: unknown) => error) as RefusedResponse;
     assert.ok(proxy instanceof RefusedResponse, String((proxy as any)?.stack ?? proxy));
     assert.equal(proxy.status, 502);
     assert.equal(planeWideRefusal(proxy), true);
   }
-  const own = await answer(JSON.stringify({ error: 'Work item not found' }), 502).withdraw!(work, 'd' as never, 'r').catch((error: unknown) => error);
+  const own = await answer(JSON.stringify({ error: 'Work item not found' }), 502).rework!(work, 'r').catch((error: unknown) => error);
   assert.equal(planeWideRefusal(own), false);
 });

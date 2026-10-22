@@ -327,14 +327,14 @@ test('unit:role-capacity-visible — master status reports, per role, the sessio
   const reviews = { pending: running.map((item, index) => review(item, index)), completed: [] as any[] };
   const agents: HerdrAgent[] = reviews.pending.map(record => ({ name: record.agentName, agent_status: 'working' }));
   const roles = { reviewers: config.reviewers, producers: config.producers };
-  const status = buildMasterStatus({ work: [...running, ...waiting], now: at }, [], agents, {}, {}, reviews, 'main', undefined, { producers: { pending: [], completed: [] }, failures: [], retries: [] }, undefined, roles);
+  const status = buildMasterStatus({ work: [...running, ...waiting], now: at }, [], agents, {}, reviews, 'main', undefined, { producers: { pending: [], completed: [] }, failures: [], retries: [] }, undefined, roles);
   const reviewer = status.concurrency.find(report => report.role === 'reviewer')!;
   assert.deepEqual({ limit: reviewer.limit, running: reviewer.running, free: reviewer.free, waiting: reviewer.waiting, longestWaitMs: reviewer.longestWaitMs, starved: reviewer.starved }, { limit: 3, running: 2, free: 1, waiting: 3, longestWaitMs: 30 * 60_000, starved: false });
   assert.deepEqual(reviewer.profiles, [{ profile: 'claude-reviewer', agentName: 'review-claude', limit: 2, running: 1, sessions: [reviews.pending[0].agentName] }, { profile: 'cursor-reviewer', agentName: 'review-cursor', limit: 1, running: 1, sessions: ['review-cursor'] }]);
   assert.deepEqual(reviewer.longest, { work: 'GY-205', requestId: waiting[2].autoDispatch!.review!.id, group: null, waitedMs: 30 * 60_000 });
   // Saturated: a second session on the Claude profile fills the role, and the wait becomes attention.
   const saturating = { ...reviews, pending: [...reviews.pending, { ...review(waiting[0], 0), review: 'r-2' }] };
-  const full = buildMasterStatus({ work: [...running, ...waiting], now: at }, [], [...agents, { name: saturating.pending[2].agentName, agent_status: 'working' }], {}, {}, saturating, 'main', undefined, { producers: { pending: [], completed: [] }, failures: [], retries: [] }, undefined, roles);
+  const full = buildMasterStatus({ work: [...running, ...waiting], now: at }, [], [...agents, { name: saturating.pending[2].agentName, agent_status: 'working' }], {}, saturating, 'main', undefined, { producers: { pending: [], completed: [] }, failures: [], retries: [] }, undefined, roles);
   const saturated = full.concurrency.find(report => report.role === 'reviewer')!;
   assert.deepEqual({ limit: saturated.limit, running: saturated.running, waiting: saturated.waiting, longestWaitMs: saturated.longestWaitMs, starved: saturated.starved }, { limit: 3, running: 3, waiting: 2, longestWaitMs: 30 * 60_000, starved: true });
   assert.equal(full.counts.concurrencyStarved, 1);

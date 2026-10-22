@@ -42,7 +42,7 @@ export function proofStep(work: Work, all: Work[], now: Date): ProofStep | null 
     // executor on any host (`producerLaunchStop`); its proofs are left to the attestation.
     const stop = producerLaunchStop(work, request.id);
     if (stop) {
-      const remedy = decision.unproven.every(proof => proof.startsWith('manual:')) ? `only a two-party attestation (master decide ${work.key} attest) satisfies them now` : 'a new head or the operator answers them now';
+      const remedy = decision.unproven.every(proof => proof.startsWith('manual:')) ? `only the master's attestation (master attest ${work.key} PROOF) satisfies them now` : 'a new head or the operator answers them now';
       stopped ??= `${decision.group} proofs ${decision.unproven.join(', ')} on ${short(candidate.sha)} get no further producer launch from any executor — ${stop.reason}; ${remedy}`;
       continue;
     }

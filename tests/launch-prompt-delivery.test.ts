@@ -7,7 +7,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, buildMasterStatus, defaultAcknowledgementSeconds, dispatchWork, launchApprover, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, buildMasterStatus, defaultAcknowledgementSeconds, dispatchWork, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization, managedInstructions } from '../src/repository-setup.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
@@ -66,14 +66,12 @@ async function repository() {
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   return root;
 }
-/** A master installed in a throwaway repository, its credentials outside it, with a reviewer, a producer and an approver identity. */
+/** A master installed in a throwaway repository, its credentials outside it, with a reviewer and a producer identity. */
 async function installed() {
   const root = await repository(), credentials = await temporaryDirectory('launch-request-credentials');
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
   await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
-  const config = await loadMasterConfig(root);
-  await atomicPrivateWrite(join(root, '.graphyard/master.json'), { ...config, approver: { id: 'graphyard-approver-project', credentialFile: await token('approver') } });
   return { root, credentials, token, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
 
@@ -126,7 +124,7 @@ class FakeHerdr {
   named(name: string) { const session = this.find(name); assert.ok(session, `${name} is a launched session`); return session; }
 }
 
-test('integration:launch-prompt-is-a-request — a producer, a reviewer, an approver and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
+test('integration:launch-prompt-is-a-request — a producer, a reviewer and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
   // The request contracts: a positional prompt after the flags, or the runtime's own interactive
   // prompt flag; a runtime without one is refused at launch rather than pasted into (GY-184).
   for (const kind of ['claude', 'codex', 'cursor', 'opencode', 'muse', 'pi', 'gemini', 'qwen', 'copilot']) assert.equal(launchDelivery(kind), 'request');
@@ -166,16 +164,6 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     assert.ok(produceStart.args.includes('--ask-for-approval') && produceStart.args.includes('--add-dir'), 'the Codex sandbox flags are kept');
     assert.equal((await readProducerLedger(root)).producers[0].delivery, 'request');
 
-    // Approver on Cursor: the same, for the decision it judges.
-    const approved = await launchApprover(root, work(), 'decision-1', 'cursor', { agents: [], available: true }, herdr.run);
-    assert.equal(approved.delivery, 'request');
-    // Looked up under the name the launcher reports: how an approver session is named is the
-    // launcher's to decide, and what this asserts is how that session received its request.
-    assert.match(approved.agentName, /^graphyard-approver-gy-93/);
-    const approver = herdr.named(approved.agentName);
-    assert.match(approver.request!, /Judge decision decision-1 on GY-93/);
-    assert.equal(approver.toolCalls.length, 1); assert.deepEqual(approver.pasted, []);
-
     // Worker on OpenCode, under the supervisor: --prompt on the watched command line.
     const workerCredential = await token('worker');
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: workerCredential, agentArgs: [], approvals: 'auto', environment: {} };
@@ -185,11 +173,6 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer, an appr
     assert.ok(worker.request!.startsWith(`${autonomyContract} Implement GY-93:`), 'OpenCode loads no role file, so the autonomy contract leads the request (GY-184)');
     assert.equal(worker.toolCalls.length, 1); assert.deepEqual(worker.pasted, []);
     assert.equal(herdr.calls.filter(call => call[0] === 'agent' && call[1] === 'prompt').length, 0, 'no launch typed anything into a session');
-
-    // Muse, which GY-93 once prompted after start, now takes its request positionally too (GY-184).
-    const approvedMuse = await launchApprover(root, work({ key: 'GY-94', id: 'work-94' }), 'decision-2', 'muse', { agents: [], available: true }, herdr.run);
-    assert.equal(approvedMuse.delivery, 'request');
-    assert.deepEqual(herdr.named(approvedMuse.agentName).pasted, []);
 
     // A runtime already busy on its request is a session that started: it is seen `working`,
     // named at once, never closed (GY-121: the start bound reads the pane).
@@ -450,7 +433,7 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
     const prompted = () => herdr.calls.filter(call => call[0] === 'agent' && call[1] === 'prompt');
     const status = async () => {
       const records = (await readProducerLedger(root)).producers;
-      return buildMasterStatus({ work: [item], now: new Date(now).toISOString() }, [], herdr.agents(), {}, {}, summarizeReviews([]), 'main', undefined, { producers: summarizeProducers(records), failures: [], retries: sessionRetries(records, now) });
+      return buildMasterStatus({ work: [item], now: new Date(now).toISOString() }, [], herdr.agents(), {}, summarizeReviews([]), 'main', undefined, { producers: summarizeProducers(records), failures: [], retries: sessionRetries(records, now) });
     };
     now = clock + 10_000; await runDispatchTick(config, cursor, effects, () => now);
     assert.equal(prompted().length, 0, 'within the interval the loop waits');

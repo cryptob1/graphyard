@@ -50,7 +50,6 @@ test('unit:next-action-no-decide-on-applied-decision — while the answering rev
   assert.equal(applied.stall, null);
   assert.doesNotMatch(applied.attention!.next, /master decide|master approver/);
   assert.doesNotMatch(applied.attention!.text, /needs decision/);
-  assert.equal(applied.attention!.approvedBy ?? null, null, 'not the decide-then-approver path');
   assert.match(applied.attention!.text, /GY-1605's needs-decision \(raised at its requirements revision 1\) was answered by its requirements revision 2, which is applied; no item owns the verification until a recorded measurement of the release verifies it/);
   // A revision with no decision raised, or the one it was raised at, answers nothing: the decision is still asked.
   for (const raisedAt of [null, 2]) assert.equal(decideOn(throughputClaimVisibility({ report, file: 't.json' }, { revision: release, version: '1' }, 10, pursuit, { ...owner, policyRevision: 2 }, null, raisedAt)), 'GY-1605');

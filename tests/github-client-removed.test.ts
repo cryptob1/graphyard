@@ -21,7 +21,7 @@ import { createWorktree } from '../src/cli/workspace-worktree.js';
 import type { CliContext } from '../src/cli/context.js';
 import { masterConfigSchema } from '../src/master.js';
 import { reconcileReviews, saveReviewLedger } from '../src/reviewer.js';
-import { routineDecision } from '../src/daemon/decisions.js';
+import { neededRework } from '../src/daemon/rework.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-05-01 instant is the loop's injected clock and the explicit
 // `now` of evaluate(); new Date() only stamps documents the Postgres half writes and reads back.
@@ -227,20 +227,19 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => { const target = String(input instanceof Request ? input.url : input); requested.push(target); return realFetch(input, init); }) as typeof fetch;
   const actions: string[] = [];
   try {
-    // Before the writer runs, the stale checks stand over repeated cycles with the decision effects
+    // Before the writer runs, the stale checks stand over repeated cycles with the rework effect
     // enabled: the loop requests no rework for them and reads no check run back.
-    const decided: { action: string; input?: Record<string, unknown>; reason: string }[] = [];
+    const decided: { reason: string }[] = [];
     const deciding = { ...effects, mergeWriter: undefined,
-      decide: async (_: Work, action: string, reason: string, input?: Record<string, unknown>) => { decided.push({ action, reason, input }); return { id: randomUUID() }; },
-      approver: async () => ({ agentName: 'approver', pane: null }) } as unknown as DaemonEffects;
+      rework: async (_: Work, reason: string) => { decided.push({ reason }); return {}; } } as unknown as DaemonEffects;
     for (let cycle = 0; cycle < 3; cycle++) {
       actions.push(...(await runCycle(master, state, deciding, () => clock + cycle * 3_600_000)).actions.map(action => action.detail));
       const stale = (await store.workDocument(work.id))!;
       // Without the stored change request in front of it too: a failed check alone grounds nothing.
       for (const document of [stale, { ...stale, observation: { ...stale.observation!, reviews: [] } } as Work])
-        assert.doesNotMatch(String(routineDecision(document, master, clock + cycle * 3_600_000)?.binding ?? ''), /:ci:/, 'no stored failed check grounds a rework');
+        assert.doesNotMatch(String(neededRework(document)?.binding ?? ''), /:ci:/, 'no stored failed check grounds a rework');
     }
-    assert.ok(!decided.some(entry => /:ci:/.test(String(entry.input?.binding ?? '')) || /required CI check/i.test(entry.reason)), `no rework for a stored failed check: ${JSON.stringify(decided)}`);
+    assert.ok(!decided.some(entry => /required CI check/i.test(entry.reason)), `no rework for a stored failed check: ${JSON.stringify(decided)}`);
     assert.deepEqual(children.filter(([command]) => command === 'gh'), [], `no gh child ran over the stale-check cycles: ${JSON.stringify(children.filter(([command]) => command === 'gh'))}`);
     assert.ok(!children.some(args => args.some(arg => /check-runs|annotations/.test(arg))), 'no check run was read back');
     for (let cycle = 0; cycle < 3 && (await store.workDocument(work.id))!.stage !== 'done'; cycle++) {

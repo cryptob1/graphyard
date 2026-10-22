@@ -12,10 +12,10 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { Engine, LeaseHealth, RenewalFault, heartbeatLatencyAttentionMs, leaseHealthWindowMs, renewalFaultEvent } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { leaseCommands, leasePoolConnections } from '../src/store/pools.js';
-import { isConfirmedCoordinationRefusal } from '../src/quarantine.js';
+import { isConfirmedCoordinationRefusal } from '../src/cli/context.js';
 import { renewalGraceMs, supervise } from '../src/supervisor.js';
 import { leaseHealthStatus } from '../src/cli/lease-health-attention.js';
-import { standingEscalations, type Principal, type Work } from '../src/model.js';
+import type { Principal, Work } from '../src/model.js';
 
 // GY-558: lease renewals timed out waiting for a connection behind slow report and observation
 // queries, and live workers lost their leases. Each test is named for the proof it produces.
@@ -183,7 +183,7 @@ test('unit:server-fault-keeps-lease — a renewal that failed server-side keeps 
   await engine.reconcile();
   stored = await reload(silent);
   assert.equal(stored.lease, null, 'a lease nobody renews still expires');
-  assert.ok(standingEscalations(stored).some(entry => entry.trigger === 'lease-loss'), 'and its loss escalates as today');
+  assert.ok((await store.events(silent.id)).some(event => event.kind === 'lease.expired'), 'and its loss is recorded as today');
   await store.close();
 });
 

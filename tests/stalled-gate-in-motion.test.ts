@@ -8,7 +8,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { actorlessSubmissions } from '../src/cli/actorless-submissions.js';
-import { syncConflict } from '../src/daemon/decisions.js';
+import { syncConflict } from '../src/daemon/rework.js';
 import { reviewNeed } from '../src/model/dispatch.js';
 import { baseRefreshConflict } from '../src/model/base-refresh.js';
 import { coordinationSnapshot } from '../src/server/work-view.js';

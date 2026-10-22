@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -44,12 +44,11 @@ const ok = async (principal: Principal, method: 'GET' | 'POST', path: string, bo
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
-const settlementToken = 'e'.repeat(64);
 interface Herdr { agents: { name: string; pane_id: string; agent_status: string }[]; output: Record<string, string> }
 /** The loop as `master run` wires it, with Herdr an inventory the test controls and the launcher its two control-plane calls. */
 function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
   const now = () => Date.now() + clock.skewMs;
-  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[], stopped: [] as string[] };
+  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[] };
   const effects: DaemonEffects = {
     agents: () => herdr.agents,
     herdr: () => ({ agents: herdr.agents, available: true }),
@@ -61,8 +60,6 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
       const selected = await selectAccount(config, 'worker', profile, { quota: false, now, cacheMs: 0, work: work.key });
       const claimed = await ok(workerA, 'POST', `work/${work.id}/claim`, {}) as Work;
       await ok(workerA, 'POST', `work/${work.id}/workspace`, { epoch: claimed.epoch, host: 'loop-host', path: worktree, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` });
-      // The supervisor records its containment before the agent starts, exactly as `watch` does.
-      await ok(workerA, 'POST', `work/${work.id}/quarantine`, { epoch: claimed.epoch, settlementHash: createHash('sha256').update(settlementToken).digest('hex'), scope: { unit: `graphyard-watch-4242-${randomUUID()}.scope`, pid: 4242 } });
       herdr.agents.push({ name: profile.agentName, pane_id: `pane-${profile.name}-${calls.dispatch.length}`, agent_status: 'working' });
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
@@ -74,11 +71,6 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
     selectedAccount: async (role, profile) => readEnvironmentLog(config).then(log => log.selected[`${role}:${profile}`] ?? null),
     holdAccount: (account, observed) => recordObservedExhaustion(config, account, observed, now()),
     preserveWork: async (work, epoch) => preservePartialWork(work.workspaces.find(entry => entry.epoch === epoch)!.path, `${work.key} attempt ${epoch} interrupted by provider quota exhaustion`),
-    stopSupervisor: async orphan => {
-      calls.stopped.push(`${orphan.key}:${orphan.epoch}`);
-      herdr.agents = herdr.agents.filter(agent => agent.name !== orphan.agentName);
-      await ok(workerA, 'POST', `work/${orphan.id}/settle`, { epoch: orphan.epoch, settlementToken });
-    },
   };
   return { calls, cycle: (state: DaemonState) => runCycle(config, state, effects, now) };
 }
@@ -197,7 +189,6 @@ test('integration:exhaustion-only-provider-notice — a stopped session narratin
   assert.equal(work.lease?.owner, workerA.id, 'the attempt is still live');
   assert.equal(work.lease?.epoch, 1);
   assert.equal(work.capacity ?? null, null, 'no exhaustion is recorded on the item');
-  assert.deepEqual(calls.stopped, [], 'the supervisor is not stopped on the worker\'s own prose');
   assert.deepEqual(Object.keys(await observedExhaustions(config)), [], 'no account is held on the worker\'s prose');
 
   // The provider's own limit notice, on the same stopped session, is the real thing: the attempt
@@ -216,7 +207,6 @@ test('integration:exhaustion-only-provider-notice — a stopped session narratin
   assert.equal(work.capacity!.exhaustions[0].account, 'env-a');
   assert.equal(work.capacity!.exhaustions[0].reason, `You've hit your usage limit · resets ${resetsAt}`);
   assert.equal(work.capacity!.exhaustions[0].resetsAt, resetsAt, 'the notice\'s reset time is recorded as parsed');
-  assert.deepEqual(calls.stopped, [`${work.key}:1`], 'the supervisor is stopped through the containment scope it recorded');
   assert.equal((await observedExhaustions(config))['env-a']?.until, resetsAt, 'the spent account is held until it resets');
 
   // And the hold keeps the next dispatch off the spent account, whatever the item's readiness.

@@ -51,13 +51,12 @@ test(`manual:fault-class-loop — stalled-step ${key}: past the 10-minute bound 
   assert.equal(await route(stale, at('06:01:56')).holds(stale, async () => null), false, 'the bound is kept without a fresh reading');
   assert.match(notes.at(-1)!, new RegExp(`^failed: ${key}: .*no observation since landed inside the loop-owned bound`));
   // The rework request itself: stale observation, overdue conflict round. Loaded here so the base, which lacks the export, fails at the hold above.
-  const { conflictReworkOverdue, reworkObservationWait } = await import('../src/daemon/decisions.js');
-  const decision = { action: 'rework' as const, binding: `${head}:conflict` };
+  const { conflictReworkOverdue, reworkObservationWait } = await import('../src/daemon/rework.js');
+  const binding = `${head}:conflict`;
   assert.equal(reworkObservationWait(stale, at('06:01:56')) !== null, true, 'the observation is stale');
-  assert.equal(conflictReworkOverdue(stale, decision, at('06:01:56')), true, 'and the round is overdue, so it does not wait');
-  assert.equal(conflictReworkOverdue(stale, decision, at('05:59:00')), false, 'inside the bound the wait stands');
-  assert.equal(conflictReworkOverdue(stale, { action: 'rework', binding: `${head}:checks` }, at('06:01:56')), false, 'other grounds keep the wait');
-  assert.equal(conflictReworkOverdue(stale, { action: 'merge', binding: `${head}:conflict` }, at('06:01:56')), false);
+  assert.equal(conflictReworkOverdue(stale, binding, at('06:01:56')), true, 'and the round is overdue, so it does not wait');
+  assert.equal(conflictReworkOverdue(stale, binding, at('05:59:00')), false, 'inside the bound the wait stands');
+  assert.equal(conflictReworkOverdue(stale, `${head}:checks`, at('06:01:56')), false, 'other grounds keep the wait');
 });
 
 for (const [instant, wall, work] of [[Date.parse('2026-10-07T22:05:07.171Z'), 62_000, 3_000], [Date.parse('2026-10-08T05:30:41.190Z'), 120_000, 5_000]] as const)

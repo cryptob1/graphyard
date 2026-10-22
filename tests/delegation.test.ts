@@ -13,7 +13,7 @@ import { pushRefusal } from '../src/model/gates.js';
 import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { currentEvidence, sliceIds, standingEscalations, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
+import { currentEvidence, sliceIds, type Observation, type Principal, type SliceId, type Work } from '../src/model.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { mergeIntent } from './helpers/merge-ledger.js';
@@ -423,8 +423,8 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   for (const work of held) await engine.execute(workerA, 'release', work.id, { epoch: work.epoch }, id());
 
   // Watch supervision is what keeps an assignment alive: an assignment whose
-  // supervisor stops renewing loses ownership on the server's clock, the loss is
-  // recorded as an escalation no worker can clear, and the item is reassignable.
+  // supervisor stops renewing loses ownership on the server's clock, the lapse is
+  // recorded as lease.expired history, and the item is reassignable.
   const brief = new Engine(store, 0); brief.principals = roster;
   let unattended = await engine.execute(admin, 'create', null, input('ownership-unattended', 'infrastructure'), id());
   unattended = await engine.execute(admin, 'ready', unattended.id, {}, id());
@@ -433,9 +433,8 @@ test('integration:ownership-and-delivery-invariants — Graphyard owns leases, w
   await brief.reconcile();
   unattended = await reload(unattended);
   assert.equal(unattended.lease, null);
-  assert.deepEqual(standingEscalations(unattended).map(entry => entry.trigger), ['lease-loss']);
+  assert.deepEqual((await store.events(unattended.id)).filter(event => event.kind === 'lease.expired').map(event => event.actor), ['graphyard'], 'the lapse is recorded, and nothing else is raised');
   assert.deepEqual(unattended.lastAssignment && { owner: unattended.lastAssignment.owner, epoch: unattended.lastAssignment.epoch }, { owner: workerA.id, epoch: 1 });
-  await assert.rejects(engine.execute(workerA, 'resolve', unattended.id, { trigger: 'lease-loss', reason: 'I am back', expectedRevision: unattended.revision }, id()), /Operator permission required/);
   unattended = await engine.execute(workerB, 'claim', unattended.id, {}, id());
   assert.equal(unattended.lease!.owner, workerB.id);
   assert.equal(unattended.epoch, 2);
@@ -658,8 +657,6 @@ test('integration:lead-ruling-history — rulings cite a rule and a reason and c
   await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: '', reason: 'looks good' }, id()));
   await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: '' }, id()));
   await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval' } as never, id()));
-  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'escalate', ruleId: 'rules/safety-v2#escalate', reason: 'Unreviewed credential change' }, id()), /trigger/);
-  await assert.rejects(recordLeadRuling(store, lead, item.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Out of scope', trigger: 'security-concern' }, id()), /trigger/);
   const approved = await recordLeadRuling(store, lead, item.id, { action: 'approve-plan', ruleId: 'rules/plan-v1#approval', reason: 'Plan satisfies the written scope' }, id());
   assert.equal(approved.ruling.leadId, lead.id);
   assert.equal(approved.ruling.slice, 'product');
@@ -690,14 +687,14 @@ test('integration:lead-ruling-history — rulings cite a rule and a reason and c
   await assert.rejects(recordLeadRuling(store, lead, item.id, { ...retryBody, reason: 'Different reason' }, retryKey), /Idempotency key reused with different input/);
   await assert.rejects(recordLeadRuling(store, lead, item.id, retryBody, ''), /Idempotency-Key is required/);
   // Delivered work is an immutable snapshot: a ruling can neither bump its
-  // revision nor attach escalation state to it.
+  // revision nor attach state to it.
   let delivered = await engine.execute(admin, 'create', null, input('ruling-delivered', 'product'), id());
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stage}',to_jsonb('done'::text)) WHERE id=$1", [delivered.id]);
   const deliveredRevision = (await reload(delivered)).revision;
-  await assert.rejects(recordLeadRuling(store, lead, delivered.id, { action: 'escalate', ruleId: 'rules/safety-v2#late', reason: 'Found after delivery', trigger: 'security-concern' }, id()), /Delivered work is immutable/);
+  await assert.rejects(recordLeadRuling(store, lead, delivered.id, { action: 'send-back', ruleId: 'rules/safety-v2#late', reason: 'Found after delivery' }, id()), /Delivered work is immutable/);
   delivered = await reload(delivered);
   assert.equal(delivered.revision, deliveredRevision);
-  assert.equal(delivered.escalation ?? null, null);
+  assert.equal(delivered.leadHold ?? null, null);
   assert.equal((await store.pool.query('SELECT 1 FROM lead_rulings WHERE work_id=$1', [delivered.id])).rowCount, 0);
 });
 
@@ -726,173 +723,6 @@ test('unit:dynamic-merge-ordering — order follows dependencies and current con
   const first = mergeable('GY-11', {  });
   const second = mergeable('GY-12', { priority: 0 });
   assert.deepEqual(currentMergeCandidates([first, second, peer], observedAt).map(item => item.key), ['GY-12', 'GY-11']);
-});
-
-test('integration:automatic-escalation — every trigger escalates and no lead can suppress it', async () => {
-  // Lease loss.
-  const brief = new Engine(store, 0); brief.principals = roster;
-  let lost = await engine.execute(admin, 'create', null, input('escalation-lease', 'product'), id());
-  lost = await engine.execute(admin, 'ready', lost.id, {}, id());
-  lost = await brief.execute(workerA, 'claim', lost.id, {}, id());
-  await brief.reconcile();
-  lost = await reload(lost);
-  assert.equal(lost.lease, null);
-  assert.equal(lost.escalation!.trigger, 'lease-loss');
-  assert.match(lost.escalation!.reason, /engineer-a/);
-  assert.equal(lost.escalation!.actor, 'graphyard');
-  // Evidence policy conflict.
-  let conflict = await candidate(workerA, 'escalation-policy', 'product');
-  conflict = await engine.execute(reviewer, 'evidence', conflict.id, proof({ policyRevision: 2 }), id());
-  assert.equal(conflict.escalation!.trigger, 'evidence-policy-conflict');
-  assert.match(conflict.escalation!.reason, /policy v2 conflicts with current policy v1/);
-  // Security concern, raised by a lead ruling that must name its trigger.
-  let concern = await engine.execute(admin, 'create', null, input('escalation-security', 'product'), id());
-  const ruled = await recordLeadRuling(store, lead, concern.id, { action: 'escalate', ruleId: 'rules/safety-v2#credential', reason: 'Unreviewed credential change', trigger: 'security-concern' }, id());
-  assert.equal(ruled.work.escalation!.trigger, 'security-concern');
-  // A lead cannot overwrite, replace, or silence a standing escalation, and a
-  // later distinct trigger never disappears behind the one already standing.
-  await recordLeadRuling(store, lead, concern.id, { action: 'escalate', ruleId: 'rules/safety-v2#credential', reason: 'Reclassified as routine', trigger: 'lease-loss' }, id());
-  await recordLeadRuling(store, lead, concern.id, { action: 'classify-failure', ruleId: 'rules/failure-v1#flaky', reason: 'Runner timeout' }, id());
-  concern = await reload(concern);
-  assert.equal(concern.escalation!.trigger, 'security-concern');
-  assert.equal(concern.escalation!.reason, 'Unreviewed credential change');
-  assert.deepEqual(concern.escalations!.map(entry => entry.trigger), ['security-concern', 'lease-loss'], 'each distinct trigger stands until it is resolved on its own');
-  // A repeat of a trigger that already stands is history, not a second incident.
-  await recordLeadRuling(store, lead, concern.id, { action: 'escalate', ruleId: 'rules/safety-v2#credential', reason: 'Same concern again', trigger: 'security-concern' }, id());
-  concern = await reload(concern);
-  assert.deepEqual(concern.escalations!.map(entry => entry.trigger), ['security-concern', 'lease-loss']);
-  // Resolving one concern leaves every other standing one refusing delivery.
-  const mergeReasons = () => concern.gates.find(gate => gate.name === 'merge')!.reasons.join(' ');
-  assert.match(mergeReasons(), /Unresolved security-concern escalation/);
-  assert.match(mergeReasons(), /Unresolved lease-loss escalation/);
-  concern = await engine.execute(admin, 'resolve', concern.id, { trigger: 'security-concern', reason: 'Credential change reviewed', expectedRevision: concern.revision }, id());
-  assert.deepEqual(concern.escalations!.map(entry => entry.trigger), ['lease-loss'], 'resolving one concern never silently drops another');
-  assert.equal(concern.escalation!.trigger, 'lease-loss');
-  assert.doesNotMatch(mergeReasons(), /Unresolved security-concern escalation/);
-  assert.match(mergeReasons(), /Unresolved lease-loss escalation/);
-  concern = await engine.execute(admin, 'resolve', concern.id, { trigger: 'lease-loss', reason: 'Replacement worker assigned', expectedRevision: concern.revision }, id());
-  assert.deepEqual(concern.escalations, []);
-  assert.equal(concern.escalation, null);
-  // Suspected requirement weakening, detected from the revision itself.
-  let weakened = await engine.execute(admin, 'create', null, { ...input('escalation-weakening', 'product'), criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'integration:works'] }, { id: 'AC-2', text: 'Stays safe', proofs: ['unit:safety'] }] }, id());
-  weakened = await engine.execute(admin, 'requirements', weakened.id, { expectedPolicyRevision: 1, reason: 'Narrowing the contract', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], dependencies: [], exclusiveResources: [] }, id());
-  assert.equal(weakened.escalation!.trigger, 'requirement-weakening');
-  assert.match(weakened.escalation!.reason, /AC-2/);
-  assert.match(weakened.escalation!.reason, /AC-1/);
-  assert.equal(weakened.escalation!.actor, admin.id);
-  // An escalated item is reported as a slice bottleneck with its reason.
-  const product = delegationSnapshot(roster, await store.list(), Date.now()).slices.find(s => s.id === 'product')!;
-  assert.ok(product.bottlenecks.some(bottleneck => bottleneck.key === concern.key));
-  assert.ok(product.bottlenecks.every(bottleneck => !!bottleneck.reason));
-  // A replacement claim is itself the proof of lease loss, so the escalation is
-  // recorded in the same transaction that overwrites the expired lease.
-  const expiring = new Engine(store, 0); expiring.principals = roster;
-  let replaced = await engine.execute(admin, 'create', null, input('escalation-replacement', 'infrastructure'), id());
-  replaced = await engine.execute(admin, 'ready', replaced.id, {}, id());
-  replaced = await expiring.execute(workerA, 'claim', replaced.id, {}, id());
-  const lostEpoch = replaced.epoch;
-  replaced = await engine.execute(workerB, 'claim', replaced.id, {}, id());
-  assert.equal(replaced.lease!.owner, workerB.id, 'the replacement claim still succeeds');
-  assert.equal(replaced.escalation!.trigger, 'lease-loss');
-  assert.match(replaced.escalation!.reason, new RegExp(`${workerA.id} lost lease epoch ${lostEpoch}`));
-  assert.equal(replaced.escalation!.actor, 'graphyard');
-  await engine.execute(workerB, 'release', replaced.id, { epoch: replaced.epoch }, id());
-
-  // Operator rework discards whatever unfinished assignment still stood, and that
-  // is the last moment its end is visible: reconciliation only ever sees an
-  // expired lease, and the replacement claim guards on a lease this path has
-  // already cleared. The admin's own stopped-worker attestation explains that end,
-  // so it is recorded as `lease.expired` history rather than as a vanished worker.
-  let stranded = await engine.execute(admin, 'create', null, input('escalation-rework-lease', 'infrastructure'), id());
-  stranded = await engine.execute(admin, 'ready', stranded.id, {}, id());
-  stranded = await engine.execute(workerA, 'claim', stranded.id, {}, id());
-  const strandedEpoch = stranded.epoch;
-  stranded = await engine.execute(workerA, 'workspace', stranded.id, { epoch: strandedEpoch, host: 'delegation-host', path: `/tmp/delegation/${stranded.id}`, branch: `graphyard/${stranded.key.toLowerCase()}-${strandedEpoch}` }, id());
-  assert.ok(stranded.lease, 'the stopped worker never released the lease it was implementing under');
-  stranded = await engine.execute(admin, 'rework', stranded.id, { reason: 'Worker session was closed before it submitted', previousWorkerStopped: true }, id());
-  assert.equal(stranded.lease, null);
-  assert.deepEqual(standingEscalations(stranded), [], 'a lease the attesting admin discarded is not a lost worker');
-  assert.equal(stranded.lastAssignment!.owner, workerA.id, 'the discarded assignment is still attributable');
-  const discarded = (await store.events(stranded.id)).filter(event => event.kind === 'lease.expired');
-  assert.deepEqual(discarded.map(event => [event.payload.details.epoch, event.payload.details.cause, event.payload.details.attestation.source, event.payload.details.attestation.actor]), [[strandedEpoch, 'stopped-by-attestation', 'rework', admin.id]]);
-  // Reconciliation has no expired lease left to notice.
-  await engine.reconcile();
-  stranded = await reload(stranded);
-  assert.deepEqual(standingEscalations(stranded), []);
-  // The replacement engineer claims the reopened item; a lead still cannot resolve the
-  // standing incident on the replaced item, and the admin can.
-  stranded = await engine.execute(workerB, 'claim', stranded.id, {}, id());
-  assert.equal(stranded.lease!.owner, workerB.id);
-  replaced = await reload(replaced);
-  await assert.rejects(engine.execute(lead, 'resolve', replaced.id, { trigger: 'lease-loss', reason: 'Reassigned already', expectedRevision: replaced.revision }, id()), /Slice leads cannot perform lifecycle mutations/);
-  replaced = await engine.execute(admin, 'resolve', replaced.id, { trigger: 'lease-loss', reason: 'Replacement engineer assigned and verified', expectedRevision: replaced.revision }, id());
-  assert.deepEqual(replaced.escalations, []);
-  await engine.execute(workerB, 'release', stranded.id, { epoch: stranded.epoch }, id());
-  // Rework that discards no assignment raises nothing: the incident is the lost
-  // lease, not the reassignment that follows it.
-  let reopened = await engine.execute(admin, 'create', null, input('escalation-rework-unleased', 'infrastructure'), id());
-  reopened = await engine.execute(admin, 'ready', reopened.id, {}, id());
-  reopened = await engine.execute(admin, 'rework', reopened.id, { reason: 'Reopened before anyone claimed it', previousWorkerStopped: true }, id());
-  assert.equal(reopened.escalation ?? null, null);
-  assert.deepEqual(reopened.escalations ?? [], []);
-  // A submitted attempt is one of those: `submit` ended its lease, so a worker
-  // session closed after completing leaves nothing for rework to discard.
-  let completed = await candidate(workerA, 'escalation-rework-submitted', 'infrastructure');
-  assert.equal(completed.lease, null);
-  completed = await engine.execute(admin, 'rework', completed.id, { reason: 'Worker session was closed after submission', previousWorkerStopped: true }, id());
-  assert.deepEqual(completed.escalations ?? [], [], 'post-submission rework is not an incident');
-  assert.equal(completed.lastAssignment!.owner, workerA.id, 'the completed attempt is still attributable');
-
-  // An unresolved escalation refuses delivery, even for an otherwise merge-ready
-  // candidate, and only a human operator can resolve it.
-  let ready = await candidate(workerB, 'escalation-blocks-merge', 'product');
-  ready = await proven(ready);
-  assert.equal(ready.stage, 'merge');
-  assert.ok(mergeAuthorized(ready));
-  const observedAt = ready.observation!.at;
-  assert.deepEqual(currentMergeCandidates([ready], observedAt).map(item => item.key), [ready.key]);
-  const escalated = (await recordLeadRuling(store, lead, ready.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Unreviewed dependency change', trigger: 'security-concern' }, id())).work;
-  assert.equal(mergeAuthorized(escalated), false, 'merge authorization is invalidated in the escalating transaction');
-  assert.equal(escalated.gates.find(gate => gate.name === 'merge')!.passed, false);
-  assert.match(escalated.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Unresolved security-concern escalation/);
-  assert.deepEqual(currentMergeCandidates([escalated], observedAt), [], 'the guarded broker cannot select an escalated item');
-  assert.equal(mergeAuthorized(await reload(ready)), false);
-  // Nobody but the operator resolves it, and never a stale or mismatched trigger.
-  await assert.rejects(engine.execute(workerA, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Clearing the block', expectedRevision: escalated.revision }, id()), /Operator permission required/);
-  await assert.rejects(engine.execute(lead, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Clearing my own escalation', expectedRevision: escalated.revision }, id()), /Slice leads cannot perform lifecycle mutations/);
-  await assert.rejects(engine.execute(reviewer, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Clearing the block', expectedRevision: escalated.revision }, id()), /Operator permission required/);
-  // An admin credential that declares `ai`, or declares nothing, is not a human
-  // operator: the escalation it would clear refuses its own automated delivery.
-  await assert.rejects(engine.execute(aiAdmin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Automated clearance', expectedRevision: escalated.revision }, id()), /requires a declared human session; automation-admin is ai/);
-  await assert.rejects(engine.execute(undeclaredAdmin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Unlabelled clearance', expectedRevision: escalated.revision }, id()), /requires a declared human session; legacy-admin is undeclared/);
-  await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'lease-loss', reason: 'Wrong standing trigger', expectedRevision: escalated.revision }, id()), /Standing escalations are security-concern/);
-  // The revision is required, so a stale client cannot clear a later incident
-  // that happens to share a trigger.
-  await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Stale read' }, id()), /expectedRevision/);
-  await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Stale read', expectedRevision: escalated.revision - 1 }, id()), /Task revision changed; reload before resolving/);
-  let resolved = await engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Dependency change reviewed and accepted', expectedRevision: escalated.revision }, id());
-  assert.equal(resolved.escalation, null);
-  assert.deepEqual(resolved.gates.find(gate => gate.name === 'merge')!.reasons, [pushRefusal(resolved.candidate!.sha)], 'the merge gate waits on the push alone');
-  assert.ok(mergeAuthorized(resolved), 'authorization is reissued only after the human resolution');
-  assert.deepEqual(currentMergeCandidates([resolved], resolved.observation!.at).map(item => item.key), [resolved.key]);
-  await assert.rejects(engine.execute(admin, 'resolve', ready.id, { trigger: 'security-concern', reason: 'Again', expectedRevision: resolved.revision }, id()), /no escalation to resolve/);
-  // A concern raised after the merge was requested must still stop the delivery it refuses.
-  // GitHub merges; the ruling withdraws the authorization in its own transaction, so the
-  // standing request no longer binds an authorized head and GitHub is told to dequeue it.
-  let pending = await candidate(workerB, 'escalation-withdraws-requested-merge', 'product');
-  pending = await proven(pending);
-  const heldBack = (await recordLeadRuling(store, lead, pending.id, { action: 'send-back', ruleId: 'rules/plan-v1#scope', reason: 'Out of agreed scope' }, id())).work;
-  assert.equal(mergeAuthorized(heldBack), false, 'a blocking ruling withdraws the authorization in its own transaction');
-  assert.equal(heldBack.mergeExecution ?? null, null, 'no merge execution exists to fence');
-  const fenced = (await recordLeadRuling(store, lead, pending.id, { action: 'escalate', ruleId: 'rules/safety-v2#supply-chain', reason: 'Dependency review reopened', trigger: 'security-concern' }, id())).work;
-  assert.equal(mergeAuthorized(fenced), false);
-  assert.deepEqual(currentMergeCandidates([fenced], fenced.observation!.at), [], 'the withdrawn item is never selected again');
-
-  // The resolution itself is append-only history with its audit reason.
-  const audit = (await store.events(ready.id)).find(event => event.kind === 'resolve');
-  assert.equal(audit.actor, admin.id);
-  assert.equal(audit.payload.details.reason, 'Dependency change reviewed and accepted');
-  assert.equal(audit.payload.details.trigger, 'security-concern');
 });
 
 test('unit:delegation-limits — configured capacity is server-enforced and refused with an explicit reason', () => {

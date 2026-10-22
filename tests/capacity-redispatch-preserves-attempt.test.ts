@@ -3,22 +3,22 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
 import {
-  approverRoleHealth, approverSessionName, masterConfigSchema, observedExhaustions, preservePartialWork,
-  readEnvironmentLog, recordObservedExhaustion, selectAccount, selectApproverAccount, workerPrompt,
+  masterConfigSchema, observedExhaustions, preservePartialWork,
+  readEnvironmentLog, recordObservedExhaustion, selectAccount, workerPrompt,
   type MasterConfig,
 } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1708 AC-1: mid-attempt limit exhaustion records the spend, fails over without re-selecting the
-// held account, and keeps the in-flight attempt's work and any recorded judgement through redispatch.
+// held account, and keeps the in-flight attempt's work and any in-flight review request through redispatch.
 
 const repository = 'owner/capacity-redispatch';
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -82,7 +82,7 @@ const loginsOnly = (now: () => number) => ({ quota: false, now, cacheMs: 0 });
 
 interface Herdr { agents: { name: string; pane_id: string; agent_status: string }[]; output: Record<string, string> }
 
-test('integration:capacity-redispatch-preserves-attempt — worker WIP and an approver decision survive mid-attempt exhaustion redispatch without re-selecting the held account', async () => {
+test('integration:capacity-redispatch-preserves-attempt — worker WIP and a reviewer request survive mid-attempt exhaustion redispatch without re-selecting the held account', async () => {
   const capacity = await import('../src/model/capacity.js') as {
     redispatchPreservesAttempt?: (work: Work, spentEpoch: number) => { ok: boolean; detail: string };
   };
@@ -97,7 +97,6 @@ test('integration:capacity-redispatch-preserves-attempt — worker WIP and an ap
   await writeFile(join(worktree, 'README.md'), 'base\n');
   git(worktree, 'add', '-A');
   git(worktree, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '-m', 'base');
-  const settlementToken = 'c'.repeat(64);
   const calls = { dispatch: [] as { work: string; account: string | null }[], closed: [] as string[] };
   const now = () => Date.now() + clock.skewMs;
   const effects: DaemonEffects = {
@@ -116,17 +115,8 @@ test('integration:capacity-redispatch-preserves-attempt — worker WIP and an ap
       await ok(workerA, 'POST', `work/${work.id}/workspace`, {
         epoch: claimed.epoch, host: 'loop-host', path, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}`,
       });
-      await ok(workerA, 'POST', `work/${work.id}/quarantine`, {
-        epoch: claimed.epoch,
-        settlementHash: createHash('sha256').update(settlementToken).digest('hex'),
-        scope: { unit: `graphyard-watch-4242-${randomUUID()}.scope`, pid: 4242 },
-      });
       herdr.agents.push({ name: profile.agentName, pane_id: `pane-${calls.dispatch.length}`, agent_status: 'working' });
       calls.dispatch.push({ work: work.key, account: selected.account?.name ?? null });
-    },
-    stopSupervisor: async orphan => {
-      herdr.agents = herdr.agents.filter(agent => agent.name !== orphan.agentName);
-      await ok(workerA, 'POST', `work/${orphan.id}/settle`, { epoch: orphan.epoch, settlementToken });
     },
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'n/a', deployed: [], pending: [] }),
     recordDeployment: async () => {},
@@ -178,68 +168,6 @@ test('integration:capacity-redispatch-preserves-attempt — worker WIP and an ap
   work = await reload(work.id);
   assert.equal(work.epoch, 2);
   assert.match(workerPrompt(config, work, config.workers[0], 2), new RegExp(`its work is kept as commit ${kept}`));
-
-  // Approver: the same decision is relaunched on another account; the judgement request is not re-created.
-  const decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null }[] = [];
-  const launches: (string | null)[] = [];
-  const reviewerOn = (accounts: string[]) => ({
-    name: 'reviewer-a', agentName: 'agent-reviewer-a', kind: 'claude' as const, agentArgs: [], approvals: 'auto' as const, environment: {}, accounts,
-  });
-  const holdHome = await temporaryDirectory('approver-redispatch-home');
-  const approverConfig = {
-    ...loopConfig([profileOf('builder', workerA)], { credentialFile: join(holdHome, 'coordinator.token') }),
-    reviewers: [reviewerOn(['env-a', 'env-b'])],
-  } as MasterConfig;
-  const approverHerdr: Herdr = { agents: [], output: {} };
-  const holdApprover = (account: string, observed: Parameters<typeof recordObservedExhaustion>[2]) =>
-    recordObservedExhaustion(approverConfig, account, observed, now());
-  const approverEffects: DaemonEffects = {
-    ...effects,
-    agents: () => approverHerdr.agents,
-    herdr: () => ({ agents: approverHerdr.agents, available: true }),
-    sessionOutput: agent => approverHerdr.output[agent.name!] ?? '',
-    closeSession: pane => { approverHerdr.agents = approverHerdr.agents.filter(agent => agent.pane_id !== pane); },
-    dispatch: async () => {},
-    holdAccount: holdApprover,
-    decide: async (_work, action, _reason, input) => {
-      const entry = { id: 'decision-redispatch-1', action, state: 'requested', input: input ?? {}, approvedBy: null };
-      decisions.push(entry);
-      return entry;
-    },
-    decisions: async () => ({ decisions }),
-    approver: async (item, decision) => {
-      const chosen = await selectApproverAccount(approverConfig, item.key, 'approver-agent', { ...loginsOnly(now), registry: undefined });
-      const agentName = approverSessionName(item, decision), pane = `pane-approver-${launches.length}`;
-      approverHerdr.agents.push({ name: agentName, pane_id: pane, agent_status: 'working' });
-      launches.push(chosen.account?.name ?? null);
-      return { agentName, pane, account: chosen.account?.name ?? null, runtime: chosen.account?.kind ?? null, session: `registry-${launches.length}` };
-    },
-    roleHealth: async () => ({ approver: await approverRoleHealth(approverConfig, loginsOnly(now)) }),
-    endRegistrySession: async () => {},
-  };
-  const filedClose = await ok(operator, 'POST', 'work', {
-    title: 'approver redispatch', 
-    criteria: [{ id: 'AC-1', text: 'close', proofs: ['integration:capacity-redispatch-preserves-attempt'] }],
-    origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: 'src/a.ts — a finding' }] } },
-  }) as Work;
-  const proposed = await ok(coordinator, 'POST', `work/${filedClose.id}/triage`, {
-    judgement: { outcome: 'close', reason: 'Not worth doing once the parent shipped' },
-  }) as Work;
-  assert.equal(proposed.triage?.state, 'proposed');
-  const approverState = emptyDaemonState(approverConfig);
-  await runCycle(approverConfig, approverState, approverEffects, now);
-  assert.equal(decisions.length, 1, 'one close decision is requested');
-  assert.deepEqual(launches, ['env-a']);
-  const decisionId = decisions[0].id;
-  const launchedAt = Object.values(approverState.approvals)[0].launchedAt;
-  const name = approverSessionName(proposed, decisionId);
-  approverHerdr.agents.find(agent => agent.name === name)!.agent_status = 'idle';
-  approverHerdr.output[name] = `● Reading the decision…\n  ⎿ You've hit your weekly limit · resets ${resetsAt}\n`;
-  await runCycle(approverConfig, approverState, approverEffects, now);
-  assert.equal(decisions.length, 1, 'the decision is not requested again — the judgement request survives');
-  assert.deepEqual(launches, ['env-a', 'env-b'], 'approver fails over to the next account');
-  assert.equal(Object.values(approverState.approvals)[0].decision, decisionId);
-  assert.equal(approverState.actions[failoverKey('approver', proposed, `${decisionId}:${launchedAt}`)].state, 'done');
 
   // Reviewer session: request id and relaunch preserve the in-flight proof/review request.
   const session: LaunchedSession = {

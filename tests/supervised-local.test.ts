@@ -28,8 +28,7 @@ const baseConfig = (extra: Partial<MasterConfig> = {}): MasterConfig => ({ versi
 const identities = {
   reviewer: { slug: 'graphyard-reviewer', appId: 9, installationId: 10, credentialFile: '/outside/reviewer.json', boundAt: '2026-10-08T00:00:00.000Z' },
   operatorAgent: { id: 'graphyard-master-shop-operator', credentialFile: '/outside/operator.token' },
-  approver: { id: 'graphyard-approver-shop', credentialFile: '/outside/approver.token' },
-} as unknown as Pick<MasterConfig, 'reviewer' | 'operatorAgent' | 'approver'>;
+} as unknown as Pick<MasterConfig, 'reviewer' | 'operatorAgent'>;
 
 /** A local control plane: no App, a worker and a reviewing account; the loop starts on restart. */
 interface World { calls: { args: string[]; stdin?: string; env?: Record<string, string> }[]; installed: boolean; loop: boolean; supervised: number; deployKeys?: number }
@@ -136,7 +135,7 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   assert.equal(written.supervision, 'supervised'); assert.equal(written.operatorLogin, OPERATOR);
   const loaded = await loadMasterConfig(stored.root);
   assert.equal(loaded.supervision, 'supervised');
-  assert.equal(loaded.reviewer, undefined); assert.equal(loaded.operatorAgent, undefined); assert.equal(loaded.approver, undefined);
+  assert.equal(loaded.reviewer, undefined); assert.equal(loaded.operatorAgent, undefined);
 });
 
 const sha = (label: string) => label.padEnd(40, '0').slice(0, 40);
@@ -151,12 +150,11 @@ function work(reviews: Observation['reviews'], author = 'graphyard-worker[bot]')
     observation, blocker: null, gates: [], violations: [] } as unknown as Work;
 }
 
-test('unit:supervised-review-gate-human — review stays required: no approval never merges, an approval of the exact head passes; the loop launches the control-plane reviewer but no approver or escalation session; master status names the promotion command', async () => {
+test('unit:supervised-review-gate-human — review stays required: no approval never merges, an approval of the exact head passes; the loop launches the control-plane reviewer; master status names the promotion command', async () => {
   const { exactApproval } = await import('../src/model.js');
   const { evaluate } = await import('../src/model/gates.js');
   const { withRoleDefaults } = await import('../src/master/profiles.js');
   const { selectReviewerProfile } = await import('../src/auto-dispatch.js');
-  const { daemonEffects } = await import('../src/master-daemon.js');
   const { buildMasterStatus } = await import('../src/master/status.js');
   const reviewGate = (item: Work) => evaluate(item, [item], new Date('2026-10-08T00:05:00.000Z')).gates.find(gate => gate.name === 'review')!;
 
@@ -173,23 +171,19 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   assert.deepEqual(exactApproval(approved), { provider: 'github', reviewer: OPERATOR, sha: H, reviewId: 2 });
   assert.equal(reviewGate(approved).passed, true);
 
-  // The loop's view of a supervised config: no reviewer App, operator-agent or approver identity.
+  // The loop's view of a supervised config: no reviewer App or operator-agent identity.
   const reviewer = { name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' } as MasterConfig['reviewers'][number];
   const supervised = withRoleDefaults(baseConfig({ supervision: 'supervised', ...identities, reviewers: [reviewer] }));
-  assert.equal(supervised.reviewer, undefined); assert.equal(supervised.operatorAgent, undefined); assert.equal(supervised.approver, undefined);
+  assert.equal(supervised.reviewer, undefined); assert.equal(supervised.operatorAgent, undefined);
   // GY-1978: no pull request awaits the operator, so the reviewer profile answers every head in control-plane mode, which needs no App.
   assert.equal(selectReviewerProfile(supervised, 'control-plane').profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
-  const effects = daemonEffects('/nonexistent/gy-1501', supervised, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: async () => ({}) });
-  assert.equal(effects.approver, undefined, 'no approver session is launched');
-  assert.equal(effects.decide, undefined, 'no two-party decision is requested, so no escalation handler runs for one');
   // The same identities in autonomous mode are kept.
   const autonomous = withRoleDefaults(baseConfig(identities));
-  assert.ok(autonomous.reviewer && autonomous.operatorAgent && autonomous.approver);
-  assert.ok(daemonEffects('/nonexistent/gy-1501', autonomous, { snapshot: async () => ({ work: [], now: new Date().toISOString() }), mutate: async () => ({}) }).approver);
+  assert.ok(autonomous.reviewer && autonomous.operatorAgent);
 
   // master status: one line naming who reviews and the promotion command; none in autonomous mode.
   const now = '2026-10-08T00:05:00.000Z';
-  const line = buildMasterStatus({ work: [unreviewed], now }, [], [], {}, {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR }).supervision;
+  const line = buildMasterStatus({ work: [unreviewed], now }, [], [], {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR }).supervision;
   assert.match(line!, /an agent reviewer reviews each head and the control plane merges it/);
   assert.match(line!, /graphyard master promote --admin-token-stdin/);
   assert.equal(buildMasterStatus({ work: [unreviewed], now }, [], []).supervision, null);
@@ -220,27 +214,26 @@ test('unit:supervised-no-identity-collapse — up --local hands the operator\'s 
 
   // GY-1978: no pull request awaits the operator's approval, so master status raises no own-login attention.
   const own = work([], 'Octo-Operator');
-  const status = buildMasterStatus({ work: [own], now: '2026-10-08T00:05:00.000Z' }, [], [], {}, {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR });
+  const status = buildMasterStatus({ work: [own], now: '2026-10-08T00:05:00.000Z' }, [], [], {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR });
   assert.ok(!status.attentionItems.some(item => /operator's own login/.test(item.text)));
   assert.match(supervisionReport({ mode: 'supervised', operatorLogin: OPERATOR })!, /^Supervised: /); assert.equal(supervisionReport({ operatorLogin: OPERATOR }), null);
 });
 
-test('unit:supervised-master-prompt — the supervised master prompt says an agent reviews and the control plane merges and no two-party decision can be approved yet; the autonomous prompt is unchanged', async () => {
+test('unit:supervised-master-prompt — the supervised master prompt says an agent reviews and the control plane merges; the autonomous prompt is unchanged', async () => {
   const { masterPrompt } = await import('../src/master/harness.js');
   const { withRoleDefaults } = await import('../src/master/profiles.js');
   const supervised = masterPrompt(withRoleDefaults(baseConfig({ supervision: 'supervised', operatorLogin: OPERATOR })));
   assert.match(supervised, /an agent reviewer reviews each head and the control plane merges it/);
-  assert.match(supervised, /no two-party decision can be approved yet/);
-  assert.match(supervised, /not an onboarding fault, so do not report the missing identities/);
+  assert.match(supervised, /not an onboarding fault, so do not report the missing identity/);
   assert.ok(!/report that onboarding must run/.test(supervised), 'the missing identities are not an onboarding fault');
   assert.ok(!/No reviewer identity is registered yet/.test(supervised), 'the missing reviewer App is not a setup step');
-  assert.ok(!/master approver GY-N DECISION/.test(supervised), 'no approver is launched');
   // Autonomous: the same prompt whether supervision is absent or explicit, still naming the onboarding step.
   for (const extra of [{}, identities]) {
     const absent = masterPrompt(baseConfig(extra)), explicit = masterPrompt(baseConfig({ ...extra, supervision: 'autonomous' }));
     assert.equal(explicit, absent);
     assert.ok(!/supervised/i.test(absent));
   }
-  assert.match(masterPrompt(baseConfig()), /Your operator-agent and approver identities are not provisioned yet; report that onboarding must run/);
-  assert.match(masterPrompt(baseConfig(identities)), /launch its independent approver with node .* master approver GY-N DECISION\. Independent review and proof collection start on their own/);
+  assert.match(masterPrompt(baseConfig()), /Your operator-agent identity is not provisioned yet; report that onboarding must run/);
+  assert.match(masterPrompt(baseConfig(identities)), /Every decision is yours to apply at once with your own identity/);
+  assert.ok(!/not provisioned yet/.test(masterPrompt(baseConfig(identities))));
 });

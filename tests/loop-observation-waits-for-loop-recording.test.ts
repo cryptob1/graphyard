@@ -76,7 +76,7 @@ test('unit:loop-observation-waits-for-loop-recording — master status lists a d
     [`reading:${due.id}`]: { kind: 'deployment', work: 'GY-1724', principal: null, state: 'waiting', detail: 'GY-1724\'s reading is due on release bbbbbbbbbbbb and cannot be taken from this host: the App\'s advanced delivery log needs a browser sign-in', attempts: 2, cycle: 9, at: iso(now - 300_000) },
     [`reading:close:${due.id}:${filed}`]: { kind: 'deployment', work: 'GY-1724', principal: null, state: 'waiting', detail: 'another key', attempts: 1, cycle: 2, at: iso(now - 3 * hour) },
   } };
-  const status = buildMasterStatus({ now: iso(now), work: [parent, due, inBuild, windowed] } as never, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, 'graphyard', loop as never);
+  const status = buildMasterStatus({ now: iso(now), work: [parent, due, inBuild, windowed] } as never, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, 'graphyard', loop as never);
   const row = (key: string) => status.work.find(entry => entry.key === key)!;
   for (const key of ['GY-1724', 'GY-1725']) {
     assert.equal(row(key).attention, null, `${key} raises no attention line`);
@@ -93,7 +93,7 @@ test('unit:loop-observation-waits-for-loop-recording — master status lists a d
   assert.equal(pending.find(entry => entry.key === 'GY-1725')!.loop, null);
   // A recorded pass still open is listed the same way, with the release it passed on, and raises no attention line however long it stays open.
   const read = item(1726, { stageEnteredAt: iso(now - 30 * hour), evidence: [reading()] as never });
-  const later = buildMasterStatus({ now: iso(now), work: [parent, read] } as never, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, 'graphyard', { projectMemory: null, actions: {} } as never);
+  const later = buildMasterStatus({ now: iso(now), work: [parent, read] } as never, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, 'graphyard', { projectMemory: null, actions: {} } as never);
   const readRow = later.work.find(entry => entry.key === 'GY-1726')!;
   assert.deepEqual([readRow.attention, readRow.observationDue, readRow.observationPassedOn, later.counts.ready, later.counts.waiting], [null, true, serving, 0, 1]);
   assert.match(readRow.observing!, /the loop's close of GY-1726 as delivered-observation on release bbbbbbbbbbbb/);

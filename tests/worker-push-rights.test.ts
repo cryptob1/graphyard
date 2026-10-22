@@ -243,7 +243,7 @@ test('integration:unrunnable-remedy-reported — a blocker naming a command no l
   assert.deepEqual(blockerCommands(unquoted.work.blocker!), ['git push --mirror origin']);
 
   const all = await store.list();
-  const status = buildMasterStatus({ work: all, now: new Date().toISOString() }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, launcher);
+  const status = buildMasterStatus({ work: all, now: new Date().toISOString() }, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, undefined, undefined, launcher);
   const reported = status.unrunnableRemedies.filter(entry => [unrunnable.work.key, runnable.work.key, unquoted.work.key].includes(entry.key));
   assert.deepEqual(reported.map(entry => entry.key), [unrunnable.work.key, unquoted.work.key], 'a blocker whose command the worker may run is an ordinary blocker');
   const [defect] = reported;

@@ -66,16 +66,16 @@ test('unit:delivered-note-not-attention — a note on a Done item raises nothing
   const request = (type: AgentRequest['type'], decider: AgentRequest['decider'], epoch = 6): AgentRequest => ({ id: `${type}-1`, type, epoch, requestedBy: 'graphyard-claude-1', at: '2026-10-05T22:05:00.000Z',
     reason: `${type}: containment fence of epoch 6 whose quarantine could not be settled`, decider, releasedLease: type !== 'note', state: 'open' });
   const note = request('note', { kind: 'rule', who: 'nobody; a note is recorded, not decided', command: null });
-  const decision = request('decision', { kind: 'approver', who: 'an independent approver agent', command: 'graphyard decide GY-1318' });
-  const human = request('escalation', { kind: 'human', who: 'the operator', command: null });
+  const decision = request('blocker', { kind: 'follow-up', who: 'a follow-up item', command: null });
+  const human = { ...request('blocker', { kind: 'human', who: 'the operator', command: null }), id: 'blocker-2' };
   human.humanDecision = 'goals-and-priorities';
 
   const done = work({ key: 'GY-1318', stage: 'done', epoch: 6, agentRequests: [note, decision, human] });
   const live = work({ key: 'GY-1400', stage: 'build', epoch: 6, agentRequests: [{ ...note, id: 'note-2' }] });
   const lines = agentRequestAttention({ work: [done, live], now });
   assert.ok(!lines.some(line => line.subject === 'GY-1318' && /recorded a note/.test(line.text)), 'the note on the Done item is not attention');
-  assert.ok(lines.some(line => line.subject === 'GY-1318' && /recorded a decision/.test(line.text) && /decided by an independent approver agent/.test(line.text)));
-  assert.ok(lines.some(line => line.subject === 'GY-1318' && /recorded a escalation/.test(line.text) && line.human));
+  assert.ok(lines.some(line => line.subject === 'GY-1318' && /recorded a blocker/.test(line.text) && /decided by a follow-up item/.test(line.text)));
+  assert.ok(lines.some(line => line.subject === 'GY-1318' && /recorded a blocker/.test(line.text) && /decided by the operator/.test(line.text) && line.human));
   assert.ok(lines.some(line => line.subject === 'GY-1400' && /recorded a note/.test(line.text)), 'a note on a live item is still reported');
   assert.equal(lines.length, 3);
   // The note stays on the item's record.

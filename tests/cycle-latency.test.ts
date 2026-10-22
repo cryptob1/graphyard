@@ -10,7 +10,6 @@ import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { describeTimings, mapBounded, serverCallName, slowCallMs, timedFetch, timedRun, childCall, Timings, withTimings } from '../src/master/timings.js';
 import type { Work } from '../src/model.js';
-import { listDecisions } from '../src/server/decision-ledger.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -146,7 +145,7 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     const timings = state.metrics.at(-1)!.timings!;
     assert.ok(timings, 'the cycle recorded its timings on the cursor');
     const steps = timings.steps.map(step => step.step);
-    for (const step of ['snapshot', 'observe', 'credentials', 'close', 'reclaim', 'dispatch', 'launches', 'decisions', 'reviews and proofs', 'merges', 'deployment verification', 'invariants', 'measure'])
+    for (const step of ['snapshot', 'observe', 'credentials', 'close', 'reclaim', 'dispatch', 'launches', 'rework', 'reviews and proofs', 'merges', 'deployment verification', 'invariants', 'measure'])
       assert.ok(steps.includes(step), `the cycle records its ${step} step: ${steps.join(', ')}`);
     const slowest = [...timings.steps].sort((a, b) => b.ms - a.ms);
     assert.equal(slowest[0].step, 'deployment verification');
@@ -166,7 +165,7 @@ test('unit:cycle-step-timings — a cycle records every step and every external 
     const report = await masterStatusReport(root, master, slowBoard, { actor: { id: 'coordinator-1' } }, { commit: null });
     assert.ok(report.timings, 'master status reports its timings');
     const phases = report.timings.steps.map(step => step.step);
-    for (const phase of ['herdr', 'credentials', 'snapshot', 'reconcile reviews', 'reconcile producers', 'setup', 'containment', 'worktrees', 'build status', 'attention: decisions', 'attention: derived'])
+    for (const phase of ['herdr', 'credentials', 'snapshot', 'reconcile reviews', 'reconcile producers', 'setup', 'worktrees', 'build status', 'attention: derived'])
       assert.ok(phases.includes(phase), `status times its ${phase} phase: ${phases.join(', ')}`);
     const statusSlowest = [...report.timings.steps].sort((a, b) => b.ms - a.ms)[0];
     assert.equal(statusSlowest.step, 'board', `the board read is the slowest phase: ${describeTimings(report.timings)}`);
@@ -230,23 +229,4 @@ test('mapBounded keeps order and never exceeds its limit; a recorder keeps its o
   ]);
   assert.deepEqual(first.report().calls.map(call => [call.name, call.step]), [['herdr agent ' + (slowCallMs + 20), 'one']]);
   assert.deepEqual(second.report().calls.map(call => [call.name, call.step]), [['gh pr ' + (slowCallMs + 40), 'two']]);
-});
-
-test('unit:cycle-latency-budget — the decisions route reads the one item it answers for, never every document in the store', async () => {
-  // The dominant cost on the live control plane: GET work/:id/decisions loaded the whole graph
-  // (store.list(), ~21 MB for 378 items) to find one item, so 170 reads were 170 whole-graph loads
-  // and queued behind each other on the server, 6-8 s apiece even when sent twelve at a time.
-  const subject = item(7, new Date().toISOString());
-  const queries: { sql: string; params: unknown[] }[] = [];
-  const pool = { query: async (sql: string, params: unknown[] = []) => {
-    queries.push({ sql, params });
-    if (/FROM work_items/.test(sql)) return { rows: (params[0] === subject.id || params[0] === subject.key) ? [{ document: subject }] : [] };
-    return { rows: [] };
-  } };
-  const services = { engine: { store: { pool, list: async () => { throw new Error('the decisions route listed every work document'); } } } } as unknown as Parameters<typeof listDecisions>[0];
-  const actor = { id: 'coordinator-1', role: 'coordinator' } as Parameters<typeof listDecisions>[1];
-  assert.deepEqual(await listDecisions(services, actor, subject.id), { key: subject.key, decisions: [] });
-  assert.match(queries[0].sql, /WHERE id=\$1$/, 'an id is read by the primary key');
-  assert.deepEqual(await listDecisions(services, actor, subject.key), { key: subject.key, decisions: [] }, 'and a key by the document\'s key');
-  await assert.rejects(listDecisions(services, actor, 'GY-999'), /Work item not found/);
 });

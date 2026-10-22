@@ -61,7 +61,7 @@ function harness(item: { current: Work[] }, agent: HerdrAgent, extra: Partial<Da
     promptSession: (_agent, text) => { log.prompts.push(text); },
     recordSession: async (_work, handle) => { log.sessions.push(handle); },
     // The control plane ends the attempt on this record, which frees the item for the next dispatch.
-    reportCapacity: async (work, event) => { log.capacity.push(event); item.current = item.current.map(entry => entry.id === work.id ? { ...entry, lease: null, containmentQuarantine: null } as Work : entry); return item.current[0]; },
+    reportCapacity: async (work, event) => { log.capacity.push(event); item.current = item.current.map(entry => entry.id === work.id ? { ...entry, lease: null } as Work : entry); return item.current[0]; },
     preserveWork: async (_work, epoch) => { log.preserved.push(epoch); return { state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/gy-252-1', detail: 'kept as WIP' }; },
     ...extra,
   };
@@ -120,7 +120,7 @@ test('unit:resume-prompt-after-unblock — one re-prompt after a blocker clears,
 test('unit:idle-lease-reclaimed — a worker idle with a live lease is re-prompted once, then handed to a new attempt that keeps its branch', async () => {
   const { directory, master } = await setup();
   try {
-    const item = { current: [held({ containmentQuarantine: null })] };
+    const item = { current: [held()] };
     const agent: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:p4J1', agent_status: 'idle', agent: 'claude' };
     const { log, effects } = harness(item, agent);
     const state = emptyDaemonState(master);
@@ -184,7 +184,7 @@ test('unit:idle-session-closed-under-60m — an idle worker observed on the loop
   for (const offset of [0, 1, 2, 3, 4]) {
     const { directory, master } = await setup();
     try {
-      const item = { current: [held({ containmentQuarantine: null })] };
+      const item = { current: [held()] };
       const agent: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:p4J1', agent_status: 'working', agent: 'claude' };
       const { log, effects } = harness(item, agent);
       const state = emptyDaemonState(master);
@@ -217,7 +217,7 @@ test('unit:idle-lease-reclaim-inside-worker-bound — a session that answers its
     // Read through the module namespace, so a base without the bounds fails here as a test case.
     const { idleLeaseMs, idleReclaimMs, idleRepromptGraceMs } = cycleSessions as Record<string, unknown>;
     assert.deepEqual([idleLeaseMs, idleReclaimMs, idleRepromptGraceMs], [minutes(25), minutes(45), minutes(10)]);
-    const item = { current: [held({ id: 'work-260', key: 'GY-260', containmentQuarantine: null })] };
+    const item = { current: [held({ id: 'work-260', key: 'GY-260' })] };
     const agent: HerdrAgent = { name: 'agent-alpha', pane_id: 'w1:p4J1', agent_status: 'idle', agent: 'claude' };
     const { log, effects } = harness(item, agent);
     const state = emptyDaemonState(master);

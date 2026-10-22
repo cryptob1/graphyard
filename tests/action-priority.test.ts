@@ -1,229 +1,17 @@
-import { after, before, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { join } from 'node:path';
-import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
-import { Store } from '../src/store.js';
-import { Engine } from '../src/engine.js';
-import { server } from '../src/server.js';
-import { leaseLossReason, standingEscalations, type Escalation, type Principal, type Work } from '../src/model.js';
+import type { Work } from '../src/model.js';
 import { actionIdleMs, idleActionable, queueSnapshot, reconcileActions } from '../src/model/actions.js';
-import { actionJudgment, carriedAction, executorRunnableKinds, humanNeeded, humanNeededActions, nextAction, openAction } from '../src/model/next-action.js';
+import { actionJudgment, executorRunnableKinds, humanNeeded, humanNeededActions, nextAction } from '../src/model/next-action.js';
 import { humanNeededAttention, needsHumanActions } from '../src/cli/master-status.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2000-01-01 lease expiry forces a lapse that stays lapsed, 2026-09-22 resetsAt is a past record the note quotes, and 2026-09-21 `at` is the fixed now handed to nextAction.
+// Time-bomb allowance (GY-1694): 2026-09-21 `at` is the fixed now handed to nextAction.
 
 /**
- * GY-104: an item stops only for a judgement it actually needs.
- *
- * A standing escalation used to be answered before anything else was considered, so a concern
- * that blocked nothing still froze work anybody could have done; an escalation whose cause the
- * ledger already explained still waited for a person. Each test here is named for the proof it
- * produces: integration:escalation-does-not-freeze-workable-item,
- * integration:explained-escalations-settle-unattended and unit:human-needed-actions-visible.
- *
- * No test here runs a master session. Where an action has to be carried out, it is carried out the
- * way the loop's own steps carry it out: a launched worker claims under its own identity.
+ * GY-104: an item stops only for a judgement it actually needs. The test here is named for the
+ * proof it produces: unit:human-needed-actions-visible.
  */
 
-const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
-const master: Principal = { id: 'master-admin', role: 'admin', sessionKind: 'ai' };
-const worker: Principal = { id: 'engineer-a', role: 'worker', runtime: 'claude', sessionKind: 'ai' };
-const other: Principal = { id: 'engineer-b', role: 'worker', runtime: 'cursor', sessionKind: 'ai' };
-const coordinator: Principal = { id: 'loop-a', role: 'coordinator' };
-const PROOF = 'unit:priority';
-
-let database: EmbeddedPostgres, store: Store, engine: Engine, expiring: Engine;
-let http: ReturnType<typeof server>, url: string;
-const coordinatorToken = 'x'.repeat(32);
-
-const id = () => randomUUID();
-const reload = async (work: Work | string) => (await store.list()).find(item => item.id === (typeof work === 'string' ? work : work.id))!;
-const events = async (work: Work, kind: string) => (await store.events(work.id)).filter(event => event.kind === kind);
 const rows = (work: Work) => work.actionQueue?.actions ?? [];
-/** The computed action, untyped at the call site so one assertion cannot narrow the next. */
-const action = (work: Work): any => openAction(work);
-
-before(async () => {
-  // An offset no other test file takes: two files that share a port fail whichever starts its
-  // Postgres second, in its `before` hook, with no reason given.
-  const port = Number(process.env.GRAPHYARD_ACTION_PRIORITY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 94);
-  database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('action-priority'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
-  await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
-  engine = new Engine(store, 120, 'owner/project');
-  engine.principals = [human, master, worker, other, coordinator];
-  // Leases granted by this engine have already lapsed by the time reconciliation reads them.
-  expiring = new Engine(store, 0, 'owner/project'); expiring.principals = engine.principals;
-  http = server(engine, [{ ...coordinator, token: coordinatorToken }]);
-  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
-  url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-});
-after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
-
-let sequence = 0;
-async function created(overrides: Record<string, unknown> = {}) {
-  ++sequence;
-  return engine.execute(human, 'create', null, { title: `Priority ${sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, id());
-}
-const release = (work: Work) => engine.execute(human, 'ready', work.id, {}, id());
-const ready = async (overrides: Record<string, unknown> = {}) => release(await created(overrides));
-
-/** Rewrite the stored document the way an earlier cycle left it, without a command to do it with. */
-async function overwrite(work: Work, mutate: (document: Work) => void) {
-  const document = await reload(work); mutate(document);
-  await store.pool.query('UPDATE work_items SET document=$2::jsonb WHERE id=$1', [document.id, JSON.stringify(document)]);
-  return document;
-}
-const lapse = (work: Work, epoch: number, owner = worker.id) =>
-  overwrite(work, document => { document.lease = { owner, epoch, expiresAt: '2000-01-01T00:00:00Z' }; });
-/** The record as it stands when the control plane has raised a lease-loss and nothing has settled it. */
-async function standingLoss(work: Work, epoch: number, owner = worker.id) {
-  return overwrite(work, document => {
-    const escalation: Escalation = { trigger: 'lease-loss', reason: leaseLossReason({ owner, epoch }), at: new Date().toISOString(), actor: 'graphyard' };
-    document.escalations = [escalation]; document.escalation = escalation; document.mergeAuthorization = null; document.lease = null;
-    const gate = document.gates.find(entry => entry.name === 'merge')!;
-    gate.passed = false; gate.reasons.push(`Unresolved lease-loss escalation requires operator resolution: ${escalation.reason}`);
-  });
-}
-
-/** What a launched worker does to the control plane: it claims under its own identity and registers its workspace. */
-async function launchWorker(item: Work) {
-  const claimed = await engine.execute(other, 'claim', item.id, {}, id());
-  return engine.execute(other, 'workspace', claimed.id, { epoch: claimed.epoch, host: 'host-1', path: `/tmp/priority/${claimed.id}-${claimed.epoch}`, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` }, id());
-}
-
-// ---- AC-1: an escalation stops only the work it blocks -----------------------------------------
-
-test('integration:escalation-does-not-freeze-workable-item — a ready item carrying a standing lease-loss escalation is named dispatch, a launched worker takes it, and the escalation stands unresolved beside the work', async () => {
-  // A worker claims and vanishes: reconciliation clears the lapse and raises the concern nobody
-  // has explained, exactly as it does in production.
-  let item = await ready();
-  item = await expiring.execute(worker, 'claim', item.id, {}, id());
-  const epoch = item.epoch;
-  await engine.reconcile();
-  item = await reload(item);
-  assert.equal(item.lease, null, 'the lapsed lease is cleared');
-  assert.deepEqual(standingEscalations(item).map(entry => [entry.trigger, entry.actor]), [['lease-loss', 'graphyard']], 'nothing explains the lapse, so the concern stands');
-  assert.match(item.gates.find(gate => gate.name === 'merge')!.reasons.join(' '), /Unresolved lease-loss escalation/, 'and it still refuses delivery');
-
-  // The item is otherwise dispatchable, so that is what it is named — the escalation blocks
-  // delivery and nothing earlier, and it is carried beside the work rather than in front of it.
-  assert.equal(action(item).kind, 'dispatch');
-  assert.equal(action(item).inputs.target, 'implementation');
-  assert.equal(action(item).llmRole, 'implement');
-  assert.deepEqual(action(item).carried.map((concern: any) => [concern.kind, concern.trigger, concern.reason]),
-    [['escalation', 'lease-loss', `Worker ${worker.id} lost lease epoch ${epoch}`]]);
-  assert.match(action(item).carried[0].resolve, new RegExp(`graphyard master escalation ${item.key} lease-loss`));
-  assert.equal(action(item).needsHuman, undefined, 'a dispatch is not itself a judgment anybody owes');
-  assert.deepEqual(rows(item).map(row => row.kind), ['dispatch'], 'and the durable row is the dispatch');
-
-  // The concern is not lost behind the work: it is listed as owed by somebody, with the command.
-  const owed = humanNeededActions([item], new Date());
-  assert.deepEqual(owed.map(entry => [entry.key, entry.source, entry.trigger]), [[item.key, 'carried', 'lease-loss']]);
-  assert.match(humanNeededAttention({ work: [item], now: new Date().toISOString() })[0].text, /standing lease-loss escalation while it is worked/);
-
-  // A worker is launched and claims the item under its own identity. Nobody resolved anything first.
-  await launchWorker(item);
-  item = await reload(item);
-  assert.equal(item.lease!.owner, other.id, 'a worker holds the item');
-  assert.equal(item.lease!.epoch, epoch + 1, 'under a fresh attempt');
-  assert.deepEqual(standingEscalations(item).map(entry => entry.trigger), ['lease-loss'], 'assigned without the escalation being resolved first');
-  assert.equal(action(item).kind, 'escalate', 'and with the work under way, the concern is what is left to do');
-  assert.equal(action(item).needsHuman.decision, `resolving ${item.key}'s lease-loss escalation`);
-
-  // The half the escalation does block is unchanged: nothing may be delivered under one, and an
-  // item that cannot take an assignment anyway is still named for the concern rather than for a
-  // dispatch no worker could take.
-  const blocked = await ready({ exclusiveResources: ['escalation-staging'] });
-  const holder = await engine.execute(worker, 'claim', (await ready({ exclusiveResources: ['escalation-staging'] })).id, {}, id());
-  const stood = await standingLoss(blocked, 1);
-  await engine.reconcile();
-  const held = await reload(stood);
-  assert.equal(action(held).kind, 'escalate');
-  assert.match(action(held).reason, new RegExp(`no assignment it can take \\(exclusive resources are held by ${holder.key} \\(escalation-staging\\)`));
-  assert.equal(action(held).needsHuman.decision, `resolving ${held.key}'s lease-loss escalation`);
-});
-
-// ---- AC-2: an escalation the ledger explains settles without anybody deciding it ---------------
-
-test('integration:explained-escalations-settle-unattended — a lease-loss the ledger explains (a recorded operator shutdown, a stopped-worker attestation, a capacity exhaustion) is settled by reconciliation with an audited note, and only a lapse nothing explains reaches a person', async () => {
-  // 1. A recorded operator shutdown: the worker reported blocked for its epoch and stopped
-  //    awaiting the operator. The escalation the control plane raised for that lapse rests on an
-  //    attempt whose end the ledger already accounts for.
-  let shutdown = await engine.execute(worker, 'claim', (await ready()).id, {}, id());
-  const shutdownEpoch = shutdown.epoch;
-  shutdown = await engine.execute(worker, 'blocked', shutdown.id, { epoch: shutdownEpoch, reason: 'The operator stopped every session to clear a wedged shell' }, id());
-  await standingLoss(shutdown, shutdownEpoch);
-  await engine.reconcile();
-  shutdown = await reload(shutdown);
-  assert.deepEqual(standingEscalations(shutdown), [], 'the blocked report for that epoch settles it');
-  const shutdownNote = (await events(shutdown, 'escalation.auto-settled')).at(-1)!;
-  assert.equal(shutdownNote.actor, 'graphyard');
-  assert.equal(shutdownNote.payload.details.cause, 'blocked-awaiting-operator');
-  assert.match(shutdownNote.payload.details.note, new RegExp(`^auto-settled: blocked report for epoch ${shutdownEpoch} explains the lapse`));
-
-  // 2. A stopped-worker attestation recorded after the concern was raised: the admin says the
-  //    worker was stopped, and the next cycle settles what that explains.
-  let stopped = await engine.execute(worker, 'claim', (await ready()).id, {}, id());
-  const stoppedEpoch = stopped.epoch;
-  await lapse(stopped, stoppedEpoch);
-  await engine.reconcile();
-  stopped = await reload(stopped);
-  assert.deepEqual(standingEscalations(stopped).map(entry => entry.trigger), ['lease-loss'], 'a silent lapse escalates first');
-  await engine.execute(master, 'rework', stopped.id, { reason: 'I stopped that session myself before re-dispatching', previousWorkerStopped: true }, id());
-  await engine.reconcile();
-  stopped = await reload(stopped);
-  assert.deepEqual(standingEscalations(stopped), [], 'and the attestation settles it on the next pass');
-  assert.equal((await events(stopped, 'escalation.auto-settled')).at(-1)!.payload.details.cause, 'stopped-by-attestation');
-
-  // 3. A capacity exhaustion: the loop reads the spent account out of the session's own output
-  //    after the lease has already lapsed and been reconciled. The attempt did not vanish — the
-  //    control plane recorded why it ended — so nothing is left for a person to judge.
-  let spent = await engine.execute(worker, 'claim', (await ready()).id, {}, id());
-  const spentEpoch = spent.epoch;
-  await lapse(spent, spentEpoch);
-  await engine.reconcile();
-  spent = await reload(spent);
-  assert.deepEqual(standingEscalations(spent).map(entry => entry.trigger), ['lease-loss']);
-  const reported = await fetch(`${url}/api/work/${spent.id}/capacity`, {
-    method: 'POST', headers: { Authorization: `Bearer ${coordinatorToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': id() },
-    body: JSON.stringify({ event: 'exhausted', role: 'worker', epoch: spentEpoch, profile: 'claude-worker', account: 'claude-two', runtime: 'claude', reason: 'Claude AI usage limit reached', resetsAt: '2026-09-22T04:00:00.000Z', partialWork: { state: 'clean' } }),
-  });
-  assert.equal(reported.status, 200, JSON.stringify(await reported.clone().json()));
-  await engine.reconcile();
-  spent = await reload(spent);
-  assert.deepEqual(standingEscalations(spent), [], 'the exhaustion record explains the lapse');
-  const spentNote = (await events(spent, 'escalation.auto-settled')).at(-1)!;
-  assert.equal(spentNote.payload.details.cause, 'exhausted-capacity');
-  assert.match(spentNote.payload.details.note, /the claude-worker account claude-two reported no quota left for epoch/);
-  assert.match(spentNote.payload.details.note, /resets 2026-09-22T04:00:00.000Z/);
-  assert.equal(humanNeededActions([spent], new Date()).length, 0, 'and nothing about it is owed to anybody');
-
-  // A lapse the ledger explains raises nothing in the first place, and every settlement above
-  // happened with no session of any kind: reconciliation is the whole mechanism.
-  let explained = await engine.execute(worker, 'claim', (await ready()).id, {}, id());
-  const explainedEpoch = explained.epoch;
-  await engine.execute(worker, 'blocked', explained.id, { epoch: explainedEpoch, reason: 'Waiting on the operator' }, id());
-  await lapse(explained, explainedEpoch);
-  await engine.reconcile();
-  explained = await reload(explained);
-  assert.deepEqual(standingEscalations(explained), []);
-  assert.equal((await events(explained, 'lease.expired')).at(-1)!.payload.details.cause, 'blocked-awaiting-operator');
-
-  // Only a lapse nothing explains is a judgement: it stands, it refuses delivery, and it is
-  // listed as owed to a person with the command that answers it.
-  let vanished = await engine.execute(worker, 'claim', (await ready()).id, {}, id());
-  await lapse(vanished, vanished.epoch);
-  await engine.reconcile();
-  vanished = await reload(vanished);
-  assert.deepEqual(standingEscalations(vanished).map(entry => entry.trigger), ['lease-loss']);
-  await engine.reconcile();
-  assert.deepEqual(standingEscalations(await reload(vanished)).map(entry => entry.trigger), ['lease-loss'], 'and no later pass settles what nothing explains');
-  assert.equal(humanNeededActions([await reload(vanished)], new Date()).length, 1);
-  await assert.rejects(engine.execute(master, 'resolve', (await reload(vanished)).id, { trigger: 'lease-loss', reason: 'Automation says it is fine', expectedRevision: (await reload(vanished)).revision }, id()),
-    /requires a declared human session/);
-});
 
 // ---- AC-4: an action no executor may run is owed by somebody, and counted apart -----------------
 
@@ -234,7 +22,7 @@ const probe = (overrides: Partial<Work> = {}): Work => ({
   ready: true, stage: 'merge', epoch: 1, revision: 1, policyRevision: 1,
   gates: [], violations: [], evidence: [], workspaces: [], agentRequests: [], sessions: [],
   lease: null, submission: null, candidate: null, observation: null, blocker: null,
-  escalation: null, escalations: [], createdAt: at, updatedAt: at, stageEnteredAt: at,
+  createdAt: at, updatedAt: at, stageEnteredAt: at,
   ...overrides,
 } as unknown as Work);
 
@@ -247,7 +35,7 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   assert.equal(computed.kind, 'escalate');
   assert.equal(actionJudgment.escalate, 'in-step');
   assert.ok(!executorRunnableKinds.includes('escalate'), 'no executor may hold a handler for it, so no executor will ever claim the row');
-  assert.deepEqual(computed.needsHuman, { decision: `resolving ${owedItem.key}'s merge refusal`, resolve: `graphyard diagnose ${owedItem.key} — ${refusal}` });
+  assert.deepEqual(computed.needsHuman, { decision: `resolving ${owedItem.key}'s refusal`, resolve: `graphyard diagnose ${owedItem.key} — ${refusal}` });
   assert.deepEqual(humanNeeded(computed), computed.needsHuman, 'what the action records is what the rule says');
 
   // Beside it, a row an executor is simply yet to take.
@@ -271,7 +59,7 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
 
   // The human-facing page names it, with the command that answers it and who answers it.
   const page = humanNeededAttention({ work, now: now.toISOString() });
-  assert.deepEqual(page.map(entry => [entry.subject, entry.role, entry.approvedBy]), [[owedItem.key, 'master', 'approver']]);
+  assert.deepEqual(page.map(entry => [entry.subject, entry.role]), [[owedItem.key, 'master']]);
   assert.match(page[0].text, /no executor may run it/);
   assert.equal(page[0].next, `graphyard diagnose ${owedItem.key} — ${refusal}`, 'and the command that reads out what it is waiting on');
 
@@ -284,65 +72,4 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   assert.deepEqual(report.waiting.map(row => row.kind), ['dispatch'], 'the queue executors read holds only what they can take');
   assert.deepEqual(report.idle.map(row => row.kind), ['dispatch'], 'and a row nobody may claim never ages into the idle list');
 
-  // A standing escalation beside a running action is owed just the same: the work is not frozen
-  // by it, and it is not lost behind the work.
-  const escalation: Escalation = { trigger: 'security-concern', reason: 'A credential appears in the diff', at, actor: human.id };
-  const carrying = probe({ key: 'GY-3', id: 'id-GY-3', escalation, escalations: [escalation],
-    gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }] } as Partial<Work>);
-  carrying.nextAction = nextAction(carrying, [carrying], new Date(at));
-  assert.equal(carrying.nextAction!.kind, 'dispatch');
-  const both = humanNeededActions([carrying], now);
-  assert.deepEqual(both.map(entry => [entry.source, entry.trigger, entry.waitedMs]), [['carried', 'security-concern', 30_000]]);
-  assert.match(both[0].resolve, /graphyard master escalation GY-3 security-concern/);
 });
-
-test('unit:delivered-escalation-not-owed — a delivered item with a standing lease-loss escalation yields no owed-decision row or attention item, while an open item with one does', () => {
-  const now = new Date(Date.parse(at) + 30_000);
-  const escalation: Escalation = { trigger: 'lease-loss', reason: 'Worker lost lease epoch 1', at, actor: 'graphyard' };
-
-  // Builds one delivered item and one open item, each with a standing lease-loss escalation.
-  const delivered = probe({
-    key: 'GY-10', id: 'id-GY-10', stage: 'done', ready: true,
-    escalation, escalations: [escalation],
-  });
-  const open = probe({
-    key: 'GY-11', id: 'id-GY-11', stage: 'build', ready: true,
-    escalation, escalations: [escalation],
-    gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
-  });
-
-  const work = [delivered, open];
-  for (const item of work) {
-    item.nextAction = nextAction(item, work, new Date(at));
-  }
-
-  // carriedAction and nextAction skipped standing escalations on the delivered item.
-  assert.equal(action(delivered), null);
-  assert.equal(carriedAction(delivered, null, work, now), null);
-
-  // The open item still raises its escalation beside the workable step.
-  assert.equal(action(open).kind, 'dispatch');
-  assert.deepEqual(action(open).carried.map((concern: any) => [concern.kind, concern.trigger]), [['escalation', 'lease-loss']]);
-
-  // Only the open item produces a row in humanNeededActions.
-  const owed = humanNeededActions(work, now);
-  assert.deepEqual(owed.map(entry => [entry.key, entry.source, entry.trigger]), [[open.key, 'carried', 'lease-loss']]);
-
-  // Only the open item produces an attention item in humanNeededAttention.
-  const attention = humanNeededAttention({ work, now: now.toISOString() });
-  assert.deepEqual(attention.map(item => item.subject), [open.key]);
-  assert.match(attention[0].text, /standing lease-loss escalation while it is worked/);
-
-  // A merged delivered item (merged pull request before stage transitions to done) is likewise skipped.
-  const mergedDelivered = probe({
-    key: 'GY-12', id: 'id-GY-12', stage: 'merge', ready: true,
-    observation: { merged: true } as any,
-    escalation, escalations: [escalation],
-  });
-  mergedDelivered.nextAction = nextAction(mergedDelivered, [mergedDelivered], new Date(at));
-  assert.equal(action(mergedDelivered), null);
-  assert.equal(carriedAction(mergedDelivered, null, [mergedDelivered], now), null);
-  assert.deepEqual(humanNeededActions([mergedDelivered], now), []);
-  assert.deepEqual(humanNeededAttention({ work: [mergedDelivered], now: now.toISOString() }), []);
-});
-

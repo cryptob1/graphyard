@@ -56,7 +56,6 @@ function daemon(overrides: Partial<DaemonEffects> = {}) {
   const effects: DaemonEffects = {
     agents: () => Promise.resolve(herdr()),
     herdr: () => ({ agents: herdr(), available: true }),
-    stopSupervisor: () => {},
     credentials: async configured => Object.fromEntries(configured.map(entry => [entry.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [...jamItems(), waiting()], now: observedAt }),
     closeSession: () => {},

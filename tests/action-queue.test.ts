@@ -1,13 +1,13 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { evaluate, standingEscalations, type Observation, type Principal, type Work } from '../src/model.js';
+import { evaluate, type Observation, type Principal, type Work } from '../src/model.js';
 import { actionClaimMs, claimAction, idleActionable, openActions, queueSnapshot, reconcileActions, settleAction, type ActionRow } from '../src/model/actions.js';
 import { actionAccount, actionJudgment, executorRunnableKinds, llmRoles, mechanicalActionKinds, nextAction, nextActionKinds, nextActionLlmRoles, refusalAction, type NextActionKind } from '../src/model/next-action.js';
 import { agentRequestLimit, agentRequestTypes, deciderFor, humanDecisions, leaseHeldRequestTypes, openAgentRequests, requestResolutionRefusal } from '../src/model/agent-requests.js';
@@ -284,67 +284,6 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(refusalAction(failing, 'merge', `merge writer has not pushed ${head.slice(0, 12)}`), 'merge');
 });
 
-test('integration:typed-next-action — an unsettled containment fence escalates instead of naming a reclaim nothing can complete, and the reconciliation a reclaim asks for clears only the unfenced lapse', async () => {
-  // A supervised worker fences its launch, submits, and lets the lease lapse. The quarantine
-  // outlives the attempt that raised it, and reconciliation records that lapse as an explained
-  // expiry rather than an incident — so nothing pre-empts what the fence itself needs.
-  let fenced = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  const settlementToken = randomBytes(32).toString('hex'), settlementHash = createHash('sha256').update(settlementToken).digest('hex');
-  const fencedEpoch = fenced.epoch;
-  fenced = await engine.execute(worker, 'workspace', fenced.id, { epoch: fencedEpoch, host: 'machine-a', path: `/tmp/fenced/${fenced.id}`, branch: `graphyard/${fenced.key.toLowerCase()}-${fencedEpoch}` }, randomUUID());
-  fenced = await engine.execute(worker, 'quarantine', fenced.id, { epoch: fencedEpoch, settlementHash }, randomUUID());
-  fenced = await engine.execute(worker, 'submit', fenced.id, { epoch: fencedEpoch, pr: Number(fenced.key.slice(3)) }, randomUUID());
-  await expireLease(fenced);
-
-  // An assignment nobody fenced, whose lease lapsed with nothing submitted, is the other half of
-  // `reclaim` — and the half that works: the reconciliation the control plane already runs clears
-  // it, so the loop only has to ask for one.
-  const lapsed = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  await expireLease(lapsed);
-  const now = new Date();
-  const probe = structuredClone(await reload(lapsed));
-  Object.assign(probe, evaluate(probe, [probe], now));
-  const reclaim = nextAction(probe, [probe], now)!;
-  assert.equal(reclaim.kind, 'reclaim');
-  assert.equal(reclaim.llmRole, null, 'asking the control plane to look again needs no judgment');
-  assert.deepEqual(reclaim.inputs, { kind: 'reclaim', epoch: probe.lease!.epoch, owner: worker.id, leaseExpiresAt: probe.lease!.expiresAt });
-
-  // Nothing the loop runs lowers a fence. `reclaim` asks the control plane to re-read the item
-  // and reconcile it, which clears a lapsed lease and never touches a quarantine: only the
-  // worker's settlement capability, a verified containment assessment or an operator's
-  // stopped-worker recovery does, and each rests on somebody judging that the worker really
-  // stopped. Naming `reclaim` here once handed a row whose handler reported the item free while it
-  // was still fenced and came back every settle window for as long as the fence stood. No
-  // mechanical step answers it, so it escalates — visible and owed — exactly as an exhausted
-  // reviewer roster does.
-  await engine.reconcile();
-  fenced = await reload(fenced);
-  assert.equal(fenced.lease, null, 'the lapse is cleared');
-  assert.ok(fenced.containmentQuarantine, 'and the fence it raised outlives it');
-  assert.deepEqual(standingEscalations(fenced), [], 'a submitted epoch explains its own lapse, so no lease-loss escalation stands in front of this');
-  assert.equal(fenced.nextAction!.kind, 'escalate');
-  assert.equal(fenced.nextAction!.llmRole, 'resolve-escalation');
-  assert.match(fenced.nextAction!.reason, new RegExp(`${fenced.key} is fenced by unverified containment from epoch ${fencedEpoch}`));
-  assert.equal(inputs(fenced).trigger, 'containment');
-  assert.match(inputs(fenced).detail, new RegExp(`settle the epoch ${fencedEpoch} quarantine \\(graphyard master settle-containment ${fenced.key} REASON\\)`));
-  const fencedRow = rows(fenced).find(entry => entry.binding === fenced.nextAction!.binding)!;
-  assert.equal(fencedRow.kind, 'escalate', 'the durable row is the escalation');
-  assert.equal(actionJudgment.escalate, 'in-step');
-  assert.ok(!executorRunnableKinds.includes('escalate'), 'which no executor claims, so nothing retries it every settle window');
-  assert.ok(!rows(fenced).some(entry => entry.kind === 'reclaim'), 'and no reclaim row stands beside it');
-
-  // The reconciliation a reclaim asks for leaves the fence standing and clears the unfenced lapse.
-  await engine.resyncWork(executorA, fenced.id);
-  assert.ok((await reload(fenced)).containmentQuarantine, 'a re-read never lowers a quarantine');
-  await engine.resyncWork(executorA, lapsed.id);
-  assert.equal((await reload(lapsed)).lease, null);
-
-  // The fence is what held it: settled, the item needs what the gates say again.
-  const settled = await engine.execute(worker, 'settle', fenced.id, { epoch: fencedEpoch, settlementToken }, randomUUID());
-  assert.equal(settled.containmentQuarantine, null);
-  assert.equal(settled.nextAction!.kind, 'resync', 'a submitted candidate nobody has observed is read, not escalated');
-});
-
 // ---- AC-2: durable rows, leased claims, idempotency ------------------------------------------
 
 /** A master configuration with one worker profile per worker, one reviewer profile and one independent producer profile. */
@@ -511,40 +450,34 @@ test('integration:no-llm-in-critical-path — every judgment has one action that
 
 test('integration:typed-agent-requests — an agent that needs something records a typed request, names its decider and exits without holding its lease, and master status shows it with how long it has waited', async () => {
   // Every type names exactly one decider, from those the project allows.
-  assert.deepEqual([...agentRequestTypes], ['decision', 'blocker', 'note', 'escalation']);
-  assert.deepEqual(agentRequestTypes.map(type => deciderFor('GY-9', { type, action: 'rework' }).kind), ['approver', 'follow-up', 'rule', 'approver']);
+  assert.deepEqual([...agentRequestTypes], ['blocker', 'note']);
+  assert.deepEqual(agentRequestTypes.map(type => deciderFor('GY-9', { type }).kind), ['follow-up', 'rule']);
   for (const type of agentRequestTypes) {
-    const decider = deciderFor('GY-9', { type, action: 'rework' });
+    const decider = deciderFor('GY-9', { type });
     assert.ok(decider.who.length > 0, `${type} names who decides it`);
-    assert.equal(['rule', 'approver', 'follow-up', 'human'].includes(decider.kind), true);
+    assert.equal(['rule', 'follow-up', 'human'].includes(decider.kind), true);
   }
   // Only one of the three human-only decisions reaches a person, whatever the type.
-  for (const humanDecision of humanDecisions) assert.equal(deciderFor('GY-9', { type: 'decision', humanDecision }).kind, 'human');
+  for (const humanDecision of humanDecisions) assert.equal(deciderFor('GY-9', { type: 'blocker', humanDecision }).kind, 'human');
 
-  // A decision request names the action an independent approver must approve.
-  let decided = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  decided = await engine.execute(worker, 'request', decided.id, { type: 'decision', epoch: decided.epoch, action: 'rework', reason: 'the finding needs a second head, which only an approved rework opens' }, randomUUID());
-  const decision = openAgentRequests(decided, new Date())[0];
-  assert.equal(decision.decider.kind, 'approver');
-  assert.match(decision.decider.command!, /master decide GY-\d+ rework REASON, then graphyard master approver/);
-  assert.equal(decided.lease, null);
+  // A blocker names a tracked follow-up item, still sets the blocker the gates read and ends the attempt.
+  let blocked = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
+  blocked = await engine.execute(worker, 'request', blocked.id, { type: 'blocker', epoch: blocked.epoch, reason: 'the deployment provider is refusing every token' }, randomUUID());
+  const blocker = openAgentRequests(blocked, new Date())[0];
+  assert.equal(blocker.decider.kind, 'follow-up');
+  assert.match(blocker.decider.command!, /graphyard master create — a follow-up item naming GY-\d+/);
+  assert.equal(blocked.blocker, 'the deployment provider is refusing every token');
+  assert.equal(blocked.lease, null);
   // Master status shows the open request with its decider and how long it has waited, addressed
   // to an agent; and the control plane names the escalation that leaves the executor loop for it.
   const snapshot = { work: await store.list(), now: new Date(Date.now() + 90_000).toISOString() };
-  const line = agentRequestAttention(snapshot).find(entry => entry.subject === decided.key)!;
-  assert.match(line.text, /recorded a decision on GY-\d+ 1.5 min ago and released its lease/);
-  assert.match(line.text, /decided by an independent approver agent/);
-  assert.deepEqual([line.role, line.human, line.humanOnly, line.approvedBy], ['master', false, null, 'approver']);
-  assert.equal(line.next, decision.decider.command);
-  assert.ok(agentRequestReport(snapshot).some(entry => entry.key === decided.key && entry.waitedMs >= 90_000));
-  assert.ok(actionReport(snapshot).next.some(entry => entry.key === decided.key && entry.kind === 'escalate'));
-
-  // A blocker names a tracked follow-up item and still sets the blocker the gates read.
-  let blocked = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  blocked = await engine.execute(worker, 'request', blocked.id, { type: 'blocker', epoch: blocked.epoch, reason: 'the deployment provider is refusing every token' }, randomUUID());
-  assert.equal(openAgentRequests(blocked, new Date())[0].decider.kind, 'follow-up');
-  assert.equal(blocked.blocker, 'the deployment provider is refusing every token');
-  assert.equal(blocked.lease, null);
+  const line = agentRequestAttention(snapshot).find(entry => entry.subject === blocked.key)!;
+  assert.match(line.text, /recorded a blocker on GY-\d+ 1.5 min ago and released its lease/);
+  assert.match(line.text, /decided by a tracked follow-up work item/);
+  assert.deepEqual([line.role, line.human, line.humanOnly], ['master', false, null]);
+  assert.equal(line.next, blocker.decider.command);
+  assert.ok(agentRequestReport(snapshot).some(entry => entry.key === blocked.key && entry.waitedMs >= 90_000));
+  assert.ok(actionReport(snapshot).next.some(entry => entry.key === blocked.key && entry.kind === 'escalate'));
 
   // A note is a record, not a hand-off: it keeps the lease and asks nobody for anything.
   let noted = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
@@ -554,11 +487,10 @@ test('integration:typed-agent-requests — an agent that needs something records
 
   // A human-only decision is the operator's, and says which of the three it is.
   let money = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  money = await engine.execute(worker, 'request', money.id, { type: 'escalation', epoch: money.epoch, trigger: 'security-concern', humanDecision: 'spending-money-or-accounts', reason: 'finishing this needs a paid account with the provider' }, randomUUID());
+  money = await engine.execute(worker, 'request', money.id, { type: 'blocker', epoch: money.epoch, humanDecision: 'spending-money-or-accounts', reason: 'finishing this needs a paid account with the provider' }, randomUUID());
   const human = openAgentRequests(money, new Date())[0];
   assert.equal(human.decider.kind, 'human');
   assert.match(human.decider.who, /spending money or accounts/);
-  assert.equal(money.escalation!.trigger, 'security-concern');
   const humanLine = agentRequestAttention({ work: await store.list(), now: new Date().toISOString() }).find(entry => entry.subject === money.key)!;
   assert.deepEqual([humanLine.role, humanLine.human, humanLine.humanOnly], ['human', true, 'spending money or opening third-party accounts']);
 
@@ -570,34 +502,32 @@ test('integration:typed-agent-requests — an agent that needs something records
   await engine.execute(otherWorker, 'release', reclaimed.id, { epoch: reclaimed.epoch }, randomUUID());
 
   // A request is closed by the party its record names, and by nobody else. Without that rule a
-  // session could record a request for an independent approver or the human operator and then
-  // resolve it itself, and master status would stop showing the very thing it exists to surface.
-  await assert.rejects(engine.execute(worker, 'request', decided.id, { type: 'note', resolve: decision.id, reason: 'I approve my own request' }, randomUUID()),
-    /agent-a recorded this decision; it is decided by an independent approver agent, never by the session that asked/);
-  await assert.rejects(engine.execute(otherWorker, 'request', decided.id, { type: 'note', resolve: decision.id, reason: 'another worker closes it' }, randomUUID()),
-    /decided by an independent approver agent; a worker credential cannot close it/);
-  await assert.rejects(engine.execute(executorA, 'request', decided.id, { type: 'note', resolve: decision.id, reason: 'the loop closes it' }, randomUUID()),
+  // session could record a request for the human operator and then resolve it itself, and master
+  // status would stop showing the very thing it exists to surface.
+  await assert.rejects(engine.execute(worker, 'request', blocked.id, { type: 'note', resolve: blocker.id, reason: 'I close my own request' }, randomUUID()),
+    /agent-a recorded this blocker; it is decided by a tracked follow-up work item, never by the session that asked/);
+  await assert.rejects(engine.execute(otherWorker, 'request', blocked.id, { type: 'note', resolve: blocker.id, reason: 'another worker closes it' }, randomUUID()),
+    /decided by a tracked follow-up work item; a worker credential cannot close it/);
+  await assert.rejects(engine.execute(executorA, 'request', money.id, { type: 'note', resolve: human.id, reason: 'the loop closes it' }, randomUUID()),
     /a coordinator credential cannot close it/);
-  assert.equal(requestResolutionRefusal({ type: 'escalation', requestedBy: 'agent-a', decider: deciderFor('GY-9', { type: 'escalation' }) }, { id: 'operator', role: 'admin' }), null);
+  assert.equal(requestResolutionRefusal({ type: 'blocker', requestedBy: 'agent-a', decider: deciderFor('GY-9', { type: 'blocker', humanDecision: 'issuing-credentials' }) }, { id: 'operator', role: 'admin' }), null);
   assert.equal(requestResolutionRefusal({ type: 'blocker', requestedBy: 'agent-a', decider: deciderFor('GY-9', { type: 'blocker' }) }, { id: 'master', role: 'coordinator' }), null,
     'a blocker names a tracked follow-up item, which the loop opens');
   assert.equal(requestResolutionRefusal({ type: 'note', requestedBy: 'agent-a', decider: deciderFor('GY-9', { type: 'note' }) }, { id: 'agent-a', role: 'worker' }), null,
     'a note decides nothing, so its author closes its own record');
   // The party the record does name closes it, with the reason on the record.
-  const answered = await engine.execute(operator, 'request', decided.id, { type: 'note', resolve: decision.id, reason: 'the approver agent approved the rework' }, randomUUID());
+  const answered = await engine.execute(operator, 'request', blocked.id, { type: 'note', resolve: blocker.id, reason: 'the follow-up item tracks the provider fault' }, randomUUID());
   assert.deepEqual(openAgentRequests(answered, new Date()), []);
-  assert.equal(answered.agentRequests!.find(entry => entry.id === decision.id)!.resolution, 'the approver agent approved the rework');
+  assert.equal(answered.agentRequests!.find(entry => entry.id === blocker.id)!.resolution, 'the follow-up item tracks the provider fault');
 
   // Recording a typed request is the same write as the command it replaces, so it needs the same
   // authority: the live lease of the attempt that is asking. Without this rule any worker or
-  // producer credential with no assignment could set the blocker that holds the ready gate, or
-  // raise the escalation that fences every in-flight merge, on any item in the graph.
-  assert.deepEqual([...leaseHeldRequestTypes].sort(), ['blocker', 'decision', 'escalation']);
+  // producer credential with no assignment could set the blocker that holds the ready gate on any
+  // item in the graph.
+  assert.deepEqual([...leaseHeldRequestTypes], ['blocker']);
   const unrelated = await release(await created());
   for (const type of leaseHeldRequestTypes) {
     const body: Record<string, unknown> = { type, reason: 'no lease on this item' };
-    if (type === 'decision') body.action = 'rework';
-    if (type === 'escalation') body.trigger = 'security-concern';
     for (const actor of [otherWorker, producer]) {
       await assert.rejects(engine.execute(actor, 'request', unrelated.id, body, randomUUID()),
         new RegExp(`A ${type} names the attempt epoch that is asking`), `${actor.role} cannot record a lease-less ${type}`);
@@ -607,7 +537,6 @@ test('integration:typed-agent-requests — an agent that needs something records
   }
   const untouched = await reload(unrelated);
   assert.equal(untouched.blocker, null, 'no blocker was set by a credential holding nothing');
-  assert.equal(untouched.escalation ?? null, null, 'no escalation was raised by a credential holding nothing');
   assert.deepEqual(untouched.agentRequests ?? [], [], 'nothing was recorded at all');
   // A note moves nothing a gate reads, so a producer session with no lease may still record one.
   const noted2 = await engine.execute(producer, 'request', unrelated.id, { type: 'note', reason: 'the acceptance fixture needs a wider timeout on this host' }, randomUUID());
@@ -641,17 +570,15 @@ test('integration:typed-agent-requests — an agent that needs something records
   assert.ok(failure, `the cycle recorded a session failure for ${waiting.key}; it recorded ${JSON.stringify(cycle.actions.map(action => [action.kind, action.work, action.state]))}`);
   assert.equal(failure!.state, 'failed');
   assert.match(failure!.detail, /is waiting on input \(Herdr reports it blocked\)/);
-  assert.match(failure!.detail, /records a typed request and exits — POST \/api\/work\/GY-\d+\/request with a type of decision, blocker, note or escalation — which names its decider and frees the item/);
+  assert.match(failure!.detail, /records a typed request and exits — POST \/api\/work\/GY-\d+\/request with a type of blocker or note — which names its decider and frees the item/);
   await engine.execute(worker, 'release', waiting.id, { epoch: waiting.epoch }, randomUUID());
 });
 
 test('integration:typed-agent-requests — the bound on recorded requests retires resolved ones and never evicts an open ask', async () => {
-  // An open decision request, recorded under the live lease of the attempt that asked, and left
-  // for its approver. Its only durable effect is the record itself: unlike a blocker, an
-  // escalation or a scope ask, nothing else on the item carries it, so losing the record loses
-  // both the ask and the escalation the control plane raises from it.
+  // An open blocker request, recorded under the live lease of the attempt that asked, and left for
+  // the follow-up item that answers it. Losing the record loses the ask master status surfaces.
   let item = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  item = await engine.execute(worker, 'request', item.id, { type: 'decision', epoch: item.epoch, action: 'rework', reason: 'the finding needs a second head, which only an approved rework opens' }, randomUUID());
+  item = await engine.execute(worker, 'request', item.id, { type: 'blocker', epoch: item.epoch, reason: 'the deployment provider is refusing every token' }, randomUUID());
   const ask = openAgentRequests(item, new Date())[0];
   assert.equal(item.lease, null, 'and the attempt ended, so the ask is not held by a session');
 
@@ -659,15 +586,15 @@ test('integration:typed-agent-requests — the bound on recorded requests retire
   // oldest entries to bound the list would therefore be a way to remove somebody else's ask:
   // enough notes and the open request falls off the end. The bound retires resolved requests
   // first — oldest first — and never evicts an open one, exactly as `sessions.ts::bounded` does
-  // for handles, so the list stays bounded without anybody being able to silence a decision.
+  // for handles, so the list stays bounded without anybody being able to silence an ask.
   for (let index = 0; index < agentRequestLimit + 10; index++) {
     item = await engine.execute(producer, 'request', item.id, { type: 'note', reason: `fixture ${index} is the slow one` }, randomUUID());
   }
   assert.equal(item.agentRequests!.length, agentRequestLimit, 'the list stays bounded');
-  assert.ok(item.agentRequests!.some(entry => entry.id === ask.id), 'the open decision survived every one of them');
-  assert.equal(openAgentRequests(item, new Date()).filter(entry => entry.type === 'decision').length, 1);
-  assert.equal(item.nextAction!.kind, 'escalate', 'so the control plane still names the escalation the ask raises');
-  assert.equal(inputs(item).trigger, 'decision');
+  assert.ok(item.agentRequests!.some(entry => entry.id === ask.id), 'the open blocker survived every one of them');
+  assert.equal(openAgentRequests(item, new Date()).filter(entry => entry.type === 'blocker').length, 1);
+  assert.equal(item.nextAction!.kind, 'escalate', 'so the control plane still names the escalation the blocker raises');
+  assert.equal(inputs(item).trigger, 'ready');
   // The notes themselves are what the bound retired: resolved entries, oldest first.
   const resolvedNote = item.agentRequests!.find(entry => entry.type === 'note')!;
   const closed = await engine.execute(producer, 'request', item.id, { type: 'note', resolve: resolvedNote.id, reason: 'a note is closed by its author' }, randomUUID());

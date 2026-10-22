@@ -17,7 +17,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const day = 86_400_000, repository = 'owner/master-defer';
 const admin: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const worker: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
-const operatorAgent = { id: 'graphyard-operator', role: 'operator-agent', sessionKind: 'ai', capabilities: ['intent:create', 'intent:ready', 'intent:unblock'],
+const operatorAgent = { id: 'graphyard-operator', role: 'operator-agent', sessionKind: 'ai', capabilities: [],
   scope: { repositories: [repository], workItems: ['*'] } } as unknown as Principal;
 const followUp = { id: 'AC-1', text: 'From this head against the serving release f1984c118352: the intervention report shows the escalation rate at the build stage below 3 per 7 days after the change ships', proofs: ['manual:intervention-pattern-escalation-build-on-serving-release'] };
 
@@ -87,8 +87,7 @@ test('integration:master-defer-sets-observation-window — master defer sets the
   await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore: new Date(await now() + 31 * day).toISOString(), reason: 'far' }, randomUUID()), /more than 30 days/);
   const ordinary = await blocked([{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }]);
   await assert.rejects(engine.execute(operatorAgent, 'window', ordinary.id, { expectedRevision: ordinary.revision, notBefore, reason: 'not a follow-up' }, randomUUID()), /owes no post-deploy observation/);
-  // The operator agent needs the unblock capability, and a worker may never set a window this way.
-  await assert.rejects(engine.execute({ ...operatorAgent, capabilities: ['intent:create'] } as Principal, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore, reason: 'no capability' }, randomUUID()), /Capability intent:unblock is required/);
+  // A worker may never set a window this way.
   await assert.rejects(engine.execute(worker, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore, reason: 'a worker' }, randomUUID()), /Coordinator permission required/);
   // A window read against an older revision is refused: what it was derived from has since changed.
   await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { expectedRevision: fresh.revision - 1, notBefore, reason: 'stale' }, randomUUID()), /Task revision changed/);

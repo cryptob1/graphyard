@@ -26,8 +26,8 @@ const producer: Principal = { id: 'huck-producer', role: 'producer', grants: ['e
 const otherProducer: Principal = { id: 'ci-collector', role: 'producer', grants: ['external-runs:import'] };
 // A producer with proof authority but no import grant: refused at the import route, naming the grant.
 const ungrantedProducer: Principal = { id: 'unit-collector', role: 'producer', proofs: ['unit:*'] };
-// An operator agent holding only intent:create, as the release-filing identity was: it reads the hold and never imports.
-const releaseFiler: Principal = { id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: ['intent:create'], scope: { repositories: ['owner/project'], workItems: [] } };
+// An operator agent with no capability, as the release-filing identity is: it reads the hold and never imports.
+const releaseFiler: Principal = { id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: [], scope: { repositories: ['owner/project'], workItems: [] } };
 const principals = [operator, worker, reader, producer, otherProducer, ungrantedProducer, releaseFiler];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
 

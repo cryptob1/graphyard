@@ -201,7 +201,7 @@ test('integration:timeline-backfill — items delivered before the timeline exis
   for (const delivery of summary.items) assert.equal(delivery.executionMs! + delivery.waitMs! >= 0, true);
 
   // Master status carries exactly that, per delivered item and in the summary.
-  const master = buildMasterStatus({ work, now: new Date(now).toISOString() }, [], [], {}, {}, { pending: [], completed: [] });
+  const master = buildMasterStatus({ work, now: new Date(now).toISOString() }, [], [], {}, { pending: [], completed: [] });
   assert.equal(master.speed.unmeasured, 1);
   assert.equal(master.speed.coverage.awaitingBackfill, 0);
   assert.deepEqual(master.speed.items.map(entry => entry.key).sort(), [legacy.key, live.key].sort());

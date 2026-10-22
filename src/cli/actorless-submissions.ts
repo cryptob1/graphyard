@@ -36,9 +36,9 @@ export const baseConflictWaitBoundMs = 30 * 60_000;
 
 const missingActor: Record<ReviewState, { actor: string; next: (key: string) => string }> = {
   required: { actor: 'a reviewer: no review request is raised for its head', next: key => `graphyard master review ${key}` },
-  'base-not-contained': { actor: 'a sync rework: its head does not merge cleanly with the base', next: key => `graphyard master decide ${key} rework REASON naming the conflicting base tip, then graphyard master approver ${key} DECISION` },
-  'changes-requested': { actor: 'a rework request: a verdict stands against its head', next: key => `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION` },
-  'proof-failed': { actor: 'a rework request: a mechanical proof failed on its head', next: key => `graphyard master decide ${key} rework REASON, then graphyard master approver ${key} DECISION` },
+  'base-not-contained': { actor: 'a sync rework: its head does not merge cleanly with the base', next: key => `graphyard master rework ${key} REASON naming the conflicting base tip` },
+  'changes-requested': { actor: 'a rework request: a verdict stands against its head', next: key => `graphyard master rework ${key} REASON` },
+  'proof-failed': { actor: 'a rework request: a mechanical proof failed on its head', next: key => `graphyard master rework ${key} REASON` },
   'proofs-pending': { actor: 'a proof producer: no producer request is raised for its unproven proofs', next: key => `graphyard master status; file the control-plane defect that raised no producer request for ${key}` },
   'provider-exhausted': { actor: 'reviewer capacity: every reviewer profile is exhausted', next: key => `graphyard master status; add reviewer capacity or select another review provider for ${key}` },
   'provider-dispatched': { actor: 'the review provider', next: key => `graphyard master status ${key}` },

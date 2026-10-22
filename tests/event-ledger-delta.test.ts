@@ -4,7 +4,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, appendSave, applyWorkDelta, eventStats, resolvedPayloadSql, snapshotEvery, workDiff, type WorkDelta } from '../src/store.js';
-import { Engine, readAttestations } from '../src/engine.js';
+import { Engine } from '../src/engine.js';
 import { ledgerEntry, ledgerReplayColumns, reconstructTimeline } from '../src/pipeline-speed.js';
 import { readEventHistory, parseEventHistoryQuery } from '../src/events-history.js';
 import type { Principal, Work } from '../src/model.js';
@@ -136,7 +136,7 @@ test('unit:delta-chain-bounded — a full snapshot recurs at least every snapsho
   assert.deepEqual(cited, (await resolved(work.id)).find(row => row.seq === target.seq)!.payload.work);
 });
 
-test('integration:delta-readers — events history, store.events, attestations and the timeline replay read deltas as the documents they stand for', async () => {
+test('integration:delta-readers — events history, store.events and the timeline replay read deltas as the documents they stand for', async () => {
   const n = ++serial;
   let w = await engine.execute(operator, 'create', null, { title: `Readers ${n}`, criteria: [1, 2, 3, 4].map(n => ({ id: `AC-${n}`, text: `Behaves ${randomBytes(900).toString('hex')}`, proofs: ['integration:x'] })) }, randomUUID());
   const records: Work[] = [plain(w)];
@@ -155,9 +155,6 @@ test('integration:delta-readers — events history, store.events, attestations a
   const history = await readEventHistory(store.pool, parseEventHistoryQuery(new URLSearchParams({ work: w.id, routine: 'include', order: 'asc' })));
   assert.equal(history.events.length, rows.length);
   for (const event of history.events) { assert.deepEqual(event.payload.work, byRevision.get(event.payload.work.revision)); assert.equal(event.payload.delta, undefined); }
-  // Attestations read the epoch the blocked row's document held.
-  const attestations = await readAttestations(store.pool, w.id);
-  assert.equal(attestations.length, 1); assert.equal(attestations[0].epoch, 1);
   // The projected replay and a replay of whole documents agree.
   const projected = (await store.pool.query(`SELECT ${ledgerReplayColumns} FROM events WHERE work_id=$1 ORDER BY seq`, [w.id])).rows.map(ledgerEntry);
   const whole = (await store.pool.query(`SELECT seq, kind, created_at, ${resolvedPayloadSql()} AS payload FROM events WHERE work_id=$1 ORDER BY seq`, [w.id])).rows;

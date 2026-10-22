@@ -8,7 +8,7 @@ import { deliveredProof } from '../src/model/bootstrap.js';
 import { classifyProofs } from '../src/cli/verify.js';
 import { proofOutcome } from '../src/producer.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
-import { neededDecision, proofRework } from '../src/daemon/decisions.js';
+import { neededRework, proofRework } from '../src/daemon/rework.js';
 
 // GY-895. The producer prompts already state the manual-proof rule — a manual: proof is judged,
 // not counted from titles — but the scorer still applied the unit title rule to it, so a trusted
@@ -107,16 +107,12 @@ test('unit:manual-proof-not-title-counted — the verifier names a manual proof 
   assert.equal(deliveredProof({ ...delivered, evidence: [evidence(MANUAL, { skipped: 1 })] }, MANUAL), false, 'a skipped manual pass discharges nothing');
 });
 
-test('unit:no-rework-on-manual-zero-executed — a manual record with executed = 0 routes to a fresh attestation, never to implementer rework', () => {
+test('unit:no-rework-on-manual-zero-executed — a manual record with executed = 0 never routes to implementer rework', () => {
   // The only failed evidence is the manual record that judged nothing; the underlying unit proof passed.
   const work = item([{ result: 'fail' as const, executed: 0 }, evidence(UNIT, { executed: 3 })]);
   assert.deepEqual(producerManualFailures(work, [work], now), [], 'an unexecuted record is no failure of the change');
   assert.equal(proofRework(work), null, 'no rework is asked for a proof nothing ran on');
-  const needed = neededDecision(work, { autoMerge: true });
-  assert.equal(needed?.action, 'attest', 'the loop requests a fresh producer attestation');
-  assert.deepEqual(needed?.input, { proof: MANUAL });
-  assert.equal(needed?.binding, `${head}:attest:${MANUAL}`);
-  assert.match(needed!.reason, /rework is the wrong remedy/);
+  assert.equal(neededRework(work), null, 'the loop applies no rework for it');
   assert.notEqual(nextAction(work, [work], now)?.kind, 'request-rework', 'the routing decision never sends this head to a worker');
 
   // The session that recorded it reports the producer's finding, not a failure of the change.
@@ -124,16 +120,16 @@ test('unit:no-rework-on-manual-zero-executed — a manual record with executed =
 
   // The fresh attestation answers it: the loop records the attested pass with executed = 1.
   const attested = item([{ result: 'fail' as const, executed: 0 }, evidence(UNIT, { executed: 3 }), { id: 'e2', result: 'pass', executed: 1, at: '2026-09-28T01:00:00.000Z' }]);
-  assert.equal(neededDecision(attested, { autoMerge: true }), null);
+  assert.equal(neededRework(attested), null);
   assert.equal(outcomeOf(attested, MANUAL), 'proven', 'the attested pass proves the criterion');
   // A re-judged pass recorded with executed = 0 answers it too (GY-895): the proof is proven.
-  assert.equal(neededDecision(item([{ result: 'fail' as const, executed: 0 }, evidence(UNIT, { executed: 3 }), { id: 'e2', result: 'pass', executed: 0, at: '2026-09-28T01:00:00.000Z' }]), { autoMerge: true }), null);
+  assert.equal(neededRework(item([{ result: 'fail' as const, executed: 0 }, evidence(UNIT, { executed: 3 }), { id: 'e2', result: 'pass', executed: 0, at: '2026-09-28T01:00:00.000Z' }])), null);
 
   // The control: a manual record the producer judged with cases executed is a failure of the
   // change (GY-868) and still returns the head to its worker.
   const judged = item([{ result: 'fail' as const, executed: 3 }, evidence(UNIT, { executed: 3 })]);
   assert.equal(producerManualFailures(judged, [judged], now).length, 1);
   assert.match(proofRework(judged)!.reason, new RegExp(MANUAL));
-  assert.equal(neededDecision(judged, { autoMerge: true })?.action, 'rework');
+  assert.match(neededRework(judged)?.binding ?? '', new RegExp(`^${head}:proof:`));
 });
 

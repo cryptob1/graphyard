@@ -109,15 +109,13 @@ test('integration:docs-sync-route-holds-across-base-move — through the loop\'s
   const decided: string[] = [], record = { synced: [] as DocsSyncPlan[], agents: [] as string[] };
   let item = conflicted(tip), at = clock;
   const effects = (): DaemonEffects => ({
-    agents: () => [], herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
+    agents: () => record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
     credentials: async () => ({}),
     snapshot: async () => ({ work: [item], now: new Date(at).toISOString(), jobs: [] }),
     closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    decide: async (_work, action) => { decided.push(action); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
-    decisions: async () => ({ decisions: [] }),
-    approver: async () => ({ agentName: 'graphyard-approver-gy-42', pane: 'pane-a' }),
+    rework: async () => { decided.push('rework'); return {}; },
     docsSync: launch(record),
     conflictPaths: async () => paths,
     persist: async () => {},
@@ -132,7 +130,7 @@ test('integration:docs-sync-route-holds-across-base-move — through the loop\'s
   item = conflicted(moved);
   const second = await cycle(clock + minute);
   assert.equal(record.synced.length, 1, 'no second launch of the same session name');
-  assert.deepEqual(decided, [], 'the item stays held: no rework decision');
+  assert.deepEqual(decided, [], 'the item stays held: no rework');
   assert.ok(!second.actions.some(action => action.work === 'GY-42' && /already visible in Herdr|returns to a worker/.test(action.detail)), 'no refused relaunch and no return to a worker');
   await cycle(clock + 4 * minute);
   assert.deepEqual(decided, []); assert.equal(record.synced.length, 1);
@@ -154,24 +152,21 @@ test('integration:docs-sync-route-holds-across-base-move — through the loop\'s
  * move never re-classified, and a 30-minute bound gated on an unprompted fresh observation.
  */
 
-/** The loop over one conflicted item, with switchable conflict paths, Herdr listing and observation effects. */
-function loop(id: string, options: { observe?: boolean } = {}) {
+/** The loop over one conflicted item, with switchable conflict paths and Herdr listing. */
+function loop(id: string) {
   const decided: string[] = [], woke: string[] = [], record = { synced: [] as DocsSyncPlan[], agents: [] as string[] };
   const harness = { item: conflicted(tip, iso(-30_000), { id }), at: clock, local: paths as string[], decided, woke, record, state: emptyDaemonState(config()) };
   const effects = (): DaemonEffects => ({
-    agents: () => [], herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
+    agents: () => record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), herdr: () => ({ agents: record.agents.map((name, index) => ({ name, pane_id: `pane-${index}`, agent_status: 'working' })), available: true }),
     credentials: async () => ({}),
     snapshot: async () => ({ work: [harness.item], now: new Date(harness.at).toISOString(), jobs: [] }),
     closeSession: () => { record.agents.length = 0; }, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(harness.at).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    decide: async (_work, action) => { decided.push(action); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
-    decisions: async () => ({ decisions: [] }),
-    approver: async () => ({ agentName: `graphyard-approver-${id}`, pane: 'pane-a' }),
+    rework: async () => { decided.push('rework'); return {}; },
     docsSync: launch(record),
     conflictPaths: async () => harness.local,
     wakeObservation: async work => { woke.push(work.key); },
-    ...(options.observe ? { observe: async (work: Work) => (harness.item = conflicted(harness.item.baseRefresh!.base, new Date(harness.at + 1_000).toISOString(), { id: work.id, conflictPaths: harness.item.baseRefresh!.conflictPaths ?? undefined })) } : {}),
     persist: async () => {},
   });
   const cycle = (now: number) => { harness.at = now; return runCycle(config(), harness.state, effects(), () => now); };
@@ -190,11 +185,11 @@ test('unit:docs-sync-hold-wait-recorded — a standing hold answers the session,
   for (const part of [name, reviewed.slice(0, 12), tip.slice(0, 12), deadline]) assert.ok(hold.wait.includes(part), `the wait names ${part}: ${hold.wait}`);
   const again = await route(clock + minute).hold(work);
   assert.ok(again.held && again.wait === hold.wait, 'the wait is stable from cycle to cycle');
-  const subjects = (now: number, docsSyncs = state.docsSyncs) => actionableSubjects({ autoMerge: true, run: config().run }, [work], now, { approvals: {}, docsSyncs }).filter(subject => subject.kind === 'decision').map(subject => subject.detail);
+  const subjects = (now: number, docsSyncs = state.docsSyncs) => actionableSubjects({ autoMerge: true, run: config().run }, [work], now, { docsSyncs }).filter(subject => subject.kind === 'decision').map(subject => subject.detail.replace(/: .*$/s, ''));
   assert.ok(docsSyncHolding(state.docsSyncs, work, clock + minute), 'the hold stands inside its bound');
   assert.deepEqual(subjects(clock + minute), [], 'no decision subject while the hold stands');
-  assert.deepEqual(subjects(clock + minute, {}), ['GY-42 needs a rework decision requested and approved'], 'without the hold the step owes the decision');
-  assert.deepEqual(subjects(clock + docsSyncHoldMs), ['GY-42 needs a rework decision requested and approved'], 'past its bound the hold exempts nothing');
+  assert.deepEqual(subjects(clock + minute, {}), ['GY-42 returns to a worker'], 'without the hold the step owes the rework');
+  assert.deepEqual(subjects(clock + docsSyncHoldMs), ['GY-42 returns to a worker'], 'past its bound the hold exempts nothing');
 });
 
 test('integration:held-conflict-no-decision-subject — through the loop\'s cycles, a held conflict records one wait naming the docs-sync and raises no decision silence subject', async () => {
@@ -203,7 +198,7 @@ test('integration:held-conflict-no-decision-subject — through the loop\'s cycl
   await run.cycle(clock + minute);
   await run.cycle(clock + 2 * minute);
   assert.deepEqual(run.decided, []);
-  const wait = run.state.actions['wait:docs-sync:work-held-subject'];
+  const wait = run.state.actions['wait:rework:work-held-subject'];
   assert.ok(wait, 'the hold is recorded as the item\'s wait');
   assert.equal(wait.attempts, 1, 'once: the wait is stable across cycles');
   for (const part of [run.record.agents[0], reviewed.slice(0, 12), tip.slice(0, 12), new Date(clock + docsSyncHoldMs).toISOString()]) assert.ok(wait.detail.includes(part), `the wait names ${part}: ${wait.detail}`);
@@ -277,14 +272,18 @@ test('unit:docs-sync-ended-hold-stays-ended — a hold found ended stays awaitin
   assert.match(notes.at(-1)!, new RegExp(`docs-sync session ${name} ended without moving`), 'an observation since settles it as ended when the loop found it gone');
 });
 
-test('integration:docs-sync-expiry-requests-rework-in-one-cycle — at the end of its bound, or when its session ends, the step wakes the observation and requests the rework within one cycle', async () => {
-  // With the loop's own observation waker: the reading lands in the cycle and the rework is requested in it.
-  const run = loop('work-expiry', { observe: true });
+test('integration:docs-sync-expiry-requests-rework-in-one-cycle — at the end of its bound, or when its session ends, the step wakes the observation and requests the rework the next cycle', async () => {
+  // At the end of its bound: the cycle wakes the observation job, and the rework follows once the reading lands.
+  const run = loop('work-expiry');
   await run.cycle(clock);
   await run.cycle(clock + 2 * minute);
   assert.deepEqual(run.decided, []);
-  const expiry = await run.cycle(clock + docsSyncHoldMs);
-  assert.deepEqual(run.decided, ['rework'], 'the rework is requested in the cycle the bound ends');
+  await run.cycle(clock + docsSyncHoldMs);
+  assert.deepEqual(run.woke, ['GY-42'], 'the observation job is woken the cycle the bound ends');
+  assert.deepEqual(run.decided, []);
+  run.harness.item = conflicted(tip, new Date(clock + docsSyncHoldMs + 5_000).toISOString(), { id: 'work-expiry' });
+  const expiry = await run.cycle(clock + docsSyncHoldMs + 20_000);
+  assert.deepEqual(run.decided, ['rework'], 'the rework is requested the cycle the reading lands');
   assert.ok(expiry.actions.some(action => action.work === 'GY-42' && new RegExp(`ran past its ${docsSyncHoldMs / minute}-minute bound`).test(action.detail)), 'the rework names the bound the session ran past');
 
   // Without it: the cycle the session is found gone wakes the observation job, and the next requests the rework.

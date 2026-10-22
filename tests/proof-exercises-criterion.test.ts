@@ -12,7 +12,7 @@ import { producerPrompt, proofOutcome } from '../src/producer.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { nextAction } from '../src/model/next-action.js';
-import { neededDecision } from '../src/daemon/decisions.js';
+import { neededRework } from '../src/daemon/rework.js';
 import { describeDispatch } from '../src/master/status.js';
 import { unansweredRequestAttention } from '../src/cli/unanswered-requests.js';
 
@@ -171,18 +171,17 @@ test('unit:nonexercising-proof-reworks a unit proof recorded as not exercising i
   const work = unexercisedItem();
   assert.ok(openProducerRequest(work, 'unit'), 'the unit request stands, as it did on GY-421');
   // Since GY-1235 review is never held for proofs, so the planner asks for the review (never a
-  // producer dispatch no executor launches) and the rework is the loop's decision below.
+  // producer dispatch no executor launches) and the rework is the loop's own below.
   const action = nextAction(work, [work], clock)!;
   assert.equal(action.kind, 'request-review', `the head is reviewed, never left on a producer dispatch: ${action.reason}`);
-  // The loop's decision input is the rework a failing proof gets, carrying the producer's finding.
-  const decision = neededDecision(work, { autoMerge: true })!;
-  assert.equal(decision.action, 'rework');
+  // The loop's rework is the one a failing proof gets, carrying the producer's finding.
+  const decision = neededRework(work)!;
   assert.equal(decision.binding, `${head}:proof:unexercised:${UNIT}`);
   for (const named of [UNIT, 'AC-3', MUTATION]) assert.ok(decision.reason.includes(named), `the decision names ${named}: ${decision.reason}`);
   // Without the finding nothing reworks the head: only the recorded finding asks for it.
   const plain = unexercisedItem({ finding: false });
   assert.equal(nextAction(plain, [plain], clock)!.kind, 'request-review');
-  assert.equal(neededDecision(plain, { autoMerge: true }), null);
+  assert.equal(neededRework(plain), null);
 });
 
 test('unit:nonexercising-proof-named master status names the item as awaiting rework for a non-exercising proof, not an unanswered producer request', () => {

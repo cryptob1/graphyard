@@ -1,17 +1,16 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { chmod, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { delimiter, join } from 'node:path';
+import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { FleetClient, FleetSelection } from '../src/fleet.js';
-import { accountLaunch, launchApprover, loadMasterConfig, masterConfigSchema, saveProducerProfile, selectAccount, setupMaster, type MasterConfig } from '../src/master.js';
+import { accountLaunch, loadMasterConfig, masterConfigSchema, saveProducerProfile, selectAccount, setupMaster, type MasterConfig } from '../src/master.js';
 import { launchProducer } from '../src/producer.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
-import { registryHeadlessLaunch } from '../src/runner/roles.js';
 import { clearRuns } from '../src/runner/registry.js';
-import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -29,7 +28,6 @@ const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url))
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x'), approverToken = 'approver-token-'.padEnd(40, 'x');
 const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
 const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
-const decision = '0e3b2c1a-7f00-4a70-8170-000000000170';
 const scratch = await realpath(await temporaryDirectory('registry-launch'));
 after(async () => { clearRuns(); await rm(scratch, { recursive: true, force: true }); });
 
@@ -100,9 +98,6 @@ function herdr(calls: string[][]) {
     return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
 }
-/** The runtime command line a Herdr launch typed, as the pane's shell hands it to the runtime. */
-const typed = (calls: string[][]) => expandTypedCommand(calls.filter(args => args[0] === 'pane' && args[1] === 'run').at(-1)![3]);
-const tabEnvironment = (calls: string[][]) => { const tab = calls.filter(args => args[0] === 'tab').at(-1)!; return Object.fromEntries(tab.flatMap((arg, index) => tab[index - 1] === '--env' ? [arg.split(/=(.*)/s).slice(0, 2)] : [])); };
 const valueOf = (args: string[], flag: string) => { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : undefined; };
 
 function item(key: string): Work {
@@ -110,104 +105,6 @@ function item(key: string): Work {
     policy: { checks: ['test'], review: true }, stage: 'review', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate: null,
     submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: [], observation: null, autoDispatch: { review: null, producers: [], history: [] } } as unknown as Work;
 }
-
-test('integration:registry-drives-launch — a role\'s policy change in the registry changes the next Herdr launch\'s command line (flags, tools, model) with no restart, and the launch takes its runtime, account and model from the registry revision it selected', async () => {
-  const { root, config } = await installation(), home = await homes(), registry = memoryRegistry(config.hostId);
-  fleet(registry, config.hostId, home);
-  const probe = { registry: registry.client, quota: false as const, cacheMs: 0 };
-
-  const calls: string[][] = [];
-  const first = await launchApprover(root, item('GY-701'), decision, undefined, { agents: [], available: true }, herdr(calls), probe, undefined, { filesystem: durable });
-  assert.equal(first.runtime, 'claude', 'the registry\'s account decides the runtime, not run.runtimes');
-  const one = typed(calls);
-  assert.equal(one.kind, 'claude');
-  assert.ok(one.args.includes('--verbose'), 'the role policy\'s flag');
-  assert.equal(valueOf(one.args, '--allowedTools'), 'Read,Grep', 'the role policy\'s tool allowlist on the runtime\'s tools flag');
-  assert.equal(valueOf(one.args, '--model'), 'claude-opus-5', 'the account\'s own model, while the policy names none');
-  assert.equal(valueOf(one.args, '--permission-mode'), 'bypassPermissions', 'the runtime\'s non-interactive contract still applies');
-  assert.equal(tabEnvironment(calls).CLAUDE_CONFIG_DIR, home.claude, 'the account\'s login home');
-  const firstSession = registry.current().sessions.at(-1)!;
-  assert.deepEqual([firstSession.role, firstSession.account, firstSession.model], ['approver', 'claude-b', 'opus']);
-
-  // The operator changes the role's policy in the registry: a stricter permission mode flag set, a wider tool list and another model.
-  const revision = registry.mutate('role.set', { role: { name: 'approver', accounts: ['claude-b'], concurrency: 4, policy: { args: ['--disallowedTools', 'WebFetch'], tools: ['Read', 'Grep', 'Bash(git:*)'], model: 'sonnet' } }, reason: 'Approvers read and run git only, on the cheaper model' });
-  calls.length = 0;
-  await launchApprover(root, item('GY-702'), decision.replace('0170', '0171'), undefined, { agents: [], available: true }, herdr(calls), probe, undefined, { filesystem: durable });
-  const two = typed(calls);
-  assert.ok(!two.args.includes('--verbose'), 'the old flag is gone');
-  assert.equal(valueOf(two.args, '--disallowedTools'), 'WebFetch', 'the new flag');
-  assert.equal(valueOf(two.args, '--allowedTools'), 'Read,Grep,Bash(git:*)');
-  assert.equal(valueOf(two.args, '--model'), 'claude-sonnet-5', 'the role policy\'s model replaces the account\'s');
-  const secondSession = registry.current().sessions.at(-1)!;
-  assert.deepEqual([secondSession.account, secondSession.model], ['claude-b', 'sonnet'], 'the selection records the policy\'s model');
-  assert.ok(registry.current().revision > revision, 'the launch was chosen in the revision after the change');
-
-  // A policy that limits tools on a runtime with no tools flag is refused, and its session given back.
-  registry.mutate('runtime.set', { runtime: { ...proposedRuntimes.find(runtime => runtime.name === 'claude')!, launch: { ...proposedRuntimes.find(runtime => runtime.name === 'claude')!.launch, toolsFlag: null } }, reason: 'no tools flag' });
-  await assert.rejects(launchApprover(root, item('GY-703'), decision.replace('0170', '0172'), undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable }), /names no tools flag, so the session would run with every tool/);
-  assert.ok(registry.current().sessions.at(-1)!.endedAt, 'the refused launch gave its registry session back');
-});
-
-test('unit:approver-inventory-availability — an approver launch judges the role\'s sessions against the Herdr inventory it was given: one that could not be read ends none and launches no session into Herdr, one that was read ends the session that is gone (GY-205)', async () => {
-  const { root, config } = await installation(), home = await homes(), registry = memoryRegistry(config.hostId);
-  fleet(registry, config.hostId, home);
-  const probe = { registry: registry.client, quota: false as const, cacheMs: 0 };
-  // An approver launched earlier on this host, past the launch grace, which Herdr does not list.
-  const earlier: FleetSession = { id: crypto.randomUUID(), role: 'approver', account: 'claude-b', runtime: 'claude', model: 'opus', host: config.hostId, work: 'GY-720', principal: 'graphyard-approver-project',
-    selectedAt: new Date(Date.now() - 10 * 60_000).toISOString(), selectedBy: 'coordinator', reason: 'recorded', skipped: [], endedAt: null, endReason: null };
-  registry.current().sessions.push(earlier);
-
-  const calls: string[][] = [];
-  await assert.rejects(launchApprover(root, item('GY-721'), decision.replace('0170', '0174'), undefined, { agents: [], available: false }, herdr(calls), probe, undefined, { filesystem: durable }), /Herdr's session inventory could not be read/);
-  assert.equal(earlier.endedAt, null, 'an unreadable inventory proves no session gone');
-  assert.ok(registry.current().sessions.at(-1)!.endedAt, 'the refused launch gave its registry session back');
-  assert.ok(!calls.some(args => args[0] === 'tab'), 'no session is launched into a Herdr it could not read');
-
-  await launchApprover(root, item('GY-722'), decision.replace('0170', '0175'), undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable });
-  assert.match(earlier.endReason ?? '', /approver session for GY-720 is gone from Herdr/, 'an inventory that was read ends the session it no longer lists');
-});
-
-test('integration:registry-drives-launch — a registry role on a pi account runs on the headless runner with the account\'s home, the chosen model and the role policy, not the local run.pi; a policy change changes the next run\'s command line', async () => {
-  const { root, config } = await installation(), home = await homes(), registry = memoryRegistry(config.hostId);
-  fleet(registry, config.hostId, home);
-  registry.mutate('role.set', { role: { name: 'approver', accounts: ['pi-a'], concurrency: 4, policy: { args: ['--thinking', 'low'], tools: ['read', 'bash'], model: null } }, reason: 'Approvers on Pi' });
-  // A stand-in `pi` on PATH records the command line and environment each run starts with.
-  const bin = join(scratch, `bin-${crypto.randomUUID().slice(0, 8)}`), record = join(bin, 'launched.jsonl');
-  await mkdir(bin);
-  await writeFile(join(bin, 'fake-pi.mjs'), `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(record)}, JSON.stringify({ args: process.argv.slice(2), home: process.env.PI_CODING_AGENT_DIR ?? null }) + '\\n');\nprocess.stdout.write(JSON.stringify({ type: 'agent_settled' }) + '\\n');\n`);
-  await writeFile(join(bin, 'pi'), `#!/bin/sh\nexec '${process.execPath}' '${join(bin, 'fake-pi.mjs')}' "$@"\n`); await chmod(join(bin, 'pi'), 0o755);
-  const path = process.env.PATH; process.env.PATH = `${bin}${delimiter}${path}`;
-  try {
-    // The account's smoke test (GY-446) is its own proof's concern: here it passes without a run.
-    const probe = { registry: registry.client, quota: false as const, cacheMs: 0, smoke: async () => ({ ok: true, error: null }) };
-    const first = await launchApprover(root, item('GY-711'), decision, undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable });
-    assert.equal(first.runtime, 'pi'); assert.equal(first.pane, null);
-    assert.equal(first.account?.environment, 'pi-a');
-    await first.settled;
-    const runs = async () => (await readFile(record, 'utf8')).trim().split('\n').map(line => JSON.parse(line));
-    const [one] = await runs();
-    assert.equal(one.home, home.pi, 'the account\'s login home on the runtime\'s home variable');
-    assert.equal(valueOf(one.args, '--model'), 'zai/glm-5.3', 'the registry\'s model, not run.pi\'s');
-    assert.equal(valueOf(one.args, '--thinking'), 'low');
-    assert.equal(valueOf(one.args, '--tools'), 'read,bash');
-    assert.ok(!JSON.stringify(one.args).includes('local/profile-model'));
-    assert.ok(registry.current().sessions.at(-1)!.endedAt, 'the run\'s registry session ends with the run');
-
-    registry.mutate('role.set', { role: { name: 'approver', accounts: ['pi-a'], concurrency: 4, policy: { args: [], tools: ['read'], model: 'glm-flash' } }, reason: 'Read-only approvers on the flash model' });
-    await (await launchApprover(root, item('GY-712'), decision.replace('0170', '0173'), undefined, { agents: [], available: true }, herdr([]), probe, undefined, { filesystem: durable })).settled;
-    const [, two] = await runs();
-    assert.equal(valueOf(two.args, '--model'), 'zai/glm-5.3-flash');
-    assert.equal(valueOf(two.args, '--tools'), 'read');
-    assert.ok(!two.args.includes('--thinking'));
-
-    // The pure plan the runner starts from says the same.
-    const account = { name: 'pi-a', kind: 'pi', home: home.pi, fleet: { runtime: 'pi', contract: proposedRuntimes.find(runtime => runtime.name === 'pi')!.launch, model: 'glm', modelId: 'zai/glm-5.3', session: 's', reason: 'r', policy: { args: ['--x'], tools: ['read'], model: null } } };
-    assert.deepEqual(registryHeadlessLaunch(account), { command: 'pi', model: 'zai/glm-5.3', args: ['--x', '--tools', 'read'], environment: { PI_CODING_AGENT_DIR: home.pi } });
-    // GY-397: a tools allowlist on a runtime with no tools flag is refused here as on the Herdr path, never guessed.
-    assert.throws(() => registryHeadlessLaunch({ ...account, fleet: { ...account.fleet, contract: { ...account.fleet.contract, toolsFlag: null } } }), /names no tools flag, so the session would run with every tool/);
-    assert.deepEqual(registryHeadlessLaunch({ ...account, fleet: { ...account.fleet, contract: { ...account.fleet.contract, toolsFlag: null }, policy: { args: [], tools: [], model: null } } }).args, [], 'no allowlist needs no tools flag');
-  } finally { process.env.PATH = path; }
-});
 
 test('integration:registry-drives-launch — the local profile is used only for roles the registry does not define', async () => {
   const { config } = await installation(), home = await homes(), registry = memoryRegistry(config.hostId);

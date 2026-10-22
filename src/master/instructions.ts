@@ -82,7 +82,7 @@ for the loop's pending step before taking one and never request a second.
 The control plane merges: the loop's merge writer trial-merges a submitted head whose
 gates pass, runs its proofs and pushes it to the base branch with its deploy key. GitHub
 merges nothing and no pull request is opened. A merge of a head whose gates had not passed is held
-as a violation until a two-party \`graphyard master decide GY-N merge\` reconciles it.
+as a violation; file the follow-up that re-verifies what it skipped.
 Never use an administrative merge bypass, edit a candidate, or read a
 worker credential. Read \`docs/master-agent.md\`
 in Graphyard or run \`graphyard master guide\` for the complete operating loop.

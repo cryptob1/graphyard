@@ -10,7 +10,6 @@ import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
-import { leaseLapseCause } from '../src/model/escalation.js';
 import { preserveInterruptedAttempt } from '../src/daemon/effects.js';
 import { preservePartialWork } from '../src/master/launch.js';
 import { childRunner } from '../src/child-runner.js';
@@ -95,12 +94,6 @@ test('unit:renew-lease-nosubmission-refusal — the server refuses renewal ten m
   // An attempt that pushed a new head within the progress cadence is still at work: renewed.
   const progressing = held(150 * minute, { sessions: [{ id: 'graphyard-claude-1:1', kind: 'implementation', principal: 'graphyard-claude-1', epoch: 1, head: 'c'.repeat(40), headAt: iso(-5 * minute) }] } as unknown as Partial<Work>);
   assert.equal(noSubmissionRenewalRefused(progressing, clock), false, 'fresh submission progress is not refused');
-  // The lapse that refusal causes is explained by it; a worker that vanished inside the bound is still a lease-loss.
-  const bounded = held(131 * minute), lapsedAt = (offset: number) => ({ epoch: 1, owner: 'graphyard-claude-1', expiresAt: iso(offset) });
-  assert.equal(leaseLapseCause(bounded, lapsedAt(0))?.cause, 'no-submission-bound');
-  assert.equal(leaseLapseCause(bounded, lapsedAt(-2 * minute)), null, 'a lease that ran out before the refusal was not refused by it');
-  assert.equal(leaseLapseCause(bounded, { epoch: 1 }), null, 'an undated lapse is not judged by the bound');
-  assert.equal(leaseLapseCause(progressing, lapsedAt(0)), null, 'a lapse with fresh progress was not the refusal\'s');
 });
 
 test('unit:nosubmission-bound-moot-after-submit — an epoch with a submission is never bounded', async () => {
@@ -108,7 +101,6 @@ test('unit:nosubmission-bound-moot-after-submit — an epoch with a submission i
   const submitted = held(5 * 60 * minute, { submission: { epoch: 1, pr: 41 } as Work['submission'] });
   assert.equal(unsubmittedAttempt(submitted, clock), null);
   assert.equal(noSubmissionRenewalRefused(submitted, clock), false);
-  assert.equal(leaseLapseCause(submitted, { epoch: 1, expiresAt: iso(0) })?.cause, 'submitted', 'its lapse is the submission\'s, never the bound\'s');
 });
 
 test('unit:single-nosubmission-bound — one module declares the no-submission bound, one predicate names the attempt and stops renewing', async () => {
@@ -189,10 +181,9 @@ test('integration:unsubmitted-attempt-reclaimed — past two bounds unsubmitted 
   await engine.reconcile();
   work = await reload(work);
   assert.equal(work.lease, null, 'the lapsed lease is gone');
-  // The control plane's own refusal explains the lapse: recorded with its cause, never a lease-loss incident.
-  assert.deepEqual(work.escalations?.filter(entry => entry.trigger === 'lease-loss') ?? [], [], 'no lease-loss escalation for a lapse the bound caused');
+  // The lapse is recorded as history and ends the attempt.
   const expired = (await store.pool.query(`SELECT payload FROM events WHERE work_id=$1 AND kind='lease.expired'`, [work.id])).rows.map(row => row.payload.details);
-  assert.deepEqual(expired.map(details => [details.epoch, details.cause]), [[epoch, 'no-submission-bound']], 'the lapse is history with the bound as its cause');
+  assert.deepEqual(expired.map(details => details.epoch), [epoch], 'the lapse is history');
   // The item is back in the queue: another worker claims a fresh epoch.
   work = await engine.execute(replacement, 'claim', work.id, {}, id());
   assert.equal(work.epoch, epoch + 1);

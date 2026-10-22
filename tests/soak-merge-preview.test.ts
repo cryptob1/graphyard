@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { mkdir, readdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
@@ -174,11 +174,9 @@ class World {
       },
     };
   }
-  decide: DaemonEffects['decide'] = async (work, action) => {
-    assert.equal(action, 'rework');
+  rework = async (work: Work) => {
     const n = Number(work.key.slice(3));
     this.decided.push(n); this.reworked.set(n, { confirmedAt: this.now() });
-    return { id: randomUUID() };
   };
 }
 
@@ -194,7 +192,7 @@ test('unit:soak-merge-preview — a simulated day on the real loop with the real
     closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), decide: world.decide } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), rework: world.rework } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * cycleMs;

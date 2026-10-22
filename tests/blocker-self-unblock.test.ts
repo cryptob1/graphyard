@@ -10,7 +10,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { approverSessionName, decisionInput, masterConfigSchema, workerPrompt, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { masterConfigSchema, workerPrompt, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { blockerClasses, blockerView, classifyBlocker, environmentalBlockerClasses, maxAutomaticClears, needsSomeone, type BlockerClass } from '../src/model/blocker-class.js';
 import { blockedAttemptMarker } from '../src/model/capacity.js';
 import { humanRequestBlocker } from '../src/model/human-request.js';
@@ -29,8 +29,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * hand, because nothing re-checked a blocker once it was recorded, while every blocked worker kept
  * its lease and sat idle holding a slot. A recorded blocker now ends its attempt in the same
  * transaction, the loop reads each blocker into a named class, probes the environmental ones every
- * cycle inside the worker's confinement and clears them once the probe passes, launches a needs-decision blocker's
- * approver, and only a genuine or human-only blocker counts as needing someone. Everything but the
+ * cycle inside the worker's confinement and clears them once the probe passes, and only a genuine or
+ * human-only blocker counts as needing someone. Everything but the
  * classification and the board runs against a real Postgres and the real HTTP routes; each test is
  * named for the proof it produces.
  */
@@ -39,8 +39,7 @@ const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 
 const implementer: Principal = { id: 'implementer', role: 'worker', sessionKind: 'ai' };
 const coordinator: Principal = { id: 'master-loop', role: 'coordinator', sessionKind: 'ai' };
 const credentials = [operator, implementer, coordinator].map(principal => ({ ...principal, token: `blocker-unblock-${principal.id}-${'x'.repeat(32)}` }));
-const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready', 'intent:unblock', 'policy:requirements'] };
-const approver = { id: 'independent-approver', token: `independent-approver-${'a'.repeat(32)}`, capabilities: ['decision:approve'] };
+const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['policy:requirements'] };
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
@@ -75,7 +74,7 @@ const loopConfig = () => masterConfigSchema.parse({ version: 1, url, credentialF
 
 /** The loop as `master run` wires it, with Herdr, the launcher and the probe's child runs under the test's control. */
 function harness(probeRun: (command: string, args: string[]) => string = () => '') {
-  const sessions: HerdrAgent[] = [], dispatched: string[] = [], launched: string[] = [], decided: { key: string; action: string; input: any }[] = [], probes: { command: string; args: string[] }[] = [];
+  const sessions: HerdrAgent[] = [], dispatched: string[] = [], probes: { command: string; args: string[] }[] = [];
   const effects: DaemonEffects = {
     agents: () => sessions,
     herdr: () => ({ agents: sessions, available: true }),
@@ -86,16 +85,12 @@ function harness(probeRun: (command: string, args: string[]) => string = () => '
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'no deployment endpoint in this test', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     persist: async () => {},
-    decide: async (work, action, reason, input = {}) => { decided.push({ key: work.key, action, input }); return ok(master.token, 'POST', `work/${work.id}/decide`, { action, input: decisionInput(action, work, input), reason }); },
-    approver: async (work, decision) => { launched.push(decision); const agentName = approverSessionName(work, decision); sessions.push({ name: agentName, pane_id: `pane-${launched.length}`, agent_status: 'working' } as HerdrAgent); return { agentName, pane: `pane-${launched.length}` }; },
-    decisions: work => ok(master.token, 'GET', `work/${encodeURIComponent(work.id)}/decisions`),
-    withdraw: (work, decision, reason) => ok(master.token, 'POST', `work/${work.id}/decide`, { action: 'withdraw', decision, reason }),
     // The worker a codex profile would get: its probe runs inside the codex sandbox the launch describes.
     probeBlocker: (work, classification) => probeBlocker(work, classification, { run: async (command, args) => { probes.push({ command, args }); return probeRun(command, args); },
       launch: { kind: 'codex', args: ['--sandbox', 'workspace-write'] }, cwd: '/srv/worktrees/probe', clock: Date.now(), planeHealth: async () => null }),
     recordBlockerProbe: (work, body) => ok(token(coordinator), 'POST', `work/${work.id}/blocker-probe`, body) as Promise<Work>,
   };
-  return { effects, sessions, dispatched, launched, decided, probes, cycle: (state: DaemonState) => runCycle(loopConfig(), state, effects) };
+  return { effects, sessions, dispatched, probes, cycle: (state: DaemonState) => runCycle(loopConfig(), state, effects) };
 }
 
 before(async () => {
@@ -107,7 +102,7 @@ before(async () => {
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  for (const agent of [master, approver]) await ok(token(operator), 'POST', 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: agent.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: `Onboarding provisions ${agent.id}` });
+  for (const agent of [master]) await ok(token(operator), 'POST', 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: agent.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: `Onboarding provisions ${agent.id}` });
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
@@ -118,7 +113,7 @@ const incidents: [string, BlockerClass][] = [
   ["git fetch failed: error: unable to append to '.git/logs/refs/remotes/origin/graphyard/gy-941-1': Read-only file system", 'sandbox-path'],
   ["This session is attached to GY-912's worktree, not this item's own: the worktree belongs to another item", 'worktree-mismatch'],
   ['npm test fails in tests/github-http.test.ts, outside plannedFiles; it fails on main as well', 'outside-scope-test-failure'],
-  ['Waiting on decision 5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b, already requested; its approver was never launched', 'needs-decision'],
+  ['Waiting on decision 5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b, already requested; its approver was never launched', 'genuine'],
   [`${humanRequestBlocker} (spending money or opening third-party accounts): a Railway team seat`, 'human-only'],
   ['The two criteria contradict each other about the retry order', 'genuine'],
   ['Dispatch failed 3 consecutive times with the same cause since 2026-10-05T18:28:08.000Z, so the master loop stopped redispatching GY-1310: no worker profile can take GY-1310 [attempts 1, 2, 3 each ended without a submission]', 'dispatch-failure'],
@@ -134,7 +129,6 @@ test('unit:blocker-classified — the 2026-09-30 blocker texts fall into their n
   assert.deepEqual([...new Set(incidents.map(([, expected]) => expected))].sort(), [...blockerClasses].sort(), 'every class is covered');
   // What each routine class carries for the loop to act on.
   assert.equal(classifyBlocker(incidents[2][0]).path, '.git/logs/refs/remotes/origin/graphyard/gy-941-1');
-  assert.equal(classifyBlocker(incidents[5][0]).decision, '5b1e7c3a-9d2f-4e61-8a0b-2c4d6e8f0a1b');
   // A request for a file is no class of its own: nothing limits the files a change may edit, so the master reads it.
   assert.equal(classifyBlocker('SCOPE NEEDED: src/model/queue.ts (the carry reads the queue entry) for commit 8106499e9f').class, 'genuine');
   assert.equal(blockerView({ blocker: 'SCOPE NEEDED: newtop/next.ts for commit 8106499e9f', humanRequest: null, blockerProbe: null } as never)?.needsSomeone, true);
@@ -346,25 +340,6 @@ test('unit:environment-blocker-auto-cleared — each cycle the loop probes an en
     if (process.getuid?.() !== 0) assert.equal((await write(join(repo, 'probe-target')))?.passed, false, 'the coordinator checkout is read-only inside the mount');
     assert.equal((await write(join(linked, 'probe-target')))?.passed, true, 'the worktree stays writable inside the mount');
   }
-});
-
-test('unit:needs-decision-blocker-launches-approver — a needs-decision blocker gets its approver launched, without a master', async () => {
-  const loop = harness(), state = emptyDaemonState(loopConfig());
-  // A needs-decision blocker: a decision stands requested on the item and no session judges it.
-  let waiting = await claimed('Decision blocker');
-  const standing = await ok(master.token, 'POST', `work/${waiting.id}/decide`, { action: 'requirements', input: decisionInput('requirements', waiting, {  }), reason: 'The carry is documented beside the queue' });
-  waiting = await block(waiting, `Waiting on decision ${standing.id}, already requested; its approver was never launched`);
-  assert.equal(classifyBlocker(waiting.blocker).class, 'needs-decision');
-  await loop.cycle(state);
-  assert.ok(loop.launched.includes(standing.id), 'the approver of the standing decision was launched');
-  assert.equal(state.approvals[`hand:${standing.id}`]?.decision, standing.id, 'the launched approver is watched from launch, so supervision closes it once judged');
-  const launches = loop.launched.length;
-  await loop.cycle(state);
-  assert.equal(loop.launched.length, launches, 'launched once, not every cycle');
-  assert.equal((await reload(waiting.id)).blocker, waiting.blocker, 'the blocker stands while the decision is requested');
-  await ok(approver.token, 'POST', `work/${waiting.id}/approve`, { decision: standing.id, reason: 'The documentation belongs with the carry' });
-  await loop.cycle(state);
-  assert.equal((await reload(waiting.id)).blocker, null, 'cleared once no decision stands requested');
 });
 
 test('unit:blocked-board-shows-class — the board and master status show each blocked item\'s class, last probe and next probe, count only genuine, human-only and master-role as needing someone, and docs/master-agent.md names the classes', async () => {

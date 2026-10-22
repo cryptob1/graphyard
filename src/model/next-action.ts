@@ -179,7 +179,7 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
       // A review refusal is a dispatch only while the head's mechanical proofs have not run (GY-115).
       if (failing.name === 'acceptance' || failing.name === 'review') {
         const proof = proofStep(work, all, now);
-        // Every unproven proof is manual: the loop's attestation request (GY-521), else the operator's escalation.
+        // Every unproven proof is manual: the master's attestation (GY-521), else an escalate action.
         const attest = proof ? null : attestationWait(work, all, now); if (attest) return waits(attest, failing.name, refusal);
         if (!proof) return make('escalate', `${key} waits on proof no producer session may run: ${failing.reasons.join('; ')}`, { kind: 'escalate', trigger: 'operator-proof', detail: refusal }, binding, failing.name, refusal);
         // A failed proof holds the head at this gate for good: a unit or integration failure is the

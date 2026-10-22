@@ -118,7 +118,7 @@ test('integration:overlap-scheduler — master status shows what each item runs 
   assert.deepEqual(report, { 'GY-left': { conflicts: [{ key: 'GY-right', files: ['src/sync.ts'] }], unprobed: [] }, 'GY-right': { conflicts: [{ key: 'GY-left', files: ['src/sync.ts'] }], unprobed: [] }, 'GY-apart': { conflicts: [], unprobed: [] } });
   const unprobed = candidateConflicts([left, right], () => null);
   assert.deepEqual(unprobed['GY-left'], { conflicts: [], unprobed: ['GY-right'] }, 'an unfetched head is reported as unprobed, never as conflict-free');
-  const status = buildMasterStatus({ work: [held, live, left, right, apart, work('GY-ready')], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
+  const status = buildMasterStatus({ work: [held, live, left, right, apart, work('GY-ready')], now: iso(0) }, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
   const row = (key: string) => status.work.find(entry => entry.key === key)!;
   assert.deepEqual(row('GY-held').overlap.concurrent.map(entry => [entry.key, entry.paths]), [['GY-live', ['src/cli/master.ts']]]);
   assert.deepEqual(row('GY-live').overlap.concurrent, [], 'GY-held, sent back for rework and unclaimed, is not in flight');
@@ -128,7 +128,7 @@ test('integration:overlap-scheduler — master status shows what each item runs 
   assert.deepEqual(status.conflicts.sequence, ['GY-apart', 'GY-held', 'GY-live', 'GY-left', 'GY-right'], 'the fewest-conflict candidate lands first');
   assert.deepEqual(status.conflicts.conflicting, [{ key: 'GY-left', conflicts: ['GY-right'] }, { key: 'GY-right', conflicts: ['GY-left'] }]);
   assert.deepEqual(sequenceAdvice([]), { sequence: [], conflicting: [] });
-  const unavailable = buildMasterStatus({ work: [left], now: iso(0) }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined);
+  const unavailable = buildMasterStatus({ work: [left], now: iso(0) }, [], [], {}, { pending: [], completed: [] }, 'main', undefined);
   assert.equal(unavailable.work[0].conflicts?.probed, false); assert.equal(unavailable.conflicts.available, false); assert.match(unavailable.conflicts.reason!, /not probed/);
 });
 

@@ -47,7 +47,6 @@ const refreshed = (key: string, n: number) => item(key, { stage: 'review', submi
   baseRefresh: n ? { from: { sha: sha(`${n - 1}`), baseSha: sha('b') }, base: sha('c'), baseTree: sha('e'), policyRevision: 1, at: iso(n * minute), head: sha(`${n}`), conflict: null } : null } as Partial<Work>);
 const untriaged = (key: string, ageMs: number) => item(key, { stage: 'backlog', ready: false, createdAt: iso(-ageMs),
   origin: { faultClass: { class: 'human-decision', threshold: 3, windowHours: 24, count: 3, instances: [], detectedAt: iso(-ageMs) } } } as Partial<Work>);
-const leaseLost = (key: string, at: number) => item(key, { stage: 'build', escalations: [{ trigger: 'lease-loss', reason: 'Worker w lost lease epoch 1', at: iso(at), actor: 'graphyard' }] } as Partial<Work>);
 const metrics = (seconds: number, n = 10) => Array.from({ length: n }, (_, index) => ({ at: iso(-index * 3 * minute), durationMs: seconds * 1000 }));
 
 /** The checks of one invariant over a sequence of cycles; the last cycle's check. */
@@ -60,7 +59,7 @@ function judge(inputs: InvariantInput[]) {
 const verdict = (checks: ReturnType<typeof judge>, invariant: SystemInvariant) => checks.find(check => check.invariant === invariant)!;
 
 test('unit:system-invariants-checked — each invariant driven over its threshold reports exactly one fault of its class; at its threshold it holds', () => {
-  assert.deepEqual([...systemInvariants], ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog', 'deploy-lease-loss']);
+  assert.deepEqual([...systemInvariants], ['follow-ups-per-parent', 'lingering-sessions', 'refresh-churn', 'merge-stall', 'cycle-p90', 'untriaged-backlog']);
   assert.equal(followUpProof, 'manual:review-followups-triaged', 'a follow-up item filed before GY-1249 is recognised by the proof it was filed with');
   const parent = item('GY-1', { stage: 'done' });
   // Each fixture drives one invariant over its threshold (`over`) and holds it at the threshold (`at`).
@@ -70,11 +69,9 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
       at: [{ work: [parent, followUp('GY-2', parent), followUp('GY-3', { ...parent, id: 'work-GY-9', key: 'GY-9' } as Work)], now: clock }] },
     'lingering-sessions': {
       over: [{ work: [delivered('GY-5', 31 * minute, [session('reviewer-5')]), delivered('GY-6', 45 * minute, [session('reviewer-6')])], now: clock,
-        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } },
         docsSyncs: { 'work-GY-14:head:base': { work: 'GY-14', agentName: 'gy-docs-sync-gy-14-1a2b3c4', pane: null, settledAt: iso(-40 * minute) } },
-        agents: [{ name: 'reviewer-5' }, { name: 'reviewer-6' }, { name: 'approver-7' }, { name: 'gy-docs-sync-gy-14-1a2b3c4' }] }],
+        agents: [{ name: 'reviewer-5' }, { name: 'reviewer-6' }, { name: 'gy-docs-sync-gy-14-1a2b3c4' }] }],
       at: [{ work: [delivered('GY-5', 29 * minute, [session('reviewer-5')]), delivered('GY-6', 45 * minute, [session('reviewer-6')])], now: clock,
-        approvals: { 'decision:GY-7': { work: 'GY-7', agentName: 'approver-7', pane: null, settledAt: iso(-40 * minute) } },
         docsSyncs: { 'work-GY-14:head:base': { work: 'GY-14', agentName: 'gy-docs-sync-gy-14-1a2b3c4', pane: null, settledAt: iso(-20 * minute) } },
         agents: [{ name: 'reviewer-5' }, { name: 'gy-docs-sync-gy-14-1a2b3c4' }] }] },
     'refresh-churn': {
@@ -85,9 +82,6 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
       at: [{ work: [mergeable('GY-10')], now: clock }, { work: [mergeable('GY-10')], now: clock + 10 * minute }] },
     'cycle-p90': { over: [{ work: [], now: clock, metrics: metrics(31) }], at: [{ work: [], now: clock, metrics: [...metrics(29), { at: iso(-2 * hour), durationMs: 300_000 }] }] },
     'untriaged-backlog': { over: [{ work: [untriaged('GY-12', 25 * hour), untriaged('GY-13', 30 * hour)], now: clock }], at: [{ work: [untriaged('GY-12', 23 * hour)], now: clock }] },
-    'deploy-lease-loss': {
-      over: [{ work: [], now: clock, build: 'build-1' }, { work: [], now: clock + 2 * minute, build: 'build-2' }, { work: [leaseLost('GY-14', 5 * minute)], now: clock + 6 * minute, build: 'build-2' }],
-      at: [{ work: [], now: clock, build: 'build-1' }, { work: [], now: clock + 2 * minute, build: 'build-2' }, { work: [leaseLost('GY-14', 20 * minute)], now: clock + 21 * minute, build: 'build-2' }] },
   };
   for (const invariant of systemInvariants) {
     const over = judge(fixtures[invariant].over), check = verdict(over, invariant);
@@ -99,7 +93,7 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
   // Every invariant over its threshold at once: each is violated.
   const all = judge([{ work: [], now: clock - 20 * minute, build: 'build-1', metrics: [] }, ...fixtures['refresh-churn'].over.map(input => ({ ...input, now: clock - 20 * minute + (input.now - clock), build: 'build-1' })),
     { work: [refreshed('GY-8', 4), mergeable('GY-10')], now: clock - 12 * minute, build: 'build-2' },
-    { work: [parent, followUp('GY-2', parent), followUp('GY-3', parent), delivered('GY-5', 31 * minute, [session('reviewer-5')]), refreshed('GY-8', 4), mergeable('GY-10'), untriaged('GY-12', 25 * hour), leaseLost('GY-14', -10 * minute)],
+    { work: [parent, followUp('GY-2', parent), followUp('GY-3', parent), delivered('GY-5', 31 * minute, [session('reviewer-5')]), refreshed('GY-8', 4), mergeable('GY-10'), untriaged('GY-12', 25 * hour)],
       now: clock, metrics: metrics(31), agents: [{ name: 'reviewer-5' }], build: 'build-2' }]);
   assert.deepEqual(all.filter(check => !check.holds).map(check => check.invariant).sort(), [...systemInvariants].sort(), all.filter(check => check.holds).map(check => check.line).join('\n'));
   // A source that could not be read is not observed, never violated.
@@ -126,7 +120,7 @@ test('unit:system-invariants-checked — each invariant driven over its threshol
   assert.equal(config({ invariants: { refreshesWithoutHeadChange: 4 } as MasterConfig['invariants'] }).invariants?.refreshesWithoutHeadChange, 4);
   assert.equal(config().invariants, undefined, 'unset, every invariant keeps its default threshold');
   assert.deepEqual(invariantDefaults, { followUpsPerParent: 1, sessionAfterSettleMinutes: 30, refreshesWithoutHeadChange: 3, mergeableWithoutRefusalMinutes: 10, cycleP90Seconds: 30, cycleWindowMinutes: 60,
-    untriagedBacklogHours: 24, untriagedBacklogMax: 0, deployLeaseLosses: 0, deployWindowMinutes: 10 });
+    untriagedBacklogHours: 24, untriagedBacklogMax: 0 });
 });
 
 function effects(overrides: Partial<DaemonEffects>): DaemonEffects {
@@ -142,7 +136,7 @@ test('unit:system-invariants-checked — the loop checks every invariant each cy
     const now = clock + cycle * 3 * minute;
     return { now, work: [parent, followUp('GY-2', parent), followUp('GY-3', parent), delivered('GY-5', 31 * minute + cycle * 3 * minute, [session('reviewer-5')]), refreshed('GY-8', cycle),
       // A merge refused by the gate is a recorded refusal; this one is mergeable and nothing refuses it, but GitHub never merges it.
-      mergeable('GY-10'), untriaged('GY-12', 25 * hour), ...(cycle >= 2 ? [leaseLost('GY-14', 5 * minute)] : [])] };
+      mergeable('GY-10'), untriaged('GY-12', 25 * hour)] };
   };
   const state = emptyDaemonState(config());
   state.metrics = metrics(31).map((metric, index) => ({ cycle: index, at: metric.at, durationMs: metric.durationMs, open: 0, actions: 0, stages: {}, lead: { count: 0, p50Ms: 0, p90Ms: 0 },
@@ -182,7 +176,7 @@ test('unit:reviewer-repeat-question — the review of a change to the loop, mast
   const start = guide.indexOf('### System invariants');
   assert.ok(start >= 0, 'docs/master-agent.md has the section');
   const section = guide.slice(start, guide.indexOf('\n## ', start)).replace(/\s+/g, ' ');
-  for (const phrase of [...systemInvariants.map(invariant => `\`${invariant}\``), '`follow-ups-per-parent` (1 open)', '`lingering-sessions` (30 min)', '`refresh-churn` (3 per own head)', '`merge-stall` (10 min)', '`cycle-p90` (30 s)', '`untriaged-backlog` (24 h)', '`deploy-lease-loss` (0)',
+  for (const phrase of [...systemInvariants.map(invariant => `\`${invariant}\``), '`follow-ups-per-parent` (1 open)', '`lingering-sessions` (30 min)', '`refresh-churn` (3 per own head)', '`merge-stall` (10 min)', '`cycle-p90` (30 s)', '`untriaged-backlog` (24 h)',
     'daemon.invariants.lines', '`invariants` in `.graphyard/master.json`', 'tests/soak-*.test.ts'])
     assert.ok(section.includes(phrase), `docs/master-agent.md lists: ${phrase}`);
 });

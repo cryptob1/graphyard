@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -60,11 +60,10 @@ const resetAt = new Date(observedAt + ((55 * 60 + 17) * 60 + 35) * 1000).toISOSt
 const clock = { skewMs: 0 };
 const now = () => observedAt + clock.skewMs;
 
-const settlementToken = 'e'.repeat(64);
 interface Herdr { agents: { name: string; pane_id: string; agent_status: string }[]; output: Record<string, string> }
 /** The loop as `master run` wires it, with Herdr an inventory the test controls and the launcher its control-plane calls. The clock never reads the wall. */
 function loop(config: MasterConfig, herdr: Herdr) {
-  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[], prompted: [] as string[], stopped: [] as string[] };
+  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[], prompted: [] as string[] };
   const effects: DaemonEffects = {
     agents: () => herdr.agents,
     herdr: () => ({ agents: herdr.agents, available: true }),
@@ -77,8 +76,6 @@ function loop(config: MasterConfig, herdr: Herdr) {
       const claimed = await ok(workerA, 'POST', `work/${work.id}/claim`, {}) as Work;
       // Each attempt works in its own worktree: the control plane refuses a path two epochs share.
       await ok(workerA, 'POST', `work/${work.id}/workspace`, { epoch: claimed.epoch, host: 'loop-host', path: calls.dispatch.length ? `${worktree}-next` : worktree, branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` });
-      // The supervisor records its containment before the agent starts, exactly as `watch` does.
-      await ok(workerA, 'POST', `work/${work.id}/quarantine`, { epoch: claimed.epoch, settlementHash: createHash('sha256').update(settlementToken).digest('hex'), scope: { unit: `graphyard-watch-4242-${randomUUID()}.scope`, pid: 4242 } });
       herdr.agents = [...herdr.agents.filter(agent => agent.name !== profile.agentName), { name: profile.agentName, pane_id: `pane-${profile.name}-${calls.dispatch.length}`, agent_status: 'working' }];
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
@@ -91,11 +88,6 @@ function loop(config: MasterConfig, herdr: Herdr) {
     holdAccount: (account, observed) => recordObservedExhaustion(config, account, observed, now()),
     preserveWork: async (work, epoch) => preservePartialWork(work.workspaces.find(entry => entry.epoch === epoch)!.path, `${work.key} attempt ${epoch} interrupted by provider quota exhaustion`),
     promptSession: async () => { calls.prompted.push('prompted'); },
-    stopSupervisor: async orphan => {
-      calls.stopped.push(`${orphan.key}:${orphan.epoch}`);
-      herdr.agents = herdr.agents.filter(agent => agent.name !== orphan.agentName);
-      await ok(workerA, 'POST', `work/${orphan.id}/settle`, { epoch: orphan.epoch, settlementToken });
-    },
   };
   return { calls, cycle: (state: DaemonState) => runCycle(config, state, effects, now) };
 }
@@ -184,7 +176,8 @@ test('integration:pi-provider-limit-exhaustion — an idle pi session on the 131
   assert.ok(failover.detail.includes(`resets ${resetAt}`), failover.detail);
   assert.deepEqual(calls.prompted, [], 'the idle bound is never waited out: no re-prompt is sent to a session whose provider said the account is spent');
   assert.equal(state.actions[idleLeaseKey(work, 1)], undefined, 'the session is never recorded idle-with-lease');
-  assert.deepEqual(calls.stopped, [`${work.key}:1`], 'the session\'s supervisor is stopped');
+  // Its supervisor stops on the ended lease, and its pane goes with it.
+  herdr.agents = herdr.agents.filter(agent => agent.name !== 'agent-builder');
   work = await reload(work.id);
   assert.equal(work.lease, null, 'the lease is released');
   assert.equal(work.pipeline!.attempts[0].end, 'released', 'the attempt ends as released, keeping its branch');

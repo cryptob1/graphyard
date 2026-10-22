@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 import { evaluateLandability, landabilityRefusals } from '../src/model/landability.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
-import { reworkWaitsForApprover, riskClassApprover, selfApprover } from '../src/server/lane-rework.js';
 import { advisoryIdle, advisoryStep, mergeWriterIdle, mergeWriterInFlight, mergeWriterStep, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
@@ -17,7 +16,7 @@ import type { Cycle } from '../src/daemon/cycle.js';
 import type { Observation, Work } from '../src/model/work.js';
 
 // GY-1528: the control-plane merger switches off the gates the decided model retired — producer
-// sessions, budget blockers and the normal-risk rework approver — while github mode keeps each
+// sessions and budget blockers — while github mode keeps each
 // exactly as before.
 
 const root = fileURLToPath(new URL('..', import.meta.url));
@@ -184,22 +183,11 @@ test('integration:advisory-failure-files-nothing — the advisory obligation is 
   assert.deepEqual([advised.length, filed.length], [2, 0]);
 });
 
-test('unit:rework-approver-by-risk — a control-plane rework waits for an approver only for a sensitive change, applied otherwise by graphyard-risk-class; github keeps reworkNeedsApprover by lane', () => {
-  assert.equal(riskClassApprover, 'graphyard-risk-class');
-  assert.ok(selfApprover(riskClassApprover), 'the risk class approves and applies at once, like the lane');
-  assert.equal(reworkWaitsForApprover(item('control-plane', ['src/app.ts'])), false, 'normal risk under the control plane');
-  assert.equal(reworkWaitsForApprover(item('control-plane', ['src/store/schema.ts'])), true, 'sensitive keeps the approver');
-  assert.equal(reworkWaitsForApprover(item('control-plane', [])), true, 'an unknown change is sensitive');
-  assert.equal(reworkWaitsForApprover(item(null, ['src/store/schema.ts'])), true, 'github: a high-lane change keeps the approver');
-  assert.equal(reworkWaitsForApprover(item(null, ['tests/x.test.ts'])), false, 'github: a low-lane change needs none');
-  assert.equal(reworkWaitsForApprover(item(null, ['src/server/routes/work.ts', 'src/app.ts'])), true, 'github: by lane, whatever the risk class says');
-});
-
 test('unit:control-plane-mode-docs — docs/coordination.md names in one sentence what control-plane mode switches off', () => {
   for (const page of ['docs/coordination.md']) {
     const sentences = readFileSync(`${root}${page}`, 'utf8').split(/(?<=\.)\s+/).filter(sentence => /^Control-plane mode switches off /.test(sentence));
     assert.equal(sentences.length, 1, `${page} has the sentence once`);
-    for (const named of ['plan refusals', 'sync restore', 'scope hook', 'producer sessions', 'budget-test blockers', 'normal-risk rework approvers']) assert.ok(sentences[0]!.includes(named), `${page} names ${named}`);
+    for (const named of ['plan refusals', 'sync restore', 'scope hook', 'producer sessions', 'budget-test blockers']) assert.ok(sentences[0]!.includes(named), `${page} names ${named}`);
   }
 });
 

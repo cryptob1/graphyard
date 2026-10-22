@@ -184,7 +184,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     // Master status: the attempts and the next retry per request, and the attention line naming them.
     const records = [{ requestId: unit.requestId, state: 'failed', requestedAt: new Date(t0 - 1000).toISOString(), closedAt: new Date(t0).toISOString(), resolution: 'the session finished (done) without trusted evidence' }];
     const producerRecords = records.map(record => ({ ...record, producer: randomUUID(), attempt: 1, profile: 'producer-a', agentName: 'produce-a', outcome: {} }));
-    const status = buildMasterStatus({ work: [item], now: new Date(t0 + 1000).toISOString() }, [], [], {}, {}, summarizeReviews([]), 'main', undefined, { producers: { pending: [], completed: producerRecords }, failures: [], retries: sessionRetries(records, t0 + 1000) });
+    const status = buildMasterStatus({ work: [item], now: new Date(t0 + 1000).toISOString() }, [], [], {}, summarizeReviews([]), 'main', undefined, { producers: { pending: [], completed: producerRecords }, failures: [], retries: sessionRetries(records, t0 + 1000) });
     const row = status.work[0];
     const retried = row.dispatch!.producers.find(entry => entry.requestId === unit.requestId)!;
     assert.deepEqual([retried.retry!.attempts, retried.retry!.limit, retried.retry!.nextAt, retried.retry!.exhausted], [1, sessionRetryLimit, new Date(t0 + sessionRetryBaseMs).toISOString(), false]);

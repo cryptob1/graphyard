@@ -43,7 +43,7 @@ test('unit:unobtainable-review-visible — master status names the dismissed rev
   // Three sessions, every one of them settled on the same review GitHub had already withdrawn.
   const settled = [session('r1', 11), session('r2', 11), session('r3', 11)];
   const exhausted = { requestId: request.id, attempts: 3, started: 3, neverStarted: 0, limit: 4, unstartedLimit: 3, nextAt: null, exhausted: true, last: { state: 'failed', resolution } };
-  const status = buildMasterStatus({ work: [item], now: iso(4_500_000) }, [], [], {}, {}, { pending: [], completed: settled }, 'main', undefined,
+  const status = buildMasterStatus({ work: [item], now: iso(4_500_000) }, [], [], {}, { pending: [], completed: settled }, 'main', undefined,
     { producers: { pending: [], completed: [] }, failures: [], retries: [exhausted] });
   assert.equal(status.counts.dispatchRequested, 1);
   assert.equal(status.counts.dispatchRunning, 0, 'a session settled on a withdrawn verdict is not a review that is running');

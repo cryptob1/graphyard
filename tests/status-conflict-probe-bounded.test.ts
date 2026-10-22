@@ -245,7 +245,7 @@ test('unit:conflict-probe-budgeted: master status still returns every other sect
   const report = candidateConflicts(work, () => { throw new Error('no probe may run once the budget is spent'); }, { timeoutMs: 0, elapsedMs: () => (clockCalls++ === 0 ? 0 : 1) }, unprobedReasons);
   assert.deepEqual(unprobedReasons, { [pairKey('GY-left', 'GY-right')]: BUDGET_EXHAUSTED_REASON });
 
-  const status = buildMasterStatus({ work, now: '2030-01-01T00:00:00Z' }, [], [], {}, {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
+  const status = buildMasterStatus({ work, now: '2030-01-01T00:00:00Z' }, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
   for (const section of ['work', 'counts', 'schedule', 'conflicts', 'speed', 'attentionItems']) {
     assert.ok(section in status, `master status still returns the ${section} section when the conflict budget is spent`);
   }

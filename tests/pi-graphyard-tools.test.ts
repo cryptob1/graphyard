@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import graphyard, { guardCommand, mktempDirectories, mktempOptions, systemPromptSection, type ExtensionApi, type ToolDefinition } from '../integrations/pi/index.js';
 import { autonomyContract } from '../src/autonomy.js';
-import { decidePayloadSchema, evidencePayloadSchema } from '../src/runner/payloads.js';
+import { evidencePayloadSchema } from '../src/runner/payloads.js';
 import { piArgs, piRunner } from '../src/runner/pi.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -31,33 +31,24 @@ function load(role?: string) {
   return { tools, handlers, prompted, emit };
 }
 
-const verdict = { decision: 'decision-1', approve: false, reason: 'the change does not meet AC-2' };
 const evidence = { proof: 'unit:pi-graphyard-tools', sha: H, baseSha: B, policyRevision: 4, result: 'pass', executed: 3, skipped: 0,
   exercise: { criterion: 'AC-2', behaviour: 'schema validation in execute removed', result: 'fail', executed: 3 } };
 
 test('unit:pi-graphyard-tools the extension registers typed Graphyard tools whose schemas accept a valid call and reject a malformed one', async () => {
   const { tools } = load();
-  assert.deepEqual([...tools.keys()].sort(), ['graphyard_decide', 'graphyard_submit_evidence']);
-  const decide = tools.get('graphyard_decide')!, submit = tools.get('graphyard_submit_evidence')!;
-  assert.deepEqual(decide.parameters.required, ['decision', 'approve', 'reason']);
-  assert.equal(decide.parameters.additionalProperties, false);
+  assert.deepEqual([...tools.keys()].sort(), ['graphyard_submit_evidence']);
+  const submit = tools.get('graphyard_submit_evidence')!;
   assert.deepEqual(submit.parameters.required, ['proof', 'sha', 'baseSha', 'policyRevision', 'result', 'executed', 'skipped', 'exercise']);
 
   // A valid call passes: its details are the payload the runner hands back, and Graphyard's own
   // payload schema accepts exactly that.
-  const decided = await decide.execute('call-1', verdict);
-  assert.deepEqual(decided.details, verdict);
-  assert.deepEqual(decidePayloadSchema.parse(decided.details), verdict);
   const submitted = await submit.execute('call-2', evidence);
   assert.deepEqual(evidencePayloadSchema.parse(submitted.details), evidence);
 
   // Malformed calls are rejected with every reason, so the agent can correct the call.
   const { tools: fresh } = load();
   const rejects = (tool: string, input: unknown, reason: RegExp) => assert.rejects(fresh.get(tool)!.execute('call-x', input), reason);
-  await rejects('graphyard_decide', { decision: 'decision-1', reason: 'fine' }, /input\.approve is required/);
-  await rejects('graphyard_decide', { decision: 'decision-1', approve: 'yes', reason: 'fine' }, /input\.approve must be a boolean/);
-  await rejects('graphyard_decide', { ...verdict, reason: '   ' }, /input\.reason must not be empty/);
-  await rejects('graphyard_decide', { ...verdict, merge: true }, /input\.merge is not a field of this tool/);
+  await rejects('graphyard_submit_evidence', { ...evidence, merge: true }, /input\.merge is not a field of this tool/);
   await rejects('graphyard_submit_evidence', { ...evidence, sha: 'abc' }, /input\.sha must match/);
   await rejects('graphyard_submit_evidence', { ...evidence, result: 'passed' }, /input\.result must be one of pass, fail/);
   await rejects('graphyard_submit_evidence', { ...evidence, executed: 2.5 }, /input\.executed must be an integer/);
@@ -66,14 +57,13 @@ test('unit:pi-graphyard-tools the extension registers typed Graphyard tools whos
   const { exercise: _dropped, ...unexercised } = evidence;
   await rejects('graphyard_submit_evidence', unexercised, /input\.exercise is required/);
   // Graphyard's own schema refuses the same malformed payloads independently of the extension.
-  assert.throws(() => decidePayloadSchema.parse({ decision: 'decision-1', approve: 'yes', reason: 'fine' }));
   assert.throws(() => evidencePayloadSchema.parse({ ...evidence, sha: 'abc' }));
 
   // One submission per subject: the first accepted call stands.
-  await assert.rejects(decide.execute('call-3', { ...verdict, approve: true }), /already recorded decision decision-1/);
+  await assert.rejects(submit.execute('call-3', { ...evidence, result: 'fail' }), /already recorded proof unit:pi-graphyard-tools/);
 
   // A role session gets only its own tool.
-  assert.deepEqual([...load('approver').tools.keys()], ['graphyard_decide']);
+  assert.deepEqual([...load('decomposition').tools.keys()], ['graphyard_decompose']);
   assert.deepEqual([...load('producer').tools.keys()], ['graphyard_submit_evidence']);
 });
 
@@ -93,7 +83,7 @@ test('unit:pi-session-autonomous the extension puts the autonomy contract in the
   // handler touches the UI when exercised, whether a call is accepted or refused.
   for (const tool of tools.values()) {
     assert.doesNotMatch(`${tool.name} ${tool.description}`, /\b(ask|question|confirm|prompt the user|input from)\b/i, tool.name);
-    await tool.execute('call-ok', tool.name === 'graphyard_decide' ? verdict : evidence);
+    await tool.execute('call-ok', evidence);
     await assert.rejects(tool.execute('call-bad', {}));
   }
   await emit('tool_call', { toolName: 'bash', input: { command: 'rm -rf $HOME' } });
@@ -113,7 +103,7 @@ test('unit:pi-session-autonomous the extension puts the autonomy contract in the
   assert.equal(args[args.indexOf('--mode') + 1], 'json');
   let stdio: unknown, detached: unknown, script = '';
   piRunner({ containment: 'setsid', spawn: ((_command: string, args: string[], options: { stdio: unknown; detached: unknown }) => { stdio = options.stdio; detached = options.detached; script = args[1]; throw new Error('not started'); }) as any })
-    .start('p', { cwd: process.cwd(), tool: 'graphyard_decide', validate: value => value, timeoutMs: 1_000 }).cancel();
+    .start('p', { cwd: process.cwd(), tool: 'graphyard_submit_evidence', validate: value => value, timeoutMs: 1_000 }).cancel();
   // GY-453: the run is detached, with its output in its run directory rather than a pipe to the launcher.
   assert.deepEqual(stdio, ['ignore', 'ignore', 'ignore'], 'stdin is closed: nothing can wait on a person');
   assert.equal(detached, true);

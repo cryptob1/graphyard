@@ -5,7 +5,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { attemptEndsNeedingRetry, attemptHoldCauses, attemptRetryHold, capBinding, failedAttemptCount, maxFailedAttempts, overlongKey, overlongMarker, overlongReason, retryBackoffMs, runtimeToAvoid } from '../src/daemon/reblocked-attempts.js';
+import { attemptEndsNeedingRetry, attemptHoldCauses, attemptRetryHold, failedAttemptCount, maxFailedAttempts, overlongKey, overlongMarker, overlongReason, retryBackoffMs, runtimeToAvoid } from '../src/daemon/reblocked-attempts.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 
@@ -14,13 +14,10 @@ import type { Work } from '../src/model.js';
  * a 4h role maximum) and were only reported as overlong. Now an implementation attempt past its
  * role's time box is ended within one cycle past the bound — its work kept on its branch, its
  * supervisor stopped, its pane closed — and the item goes to a fresh attempt, preferably on
- * another runtime. Retries are bounded: each waits a backoff (5, then 15 minutes) after the
- * failure before it, and an item whose attempts end without submitting three times in a row is
- * held with every cause named instead of being redispatched again. The hold is resolved only
- * through the rework decision an independent approver judges — the loop requests it, launches the
- * approver, and never judges its own request — and the round the decision approves waits the
- * longest backoff (45 minutes) before it dispatches. Every rung of the ladder is computed from
- * the item's own record, so a restarted daemon holds exactly what the record holds.
+ * another runtime. Each retry waits a backoff after the failure before it (5, then 15 minutes),
+ * and every retry past the third failure in a row waits the longest backoff (45 minutes); nothing
+ * holds the item beyond it. Every rung of the ladder is computed from the item's own record, so a
+ * restarted daemon waits exactly what the record holds.
  */
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T00:00:00Z');
@@ -76,10 +73,9 @@ const overlongEnd = (epoch: number, ageMs: number, runtime = 'claude') => ({
 const betweenAttempts = (ends: ReturnType<typeof overlongEnd>[]) => held({ lease: null, capacity: { exhaustions: ends, escalations: [] } } as Partial<Work>);
 
 function harness(item: { current: Work[] }, agents: HerdrAgent[]) {
-  const log = { closed: [] as string[], capacity: [] as Record<string, unknown>[], dispatches: [] as string[], decided: [] as { action: string; reason: string; input: any }[], approvers: [] as string[] };
+  const log = { closed: [] as string[], capacity: [] as Record<string, unknown>[], dispatches: [] as string[] };
   // The cycle's clock is the snapshot's: `time.value` is what the control plane is observed at.
   const time = { value: clock }, at = (offsetMs: number) => { time.value = clock + offsetMs; return time.value; };
-  let decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null; approvedAt: string | null; refusal: { approver: string; reason: string } | null }[] = [];
   const effects: DaemonEffects = {
     agents: () => agents,
     credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
@@ -96,26 +92,14 @@ function harness(item: { current: Work[] }, agents: HerdrAgent[]) {
       item.current = item.current.map(entry => {
         if (entry.id !== work.id) return entry;
         const { endsBlocker: _endsBlocker, ...report } = event as Record<string, unknown>;
-        return { ...entry, lease: null, containmentQuarantine: null,
+        return { ...entry, lease: null,
           capacity: { exhaustions: [...(entry.capacity?.exhaustions ?? []), { ...report, at: iso(0), owner: 'alpha-principal', recordedBy: 'loop', resetsAt: null, partialWork: { state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/gy-885-1' } }], escalations: entry.capacity?.escalations ?? [] } } as Work;
       });
       return item.current[0];
     },
     preserveWork: async () => ({ state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/gy-885-1', detail: 'kept as WIP' }),
-    decisions: async () => ({ decisions }),
-    decide: async (_work, action, reason, input) => {
-      log.decided.push({ action, reason, input });
-      const id = `decision-${log.decided.length}`;
-      decisions = [...decisions, { id, action, state: 'requested', input, approvedBy: null, approvedAt: null, refusal: null }];
-      return { id };
-    },
-    approver: async (_work, decision) => { log.approvers.push(decision); return { agentName: 'approver-1', pane: 'w1:p9', account: null, runtime: 'claude', session: null, run: null }; },
   };
-  return {
-    log, effects, at,
-    decisionLedger: () => decisions,
-    applyDecision: (id: string, at: string) => { decisions = decisions.map(entry => entry.id === id ? { ...entry, state: 'applied', approvedBy: 'approver-2', approvedAt: at } : entry); },
-  };
+  return { log, effects, at };
 }
 
 test('unit:overlong-attempt-ended', async t => {
@@ -208,7 +192,7 @@ test('unit:attempt-retries-capped', async t => {
     const one = betweenAttempts([overlongEnd(1, 60_000)]);
     assert.equal(failedAttemptCount(one), 1);
     const row = attemptEndsNeedingRetry(one);
-    assert.deepEqual(attemptRetryHold(one, clock), { kind: 'backoff', count: 1, causes: attemptHoldCauses(row), ends: row, resumeAt: Date.parse(overlongEnd(1, 60_000).at) + 5 * 60_000, boundAt: null });
+    assert.deepEqual(attemptRetryHold(one, clock), { count: 1, causes: attemptHoldCauses(row), ends: row, resumeAt: Date.parse(overlongEnd(1, 60_000).at) + 5 * 60_000 });
     assert.equal(attemptRetryHold(one, clock + 6 * 60_000), null, 'past the backoff the item dispatches');
 
     // A reblocked or idle hand-over breaks the row: it is not an overlong failure.
@@ -219,93 +203,19 @@ test('unit:attempt-retries-capped', async t => {
     assert.equal(failedAttemptCount(resubmitted), 1);
   });
 
-  await t.test('three overlong ends hold the item with every cause named, and the round is put to an independent approver', async t => {
+  await t.test('past three overlong ends the retry waits the longest backoff and then dispatches; nothing holds the item', async t => {
     const { directory, master } = await setup();
     try {
       const item = { current: [betweenAttempts([overlongEnd(1, 3 * 3_600_000), overlongEnd(2, 2 * 3_600_000), overlongEnd(3, 60_000)])] };
       const { log, effects, at } = harness(item, []);
       const state = emptyDaemonState(master);
       await runCycle(master, state, effects, () => at(0));
-      assert.deepEqual(log.dispatches, [], 'a held item is not redispatched again');
-      assert.deepEqual(log.decided.map(entry => entry.action), ['rework'], 'the loop requests the round but never judges it');
-      const binding = capBinding(item.current[0], Date.parse(overlongEnd(3, 60_000).at));
-      assert.equal(log.decided[0].input.binding, binding);
-      assert.match(log.decided[0].reason, /attempt 1 on alpha/);
-      assert.match(log.decided[0].reason, /attempt 2 on alpha/);
-      assert.match(log.decided[0].reason, /attempt 3 on alpha/);
-      assert.equal(log.approvers.length, 1, 'an independent approver session is launched');
-      const hold = state.actions['retry:held:work-885'];
-      assert.equal(hold?.state, 'done');
-      assert.match(hold!.detail, /held: 3 attempts in a row ended without submitting/);
-      for (const epoch of [1, 2, 3]) assert.match(hold!.detail, new RegExp(`attempt ${epoch} on alpha`), `the cause of attempt ${epoch} is named`);
-
-      // The decision already standing is waited on, not requested twice.
-      await runCycle(master, state, effects, () => at(60_000));
-      assert.equal(log.decided.length, 1);
-      assert.equal(log.approvers.length, 1);
-      assert.match(state.actions['retry:held:work-885'].detail, /waits on the independent approver/);
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  await t.test('an applied cap decision resumes the item after the longest backoff', async t => {
-    const { directory, master } = await setup();
-    try {
-      const item = { current: [betweenAttempts([overlongEnd(1, 3 * 3_600_000), overlongEnd(2, 2 * 3_600_000), overlongEnd(3, 3_600_000)])] };
-      const { log, effects, at, decisionLedger, applyDecision } = harness(item, []);
-      const state = emptyDaemonState(master);
-      await runCycle(master, state, effects, () => at(0));
-      assert.equal(log.decided.length, 1);
-      applyDecision(decisionLedger()[0].id, iso(60_000));
-      // The approved round waits the 45-minute backoff before it dispatches.
-      await runCycle(master, state, effects, () => at(2 * 60_000));
-      assert.deepEqual(log.dispatches, [], 'the approved round still waits the 45-minute backoff');
+      assert.deepEqual(log.dispatches, [], 'the fourth attempt waits its backoff');
       const backoff = Object.entries(state.actions).find(([key]) => key.startsWith('retry:backoff:work-885'))?.[1];
-      assert.match(backoff!.detail, /45 minutes/);
-      assert.match(backoff!.detail, /cap decision/);
-      await runCycle(master, state, effects, () => at(60 * 60_000));
-      assert.deepEqual(log.dispatches, ['beta'], 'the approved round dispatches once its backoff is out');
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  await t.test('a refused cap decision ends the asking: the recovery is named on the record', async t => {
-    const { directory, master } = await setup();
-    try {
-      const binding = capBinding({ key: 'GY-885' }, Date.parse(overlongEnd(3, 60_000).at));
-      const item = { current: [betweenAttempts([overlongEnd(1, 3 * 3_600_000), overlongEnd(2, 2 * 3_600_000), overlongEnd(3, 60_000)])] };
-      const { log, effects, at } = harness(item, []);
-      const refusedEffects: DaemonEffects = { ...effects, decisions: async () => ({ decisions: [{ id: 'decision-refused', action: 'rework', state: 'refused', input: { previousWorkerStopped: true, binding }, approvedBy: null, approvedAt: null, refusal: { approver: 'approver-9', reason: 'premature: the runtime was degraded that day' } }] }) };
-      const state = emptyDaemonState(master);
-      await runCycle(master, state, refusedEffects, () => at(0));
-      await runCycle(master, state, refusedEffects, () => at(46 * 60_000));
-      assert.deepEqual(log.decided, [], 'a refused round is never asked again');
-      const hold = state.actions['retry:held:work-885'];
-      assert.match(hold!.detail, /refused the round the loop asked for/);
-      assert.match(hold!.detail, /premature: the runtime was degraded that day/);
-      assert.match(hold!.detail, /graphyard master decisions GY-885/);
-      assert.deepEqual(log.dispatches, [], 'the item stays held');
-    } finally {
-      await rm(directory, { recursive: true, force: true });
-    }
-  });
-
-  await t.test('without the decision effects the hold names the commands that resolve it', async t => {
-    const { directory, master } = await setup();
-    try {
-      const item = { current: [betweenAttempts([overlongEnd(1, 3 * 3_600_000), overlongEnd(2, 2 * 3_600_000), overlongEnd(3, 60_000)])] };
-      const { log, effects, at } = harness(item, []);
-      const bare: DaemonEffects = { ...effects, decide: undefined, approver: undefined, decisions: undefined };
-      const state = emptyDaemonState(master);
-      await runCycle(master, state, bare, () => at(0));
-      await runCycle(master, state, bare, () => at(46 * 60_000));
-      assert.deepEqual(log.decided, []);
-      const hold = state.actions['retry:held:work-885'];
-      assert.match(hold!.detail, /graphyard master decide GY-885 rework/);
-      assert.match(hold!.detail, /graphyard master approver GY-885/);
-      assert.deepEqual(log.dispatches, []);
+      assert.match(backoff!.detail, /retry 4 waits 45 minutes/);
+      assert.equal(Object.keys(state.actions).some(key => key.startsWith('retry:held:')), false, 'nothing holds the item');
+      await runCycle(master, state, effects, () => at(46 * 60_000));
+      assert.deepEqual(log.dispatches, ['beta'], 'the retry dispatches once its backoff is out, on the other runtime');
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

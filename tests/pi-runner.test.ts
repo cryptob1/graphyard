@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { decidePayloadSchema, graphyardTools } from '../src/runner/payloads.js';
+import { decompositionPayloadSchema, graphyardTools } from '../src/runner/payloads.js';
 import { piArgs, piRunner, runEnvironment } from '../src/runner/pi.js';
 import { runRecord, runRecordSchema, type RunEvent } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -27,13 +27,13 @@ for (const step of scenario.steps) {
 `;
 
 const H = 'a'.repeat(40);
-const decide = (details: unknown, isError = false) => ({ line: { type: 'tool_execution_end', toolCallId: 'call-1', toolName: graphyardTools.decide, result: { content: [{ type: 'text', text: isError ? 'graphyard_decide was not recorded: input.approve is required' : 'recorded' }], details }, isError } });
+const decompose = (details: unknown, isError = false) => ({ line: { type: 'tool_execution_end', toolCallId: 'call-1', toolName: graphyardTools.decompose, result: { content: [{ type: 'text', text: isError ? 'graphyard_decompose was not recorded: input.children is required' : 'recorded' }], details }, isError } });
 const recorded = [
   { line: { type: 'session', version: 3, id: 'session-1', timestamp: '2030-01-01T00:00:00Z', cwd: '/w' } },
   { line: { type: 'agent_start' } },
   { line: { type: 'message_update', message: { role: 'assistant' }, assistantMessageEvent: { type: 'text_delta', delta: 'Rea' } } },
   { line: { type: 'message_end', message: { role: 'assistant', content: [{ type: 'text', text: 'Reading the decision.' }], stopReason: 'toolUse' } } },
-  { line: { type: 'tool_execution_start', toolCallId: 'call-1', toolName: graphyardTools.decide, args: {} } },
+  { line: { type: 'tool_execution_start', toolCallId: 'call-1', toolName: graphyardTools.decompose, args: {} } },
 ];
 const settled = [{ line: { type: 'agent_end', messages: [], willRetry: false } }, { line: { type: 'agent_settled' } }];
 
@@ -44,20 +44,20 @@ async function fixture() {
   let count = 0;
   const scenario = async (steps: unknown[]) => { const file = join(directory, `scenario-${++count}.json`), argsFile = join(directory, `args-${count}.json`); await writeFile(file, JSON.stringify({ steps, argsFile })); return { file, argsFile }; };
   const runner = (file: string, exitGraceMs = 2_000) => piRunner({ command: process.execPath, commandArgs: [script, file], model: 'zai/glm-5.3-flash', extension: '/extensions/graphyard.ts', exitGraceMs });
-  const options = { cwd: directory, tool: graphyardTools.decide, validate: (payload: unknown) => decidePayloadSchema.parse(payload), timeoutMs: 5_000 };
+  const options = { cwd: directory, tool: graphyardTools.decompose, validate: (payload: unknown) => decompositionPayloadSchema.parse(payload), timeoutMs: 5_000 };
   return { directory, scenario, runner, options, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
 
 test('unit:runner-pi-events a Pi run streams typed events and resolves to the validated submitted payload', async () => {
   const { directory, scenario, runner, options, cleanup } = await fixture();
   try {
-    const verdict = { decision: 'decision-1', approve: true, reason: 'the criteria are met' };
-    const { file, argsFile } = await scenario([...recorded, decide(verdict), { line: 'not json' }, ...settled]);
+    const verdict = { reason: 'the item is small enough to keep whole', children: [] };
+    const { file, argsFile } = await scenario([...recorded, decompose(verdict), { line: 'not json' }, ...settled]);
     const run = runner(file).start('Judge decision-1', { ...options, env: { FAKE_ACCOUNT: 'pi-a' } });
     const streamed: RunEvent['kind'][] = [];
     run.onEvent(event => streamed.push(event.kind));
     const result = await run.result();
-    assert.deepEqual(result, { ok: true, tool: graphyardTools.decide, payload: verdict, payloads: [verdict] }, 'the result is the validated payload');
+    assert.deepEqual(result, { ok: true, tool: graphyardTools.decompose, payload: verdict, payloads: [verdict] }, 'the result is the validated payload');
     assert.deepEqual(streamed, ['start', 'session', 'message', 'tool-start', 'tool-end', 'unparsed', 'settled', 'exit'], 'every event streamed in order, streaming noise dropped');
     const message = run.events.find(event => event.kind === 'message');
     assert.deepEqual(message && { role: message.role, text: message.text, stopReason: message.stopReason }, { role: 'assistant', text: 'Reading the decision.', stopReason: 'toolUse' });
@@ -78,7 +78,7 @@ test('unit:runner-pi-events a Pi run streams typed events and resolves to the va
 
     // The record a session keeps is bounded and schema-valid.
     const kept = runRecordSchema.parse(runRecord('pi', run, result, '2030-01-01T00:00:00.000Z', '2030-01-01T00:01:00.000Z'));
-    assert.deepEqual(kept.result, { ok: true, tool: graphyardTools.decide, submitted: 1 });
+    assert.deepEqual(kept.result, { ok: true, tool: graphyardTools.decompose, submitted: 1 });
   } finally { await cleanup(); }
 });
 
@@ -101,17 +101,17 @@ test('unit:runner-pi-events an invalid submitted payload is a typed invalid-payl
   const { scenario, runner, options, cleanup } = await fixture();
   try {
     // A payload the extension let through but Graphyard's own schema refuses.
-    const { file } = await scenario([...recorded, decide({ decision: 'decision-1', approve: 'yes', reason: 'fine' }), ...settled]);
+    const { file } = await scenario([...recorded, decompose({ reason: 'fine', children: 'none' }), ...settled]);
     const result = await runner(file).start('Judge decision-1', options).result();
     assert.equal(!result.ok && result.failure.reason, 'invalid-payload');
     assert.match(!result.ok ? result.failure.detail : '', /failed validation/);
     assert.deepEqual(result.payloads, []);
 
     // A call the extension rejected is the same failure, with the extension's reason.
-    const rejected = await scenario([...recorded, decide({}, true), ...settled]);
+    const rejected = await scenario([...recorded, decompose({}, true), ...settled]);
     const second = await runner(rejected.file).start('Judge decision-1', options).result();
     assert.equal(!second.ok && second.failure.reason, 'invalid-payload');
-    assert.match(!second.ok ? second.failure.detail : '', /input\.approve is required/);
+    assert.match(!second.ok ? second.failure.detail : '', /input\.children is required/);
 
     // A run that ends cleanly without calling the tool submitted nothing.
     const silent = await scenario([...recorded, ...settled]);

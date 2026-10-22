@@ -5,7 +5,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
-import { decisionPrecondition, ownerHoldRefusal } from '../src/model/approval.js';
+import { ownerHoldRefusal } from '../src/model/loop-owned.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -14,8 +14,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const repository = 'owner/hold';
 const owner: Principal = { id: 'human-owner', role: 'admin', sessionKind: 'human' };
 const credentials = [{ ...owner, token: `owner-hold-${'o'.repeat(32)}` }];
-const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['intent:create', 'intent:ready'] };
-const approver = { id: 'approver-agent', token: `approver-agent-${'a'.repeat(32)}`, capabilities: ['decision:approve'] };
+const master = { id: 'master-operator', token: `master-operator-${'m'.repeat(32)}`, capabilities: ['policy:requirements'] };
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
 const call = async (credential: string, path: string, body: unknown) => {
@@ -40,7 +39,7 @@ before(async () => {
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  for (const agent of [master, approver]) {
+  for (const agent of [master]) {
     const provisioned = await call(credentials[0].token, 'operator-agents', { id: agent.id, displayName: agent.id, capabilities: agent.capabilities, scope: { repositories: [repository], workItems: ['*'] }, token: agent.token, reason: 'Onboarding' });
     assert.equal(provisioned.status, 200, JSON.stringify(provisioned.body));
   }
@@ -52,23 +51,20 @@ test('unit:release-owner-hold-refused — every recorded form of the hold refuse
     fixture({ criteria: [{ id: 'AC-1', text: 'This stays in the backlog until the owner releases it', proofs: ['unit:x'] }] as Work['criteria'] }),
     fixture({ criteria: [{ id: 'AC-1', text: 'Scheduled', proofs: ['manual:owner-schedules-isolation'] }] as Work['criteria'] })]) {
     assert.match(ownerHoldRefusal(work, { id: 'doctor', role: 'operator-agent' }) ?? '', /owner hold.*doctor may not release it/);
-    assert.match(decisionPrecondition('release', { expectedRevision: work.revision }, { ...work, stage: 'backlog', ready: false }) ?? '', /owner hold/);
   }
   assert.notEqual(ownerHoldRefusal(fixture({ title: 'Owner hold: later' }), { id: 'agent-admin', role: 'admin', sessionKind: 'ai' }), null, 'an AI admin session is not the owner');
 });
 
-test('integration:release-owner-hold-guard — master release and a release decision of an owner-held item are refused; it stays in the backlog', async () => {
+test('integration:release-owner-hold-guard — master release of an owner-held item is refused; it stays in the backlog', async () => {
   const work = await created(heldInput);
   const refused = await release(master.token, work);
   assert.equal(refused.status, 409); assert.match(refused.body.error, /owner hold/);
-  const requested = await call(master.token, `work/${work.key}/decide`, { action: 'release', input: { expectedRevision: work.revision }, reason: 'Next by priority' });
-  assert.equal(requested.status, 409); assert.match(requested.body.error, /owner hold/);
   const after = await reload(work.id);
   assert.equal(after.stage, 'backlog'); assert.equal(after.ready, false); assert.equal(after.epoch, work.epoch);
   assert.deepEqual(after.actionQueue?.actions ?? [], []);
 });
 
-test('unit:release-owner-hold-owner-path — the owner\'s own release, or one carrying an owner-recorded decision, applies as today', async () => {
+test('unit:release-owner-hold-owner-path — the owner\'s own release, or one carrying an owner-recorded answer, applies as today', async () => {
   const work = await created({ ...heldInput, title: 'Owner hold: owner releases it' });
   const released = await release(credentials[0].token, work);
   assert.equal(released.status, 200, JSON.stringify(released.body));
@@ -80,7 +76,6 @@ test('unit:release-owner-hold-owner-path — the owner\'s own release, or one ca
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{humanRequests}',$2::jsonb) WHERE id=$1", [decided.id, JSON.stringify(answered)]);
   const carried = await reload(decided.id);
   assert.equal(ownerHoldRefusal(carried, { id: master.id, role: 'operator-agent' }), null);
-  assert.equal(decisionPrecondition('release', { expectedRevision: carried.revision }, carried), null);
   const releasedByMaster = await release(master.token, carried);
   assert.equal(releasedByMaster.status, 200, JSON.stringify(releasedByMaster.body));
   assert.equal((await reload(decided.id)).ready, true);

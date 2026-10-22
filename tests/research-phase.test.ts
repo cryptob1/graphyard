@@ -7,7 +7,7 @@ import { createSchema } from '../src/model/work.js';
 import { applyResearchAnswer, applyResearchEvent, clearResearchRuns, currentResearch, requirementsRevision, researchBriefSchema, researchHold, researchHoldGraceMs, researchLostRestarts, researchRework,
   researchSettings, researchSettled, researchStep, researchTool, type ResearchBrief, type ResearchEvent, type ResearchSettings } from '../src/research.js';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../src/runner/types.js';
-import { neededDecision } from '../src/daemon/decisions.js';
+import { neededRework } from '../src/daemon/rework.js';
 import { masterRunSchema, workerPrompt } from '../src/master.js';
 import { reviewPrompt } from '../src/reviewer.js';
 import { graphyardTools } from '../integrations/pi/index.js';
@@ -141,7 +141,7 @@ test('unit:research-brief-recorded — the loop researches a feature on the conf
   assert.deepEqual((await tools[0].execute('call-1', brief)).details, brief);
   await assert.rejects(tools[0].execute('call-2', { ...brief, approach: undefined }), /input\.approach is required/);
   assert.equal(researchBriefSchema.safeParse({ ...brief, risks: 'none' }).success, false);
-  assert.deepEqual(graphyardTools(undefined).map(tool => tool.name), ['graphyard_decide', 'graphyard_submit_evidence'], 'the other roles are unchanged');
+  assert.deepEqual(graphyardTools(undefined).map(tool => tool.name), ['graphyard_submit_evidence'], 'the other roles are unchanged');
   assert.equal(createSchema.parse({ title: 't', type: 'chore', research: true, criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }] }).research, true, 'the intent opts an item in');
 });
 
@@ -191,15 +191,15 @@ test('unit:product-questions-in-graphyard — each product question is a goals-a
   assert.equal(researchRework(early), null, 'a head launched after the answer carried it in its brief');
   assert.throws(() => applyResearchAnswer(early, { question: question.id, answer: 'again' }, 'operator', new Date(NOW)), /already answered/);
 
-  // A differing answer after the head was built on the recommendation: added to the brief, and a rework decision.
+  // A differing answer after the head was built on the recommendation: added to the brief, and a rework.
   Object.assign(feature, { epoch: 1, lease: null, submission: { epoch: 1, pr: 7 }, stage: 'review',
     candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 7, branch: 'graphyard/gy-1-1', author: 'worker-1' } });
   const late = applyResearchAnswer(feature, { question: question.id, answer: 'No, keep it off the page' }, 'operator', new Date(NOW + 5 * 3_600_000));
   assert.deepEqual({ differs: late.answer!.differs, inFlight: late.answer!.inFlight, epoch: late.answer!.epoch }, { differs: true, inFlight: true, epoch: 1 });
   assert.equal(currentResearch(feature)!.questions[0].answer!.text, 'No, keep it off the page', 'the answer is added to the brief');
   assert.deepEqual(researchQuestionRows([feature], NOW), [], 'an answered question leaves Needs you');
-  const rework = neededDecision(feature, { autoMerge: true });
-  assert.equal(rework?.action, 'rework');
+  const rework = neededRework(feature);
+  assert.ok(rework, 'the loop returns the head to a worker');
   assert.match(rework!.reason, /answered "No, keep it off the page", not the provisional "Yes, collapsed under the criteria"/);
   assert.equal(rework!.binding, `${'a'.repeat(40)}:research:${question.id.slice(0, 8)}`);
   feature.reworkRequested = true;

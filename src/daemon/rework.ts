@@ -5,7 +5,7 @@ import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualF
 import { extractProducerAccountsOrRuntimes, unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { researchRework } from '../research.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
-import { message, type DaemonActionKind } from './state.js';
+import { latencySampleSchema, message, type DaemonActionKind } from './state.js';
 import { readyToRetry } from './sessions.js';
 import { boundDetail, detailChanged } from './text.js';
 import { record } from './effects.js';
@@ -200,8 +200,12 @@ export async function reworkStep(cycle: Cycle) {
     if (wait) { await noteWait(item, wait); return wakeJob(item, 'rework'); }
     await retireMootWake(item, 'the item no longer waits for the observation it was to fetch');
     const attempts = (previous?.attempts ?? 0) + 1;
+    const verdict = standingVerdict(item);
     try {
       await effects.rework!(item, rework.reason);
+      // The verdict-to-rework latency the loop is judged on (metrics.ts `latencyTargets`).
+      const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
+      if (Number.isFinite(verdictAt) && rework.binding.includes(':verdict:')) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Returned ${item.key} to a worker: ${rework.reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
       performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not return ${item.key} to a worker: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));

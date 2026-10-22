@@ -17,12 +17,12 @@ import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
 import { discoverHostLogins, fleetRoleHealth, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
-import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, launchApprover, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
+import { NoHealthyAccountError, atomicPrivateWrite, buildMasterStatus, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
 import { FleetOverview, pastesCredential } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
-import { expandTypedCommand, requestOf, startedAtOnce } from './helpers/launch-shell.js';
+import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-20 at/now/resetsAt trio is the fixed clock handed to fleetView, chooseSession and sessionEnded; Date.now() only builds relative expiries and reset times.
 
@@ -97,8 +97,6 @@ async function master(workers: { name: string; principal: string; kind: string; 
     const credentialFile = join(credentialDirectory, 'workers', `${entry.name}.token`); await writeFile(credentialFile, `${entry.name}-token-`.padEnd(40, 'x'), { mode: 0o600 });
     config.workers.push({ name: entry.name, principal: entry.principal, agentName: entry.name, mode: 'launch', kind: entry.kind, credentialFile, agentArgs: entry.agentArgs ?? [], approvals: 'auto', environment: {} });
   }
-  const approverFile = join(credentialDirectory, 'approver.token'); await writeFile(approverFile, 'approver-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  config.approver = { id: 'graphyard-approver', credentialFile: approverFile };
   await atomicPrivateWrite(join(root, '.graphyard/master.json'), config);
   return { root, credentialDirectory, config: await loadMasterConfig(root) };
 }
@@ -198,7 +196,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['codex-a', 'claude-a'], concurrency: 1 }, reason: 'Review on a different model than the author' });
   await registryCommand({ hostId: HOST }, ['role', 'set', 'reviewer', '--concurrency', '2', '--reason', 'One more reviewer at a time'], cli);
   assert.deepEqual((await ok('agent-registry/document', coordinator) as Registry).roles.find(role => role.name === 'reviewer'), { name: 'reviewer', accounts: ['codex-a', 'claude-a'], concurrency: 2 }, 'the CLI changed the limit and kept the order');
-  for (const name of ['producer', 'approver', 'escalation-handler']) await ok('agent-registry/roles', operator, { role: { name, accounts: ['claude-a'], concurrency: 1 }, reason: `Configure ${name}` });
+  for (const name of ['producer', 'approver']) await ok('agent-registry/roles', operator, { role: { name, accounts: ['claude-a'], concurrency: 1 }, reason: `Configure ${name}` });
   // The master role (GY-898) is a capacity role like any other, but never more than one live session:
   // whatever the mutation asks, the stored concurrency is 1 (two masters break single-coordinator).
   await ok('agent-registry/roles', operator, { role: { name: 'master', accounts: ['claude-a'], concurrency: 4 }, reason: 'Configure the loop-launched master session' });
@@ -215,7 +213,7 @@ test('integration:agent-registry-model — the control plane stores runtimes wit
   assert.deepEqual(fleetRoles.filter(name => view.roles.some(role => role.role === name)), [...fleetRoles]);
   const claude = view.accounts.find(account => account.name === 'claude-a')!;
   assert.deepEqual([claude.runtime, claude.model, claude.modelId, claude.cost, claude.capability?.tier, claude.host, claude.home, claude.maxSessions], ['claude', 'opus', 'claude-opus-5', { inputPerMTok: 15, outputPerMTok: 75 }, 'frontier', HOST, claudeHome, 2]);
-  assert.deepEqual(claude.roles.map(entry => `${entry.role}:${entry.preference}/${entry.of}`), ['worker:1/3', 'reviewer:2/2', 'producer:1/1', 'approver:1/1', 'escalation-handler:1/1', 'master:1/1']);
+  assert.deepEqual(claude.roles.map(entry => `${entry.role}:${entry.preference}/${entry.of}`), ['worker:1/3', 'reviewer:2/2', 'producer:1/1', 'approver:1/1', 'master:1/1']);
   const aider = view.accounts.find(account => account.name === 'aider-a')!;
   assert.deepEqual([aider.quota, aider.resetsAt, aider.quotaSource, aider.eligible], ['exhausted', resetsAt, 'operator', false]); assert.match(aider.ineligible!, /aider-a quota is exhausted until/);
   assert.equal(view.runtimes.find(runtime => runtime.name === 'aider')!.launch.homeVariable, 'AIDER_HOME');
@@ -311,23 +309,8 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   assert.equal(refusedLaunch.principal, 'implementer-c'); assert.ok(refusedLaunch.endedAt, 'the refused launch gives its session back');
   assert.match(refusedLaunch.endReason!, /worker launch for GY-\d+ failed: Graphyard refuses to launch the claude runtime/);
 
-  // The approver's runtime comes from its role too — here a runtime with no login home and its own contract.
-  const approverCalls: string[][] = [];
-  const approver = await launchApprover(root, readyWork('GY-950'), 'decision-1', undefined, { agents: [], available: true }, herdr(approverCalls), probe);
-  assert.equal(approver.account!.environment, 'muse-a');
-  const started = expandTypedCommand(approverCalls.find(args => args[0] === 'pane' && args[1] === 'run')![3]);
-  assert.equal(started.kind, 'muse'); assert.deepEqual(started.args.slice(0, 3), ['--approval-mode', 'never', '--trust-workspace']);
-  // Muse takes its request positionally, after its contract's arguments, never pasted (GY-184).
-  assert.equal(started.args.length, 4); assert.match(started.args[3], /You are the independent Graphyard approver/);
-  assert.equal(requestOf(started.kind, started.args), started.args[3]);
-  assert.equal(approverCalls.some(args => args[0] === 'agent' && args[1] === 'prompt'), false);
   // …and a role the registry does not define is not guessed at: reviewer falls to the local profile, which names none.
   assert.deepEqual(await selectAccount(config, 'reviewer', { name: 'review-a' }, probe), { account: null, health: null, skipped: [] });
-  const source = await readFile(new URL('../src/master/autonomy.ts', import.meta.url), 'utf8');
-  const daemon = await readFile(new URL('../src/daemon/effects-production.ts', import.meta.url), 'utf8');
-  const launchPaths = source.slice(source.indexOf('export async function launchApprover'), source.indexOf('export const autonomySubcommands')) + source.slice(source.indexOf("if (id === 'approver')"), source.indexOf("if (id === 'approver')") + 400)
-    + daemon.slice(daemon.indexOf("const approver: DaemonEffects['approver']"), daemon.indexOf("const approver: DaemonEffects['approver']") + 400);
-  assert.doesNotMatch(launchPaths, /\?\? '(claude|codex|cursor|opencode|muse)'/, 'no launch path falls back to a runtime named in code, in the loop as much as in the command');
 
   // A launch that fails *after* the choice gives its session back on every path, not only the
   // worker's: the reviewer's token mint fails here, and its account and the role's one slot are
@@ -479,7 +462,7 @@ test('unit:registry-visibility — master status and the dashboard show each acc
   assert.deepEqual(settleSessions(settled, [], new Date(now + 2000).toISOString()).map(entry => entry.endReason), ['superseded by the claude-a session launched for GY-5']);
 
   // master status: the same facts, per account, with every blocked role raised as the master's own attention.
-  const status = buildMasterStatus({ work: [], now: at }, [], [], {}, {}, { pending: [], completed: [] }, 'main', { fleet: view });
+  const status = buildMasterStatus({ work: [], now: at }, [], [], {}, { pending: [], completed: [] }, 'main', { fleet: view });
   const row = status.fleet!.accounts.find(account => account.account === 'claude-b')!;
   assert.deepEqual([row.runtime, row.model, row.roles, row.quota, row.resetsAt, row.eligible, row.ineligible], ['claude', 'opus', ['worker (2 of 3)', 'reviewer (2 of 2)', 'producer (1 of 1)'], 'exhausted', resetsAt, false, `claude-b quota is exhausted until ${resetsAt} (weekly window spent)`]);
   assert.deepEqual(status.fleet!.accounts.find(account => account.account === 'claude-a')!.liveSessions, [{ role: 'worker', work: 'GY-5', since: at }]);
@@ -488,7 +471,7 @@ test('unit:registry-visibility — master status and the dashboard show each acc
   assert.ok(raised.length >= 3 && raised.every(item => item.role === 'master' && !item.human && /graphyard master registry/.test(item.next)), 'the master resolves fleet attention itself, in the registry');
   assert.equal(status.counts.attention, raised.length);
   assert.equal(buildMasterStatus({ work: [], now: at }, [], []).fleet, null, 'a control plane before the registry reports none');
-  assert.match(buildMasterStatus({ work: [], now: at }, [], [], {}, {}, { pending: [], completed: [] }, 'main', { fleet: fleetView(emptyRegistry(), now) }).fleet!.next!, /master registry propose --apply/);
+  assert.match(buildMasterStatus({ work: [], now: at }, [], [], {}, { pending: [], completed: [] }, 'main', { fleet: fleetView(emptyRegistry(), now) }).fleet!.next!, /master registry propose --apply/);
 
   // Dashboard: the page renders the same view.
   const page = renderToStaticMarkup(createElement(FleetOverview, { fleet: view }));

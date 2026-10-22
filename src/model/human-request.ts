@@ -117,11 +117,11 @@ const requirementsQuestion = (text: string) => (text.match(/(?:[^.;\n?]|\.(?=\S)
   return requirementsObject(sentence) && (targeted || !bareNounOnly(sentence) && changeNoun.test(sentence.replace(scheduledChange, 'work'))); });
 /** A park's own words: the kind it claims, and every text the human would read. */
 export interface ParkQuestion { kind?: string; needed: string; ask?: string | null; reason?: string | null }
-/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816, GY-1818, GY-1819), or null: the master requests rewrites, an approver approves. */
+/** Why a goals-and-priorities park asks a criterion rewrite (GY-1816, GY-1818, GY-1819), or null: the master applies rewrites. */
 export function requirementsQuestionRefusal(data: ParkQuestion): string | null {
   if (data.kind !== 'goals-and-priorities') return null;
   const questioned = [data.ask, data.needed, data.reason].some(text => !!text?.trim() && requirementsQuestion(text));
-  return questioned ? 'Not a human-only decision: the request asks whether this item\'s criteria are rewritten, revised or matched to another item\'s tests — a requirements decision, never the human\'s. Agent route: record the conflict with `graphyard blocked GY-N EPOCH REASON`, so the master requests the requirements decision (`graphyard master decide GY-N requirements …`) for an independent approver to approve; the item never parks.' : null;
+  return questioned ? 'Not a human-only decision: the request asks whether this item\'s criteria are rewritten, revised or matched to another item\'s tests — a requirements decision, never the human\'s. Agent route: record the conflict with `graphyard blocked GY-N EPOCH REASON`, so the master revises the requirements (`graphyard master requirements GY-N FILE REASON`); the item never parks.' : null;
 }
 /** The park refusals in the order they fire: a criterion-rewrite question first (GY-1816), then the classifier's own (GY-1395, GY-1416, GY-1692). */
 export const parkRefusal = (data: ParkQuestion): string | null => requirementsQuestionRefusal(data) ?? classifiedParkRefusal(data);

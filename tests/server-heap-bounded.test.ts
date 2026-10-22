@@ -9,10 +9,10 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { standingEscalations, type Principal } from '../src/model.js';
+import type { Principal } from '../src/model.js';
 
 // GY-975: the production server's heap climbed to its 4 GB limit every ten to fifteen minutes. These
-// tests drive the requests every client polls — status, escalation context, action claims and the
+// tests drive the requests every client polls — status, item reads, action claims and the
 // agent registry — and assert what the process retains after a full collection stays under a fixed
 // bound. The GitHub answer cache that retained it then went with the GitHub client (GY-2010).
 
@@ -51,22 +51,19 @@ async function call(principal: Principal, method: 'GET' | 'POST', path: string, 
   return text.length;
 }
 
-/** An item with a standing escalation, so its context read assembles the escalation's whole context. */
-async function escalated() {
-  let work = await engine.execute(operator, 'create', null, { title: 'heap', description: 'Why heap matters', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal' }, randomUUID());
-  work = await engine.execute(operator, 'ready', work.id, { reason: 'Priority one' }, randomUUID());
-  work = await engine.execute(operator, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, criteria: [work.criteria[0]], dependencies: work.dependencies, exclusiveResources: [], producerProofs: [], reason: 'AC-2 moves to a follow-up item' }, randomUUID());
-  assert.deepEqual(standingEscalations(work).map(entry => entry.trigger), ['requirement-weakening']);
-  return work;
+/** A released item, so the item read and the claim have something to return. */
+async function released() {
+  const work = await engine.execute(operator, 'create', null, { title: 'heap', description: 'Why heap matters', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal' }, randomUUID());
+  return engine.execute(operator, 'ready', work.id, { reason: 'Priority one' }, randomUUID());
 }
 
-test('unit:server-heap-bounded-under-repeated-requests — repeated status, context, claim and registry requests retain a bounded heap', async () => {
-  const work = await escalated();
+test('unit:server-heap-bounded-under-repeated-requests — repeated status, item, claim and registry requests retain a bounded heap', async () => {
+  const work = await released();
   // One polling round: every read a client repeats.
   const round = async () => {
     await Promise.all([
       call(coordinator, 'GET', 'status'), call(operator, 'GET', 'status'),
-      call(coordinator, 'GET', `work/${work.key}/context`),
+      call(coordinator, 'GET', `work/${work.key}`),
       call(implementer, 'POST', 'assignments/claim', {}),
       call(coordinator, 'GET', 'agent-registry'),
     ]);

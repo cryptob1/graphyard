@@ -140,7 +140,7 @@ export function nextActor(work: Work, group: Group | null, now: number, release:
   // Blocked means the step's own actor cannot clear it (a recorded blocker, a stall, a violation,
   // a refusal no retry fixes): the master agent acts next.
   const routine = group === 'blocked' ? routineBlocker(work) : null; if (routine) return routine; // GY-1008: the loop's to clear
-  if (group === 'blocked') return { who: 'Master agent', does: 'Clear what blocks it, or hand the decision to an approver agent' };
+  if (group === 'blocked') return { who: 'Master agent', does: 'Clear what blocks it, or decide it with its own identity' };
   if (group === 'up-next') {
     const held = upNextHold(work, all, now);
     return held ? { who: 'Nobody yet', does: held.text } : { who: 'Graphyard (assigns a builder)', does: 'Hands it to the next free builder agent' };
@@ -177,7 +177,7 @@ function heldMeaning(total: number, held: string[]): string {
  * `held` is no role at all: the item waits behind a dependency or an exclusive resource another
  * item holds, so nobody can act on it until that clears — never the control plane's pending step.
  */
-export const actorRoles = ['worker', 'reviewer', 'producer', 'approver', 'master', 'executor', 'human-only', 'held'] as const;
+export const actorRoles = ['worker', 'reviewer', 'producer', 'master', 'executor', 'human-only', 'held'] as const;
 export type ActorRole = typeof actorRoles[number];
 /** Every `who` label `nextActor`, `prSteps` and `waitsOn` write, with the role it names. */
 export const roleOf: Readonly<Record<string, ActorRole>> = {
@@ -197,18 +197,15 @@ export function actorRole(work: Work, group: Group | null, who: string): ActorRo
   return Object.hasOwn(roleOf, who) ? roleOf[who]! : 'held';
 }
 
-const escalation = /^Unresolved \S+ escalation requires operator resolution/;
 const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.name === gate && !entry.passed)?.reasons ?? [];
 
-/** The exact command that takes the next step, when there is one to run: a recorded blocker `master unblock`, an escalation `master decide … resolve`, a review `master review`, backlog `master release`, and a human-only decision the answer its row names. Null where the next step is a session already running or a turn nobody can take early. */
+/** The exact command that takes the next step, when there is one to run: a recorded blocker `master unblock`, a review `master review`, backlog `master release`, and a human-only decision the answer its row names. Null where the next step is a session already running or a turn nobody can take early. */
 export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow): string | null {
   const key = work.key;
   if (actor === 'human-only') return humanRow?.answer.cli ?? (work.humanRequest ? answerCommand(key, work.humanRequest) : null);
-  if (actor === 'approver') return `graphyard master decisions ${key}`;
   if (actor === 'reviewer') return `graphyard master review ${key}`;
   if (group === 'backlog') return actor === 'master' ? `graphyard master release ${key}` : null;
   if (work.blocker) return blockerView(work)?.needsSomeone === false ? null : `graphyard master unblock ${key} REASON`;
-  if (refusalsOf(work, 'merge').some(reason => escalation.test(reason))) return `graphyard master decide ${key} resolve REASON`;
   return null;
 }
 

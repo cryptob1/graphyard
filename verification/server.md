@@ -4,7 +4,7 @@ Paths: src/server/**, src/server.ts
 
 - `tests/board-api.test.ts`: the board's HTTP routes and their principals.
 - `tests/server-startup-readiness.test.ts`, `tests/healthz-bounded.test.ts`: startup and health.
-- `tests/decision-lifecycle.test.ts`, `tests/decision-application.test.ts`: two-party decisions.
+- `tests/master-intent-applies-directly.test.ts`: the master's intent applied at once, and a lapsed lease ending the attempt.
 - `tests/lease-lifecycle.test.ts`, `tests/server-scale.test.ts`, `tests/server-heap-bounded.test.ts`.
 
 ## Drive
@@ -15,7 +15,6 @@ Paths: src/server/**, src/server.ts
 
 - Every route authenticates a principal and checks the role the action needs; there is no client-controlled lifecycle-state endpoint.
 - Mutations carry the lease epoch they act under and are refused once it is expired or superseded.
-- The approver of a decision is never its requester, an implementer of the item, or the producer of its evidence.
 - `/healthz` and the coordination snapshot stay bounded in time and size whatever the board's size.
 
 ## Gotchas

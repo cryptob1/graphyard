@@ -17,9 +17,8 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { bwrapOnPath, coordinatorCheckoutRefusal, readCoordinatorCheckout, readOnlyMountWrapper } from '../src/master/profiles.js';
-import { readApproverLaunches } from '../src/master/autonomy.js';
 import { dataDirectory, orphanGraceMs, worktreeRoot } from '../src/install/worktree-root.js';
-import { atomicPrivateWrite, dispatchWork, launchApprover, launchEscalationHandler, loadMasterConfig, readEscalationSessions, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { atomicPrivateWrite, dispatchWork, loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { launchProducer, loopScratchCheckout, readProducerLedger, reclaimCheckouts } from '../src/producer.js';
 import { applyResearchEvent, clearResearchRuns, type ResearchEvent } from '../src/research.js';
 import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
@@ -27,7 +26,6 @@ import { docsSyncMaxMs, launchDocsSync, type DocsSyncPlan } from '../src/docs-sy
 import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import type { HerdrAgent } from '../src/master/herdr.js';
 import type { Runner } from '../src/runner/types.js';
-import type { EscalationContext } from '../src/model/escalation-context.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 iso() instants are judged against the stub snapshot's own now iso(0) (lease expiry, fault ages, observedAt); Date.now() only mints tokens, stamps observations and runs reclaim.
@@ -198,63 +196,6 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
       assert.equal(projects[realpathSync(resolve(sessionCheckout!))]?.hasTrustDialogAccepted, true, 'the runtime starts in the session checkout');
       assert.equal(projects[realpathSync(resolve(root))], undefined, 'the coordinator checkout is never recorded as the folder the runtime starts in');
     } finally { await rm(home, { recursive: true, force: true }); }
-    await cleanup();
-  } finally { await fixture.cleanup(); }
-});
-
-test('unit:session-cwd-own-checkout — an approver session opens its pane and starts its runtime in a managed checkout of its own, never in the coordinator checkout', async () => {
-  const fixture = await installed();
-  try {
-    const { root, cleanup } = fixture;
-    const stub = herdr();
-    await launchApprover(root, work(), 'decision-1', 'claude', { agents: [], available: true }, stub.run);
-    assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the approver');
-    const pane = paneCwd(stub.tabs[0]);
-    assert.ok(pane, 'the approver pane is created with an explicit --cwd');
-    assert.ok(outsideCoordinator(pane!, root), `the approver pane opens outside the coordinator checkout, not ${pane}`);
-    assert.equal(existsSync(pane!), true, 'the approver pane opens in a checkout that exists');
-    const sessionCheckout = checkoutOfStem(stub.typed[0].stem);
-    assert.equal(resolve(pane!), resolve(sessionCheckout!), 'the pane opens exactly where the approver checkout is');
-    // What its request runs works from there: `master decisions`, `approve` and `refuse` resolve
-    // the coordinator's installation from the root the tab hands it, and gh and git reads reach
-    // the repository from the directory itself.
-    const handed = tabEnv(stub.tabs[0], 'GRAPHYARD_REPOSITORY_ROOT');
-    assert.equal(handed, root, 'the approver tab hands the session the coordinator root');
-    assert.equal(realpathSync(cliRoot(pane!, { GRAPHYARD_REPOSITORY_ROOT: handed! })), realpathSync(root), 'graphyard master commands run from where the approver starts resolve the coordinator installation');
-    assert.ok(obtainsCode(pane!, join(pane!, 'checkout'), fixture.head, root), 'git reads from where the approver starts reach the repository');
-    // The directory is owned while the session's launch record is kept: a reclaim pass past the grace leaves it.
-    assert.equal((await readApproverLaunches(root)).at(-1)?.checkout, pane, 'the launch record names the approver checkout');
-    assert.ok(await survivesReclaim(root, fixture.config, pane!), 'a reclaim pass past the orphan grace leaves the approver checkout');
-    await cleanup();
-  } finally { await fixture.cleanup(); }
-});
-
-test('unit:session-cwd-own-checkout — an escalation handler opens its pane and starts its runtime in a managed checkout of its own, never in the coordinator checkout', async () => {
-  const fixture = await installed();
-  try {
-    const { root, config, cleanup } = fixture;
-    const stub = herdr();
-    const context = { key: 'GY-866', escalation: { trigger: 'requirement-weakening' }, fingerprint: 'f'.repeat(64) } as unknown as EscalationContext;
-    await launchEscalationHandler(root, config, context, 'claude', [], stub.run);
-    assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the handler');
-    const pane = paneCwd(stub.tabs[0]);
-    assert.ok(pane, 'the escalation handler pane is created with an explicit --cwd');
-    assert.ok(outsideCoordinator(pane!, root), `the escalation handler pane opens outside the coordinator checkout, not ${pane}`);
-    assert.equal(existsSync(pane!), true, 'the escalation handler pane opens in a checkout that exists');
-    // The one checkout the launch allocated under the managed worktree root is where it opens.
-    const managedRoot = worktreeRoot(root, config);
-    const allocated = (await readdir(managedRoot)).filter(name => /^graphyard-approval-/.test(name)).map(name => join(managedRoot, name));
-    assert.equal(allocated.length, 1, 'the launch allocates one managed checkout for the handler');
-    assert.equal(resolve(pane!), resolve(allocated[0]), 'the pane opens exactly in the checkout the handler was allocated');
-    assert.equal(dirname(resolve(pane!)), resolve(managedRoot));
-    assert.match(basename(pane!), /^graphyard-approval-gy-866-/i, 'the checkout is the handler\'s own, named for its item');
-    assert.deepEqual(stub.pasted, [], 'the handler takes its request on its command line, never a paste');
-    // `master decide` resolves the coordinator installation from where it starts with the root its tab hands it.
-    const handed = tabEnv(stub.tabs[0], 'GRAPHYARD_REPOSITORY_ROOT');
-    assert.equal(handed, root, 'the handler tab hands the session the coordinator root');
-    assert.equal(realpathSync(cliRoot(pane!, { GRAPHYARD_REPOSITORY_ROOT: handed! })), realpathSync(root), 'graphyard master decide run from where the handler starts resolves the coordinator installation');
-    assert.equal((await readEscalationSessions(root)).at(-1)?.checkout, pane, 'the handler record names its checkout');
-    assert.ok(await survivesReclaim(root, config, pane!), 'a reclaim pass past the orphan grace leaves the handler checkout');
     await cleanup();
   } finally { await fixture.cleanup(); }
 });

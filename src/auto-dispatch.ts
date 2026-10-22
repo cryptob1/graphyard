@@ -1243,7 +1243,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
           // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
           const unexercised = unexercisedFindings(item, request.sha, request.proofs);
-          if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through a rework decision, and no producer is launched for it again`); continue; }
+          if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through the loop's rework, and no producer is launched for it again`); continue; }
           if (!session('producer', item, request, producers)) continue;
           if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
           if (memoryDeferred) { wait('producer', item, request, memoryDeferred); continue; }
@@ -1650,7 +1650,7 @@ export function abandonedAttention(entry: AbandonedRequest & { requestId: string
   }
   return { subject: entry.work, text: bounded(`${entry.work}'s ${role} request ${entry.requestId}${group} on ${entry.sha.slice(0, 12)} still stands after ${entry.attempts.length} automatic session${entry.attempts.length === 1 ? '' : 's'}, none of which answered it, so the loop has stopped attempting it (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
     ...agentOwner('master', entry.kind === 'review' ? `Fix what the attempts name, then graphyard master review ${entry.work}`
-      : `The loop requests a rework decision for ${entry.work} on its next cycle, quoting these attempts, and the approver judges it; if the attempts name a launcher fault (a producer profile or its credential), fix that first`) };
+      : `The loop returns ${entry.work} to a worker on its next cycle, quoting these attempts; if the attempts name a launcher fault (a producer profile or its credential), fix that first`) };
 }
 function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
   if (dispatch.error) return [{ subject: 'dispatch', text: `The dispatch cursor cannot be read, so whether any reviewer or producer is being launched is unknown: ${dispatch.error}`,

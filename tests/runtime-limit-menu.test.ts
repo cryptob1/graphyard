@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -119,12 +119,11 @@ const ok = async (principal: Principal, method: 'GET' | 'POST', path: string, bo
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 
-const settlementToken = 'e'.repeat(64);
 interface Herdr { agents: { name: string; pane_id: string; agent_status: string }[]; output: Record<string, string> }
 /** The loop as `master run` wires it, with Herdr an inventory the test controls and the launcher its control-plane calls. */
 function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
   const now = () => Date.now() + clock.skewMs;
-  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[], stopped: [] as string[], keys: [] as string[][] };
+  const calls = { dispatch: [] as { work: string; profile: string; account: string | null }[], keys: [] as string[][] };
   const effects: DaemonEffects = {
     agents: () => herdr.agents,
     herdr: () => ({ agents: herdr.agents, available: true }),
@@ -135,7 +134,6 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
       const selected = await selectAccount(config, 'worker', profile, { quota: false, now, cacheMs: 0, work: work.key });
       const claimed = await ok(workerA, 'POST', `work/${work.id}/claim`, {}) as Work;
       await ok(workerA, 'POST', `work/${work.id}/workspace`, { epoch: claimed.epoch, host: 'loop-host', path: worktrees[claimed.epoch - 1], branch: `graphyard/${claimed.key.toLowerCase()}-${claimed.epoch}` });
-      await ok(workerA, 'POST', `work/${work.id}/quarantine`, { epoch: claimed.epoch, settlementHash: createHash('sha256').update(settlementToken).digest('hex'), scope: { unit: `graphyard-watch-4242-${randomUUID()}.scope`, pid: 4242 } });
       herdr.agents.push({ name: profile.agentName, pane_id: `pane-${profile.name}-${calls.dispatch.length}`, agent_status: 'working' });
       calls.dispatch.push({ work: work.key, profile: profile.name, account: selected.account?.name ?? null });
     },
@@ -148,11 +146,6 @@ function loop(config: MasterConfig, herdr: Herdr, clock: { skewMs: number }) {
     selectedAccount: async (role, profile) => readEnvironmentLog(config).then(log => log.selected[`${role}:${profile}`] ?? null),
     holdAccount: (account, observed) => recordObservedExhaustion(config, account, observed, now()),
     preserveWork: async (work, epoch) => preservePartialWork(work.workspaces.find(entry => entry.epoch === epoch)!.path, `${work.key} attempt ${epoch} interrupted by provider quota exhaustion`),
-    stopSupervisor: async orphan => {
-      calls.stopped.push(`${orphan.key}:${orphan.epoch}`);
-      herdr.agents = herdr.agents.filter(agent => agent.name !== orphan.agentName);
-      await ok(workerA, 'POST', `work/${orphan.id}/settle`, { epoch: orphan.epoch, settlementToken });
-    },
   };
   return { calls, cycle: (state: DaemonState) => runCycle(config, state, effects, now) };
 }
@@ -220,7 +213,8 @@ test('unit:blocked-limit-menu-fails-over — a worker blocked on the usage-limit
     assert.equal(failover?.state, 'done', failover?.detail);
     assert.match(failover.detail, /exhausted env-a mid-session \(You've hit your weekly limit/);
     assert.deepEqual(calls.keys, [], 'the loop never chooses on the menu, least of all "Switch to usage credits"');
-    assert.deepEqual(calls.stopped, [`${work.key}:1`], 'the session\'s supervisor is stopped');
+    // Its supervisor stops on the ended lease, and its pane goes with it.
+    herdr.agents = herdr.agents.filter(agent => agent.name !== 'agent-builder');
     work = await reload(work.id);
     assert.equal(work.lease, null, 'the lease is released');
     assert.equal(work.pipeline!.attempts[0].end, 'released');

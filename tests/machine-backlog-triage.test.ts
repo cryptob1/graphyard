@@ -4,8 +4,6 @@ import type { Work } from '../src/model.js';
 import { backlogCounts, machineKind, overdueTriage, triageDeadlineMs, untriaged, type TriageJudgement } from '../src/model/machine-backlog.js';
 import { clearTriageRuns, triageSettled, triageStep, triageTool, untriagedAttention } from '../src/triage.js';
 import { researchSettings } from '../src/research.js';
-import { neededDecision, routineDecision } from '../src/daemon/decisions.js';
-import { decisionInputs, decisionPrecondition } from '../src/model/approval.js';
 import { graphyardTools } from '../integrations/pi/index.js';
 import type { Run, RunEvent, RunOptions, RunResult, Runner } from '../src/runner/types.js';
 
@@ -68,7 +66,7 @@ function fakeRunner(answer: (work: string) => TriageJudgement | null) {
   return { runner, starts };
 }
 
-test('unit:machine-backlog-triaged — the triage step judges each machine-filed item awaiting triage through the typed triage tool, and a proposed closure becomes a close decision for the approver', async t => {
+test('unit:machine-backlog-triaged — the triage step judges each machine-filed item awaiting triage through the typed triage tool', async t => {
   t.after(clearTriageRuns);
   const work = [stale, fresh, fault, operator, delivered];
   const recorded: { key: string; judgement: TriageJudgement }[] = [];
@@ -87,17 +85,6 @@ test('unit:machine-backlog-triaged — the triage step judges each machine-filed
   assert.equal(tool!.name, triageTool);
   await assert.rejects(tool!.execute('call', { outcome: 'release', priority: 9, reason: 'x' } as never), /at most 4/);
 
-  // A proposed closure is the close decision the loop requests, which only an approver applies.
-  const at = hours(1);
-  const proposed = { ...stale, triage: { judgement: { outcome: 'close', ref: 'GY-300', reason: 'GY-300 bounded the retry' }, state: 'proposed', by: 'master', at } } as Work;
-  const decision = routineDecision(proposed, { autoMerge: true }, NOW);
-  assert.deepEqual(decision && { action: decision.action, binding: decision.binding, input: decision.input }, { action: 'close', binding: `triage:${at}`, input: { kind: 'superseded', ref: 'GY-300', reason: 'Already fixed by GY-300: GY-300 bounded the retry', triageAt: at } });
-  assert.doesNotThrow(() => decisionInputs.close.parse(decision!.input));
-  assert.equal(decisionPrecondition('close', decision!.input, proposed), null);
-  assert.match(decisionPrecondition('close', { ...decision!.input, triageAt: hours(2) }, proposed)!, /no proposed triage closure/);
-  const merge = { ...stale, triage: { judgement: { outcome: 'merge', into: 'GY-401', reason: 'the same findings' }, state: 'proposed', by: 'master', at } } as Work;
-  assert.deepEqual(neededDecision(merge, { autoMerge: true })?.input, { kind: 'duplicate', ref: 'GY-401', reason: 'Merged into GY-401 by triage: the same findings', triageAt: at });
-  assert.equal(neededDecision(stale, { autoMerge: true }), null, 'an item awaiting triage needs a judgement, not a decision');
 });
 
 test('unit:triage-concurrency-setting — run.research.triageConcurrency sets how many machine-filed items are triaged at once, defaulting to two', async t => {
@@ -125,7 +112,6 @@ test('unit:triage-refused-closure-not-reproposed — the closure an approver ref
   const recorded: TriageJudgement[] = [];
   const { runner, starts } = fakeRunner(() => ({ outcome: 'close', ref: 'GY-1427', reason: 'GY-1427 fixed it, again' }));
   const step = (items: Work[], clock = NOW) => triageStep({ work: items, clock, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner, record: async (_, body) => { recorded.push(body.judgement); } });
-  assert.equal(neededDecision(work, { autoMerge: true }), null, 'a refused closure needs no decision');
   assert.deepEqual(step([work]).map(action => action.state), ['started']);
   await triageSettled();
   assert.equal(recorded.length, 0, 'the repeated closure is dropped unrecorded, so the item never carries a proposed closure');
@@ -137,7 +123,6 @@ test('unit:triage-refused-closure-not-reproposed — the closure an approver ref
   }
   assert.equal(starts.length, 1);
   assert.equal(recorded.length, 0);
-  assert.equal(neededDecision(work, { autoMerge: true }), null);
   // A merge into the refused ref is the same closure (duplicate of GY-1427) only when the refusal was of a merge.
   const merged = refusedClosure({ triage: { judgement: { outcome: 'merge', into: 'GY-1427', reason: 'same' }, state: 'refused', by: 'graphyard', at: refusedAt, refusal: 'no' } } as Partial<Work>);
   clearTriageRuns(); starts.length = 0;
@@ -173,8 +158,6 @@ test('unit:triage-sees-closure-refusal — triage judging an item whose closure 
   run({ outcome: 'close', ref: 'GY-1440', reason: 'GY-1440 fixed the rest, delivered after the refusal' });
   await triageSettled();
   assert.deepEqual(recorded.at(-1), { outcome: 'close', ref: 'GY-1440', reason: 'GY-1440 fixed the rest, delivered after the refusal' }, 'a closure naming new evidence is recorded');
-  const proposed = refusedClosure({ triage: { judgement: recorded.at(-1)!, state: 'proposed', by: 'graphyard', at: NOW.toString() } } as Partial<Work>);
-  assert.equal(neededDecision(proposed, { autoMerge: true })?.input?.ref, 'GY-1440');
   // A judgement never refused carries no refusal into the prompt.
   clearTriageRuns();
   const fresh = fakeRunner(() => null);

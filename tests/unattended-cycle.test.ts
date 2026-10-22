@@ -5,48 +5,37 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { actionableSubjects, approvalStep, approvalWatchSchema, approverJudgeBoundMs, cycleDelay, daemonEffects, daemonSummary, decisionKey, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, maxApproverLaunches, mergeableCandidate, observeItemClock, progressAttention, reconcilePendingActions, routineDecision, runCycle, runDaemon, standingVerdict, watchdogPlan, withheldDecision, workerStopped, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { actionableSubjects, cycleDelay, daemonSummary, emptyDaemonState, latencyBudget, latencyTargets, loopAttention, loopLiveness, mergeableCandidate, neededRework, observeItemClock, progressAttention, runCycle, runDaemon, standingVerdict, watchdogPlan, writeDaemonState, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
-import { approverSessionName, decisionInput, launchApprover, listHerdrAgents, masterConfigSchema, type ContainmentAssessment, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
-import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
-import { containmentGraceMs } from '../src/quarantine.js';
-import { containmentSettleWaitBoundMs } from '../src/model/containment.js';
+import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { maxInFlight } from '../src/model/dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { installUnitsFile, perInstallUnits } from '../src/install/units.js';
-import { cappedEscalationKey, cappedFilingKey } from '../src/daemon/cycle-review-cap.js';
-import { observedReviewBody } from '../src/review-cap.js';
 // Time-bomb allowance (GY-1694): the 2031-03-01 clockStart is the loop's injected now and every verdict/lease instant and loopLiveness call takes it explicitly; new Date() only stamps an empty snapshot for a lockless status.
 
 /**
- * GY-84: the loop drives every routine decision unattended.
+ * GY-84: the loop drives every routine step unattended.
  *
  * These proofs run the real cycle against a simulated control plane and a simulated outside world:
  * the launcher claims, the worker pushes and submits, CI and the reviewer land verdicts on the exact
- * head, GitHub merges the candidate whose gates are green, and the approver session the loop launches
- * judges the decisions the loop requests. Nothing in the harness makes a decision for the loop, and no step
- * waits for a human: what the loop does not do itself does not happen.
- *
- * The approver is not a stub. The loop's own effects launch it — `daemonEffects(...).approver`, which
- * is `launchApprover` — and close it with the real pane closer, both against a simulated Herdr that
- * keeps a finished tab listed exactly as the real one does. What a launched session then does is
- * scripted per launch: it approves, dies, declines, hangs, has its decision fail on the server, or
- * approves a decision whose application is interrupted before an outcome is recorded (GY-1300).
+ * head, and GitHub merges the candidate whose gates are green. A head nothing can carry forward goes
+ * back to a worker through the loop's own rework, applied at once with the master's identity. Nothing
+ * in the harness makes a decision for the loop, and no step waits for a human: what the loop does not
+ * do itself does not happen.
  */
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clockStart = Date.parse('2031-03-01T09:00:00Z');
 const hex = (seed: string) => createHash('sha1').update(seed).digest('hex');
-/** A decision id shaped like the server's, so each decision gets the session name the launcher gives it. */
+/** An id shaped like the server's UUIDs. */
 const uuid = (seed: string) => hex(seed).replace(/^(.{8})(.{4})(.{4})(.{4})(.{12}).*$/, '$1-$2-$3-$4-$5');
 const minute = 60_000;
 
 function config(overrides: Partial<Omit<MasterConfig, 'run'>> & { run?: Partial<MasterRun> } = {}): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
-    autoMerge: true, mergeMethod: 'merge', operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/coordinator-operator.token' },
-    approver: { id: 'graphyard-approver', credentialFile: '/outside/coordinator-approver.token' }, ...overrides,
+    autoMerge: true, mergeMethod: 'merge', operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/coordinator-operator.token' }, ...overrides,
     run: { proofWorkflow: 'acceptance.yml', ...overrides.run } });
 }
 const profile = (name: string, overrides: Partial<WorkerProfile> = {}): WorkerProfile =>
@@ -56,87 +45,16 @@ const profile = (name: string, overrides: Partial<WorkerProfile> = {}): WorkerPr
 type Round = 'die' | 'changes' | 'conflict' | 'pass';
 interface Script { key: string; rounds: Round[] }
 
-interface PlaneDecision { id: string; action: string; state: string; input: any; approvedBy: string | null; approvedAt?: string | null; reason: string; outcome: string | null }
-
-/** What one launched approver session does with the decision it was asked to judge. */
-type Judgement = 'approve' | 'die' | 'decline' | 'hang' | 'fail' | 'strand';
-
-/**
- * A repository the real launcher accepts: a Git checkout holding `.graphyard/master.json`, with the
- * coordinator, operator-agent and approver credentials outside it, each mode 0600.
- */
-async function approverHost(overrides: Parameters<typeof config>[0] = {}) {
-  const root = await temporaryDirectory('unattended-root'), secrets = await temporaryDirectory('unattended-secrets');
-  execFileSync('git', ['init', '-q', root]);
-  const credential = async (name: string) => { const file = join(secrets, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(48, 'x'), { mode: 0o600 }); return file; };
-  const master = config({ credentialFile: await credential('coordinator'), operatorAgent: { id: 'graphyard-master-operator', credentialFile: await credential('operator') },
-    approver: { id: 'graphyard-approver', credentialFile: await credential('approver') }, ...overrides });
-  await mkdir(join(root, '.graphyard'));
-  await writeFile(join(root, '.graphyard/master.json'), JSON.stringify(master), { mode: 0o600 });
-  return { root, master, cleanup: () => Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]) };
-}
-
-/**
- * The part of Herdr the launcher and the pane closer speak to. A session that finishes stays
- * listed under its name until its pane is closed, which is the behaviour that used to refuse the
- * next approver on the same item.
- */
-function herdr() {
-  const sessions = new Map<string, { name: string; pane: string; status: string; prompt: string; judgement: Judgement }>();
-  const panes = new Set<string>(), log: string[] = [], judgements: Judgement[] = [];
-  const control = { available: true, closable: true };
-  /** What each pane runs, from the typed launch until Herdr names it. */
-  const occupants = new Map<string, { kind: string; request: string }>();
-  let created = 0;
-  const ok = (result: unknown = {}) => JSON.stringify({ result });
-  const run = (command: string, args: string[]) => {
-    assert.equal(command, 'herdr', `only Herdr is run for an approver: ${command} ${args.join(' ')}`);
-    if (!control.available) throw new Error('herdr: the server socket is unreachable');
-    const [noun, verb] = args;
-    if (noun === 'tab' && verb === 'create') { const pane = `pane-${++created}`; panes.add(pane); return ok({ root_pane: { pane_id: pane, tab_id: `tab-${created}` } }); }
-    if (noun === 'pane' && verb === 'run') {
-      // A runtime with a request contract starts on its instruction (GY-93): it arrives on the
-      // command line after the runtime's own flags, never as a later paste, and the session is at
-      // work on it at once. The typed line references the request file (GY-121); the shell reads it.
-      const launch = expandTypedCommand(args[3]);
-      occupants.set(args[2], { kind: launch.kind, request: requestOf(launch.kind, launch.args) ?? '' }); return '';
-    }
-    if (noun === 'pane' && verb === 'read') return '';
-    if (noun === 'agent' && verb === 'get') {
-      const occupant = occupants.get(args[2]);
-      return occupant ? ok({ agent: { agent: occupant.kind, agent_status: occupant.request ? 'working' : 'idle', pane_id: args[2] } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
-    }
-    if (noun === 'agent' && verb === 'rename') {
-      const name = args[3], pane = args[2], occupant = occupants.get(pane)!;
-      assert.ok(!sessions.has(name), `Herdr refuses a second agent named ${name}`);
-      sessions.set(name, { name, pane, status: occupant.request ? 'working' : 'idle', prompt: occupant.request, judgement: judgements.shift() ?? 'approve' }); log.push(`launch:${name}`); return ok();
-    }
-    if (noun === 'agent' && verb === 'prompt') { Object.assign(sessions.get(args[2])!, { status: 'working', prompt: args[3] }); return ok(); }
-    if (noun === 'agent' && verb === 'list') return ok({ agents: [...sessions.values()].map(session => ({ name: session.name, pane_id: session.pane, agent_status: session.status })) });
-    if (noun === 'pane' && verb === 'close') {
-      if (!control.closable) return JSON.stringify({ error: { code: 'pane_busy', message: 'the pane could not be closed' } });
-      for (const session of [...sessions.values()].filter(entry => entry.pane === args[2])) { sessions.delete(session.name); log.push(`close:${session.name}`); }
-      panes.delete(args[2]); occupants.delete(args[2]); return ok();
-    }
-    if (noun === 'pane' && verb === 'list') return ok({ panes: [...panes].map(pane_id => ({ pane_id })) });
-    throw new Error(`The simulated Herdr has no ${args.slice(0, 2).join(' ')}`);
-  };
-  return { run, sessions, panes, log, judgements, control };
-}
-
 /**
  * The simulated control plane. It holds work documents, recomputes gates and stage from them
  * exactly as the engine's order does, and applies the mutations the loop's effects ask for —
- * a claim, a settled quarantine, an additive requirements revision, a decision. Between cycles
- * `advance` runs everyone else: the launched worker, CI, the reviewer, GitHub merging what is green
- * (GY-1235: the loop never merges), and the approver session the loop launched for its own request.
+ * a claim, a rework. Between cycles `advance` runs everyone else: the launched worker, CI, the
+ * reviewer, and GitHub merging what is green (GY-1235: the loop never merges).
  */
-function plane(scripts: Script[], options: { hostId?: string; host?: { root: string; master: MasterConfig }; judgements?: Judgement[]; delivered?: number; admit?: number } = {}) {
+function plane(scripts: Script[], options: { hostId?: string; delivered?: number; admit?: number } = {}) {
   const hostId = options.hostId ?? 'machine-a';
   /** GitHub's side: whether it merges a green candidate on the next tick, or holds it (a queue that does not move). */
   const github = { merging: true };
-  const sessions = herdr();
-  sessions.judgements.push(...options.judgements ?? []);
   let now = clockStart;
   const iso = (at: number = now) => new Date(at).toISOString();
   // GY-2097: with `admit`, the exercise releases work as the pipeline admits it — the operator's
@@ -166,10 +84,11 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
         mergeable: true, protected: true, files: [], at: mergedAt, baseTip: baseSha, baseTipContained: true, prState: 'closed', draft: false },
       delivery: { mergedAt, mergedAtRepository: mergedAt, mergeSha: hex(`merge-${key}`), authorizationRevision: 1 }, pr: index + 1 } as unknown as Work);
   }
-  const decisions = new Map<string, PlaneDecision[]>();
+  /** Every rework the loop applied, per item, with the reason it gave. */
+  const reworks = new Map<string, { reason: string; at: string }[]>();
+  /** How many of the next rework requests the server refuses. */
+  const refusals = { rework: 0 };
   const judged = new Map<string, number>();
-  /** Every decision the loop asked the server to resume (GY-1300). */
-  const resumes: string[] = [];
   const find = (id: string) => work.find(item => item.id === id || item.key === id)!;
   const script = (item: Work) => scripts.find(entry => entry.key === item.key)!;
   const round = (item: Work): Round => { const rounds = script(item).rounds; return rounds[Math.min(rounds.length - 1, Math.max(0, item.epoch - 1))]; };
@@ -237,41 +156,15 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     }
     recompute(item);
   };
-  /** The control plane's side of an approval: the decision is applied exactly as the engine applies it. */
-  const approve = (item: Work, decision: PlaneDecision, approvedBy = 'graphyard-approver') => {
-    Object.assign(decision, { state: 'applied', approvedBy });
-    // The engine's `rework` leaves `baseRefresh` alone: a conflict keeps matching the head it was found
-    // on until a worker pushes a new one.
-    if (decision.action === 'rework') { item.reworkRequested = true; item.lease = null; item.containmentQuarantine = null; judged.set(item.key, 0); }
-    if (decision.action === 'recover') item.containmentQuarantine = null;
+  /** The control plane's side of a rework, exactly as the engine applies it. The engine's `rework` leaves `baseRefresh` alone: a conflict keeps matching the head it was found on until a worker pushes a new one. */
+  const rework = (item: Work, reason: string) => {
+    reworks.set(item.id, [...reworks.get(item.id) ?? [], { reason, at: iso() }]);
+    item.reworkRequested = true; item.lease = null; judged.set(item.key, 0);
     recompute(item);
-  };
-  /**
-   * Every approver session the loop launched acts on the prompt the real launcher delivered to it:
-   * it judges the one decision it names, from its own tab, and then does what its script says —
-   * approve and stop (the tab stays listed), die, decline and go idle, hang, or approve a decision
-   * the engine then refuses to apply.
-   */
-  const judgeDecisions = () => {
-    for (const session of [...sessions.sessions.values()].filter(entry => entry.status === 'working')) {
-      const named = /Judge decision (\S+) on (\S+):/.exec(session.prompt);
-      assert.ok(named, `the approver prompt names its decision: ${session.prompt}`);
-      const item = find(named![2]), decision = (decisions.get(item.id) ?? []).find(entry => entry.id === named![1]);
-      if (session.judgement === 'hang') continue;
-      if (session.judgement === 'die') { sessions.sessions.delete(session.name); sessions.panes.delete(session.pane); continue; }
-      if (session.judgement === 'decline') { session.status = 'idle'; continue; }
-      session.status = 'done';
-      if (!decision || decision.state !== 'requested') continue;
-      if (session.judgement === 'fail') Object.assign(decision, { state: 'failed', approvedBy: 'graphyard-approver', outcome: 'Worker startup remains fenced; stop its supervisor and wait for both lease and launch authority expiry before recovery' });
-      // The approval commits and the session ends, but the server faults before the application records an outcome.
-      else if (session.judgement === 'strand') Object.assign(decision, { state: 'approved', approvedBy: 'graphyard-approver', approvedAt: iso(), outcome: null });
-      else approve(item, decision);
-    }
   };
 
   const advance = (ms: number) => {
     now += ms;
-    judgeDecisions();
     // GitHub merges what was green when the loop last looked, so the loop sees each candidate mergeable once.
     if (github.merging) for (const item of work) if (item.stage === 'merge' && !item.observation?.merged && item.gates.every(gate => gate.passed) && !item.violations.length) githubMerge(item);
     for (const item of work) {
@@ -285,12 +178,8 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
     for (const item of work) recompute(item);
   };
 
-  // The loop's own session effects, as `master run` wires them, against the simulated Herdr. An
-  // exercise that asks for no decision needs no repository for the launcher to load.
-  const wired = options.host ? daemonEffects(options.host.root, options.host.master, { snapshot: async () => ({ work: [], now: iso() }), mutate: async () => { throw new Error('not used'); }, run: sessions.run }) : null;
   const effects = (overrides: Partial<DaemonEffects> = {}): DaemonEffects => ({
-    agents: () => wired ? wired.agents() : [],
-    ...(wired ? { herdr: wired.herdr } : {}),
+    agents: () => [],
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => {
       // Release the next admitted item the instant a slot frees, so its released-at stamp is the
@@ -303,7 +192,7 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       }
       return { work: work.map(item => ({ ...item })), now: iso() };
     },
-    closeSession: pane => { if (wired) return wired.closeSession(pane); },
+    closeSession: () => {},
     dispatch: async (item, worker) => {
       const target = find(item.id);
       target.epoch += 1;
@@ -313,54 +202,23 @@ function plane(scripts: Script[], options: { hostId?: string; host?: { root: str
       target.implementers = [...new Set([...(target.implementers ?? []), worker.principal])];
       // A claim leaves `reworkRequested` standing, as the engine does: only the round's own
       // submission clears it, so a round whose worker dies before pushing is still a requested round.
-      if (round(target) === 'die') {
-        // A supervised launch fences its session in a scope unit; this one dies with the fence up.
-        target.lease = { ...target.lease, expiresAt: iso(now + minute) };
-        target.containmentQuarantine = { owner: worker.principal, epoch: target.epoch, at: iso(), settlementHash: 'f'.repeat(64),
-          leaseExpiresAt: iso(now + minute), launchExpiresAt: iso(now + minute), scope: { unit: `graphyard-watch-${target.epoch}.scope`, pid: 4242 } };
-      }
+      // A session that dies stops renewing: its lease lapses a minute later and the attempt is over.
+      if (round(target) === 'die') target.lease = { ...target.lease, expiresAt: iso(now + minute) };
       recompute(target);
     },
     observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(clockStart), reason: 'No deployment endpoint is configured in this exercise', deployed: [], pending: [] }),
     recordDeployment: async () => {},
-    decide: async (item, action, reason) => {
-      const target = find(item.id);
-      const entries = decisions.get(target.id) ?? [];
-      // The server refuses a second request of an action while one stands, whatever it is bound to.
-      const pending = entries.find(entry => entry.action === action && (entry.state === 'requested' || entry.state === 'approved'));
-      if (pending) throw new Error(`Decision ${pending.id} (${action}) is already ${pending.state} on ${target.key}; wait for it before requesting another`);
-      const id = uuid(`${target.key}-${action}-${entries.length + 1}`);
-      decisions.set(target.id, [...entries, { id, action, state: 'requested', input: decisionInput(action, target, {}), approvedBy: null, reason, outcome: null }]);
-      return { id };
+    // The master's operator-agent rework (POST work/:id/rework), applied by the server at once.
+    rework: async (item, reason) => {
+      if (refusals.rework > 0) { refusals.rework--; throw new Error(`Graphyard refused work/${item.id}/rework (503): the control plane is restarting`); }
+      rework(find(item.id), reason);
+      return {};
     },
-    approver: async (item, decision) => {
-      assert.ok(wired, 'this exercise asked for a decision, so it needs a repository for the launcher');
-      return wired!.approver!(find(item.id), decision);
-    },
-    decisions: async item => ({ decisions: (decisions.get(find(item.id).id) ?? []).map(entry => ({ ...entry })) }),
-    // The server's resume (GY-1300): an approved decision with no outcome is applied under its recorded approval; any other is answered as it stands.
-    resume: async (item, decision) => {
-      const target = find(item.id), entry = (decisions.get(target.id) ?? []).find(candidate => candidate.id === decision)!;
-      resumes.push(decision);
-      if (entry.state === 'approved') approve(target, entry, entry.approvedBy!);
-      return { ...entry };
-    },
-    withdraw: async (item, decision, reason) => {
-      const entry = (decisions.get(find(item.id).id) ?? []).find(candidate => candidate.id === decision)!;
-      assert.equal(entry.state, 'requested', 'only a requested decision can be withdrawn');
-      Object.assign(entry, { state: 'withdrawn', outcome: reason });
-    },
-    containment: items => Object.fromEntries(items.filter(item => item.containmentQuarantine).map(item => [item.id, {
-      key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch, owner: item.containmentQuarantine!.owner, at: item.containmentQuarantine!.at,
-      host: hostId, workspacePath: item.workspaces[0]?.path ?? null, scope: item.containmentQuarantine!.scope ?? null,
-      settleable: true, refusals: [], attestation: '', verification: null,
-    } as ContainmentAssessment])),
-    settleContainment: async item => { find(item.id).containmentQuarantine = null; recompute(find(item.id)); },
     persist: async () => {},
     ...overrides,
   });
 
-  return { work, decisions, sessions, effects, recompute, advance, approve, find, github, resumes, now: () => now, iso, hostId,
+  return { work, reworks, refusals, effects, recompute, advance, find, github, now: () => now, iso, hostId,
     set: (at: number) => { now = at; } };
 }
 
@@ -372,117 +230,42 @@ async function cycle(state: DaemonState, master: MasterConfig, simulation: Retur
 }
 const steps = (actions: DaemonAction[]) => actions.filter(action => action.kind !== 'deployment').map(action => `${action.kind}:${action.work ?? '-'}:${action.state}`);
 
-// GY-1300: the approver approves the rework and its session ends, but the server faults before the application records an
-// outcome. The loop's next cycle applies what was approved through the server's resume — once — and puts the session down; it
-// launches no second approver for a decision already judged, requests nothing again, and the item is delivered.
-test('integration:unattended-stranded-approval — an approval left unapplied is resumed once by the next cycle, its session closed and no approver relaunched, and the item is delivered', async t => {
-  const host = await approverHost({ workers: [profile('claude-a'), profile('claude-b')] });
-  t.after(host.cleanup);
-  const master = host.master;
-  const simulation = plane([{ key: 'GY-85', rounds: ['changes', 'pass'] }], { host, judgements: ['strand'] });
-  const state = emptyDaemonState(master);
-  const effects = simulation.effects();
-  const performed: DaemonAction[] = [];
-  const item = simulation.work[0];
-  let strandedAt: number | null = null, resumedAt: number | null = null;
-  for (let pass = 0; pass < 40 && item.stage !== 'done'; pass++) {
-    performed.push(...(await cycle(state, master, simulation, effects)).actions);
-    const [decision] = simulation.decisions.get(item.id) ?? [];
-    if (decision?.state === 'approved' && strandedAt === null) strandedAt = pass;
-    if (simulation.resumes.length && resumedAt === null) resumedAt = pass;
-  }
-  performed.push(...(await cycle(state, master, simulation, effects)).actions);
-  assert.equal(item.stage, 'done', 'the item is delivered');
-  const requested = simulation.decisions.get(item.id)!;
-  assert.deepEqual(requested.map(decision => [decision.action, decision.state, decision.approvedBy]), [['rework', 'applied', 'graphyard-approver']], 'one rework, applied under its approver\'s approval');
-  assert.ok(strandedAt !== null, 'the approval was left with no outcome');
-  assert.equal(resumedAt, strandedAt! + 1, 'the very next cycle applied it');
-  assert.deepEqual(simulation.resumes, [requested[0].id], 'resumed once, and never again once it settled');
-  const name = approverSessionName(item, requested[0].id);
-  assert.deepEqual(simulation.sessions.log, [`launch:${name}`, `close:${name}`], 'no approver was relaunched for a judged decision, and its session was put down');
-  assert.deepEqual([...simulation.sessions.sessions.keys()], [], 'no approver tab is left open');
-  assert.equal(performed.filter(action => action.kind === 'decision' && /^Requested decision /.test(action.detail)).length, 1, 'the decision was requested once');
-  assert.ok(performed.some(action => action.kind === 'decision' && new RegExp(`Applied rework decision ${requested[0].id} on GY-85: .*on the loop's resume`).test(action.detail)), steps(performed).join(', '));
-  assert.deepEqual(performed.filter(action => action.kind === 'escalation').map(action => action.detail), [], 'nothing is escalated');
-  assert.deepEqual(state.approvals, {}, 'the watch is retired with its decision');
-});
-
-test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, reclaims a dead session, requests and dispatches rework after a verdict and after a base conflict through approver sessions that die and decline, and leaves the candidate whose gates are green to GitHub to merge', async t => {
-  // Attempt 1's session dies under its fence; attempt 2 is told to change the work; attempt 3
+test('integration:unattended-full-cycle — with no master session and no human input the loop drives one item from ready to delivered: it dispatches, redispatches after a dead session, returns the head to a worker after a verdict and after a base conflict, and leaves the candidate whose gates are green to GitHub to merge', async () => {
+  // Attempt 1's session dies and its lease lapses; attempt 2 is told to change the work; attempt 3
   // hits a base branch Graphyard cannot merge in; attempt 4 delivers. Every step between them is the loop's to take.
-  //
-  // The approver sessions are the real launch contract, and they are not all well behaved: the
-  // first rework's approver dies without judging, and the second rework's approver declines and
-  // goes idle under the very name its replacement needs. The loop has to see both and carry on.
-  const host = await approverHost({ workers: [profile('claude-a'), profile('claude-b')] });
-  t.after(host.cleanup);
-  const master = host.master;
-  const simulation = plane([{ key: 'GY-84', rounds: ['die', 'changes', 'conflict', 'pass'] }], { host, judgements: ['die', 'approve', 'decline', 'approve'] });
+  const master = config({ workers: [profile('claude-a'), profile('claude-b')] });
+  const simulation = plane([{ key: 'GY-84', rounds: ['die', 'changes', 'conflict', 'pass'] }]);
   const state = emptyDaemonState(master);
   const effects = simulation.effects();
   const performed: DaemonAction[] = [];
   const item = simulation.work[0];
-  for (let pass = 0; pass < 40 && item.stage !== 'done'; pass++) {
-    // Longer than the containment grace window, so the first attempt's fence becomes settleable.
-    performed.push(...(await cycle(state, master, simulation, effects, containmentGraceMs / 2)).actions);
-  }
+  for (let pass = 0; pass < 40 && item.stage !== 'done'; pass++) performed.push(...(await cycle(state, master, simulation, effects)).actions);
   // One more cycle so the delivery is sampled from the snapshot that shows it delivered.
   performed.push(...(await cycle(state, master, simulation, effects)).actions);
 
   assert.equal(item.stage, 'done', 'the item reached delivery with no master session and no human input');
   assert.equal(item.epoch, 4, 'four attempts: the dead session, the rework round, the base conflict, and the delivered one');
-  assert.equal(item.containmentQuarantine, null, 'the dead session\'s fence was settled by the loop');
 
-  // Exactly the routine decisions the criteria name, each requested by the loop and applied by the
-  // independent approver session the loop launched for it — never by the requester.
-  const requested = simulation.decisions.get(item.id)!;
-  assert.deepEqual(requested.map(decision => [decision.action, decision.state, decision.approvedBy]),
-    [['rework', 'applied', 'graphyard-approver'], ['rework', 'applied', 'graphyard-approver']]);
-  for (const decision of requested) assert.equal(decision.input.previousWorkerStopped, true, 'rework is requested only once the attempt has ended');
-  for (const decision of requested) assert.match(decision.reason, /The previous worker is stopped: GY-84 holds no lease and no containment fence stands for it\.$/, 'and the request says what that attestation rests on');
-
-  // What the loop did with the sessions, read from Herdr's side. Each decision has its own session
-  // name, so the first decision's tab can never refuse the second's approver. The approver that
-  // died was replaced; the one that declined was still listed under the name its replacement
-  // needs, so it was closed first; and every finished tab was closed rather than left listed.
-  const [first, second] = requested.map(decision => approverSessionName(item, decision.id));
-  assert.notEqual(first, second);
-  assert.deepEqual(simulation.sessions.log, [`launch:${first}`, `launch:${first}`, `close:${first}`, `launch:${second}`, `close:${second}`, `launch:${second}`, `close:${second}`]);
-  assert.deepEqual([...simulation.sessions.sessions.keys()], [], 'no approver tab is left holding a provider seat');
-  const supervision = performed.filter(action => action.kind === 'decision').map(action => action.detail);
-  assert.ok(supervision.some(detail => new RegExp(`approver session ${first} is gone without judging it; launched independent approver session ${first} \\(launch 2 of 3\\)`).test(detail)), supervision.join('\n'));
-  assert.ok(supervision.some(detail => new RegExp(`approver session ${second} ended idle without approving it — declined, or its prompt was dropped; launched independent approver session ${second} \\(launch 2 of 3\\)`).test(detail)), supervision.join('\n'));
-  assert.deepEqual(state.approvals, {}, 'a watch is retired with the decision it watched');
-
-  // The launch contract itself, which the loop has to live inside: a name still listed refuses a
-  // second session for the same decision, and says nothing about another decision on the item.
-  const lingering = [{ name: first, pane_id: 'pane-lingering', agent_status: 'done' }];
-  await assert.rejects(launchApprover(host.root, item, requested[0].id, 'claude', { agents: lingering, available: true }, simulation.sessions.run), /is already visible in Herdr; let it finish or close it first/);
-  const beside = await launchApprover(host.root, item, requested[1].id, 'claude', { agents: lingering, available: true }, simulation.sessions.run);
-  assert.equal(beside.agentName, second);
-  assert.deepEqual((await listHerdrAgents(simulation.sessions.run)).map(agent => [agent.name, agent.agent_status]), [[second, 'working']]);
+  // Exactly the routine reworks the criteria name, each applied by the loop itself.
+  const applied = simulation.reworks.get(item.id)!;
+  assert.equal(applied.length, 2, 'one rework for the verdict, one for the base conflict');
+  assert.match(applied[0].reason, /graphyard-reviewer\[bot\] requested changes on [0-9a-f]{12}/);
+  assert.match(applied[1].reason, /merge conflict with the base branch/);
 
   const kinds = steps(performed);
-  const order = (needle: string) => kinds.findIndex(entry => entry === needle);
-  assert.ok(order('settle:GY-84:done') >= 0, `the dead session was reclaimed: ${kinds.join(', ')}`);
   assert.equal(kinds.filter(entry => entry === 'dispatch:GY-84:done').length, 4, 'every attempt was dispatched by the loop');
-  assert.equal(performed.filter(action => action.kind === 'decision' && /^Requested decision /.test(action.detail)).length, 2, 'one request per round, however many sessions it took to judge it');
+  assert.equal(performed.filter(action => action.kind === 'decision' && /^Returned GY-84 to a worker: /.test(action.detail)).length, 2, 'one rework per round');
   assert.deepEqual(kinds.filter(entry => entry.startsWith('merge:')), [], 'GitHub merged the green candidate; the loop merges nothing (GY-1235)');
   assert.equal(item.delivery?.mergeSha, hex('merge-GY-84-4'), 'the delivery is the fourth attempt\'s, after the rework rounds it needed');
-  assert.ok(order('settle:GY-84:done') < order('decision:GY-84:done'), 'the reclaim came before the rework rounds');
-  // Nothing in the drive was left to a person: every recorded action is the loop's own, and no
-  // escalation was raised for a decision it is able to request.
+  // Nothing in the drive was left to a person: every recorded action is the loop's own.
   const escalations = performed.filter(action => action.kind === 'escalation');
-  assert.deepEqual(escalations.map(action => action.detail), [], 'an unattended cycle escalates nothing it can decide itself');
+  assert.deepEqual(escalations.map(action => action.detail), [], 'an unattended cycle escalates nothing it can do itself');
 
-  // The decision behind each of those rounds, read from the item alone: a verdict standing against
-  // the exact head, and never a rework request while the previous attempt is still running.
+  // The rework behind each of those rounds, read from the item alone: a verdict standing against the exact head.
   const reviewed = { ...simulation.work[0], stage: 'review' as const, reworkRequested: false, submission: { epoch: 4, pr: 100 },
     observation: { ...item.observation!, merged: false, reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: item.candidate!.sha, state: 'CHANGES_REQUESTED', submittedAt: '2031-03-01T09:20:00Z' }] } } as Work;
   assert.deepEqual(standingVerdict(reviewed), { reviewer: 'graphyard-reviewer[bot]', at: '2031-03-01T09:20:00Z', reason: `graphyard-reviewer[bot] requested changes on ${item.candidate!.sha.slice(0, 12)}` });
-  assert.equal(routineDecision(reviewed, master, Date.parse('2031-03-01T09:21:00Z'))?.action, 'rework');
-  const running = { ...reviewed, lease: { owner: 'claude-a-principal', epoch: 4, expiresAt: '2031-03-01T10:00:00Z' } } as Work;
-  assert.equal(routineDecision(running, master, Date.parse('2031-03-01T09:21:00Z')), null, 'rework attests that the previous worker is stopped, so a live attempt is never reworked under it');
+  assert.equal(neededRework(reviewed)?.binding, `${item.candidate!.sha}:verdict:graphyard-reviewer[bot]`);
 
   // The passage it measured, from its own observations: one delivery, each figure inside its bound.
   const budget = latencyBudget(state.latency);
@@ -552,7 +335,7 @@ test('integration:mergeable-dwell-budget — a candidate whose gates are green m
   assert.equal(attention.at(-1)!.human, false);
 });
 
-test('integration:no-actionable-silence — every cycle records what it could act on and what it did, an actionable item stays named while nothing can act on it, and a decision the loop requested and no approver judged stays on the measure until it is judged', async t => {
+test('integration:no-actionable-silence — every cycle records what it could act on and what it did, an actionable item stays named while nothing can act on it', async () => {
   const simulation = plane([{ key: 'GY-400', rounds: ['pass'] }]);
   // A two-minute cycle, so cycling every two simulated minutes is a healthy loop rather than a
   // stalled one: this proof is about the work standing still, not about the loop's own liveness.
@@ -607,68 +390,6 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   await cycle(state, master, simulation, healthy, minute);
   assert.equal(simulation.work[0].stage, 'done');
   assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()), [], 'a delivered item asks nothing of the loop');
-
-  // The wait the loop itself creates: a decision it requested, sitting with an approver. Every
-  // approver the loop launches here declines — it goes idle without approving, which the control
-  // plane records nowhere. The item must not drop off the measure while that happens.
-  const host = await approverHost({ workers: [profile('claude-a')], run: { intervalSeconds: 120 } });
-  t.after(host.cleanup);
-  const waiting = plane([{ key: 'GY-410', rounds: ['changes', 'pass'] }], { host, judgements: ['decline', 'decline', 'decline'] });
-  const waitingState = emptyDaemonState(host.master);
-  waitingState.lock = { id: 'lock', pid: process.pid, host: host.master.hostId, startedAt: waiting.iso(), heartbeatAt: waiting.iso() };
-  const waitingEffects = waiting.effects();
-  let pass = await cycle(waitingState, host.master, waiting, waitingEffects, 2 * minute);
-  while (!Object.keys(waitingState.approvals).length) pass = await cycle(waitingState, host.master, waiting, waitingEffects, 2 * minute);
-  const [watchKey] = Object.keys(waitingState.approvals), decision = waitingState.approvals[watchKey].decision;
-  const session = approverSessionName(waiting.work[0], decision);
-  // Requested and launched: still a subject the loop keeps, for the master session's wake.
-  assert.deepEqual(actionableSubjects(host.master, waiting.work, waiting.now()).map(subject => [subject.kind, subject.work]), [['decision', 'GY-410']]);
-  assert.equal(pass.metrics.actionable, 1, 'a decision waiting on an approver is still something the pipeline could act on');
-
-  // Three sessions decline in turn. Each replacement is an action; then the launches are spent.
-  const replaced: DaemonAction[] = [];
-  for (let round = 0; round < 3; round++) { pass = await cycle(waitingState, host.master, waiting, waitingEffects, 2 * minute); replaced.push(...pass.actions); }
-  assert.deepEqual(waiting.sessions.log, [`launch:${session}`, `close:${session}`, `launch:${session}`, `close:${session}`, `launch:${session}`, `close:${session}`]);
-  assert.equal(waitingState.approvals[watchKey].launches, maxApproverLaunches);
-  assert.ok(waitingState.approvals[watchKey].exhaustedAt, 'the loop stops spending sessions on a decision none of them will judge');
-  const unjudged = replaced.filter(action => action.kind === 'escalation');
-  assert.equal(unjudged.length, 1, 'and escalates it once, when the last session ends');
-  assert.equal(unjudged[0].state, 'failed');
-  assert.match(unjudged[0].detail, new RegExp(`rework decision ${decision} on GY-410: approver session ${session} ended idle without approving it — declined, or its prompt was dropped\\. 3 approver session\\(s\\) and 1 request\\(s\\) have not produced a judgement`));
-  assert.match(unjudged[0].detail, new RegExp(`graphyard master approver GY-410 ${decision}`), 'with the command that puts it to a fresh approver');
-  assert.equal(waiting.decisions.get(waiting.work[0].id)![0].state, 'requested', 'the request itself still stands for whoever judges it');
-
-  // From there nothing acts on it, and the loop keeps naming it without relaunching anything.
-  for (let round = 0; round < 11; round++) pass = await cycle(waitingState, host.master, waiting, waitingEffects, 2 * minute);
-  assert.deepEqual(pass.actions.filter(action => action.kind !== 'deployment'), [], 'no relaunch every few minutes forever');
-  assert.deepEqual(actionableSubjects(host.master, waiting.work, waiting.now()).map(subject => [subject.kind, subject.work]), [['decision', 'GY-410']], 'the unjudged decision stays named while nothing can act on it');
-  assert.equal(daemonSummary(waitingState, waiting.now(), host.master.run.intervalSeconds * 1000, host.master.hostId).approvals[0].decision, decision, 'master status lists the decision the loop is waiting on');
-
-  // A fresh approver judges it (`master approver`, from a master session): the loop sees the
-  // decision applied, retires its watch, dispatches the round, and the wait is over.
-  waiting.approve(waiting.work[0], waiting.decisions.get(waiting.work[0].id)![0]);
-  pass = await cycle(waitingState, host.master, waiting, waitingEffects, 2 * minute);
-  assert.ok(pass.actions.some(action => action.kind === 'dispatch' && action.state === 'done'), steps(pass.actions).join(', '));
-  assert.deepEqual(waitingState.approvals, {});
-  assert.deepEqual(actionableSubjects(host.master, waiting.work, waiting.now()).filter(subject => subject.kind === 'decision'), []);
-
-  // The step behind each of those cycles, as a pure judgement over one watch. A session that is
-  // still working is waited for up to the bound and replaced past it; a history or an inventory
-  // that cannot be read concludes nothing; and an approval the server has not applied yet is already
-  // judged, so the loop applies it (GY-1300) rather than relaunching or exhausting a session for it.
-  const at = waiting.now();
-  const watch = approvalWatchSchema.parse({ work: 'GY-410', action: 'rework', decision, agentName: session, requestedAt: waiting.iso(at), launchedAt: waiting.iso(at), launches: 1 });
-  const working = { agents: [{ name: session, pane_id: 'pane-9', agent_status: 'working' }], available: true };
-  assert.equal(approvalStep(watch, { state: 'requested' }, working, at + approverJudgeBoundMs).step, 'wait');
-  const hung = approvalStep(watch, { state: 'requested' }, working, at + approverJudgeBoundMs + minute);
-  assert.deepEqual([hung.step, /has not judged it for 11 minutes, past the 10-minute bound/.test(hung.detail)], ['relaunch', true]);
-  assert.equal(approvalStep({ ...watch, launches: maxApproverLaunches }, { state: 'approved' }, { agents: [], available: true }, at + minute).step, 'apply');
-  assert.equal(approvalStep(watch, { state: 'approved' }, { agents: [], available: true }, at + minute).step, 'apply');
-  assert.equal(approvalStep(watch, undefined, { agents: [], available: true }, at + minute).step, 'wait');
-  assert.equal(approvalStep(watch, { state: 'requested' }, { agents: [], available: false }, at + minute).step, 'wait');
-  assert.equal(approvalStep(watch, { state: 'applied' }, working, at + minute).step, 'settled');
-  assert.equal(approvalStep(watch, null, working, at + minute).step, 'rerequest');
-  assert.deepEqual(['stale', 'withdrawn', 'failed'].map(ended => approvalStep(watch, { state: ended }, working, at + minute).step), ['rerequest', 'rerequest', 'rerequest']);
 });
 
 test('integration:dispatch-latency-budget — ready work reaches a free worker inside two minutes and its first push inside fifteen, measured over ten items the in-flight cap admits in turn, and a long configured interval cannot push a claim past that bound', async () => {
@@ -802,174 +523,57 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   assert.equal(watchdogPlan({ NOTIFY_SOCKET: '/run/notify', WATCHDOG_USEC: String(window * 1000) }, intervalMs).refusal, null, 'the packaged unit and the default interval agree');
 });
 
-test('routine decisions rest on what the loop verified and are supervised to the end: a fence nobody verified withholds rework and recovery, a decision the server fails is requested again, and automatic merging off asks for no merge decision', async t => {
-  const host = await approverHost({ workers: [profile('claude-a')], autoMerge: false });
-  t.after(host.cleanup);
-  const master = host.master;
-
-  // The attestation, from the item alone. A live lease or a fence in its grace window is waited
-  // out; a lapsed fence is attested only on this host's verification; an unverified one withholds.
-  const verdictAt = '2031-03-01T09:20:00Z', at = Date.parse('2031-03-01T09:30:00Z');
-  const sha = hex('candidate'), baseSha = hex('base');
-  const candidate = { sha, baseSha, pr: 7, branch: 'graphyard/gy-700-1', author: 'worker', createdAt: verdictAt };
-  const reviewed = { id: 'id-GY-700', key: 'GY-700', stage: 'review', epoch: 1, policyRevision: 1, lease: null, submission: { epoch: 1, pr: 7 }, reworkRequested: false, candidate, violations: [], gates: [], workspaces: [],
-    observation: { candidate, reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha, state: 'CHANGES_REQUESTED', submittedAt: verdictAt }], at: verdictAt } } as unknown as Work;
-  const fence = (lapsedAt: number) => ({ owner: 'claude-a-principal', epoch: 1, at: verdictAt, settlementHash: 'f'.repeat(64), leaseExpiresAt: new Date(lapsedAt).toISOString(), launchExpiresAt: new Date(lapsedAt).toISOString(), scope: { unit: 'graphyard-watch-1.scope', pid: 4242 } });
-  const assessed = (settleable: boolean, refusals: string[] = []) => ({ key: 'GY-700', id: 'id-GY-700', epoch: 1, owner: 'claude-a-principal', at: verdictAt, host: 'machine-a', workspacePath: null, scope: null, settleable, refusals, attestation: '', verification: null }) as ContainmentAssessment;
-  assert.match(routineDecision(reviewed, master, at)!.reason, /The previous worker is stopped: GY-700 holds no lease and no containment fence stands for it\.$/);
-  const inGrace = { ...reviewed, containmentQuarantine: fence(at - containmentGraceMs / 2) } as Work;
-  assert.equal(routineDecision(inGrace, master, at, assessed(true)), null, 'a fence still inside its grace window is waited out, verified or not');
-  assert.equal(withheldDecision(inGrace, master, at, assessed(true)), null, 'and waiting it out is not an escalation');
-  const lapsed = { ...reviewed, containmentQuarantine: fence(at - 2 * containmentGraceMs) } as Work;
-  assert.equal(routineDecision(lapsed, master, at), null, 'a lapsed fence alone attests nothing');
-  assert.equal(routineDecision(lapsed, master, at, assessed(false, ['Process 4242 is still present'])), null);
-  assert.deepEqual(workerStopped(lapsed, at, assessed(false, ['Process 4242 is still present'])), { stopped: false, grounds: '', unverified: 'Process 4242 is still present' });
-  assert.match(withheldDecision(lapsed, master, at, assessed(false, ['Process 4242 is still present']))!.reason, /GY-700 needs a rework decision, but it attests that the previous worker is stopped and that is not verified: Process 4242 is still present/);
-  assert.equal(routineDecision(lapsed, master, at, { ...assessed(true), epoch: 9 }), null, 'a verification of another epoch is not a verification of this fence');
-  assert.match(routineDecision(lapsed, master, at, assessed(true))!.reason, /the master loop verified on machine-a that the supervisor of epoch 1 is gone\.$/);
-  const delivered = { ...lapsed, stage: 'done' } as Work;
-  assert.equal(routineDecision(delivered, master, at, assessed(false, ['Epoch 1 is registered on host machine-b; automatic verification must run there'])), null, 'recovery lowers the same fence on the same attestation');
-  // GY-1633: inside the settle bound the reclaim step settles a delivered item's fence itself; only past it is recovery asked.
-  assert.equal(routineDecision(delivered, master, at, assessed(true)), null, 'a verified-dead delivered fence inside its settle bound is the reclaim step\'s');
-  const stranded = { ...delivered, containmentQuarantine: fence(at - containmentGraceMs - containmentSettleWaitBoundMs - 60_000) } as Work;
-  assert.equal(routineDecision(stranded, master, at, assessed(true))!.action, 'recover');
-  assert.equal(routineDecision({ ...delivered, containmentQuarantine: fence(at - containmentGraceMs / 2) } as Work, master, at, assessed(true)), null);
-
-  // The same in the cycle. A verdict stands, the worker's fence lapsed, and this host cannot
-  // verify its supervisor gone: the loop requests nothing, and says so once where a master reads it.
-  const simulation = plane([{ key: 'GY-701', rounds: ['changes', 'pass'] }], { host, judgements: ['fail', 'die', 'approve'] });
-  const state = emptyDaemonState(master);
-  let verified = false;
-  const effects = simulation.effects({ containment: items => Object.fromEntries(items.filter(entry => entry.containmentQuarantine).map(entry => [entry.id,
-    { ...assessed(verified, verified ? [] : ['Process 4242 is still present']), key: entry.key, id: entry.id, epoch: entry.containmentQuarantine!.epoch }])), settleContainment: undefined });
-  const item = simulation.work[0];
+test('a rework the server refuses is applied again on a later cycle, automatic merging off asks for no merge, and an item with no review gate starts no approval→merge passage', async () => {
+  const master = config({ workers: [profile('claude-a')], autoMerge: false });
+  const simulation = plane([{ key: 'GY-701', rounds: ['changes', 'pass'] }]);
+  const state = emptyDaemonState(master), effects = simulation.effects(), item = simulation.work[0];
   while (!standingVerdict(item)) await cycle(state, master, simulation, effects);
-  item.containmentQuarantine = { ...fence(simulation.now() - 2 * containmentGraceMs), epoch: item.epoch };
-  const held = await cycle(state, master, simulation, effects);
-  assert.deepEqual(simulation.decisions.get(item.id) ?? [], [], 'no rework is requested on an attestation nobody verified');
-  assert.deepEqual(held.actions.filter(action => action.kind === 'escalation').map(action => /cannot be settled automatically: Process 4242 is still present/.test(action.detail)), [true]);
-  assert.ok(actionableSubjects(master, simulation.work, simulation.now(), { assessments: { [item.id]: { ...assessed(verified, verified ? [] : ['Process 4242 is still present']), key: item.key, id: item.id, epoch: item.containmentQuarantine!.epoch } } })
-    .some(subject => subject.kind === 'decision' && /is not verified: Process 4242 is still present/.test(subject.detail)), 'and the withheld decision stays named for the master session');
-
-  // The probe verifies it. Rework is requested on those grounds — and the engine refuses to apply
-  // the first decision, which the loop reads back and requests again; the second one's first
-  // approver dies, its second approves. One round, three sessions, no master session.
-  verified = true;
+  // The server refuses the first rework: a failed action, retried on the widening interval of any failed action.
+  simulation.refusals.rework = 1;
   const performed: DaemonAction[] = [];
-  for (let pass = 0; pass < 8 && !item.reworkRequested && item.epoch === 1; pass++) performed.push(...(await cycle(state, master, simulation, effects)).actions);
-  const reworks = simulation.decisions.get(item.id)!;
-  assert.deepEqual(reworks.map(decision => [decision.action, decision.state]), [['rework', 'failed'], ['rework', 'applied']]);
-  assert.match(reworks[0].reason, /the master loop verified on machine-a that the supervisor of epoch 1 is gone\.$/);
-  assert.ok(performed.some(action => action.kind === 'decision' && action.state === 'failed' && /ended failed \(Worker startup remains fenced.*still needs it, so it is requested again/.test(action.detail)), performed.map(action => action.detail).join('\n'));
-  assert.deepEqual(simulation.sessions.log.filter(entry => entry.startsWith('launch:')).map(entry => entry.slice(7)), [reworks[0].id, reworks[1].id, reworks[1].id].map(id => approverSessionName(item, id)));
+  for (let pass = 0; pass < 12 && !item.reworkRequested && item.epoch === 1; pass++) performed.push(...(await cycle(state, master, simulation, effects)).actions);
+  assert.ok(performed.some(action => action.kind === 'decision' && action.state === 'failed' && /Could not return GY-701 to a worker: .*503/.test(action.detail)), performed.map(action => action.detail).join('\n'));
+  assert.equal(simulation.reworks.get(item.id)!.length, 1, 'applied once the server accepts it');
+  assert.match(simulation.reworks.get(item.id)![0].reason, /graphyard-reviewer\[bot\] requested changes/);
 
-  // Automatic merging off asks for no merge decision since GY-1235: GitHub merges the green
-  // candidate of the second attempt on its own branch protection.
+  // Automatic merging off asks for no merge since GY-1235: GitHub merges the green candidate of the
+  // second attempt on its own branch protection.
   const merging: DaemonAction[] = [];
   for (let pass = 0; pass < 8 && item.stage !== 'done'; pass++) merging.push(...(await cycle(state, master, simulation, effects)).actions);
   assert.equal(item.stage, 'done', steps(merging).join(', '));
-  assert.deepEqual(simulation.decisions.get(item.id)!.filter(decision => decision.action === 'merge'), [], 'no merge decision is requested');
   assert.deepEqual(merging.filter(action => action.kind === 'merge'), []);
-  assert.deepEqual([...simulation.sessions.sessions.keys()], [], 'every approver tab was closed');
 
   // An item with no review gate was never approved, so it starts no approval→merge passage.
+  const at = Date.parse('2031-03-01T09:30:00Z'), sha = hex('candidate');
+  const candidate = { sha, baseSha: hex('base'), pr: 7, branch: 'graphyard/gy-700-1', author: 'worker', createdAt: '2031-03-01T09:20:00Z' };
+  const unreviewed = { id: 'id-GY-700', key: 'GY-700', stage: 'review', epoch: 1, policyRevision: 1, lease: null, submission: { epoch: 1, pr: 7 }, reworkRequested: false, candidate, violations: [], workspaces: [],
+    observation: { candidate, reviews: [], at: '2031-03-01T09:20:00Z' }, gates: [{ name: 'build', passed: true, reasons: [] }] } as unknown as Work;
   const clocks = emptyDaemonState(master);
-  const unreviewed = { ...reviewed, observation: { ...reviewed.observation!, reviews: [] }, gates: [{ name: 'build', passed: true, reasons: [] }] } as Work;
   observeItemClock(clocks, unreviewed, at);
   assert.equal(clocks.clocks[unreviewed.id].approvedAt, null);
   observeItemClock(clocks, { ...unreviewed, gates: [...unreviewed.gates, { name: 'review', passed: true, reasons: [] }] } as Work, at);
   assert.equal(clocks.clocks[unreviewed.id].approvedAt, new Date(at).toISOString());
-
-  // A loop killed between requesting a decision and recording it resumes to something it will
-  // act on: requested again (and the standing request adopted), or supervised from its watch.
-  const interrupted = emptyDaemonState(master), key = decisionKey(reviewed, routineDecision(reviewed, master, at)!);
-  interrupted.actions[key] = { kind: 'decision', work: 'GY-700', principal: null, state: 'started', detail: 'Requesting the rework decision for GY-700', attempts: 1, epoch: 1, cycle: 3, at: verdictAt };
-  assert.deepEqual(reconcilePendingActions(interrupted, [reviewed], at).map(action => action.state), ['failed']);
-  interrupted.actions[key].state = 'started';
-  interrupted.approvals[key] = approvalWatchSchema.parse({ work: 'GY-700', action: 'rework', decision: uuid('standing'), requestedAt: verdictAt });
-  assert.deepEqual(reconcilePendingActions(interrupted, [reviewed], at).map(action => action.state), ['done']);
 });
 
-test('a requested round is requested once, a request the item moved past is taken back, a refused action is not the loop acting, and a loop with no operator-agent identity escalates instead of failing', async t => {
-  const host = await approverHost({ workers: [profile('claude-a')] });
-  t.after(host.cleanup);
-  const master = host.master;
-
+test('a requested round is requested once: a base conflict whose round\'s worker dies before pushing is reworked once and delivered', async () => {
+  const master = config({ workers: [profile('claude-a')] });
   // A base conflict returns the head to a worker; the round's worker dies before pushing. The
   // conflict still matches that head — the engine's `rework` never clears it — but the round is
-  // already requested: the loop settles the dead worker's fence and dispatches, and asks for nothing.
-  const simulation = plane([{ key: 'GY-720', rounds: ['conflict', 'die', 'pass'] }], { host });
+  // already requested: the loop redispatches once the dead attempt's lease lapses, and asks for nothing more.
+  const simulation = plane([{ key: 'GY-720', rounds: ['conflict', 'die', 'pass'] }]);
   const state = emptyDaemonState(master), effects = simulation.effects(), item = simulation.work[0];
   const performed: DaemonAction[] = [];
   for (let pass = 0; pass < 40 && item.stage !== 'done'; pass++) performed.push(...(await cycle(state, master, simulation, effects)).actions);
   assert.equal(item.stage, 'done', steps(performed).join(', '));
   assert.equal(item.epoch, 3, 'the conflicted head, the round whose worker died, and the round that delivered');
-  assert.deepEqual(simulation.decisions.get(item.id)!.map(decision => [decision.action, decision.state]), [['rework', 'applied']], 'one conflict, one rework decision');
-  assert.equal(simulation.sessions.log.filter(entry => entry.startsWith('launch:')).length, 1, 'and one approver session spent on it');
-  assert.ok(performed.some(action => action.kind === 'settle' && action.state === 'done'), 'the dead round was recovered by settling its fence, not by a second decision');
-
-  // A verdict stands and its rework is with an approver that has not judged it when an operator
-  // requests the round by hand. The item has moved past the loop's request, so the loop — its
-  // requester — takes it back rather than leaving it to be adopted for some later round.
-  const moved = plane([{ key: 'GY-721', rounds: ['changes', 'pass'] }], { host, judgements: ['hang'] });
-  const movedState = emptyDaemonState(master), movedEffects = moved.effects(), overtaken = moved.work[0];
-  while (!(moved.decisions.get(overtaken.id) ?? []).length) await cycle(movedState, master, moved, movedEffects);
-  const asked = moved.decisions.get(overtaken.id)![0];
-  assert.equal(asked.state, 'requested');
-  Object.assign(overtaken, { reworkRequested: true }); moved.recompute(overtaken);
-  const after = await cycle(movedState, master, moved, movedEffects);
-  assert.equal(asked.state, 'withdrawn', steps(after.actions).join(', '));
-  assert.match(asked.outcome!, /GY-721 moved past the rework this decision asked for before any approver judged it/);
-  assert.ok(after.actions.some(action => action.kind === 'decision' && action.state === 'done' && new RegExp(`Withdrew rework decision ${asked.id}`).test(action.detail)));
-  assert.deepEqual(Object.keys(movedState.approvals), [], 'its watch is retired');
-  assert.ok(!moved.sessions.sessions.has(approverSessionName(overtaken, asked.id)), 'and its approver tab closed');
-
-  // A request the item still calls for, which the loop merely cannot attest this cycle, is not
-  // one it moved past: it stays requested, and is adopted once the worker is verified stopped.
-  let verified = true;
-  const withheld = plane([{ key: 'GY-722', rounds: ['changes', 'pass'] }], { host, judgements: ['hang', 'approve'] });
-  const withheldState = emptyDaemonState(master), waiting = withheld.work[0];
-  const withheldEffects = withheld.effects({ settleContainment: undefined, containment: items => Object.fromEntries(items.filter(entry => entry.containmentQuarantine).map(entry => [entry.id,
-    { key: entry.key, id: entry.id, epoch: entry.containmentQuarantine!.epoch, owner: entry.containmentQuarantine!.owner, at: entry.containmentQuarantine!.at, host: 'machine-a', workspacePath: null, scope: null,
-      settleable: verified, refusals: verified ? [] : ['Process 4242 is still present'], attestation: '', verification: null } as ContainmentAssessment])) });
-  while (!(withheld.decisions.get(waiting.id) ?? []).length) await cycle(withheldState, master, withheld, withheldEffects);
-  const standing = withheld.decisions.get(waiting.id)![0];
-  const lapsedAt = withheld.iso(withheld.now() - 2 * containmentGraceMs);
-  waiting.containmentQuarantine = { owner: 'claude-a-principal', epoch: waiting.epoch, at: lapsedAt, settlementHash: 'f'.repeat(64), leaseExpiresAt: lapsedAt, launchExpiresAt: lapsedAt, scope: { unit: 'graphyard-watch-1.scope', pid: 4242 } };
-  verified = false;
-  await cycle(withheldState, master, withheld, withheldEffects);
-  assert.equal(standing.state, 'requested', 'a withheld decision is not withdrawn');
-  verified = true;
-  for (let pass = 0; pass < 6 && !waiting.reworkRequested; pass++) await cycle(withheldState, master, withheld, withheldEffects);
-  assert.deepEqual(withheld.decisions.get(waiting.id)!.map(decision => [decision.id, decision.state]), [[standing.id, 'applied']], 'the same request is adopted and applied; no second one is made');
-
-  // No operator-agent identity: the wired loop has no decision effects at all, so a routine
-  // decision is the escalation naming the two commands — not a request that fails on every retry —
-  // and provisioning the identity brings the effects back on the next reload, with no restart.
-  let live: MasterConfig = { ...master, operatorAgent: undefined } as MasterConfig;
-  const bare = daemonEffects(host.root, () => live, { snapshot: async () => ({ work: [], now: simulation.iso() }), mutate: async () => { throw new Error('not used'); }, run: simulation.sessions.run });
-  assert.deepEqual([bare.decide, bare.approver, bare.withdraw, bare.decisions], [undefined, undefined, undefined, undefined]);
-  const degraded = plane([{ key: 'GY-740', rounds: ['changes', 'pass'] }], { host });
-  const degradedState = emptyDaemonState(live), degradedEffects = degraded.effects({ decide: bare.decide, approver: bare.approver, withdraw: bare.withdraw, decisions: bare.decisions });
-  const raised: DaemonAction[] = [];
-  while (!standingVerdict(degraded.work[0])) await cycle(degradedState, live, degraded, degradedEffects);
-  for (let pass = 0; pass < 3; pass++) raised.push(...(await cycle(degradedState, live, degraded, degradedEffects)).actions);
-  assert.deepEqual(raised.filter(action => action.kind === 'decision'), [], 'nothing is requested, so nothing fails');
-  const escalations = raised.filter(action => action.kind === 'escalation');
-  assert.equal(escalations.length, 1, 'raised once');
-  assert.match(escalations[0].detail, /GY-740 needs a rework decision: .*graphyard master decide GY-740 rework REASON, then graphyard master approver GY-740 DECISION/);
-  live = master;
-  assert.deepEqual([bare.decide, bare.approver, bare.withdraw, bare.decisions].map(effect => typeof effect), ['function', 'function', 'function', 'function']);
+  assert.equal(simulation.reworks.get(item.id)!.length, 1, 'one conflict, one rework');
 });
 
-test('an agent or Codex review that has not approved is not a verdict: a head not yet dispatched, one a reviewer is still working on, and one whose profiles are exhausted are asked for nothing, and only a changes-requested verdict for the exact head and request sends it back', async t => {
-  const host = await approverHost({ workers: [profile('claude-a')] });
-  t.after(host.cleanup);
-  const master = host.master;
+test('an agent or Codex review that has not approved is not a verdict: a head not yet dispatched, one a reviewer is still working on, and one whose profiles are exhausted are asked for nothing, and only a changes-requested verdict for the exact head and request sends it back', async () => {
+  const master = config({ workers: [profile('claude-a')] });
 
-  // A worker submits: `complete` ends the lease, so from the next cycle the loop may attest that
-  // the worker is stopped. Everything it does next rests on what the review observation says.
-  const simulation = plane([{ key: 'GY-730', rounds: ['pass'] }], { host });
+  // A worker submits. Everything the loop does next rests on what the review observation says.
+  const simulation = plane([{ key: 'GY-730', rounds: ['pass'] }]);
   const item = simulation.work[0];
   await cycle(emptyDaemonState(master), master, simulation, simulation.effects());
   assert.ok(item.submission && item.candidate && !item.lease, 'the head is submitted and its worker is gone');
@@ -985,7 +589,6 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
   };
   /** One cycle of the real loop from a loop that has seen nothing. */
   const run = async () => ({ actions: (await runCycle(master, emptyDaemonState(master), simulation.effects(), simulation.now)).actions });
-  const at = simulation.now() + minute;
 
   // Every state the observers report short of approval, as they report it (src/agent-review.ts,
   // `observeAgent` in src/github.ts). None is a verdict, and each would have read as one.
@@ -998,19 +601,18 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
   for (const [name, arrange] of unreviewed) {
     arrange();
     assert.equal(standingVerdict(item), null, `${name}: no verdict stands`);
-    assert.equal(routineDecision(item, master, at), null, `${name}: no decision is needed`);
+    assert.equal(neededRework(item), null, `${name}: no rework is needed`);
     const { actions } = await run();
     assert.deepEqual(actions.filter(action => action.kind === 'decision').map(action => action.detail), [], `${name}: the loop asks for no rework`);
-    assert.equal((simulation.decisions.get(item.id) ?? []).length, 0, `${name}: and none reached the control plane`);
+    assert.equal((simulation.reworks.get(item.id) ?? []).length, 0, `${name}: and none reached the control plane`);
   }
-  assert.deepEqual(simulation.sessions.log.filter(entry => entry.startsWith('launch:')), [], 'no approver session was spent on a head nobody has reviewed');
 
   // The reviewer answered the recorded request and asked for changes on this exact head.
   const verdict = refusal(`Reviewer profile ${reviewer.name} requested changes; address the findings and request a fresh review`,
     { verdict: 'changes-requested', verdictId: 902, requestId: request.commentId, completedAt: '2031-03-01T09:20:00.000Z' });
   observe(verdict, { reviewRequest: request });
   assert.deepEqual(standingVerdict(item), { reviewer: reviewer.name, at: '2031-03-01T09:20:00.000Z', reason: `${reviewer.name} requested changes on ${head.slice(0, 12)}: ${verdict.reason}` });
-  assert.equal(routineDecision(item, master, at)?.action, 'rework');
+  assert.ok(neededRework(item), 'a rework is needed');
   // It is the head's verdict only while it answers the head's request, on the head, unapproved,
   // under the provider the policy names: the same binding an approval must carry.
   observe(verdict, { reviewRequest: { ...request, commentId: 777 } });
@@ -1026,101 +628,13 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
 
   observe(verdict, { reviewRequest: request });
   const reworked = await run();
-  assert.deepEqual((simulation.decisions.get(item.id) ?? []).map(decision => [decision.action, decision.state]), [['rework', 'requested']], steps(reworked.actions).join(', '));
-  assert.match(simulation.decisions.get(item.id)![0].reason, new RegExp(`${reviewer.name} requested changes on ${head.slice(0, 12)}`));
+  assert.equal((simulation.reworks.get(item.id) ?? []).length, 1, steps(reworked.actions).join(', '));
+  assert.match(simulation.reworks.get(item.id)![0].reason, new RegExp(`${reviewer.name} requested changes on ${head.slice(0, 12)}`));
 
-  // Codex has the same shape: running and not dispatched are no verdict; findings on the head are.
-  const codex = { ...item, policy: { ...item.policy, reviewProvider: 'codex', reviewerProfiles: undefined }, reviewRequest: { commentId: 601, sha: head, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, body: '@codex review', createdAt: simulation.iso() } } as Work;
+  // Codex has the same shape (on the head before its rework): running and not dispatched are no verdict; findings on the head are.
+  const codex = { ...item, reworkRequested: false, policy: { ...item.policy, reviewProvider: 'codex', reviewerProfiles: undefined }, reviewRequest: { commentId: 601, sha: head, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, body: '@codex review', createdAt: simulation.iso() } } as Work;
   const codexReview = (reason: string, extra: Record<string, unknown> = {}) => ({ ...codex, observation: { ...codex.observation!, agentReview: { provider: 'codex' as const, sha: head, approved: false, reason, ...extra } } }) as Work;
   for (const reason of ['Graphyard must dispatch a review bound to this candidate and policy', 'Codex review changed or is running; retry', 'Codex has not completed a supported review of this candidate'])
     assert.equal(standingVerdict(codexReview(reason)), null, reason);
   assert.equal(standingVerdict(codexReview('Codex posted review findings/output for this request; fix them and request a fresh clean review', { verdict: 'changes-requested', requestId: 601, completedAt: '2031-03-01T09:25:00.000Z' }))?.reviewer, 'codex');
-});
-
-test('unit:review-rounds-capped — the real loop past an item\'s third review round: a change request naming no BLOCKING: finding is withdrawn with nothing filed, and the item merges with no further rework; a blocking finding is the loop\'s own rework request for an independent approver, which no risk lane applies; and the cap is master.json reviewRoundCap', async t => {
-  const reviewerApp = { appId: 77, installationId: 78, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.pem', boundAt: '2031-01-01T00:00:00Z' };
-  const host = await approverHost({ workers: [profile('claude-a')], reviewer: reviewerApp });
-  t.after(host.cleanup);
-  const master = host.master;
-  assert.equal(master.reviewRoundCap, undefined, 'an installation that sets no cap gets the default of three rounds');
-
-  /** An item already three rework rounds in, whose next head draws the reviewer App's change request with this body. */
-  const third = (key: string, body: string, options: Parameters<typeof plane>[1] = {}, rereview?: string) => {
-    const scripts: Script[] = [{ key, rounds: ['changes'] }];
-    const simulation = plane(scripts, { host, ...options });
-    const item = simulation.work[0];
-    item.pipeline = { attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds: 3, interventions: { blocked: 0, requirements: 0 } };
-    // GitHub reports the review with its id and body, which the observation keeps for a change request.
-    const observe = () => { for (const review of item.observation?.reviews ?? []) if (review.state === 'CHANGES_REQUESTED' && review.id === undefined) Object.assign(review, { id: 9001, ...observedReviewBody(body) }); };
-    const withdrawn: { work: string; reviewId: number; message: string }[] = [];
-    const effects = simulation.effects({
-      withdrawReview: async (work, reviewId, message) => {
-        withdrawn.push({ work: work.key, reviewId, message });
-        // GitHub dismisses it, the review request is answered afresh on the same head, and the
-        // reviewer approves it, its findings now nits; CI has passed on the head meanwhile.
-        // A `rereview` body is instead the re-review requesting changes again on the same head.
-        scripts[0].rounds = ['pass'];
-        const target = simulation.find(work.id);
-        const again = rereview === undefined ? { state: 'APPROVED' } : { state: 'CHANGES_REQUESTED', id: reviewId + 1, ...observedReviewBody(rereview) };
-        target.observation = { ...target.observation!, at: simulation.iso(), reviews: [{ reviewer: 'graphyard-reviewer[bot]', sha: target.candidate!.sha, submittedAt: simulation.iso(), ...again }],
-          checks: target.policy.checks.map(name => ({ name, result: 'success', appId: 1234 })) };
-        simulation.recompute(target);
-      },
-    });
-    return { simulation, item, observe, withdrawn, effects };
-  };
-  const drive = async (run: ReturnType<typeof third>, config: MasterConfig, passes: number, until: () => boolean = () => false) => {
-    const state = emptyDaemonState(config), performed: DaemonAction[] = [];
-    for (let pass = 0; pass < passes && !until(); pass++) { run.observe(); performed.push(...(await cycle(state, config, run.simulation, run.effects)).actions); }
-    return { state, performed };
-  };
-
-  // Non-blocking findings in round 4: nothing filed, the change request withdrawn, no rework.
-  const followUps = third('GY-1201', 'The helper could be named more clearly.\n\n- Consider a table-driven test for the edge cases.');
-  const delivered = await drive(followUps, master, 30, () => followUps.item.stage === 'done');
-  assert.equal(followUps.item.stage, 'done', steps(delivered.performed).join(', '));
-  assert.equal(followUps.item.epoch, 1, 'the item proceeded toward merge on the same head: no rework round');
-  assert.deepEqual(followUps.simulation.decisions.get(followUps.item.id) ?? [], [], 'no rework decision was ever requested');
-  assert.equal(delivered.state.actions[cappedFilingKey(followUps.item, { sha: followUps.item.candidate!.sha, reviewId: 9001 })]?.state, 'done', 'the withdrawal is recorded once, under its head and review');
-  assert.match(delivered.state.actions[cappedFilingKey(followUps.item, { sha: followUps.item.candidate!.sha, reviewId: 9001 })]!.detail, /Review round 4 of GY-1201 is past its cap of 3/);
-  assert.deepEqual(followUps.withdrawn.map(entry => [entry.work, entry.reviewId]), [['GY-1201', 9001]]);
-  assert.match(followUps.withdrawn[0].message, /review round 4 is past the cap of 3, and it names no BLOCKING: finding\. Its findings are nits and are not filed/);
-  assert.ok(delivered.performed.some(action => action.kind === 'review' && action.state === 'done' && /2 findings left as nits, nothing filed, and the change request withdrawn/.test(action.detail)));
-  assert.ok(followUps.item.delivery, 'GitHub merged it once it was approved: no merge action is the loop\'s (GY-1235)');
-
-  // A blocking finding still open in round 4: put to an independent approver as the loop's own rework
-  // request on the capped grounds (GY-1389) — never applied by the risk lane, never withdrawn, and no
-  // escalation asks a master to request it by hand.
-  const blocking = third('GY-1202', 'BLOCKING: AC-1 is not met — the widget skips the last frob.\n\nThe naming could be clearer.');
-  const escalated = await drive(blocking, master, 8, () => !!(blocking.simulation.decisions.get(blocking.item.id) ?? []).length);
-  const capped = blocking.simulation.decisions.get(blocking.item.id) ?? [];
-  assert.deepEqual(capped.map(decision => [decision.action, decision.approvedBy]), [['rework', 'graphyard-approver']], steps(escalated.performed).join(', '));
-  assert.ok(escalated.state.approvals[`decision:rework:${blocking.item.id}:${capped[0].reason.match(/candidate ([0-9a-f]{40})/)![1]}:capped:graphyard-reviewer[bot]:${blocking.item.policyRevision}`], 'requested on the capped grounds, and judged by the approver the loop launched');
-  assert.match(capped[0].reason, /GY-1202 is in review round 4, past its cap of 3, and graphyard-reviewer\[bot\] names a blocking finding on [0-9a-f]{12}: AC-1 is not met — the widget skips the last frob\. Past the review-round cap only an independent approver sends the head back/);
-  assert.deepEqual(blocking.withdrawn, [], 'and was not withdrawn');
-  assert.deepEqual(escalated.performed.filter(action => action.kind === 'escalation' && action.work === 'GY-1202'), [], 'no escalation asks a master to request it');
-  assert.equal(escalated.state.actions[cappedEscalationKey(blocking.item, blocking.item.candidate!.sha)], undefined);
-
-  // A BLOCKING: line past the observation's body bound — after a long verdict — still escalates, never withdrawn.
-  const late = third('GY-1204', `${'The judgement of each criterion, at length. '.repeat(60)}\n\nBLOCKING: AC-2 is not met — the escalation never fires.`);
-  await drive(late, master, 8, () => !!(late.simulation.decisions.get(late.item.id) ?? []).length);
-  assert.deepEqual(late.withdrawn, []);
-  assert.match((late.simulation.decisions.get(late.item.id) ?? [])[0]?.reason ?? '', /names a blocking finding on [0-9a-f]{12}: AC-2 is not met — the escalation never fires\./);
-
-  // A head is withdrawn once: when its re-review requests changes again, the second request is escalated, not withdrawn again.
-  const repeat = third('GY-1205', 'The helper could be named more clearly.', {}, 'The helper could still be named more clearly.');
-  const repeated = await drive(repeat, master, 12);
-  assert.deepEqual(repeat.withdrawn.map(entry => entry.reviewId), [9001], 'withdrawn once only');
-  assert.equal(repeat.item.epoch, 1);
-  assert.deepEqual(repeat.simulation.decisions.get(repeat.item.id) ?? [], [], 'and no rework requested');
-  const again = repeated.performed.filter(action => action.kind === 'escalation' && action.work === 'GY-1205');
-  assert.equal(again.length, 1, steps(repeated.performed).join(', '));
-  assert.match(again[0].detail, /change request 9002 on [0-9a-f]{12} names no BLOCKING: finding, after change request 9001 on the same head was already withdrawn/);
-
-  // The cap is configuration: at reviewRoundCap 4, round 4 is an ordinary round and the change request is reworked as before.
-  const widened: MasterConfig = { ...master, reviewRoundCap: 4 };
-  const ordinary = third('GY-1203', 'The helper could be named more clearly.', { host, judgements: ['hang'] });
-  await drive(ordinary, widened, 8, () => !!(ordinary.simulation.decisions.get(ordinary.item.id) ?? []).length);
-  assert.deepEqual((ordinary.simulation.decisions.get(ordinary.item.id) ?? []).map(decision => decision.action), ['rework']);
-  assert.deepEqual(ordinary.withdrawn, []);
 });

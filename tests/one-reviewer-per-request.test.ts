@@ -15,7 +15,7 @@ import { openReviewConflict, reconcileReviewConflict, reviewConflictAttention } 
 import { loadMasterConfig, setupMaster, sessionAgentName, type HerdrAgent } from '../src/master.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type DispatchTick } from '../src/auto-dispatch.js';
-import { routineDecision, standingVerdict } from '../src/master-daemon.js';
+import { neededRework, standingVerdict } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-22 review submittedAt instants only order verdicts; items, requests and observations are stamped with new Date().
@@ -271,7 +271,7 @@ test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUES
   assert.ok(!review.reasons.some(reason => /Outstanding change requests/.test(reason)), 'the change request is not acted on');
   assert.equal(item.reworkRequested, false);
   assert.equal(standingVerdict(item), null, 'no standing verdict asks for rework');
-  assert.equal(routineDecision(item, { autoMerge: true }, Date.now()), null, 'the loop requests no rework decision');
+  assert.equal(neededRework(item), null, 'the loop applies no rework');
   assert.notEqual(item.nextAction?.kind, 'request-rework');
   assert.ok(!item.observation!.reviews.some(entry => entry.id === 501 || entry.id === 502), 'both verdicts are withheld from what the gates read');
   // A fresh review of the head is requested in its place.

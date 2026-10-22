@@ -76,18 +76,6 @@ export function recordChangeInMemory(memory: ProjectMemory, change: { key: strin
   return true;
 }
 
-/**
- * Record a two-party decision the loop observed settling (GY-1125). Only an applied decision
- * enters memory, with the approver's own reason (the request's when the approver gave none): a
- * refused or withdrawn decision also settles the loop's watch, but it approved nothing.
- */
-export function recordSettledDecision(memory: ProjectMemory, watch: { work: string; action: string; decision: string }, judged: { state: string; approvedBy: string | null; approvedAt?: string | null; approvalReason?: string | null; reason?: string } | null | undefined, at: string): boolean {
-  if (!judged || judged.state !== 'applied') return false;
-  const reason = (judged.approvalReason || judged.reason || '').trim();
-  if (!reason) return false;
-  return recordDecisionInMemory(memory, { id: watch.decision, key: watch.work, action: watch.action, reason, state: 'applied', approvedBy: judged.approvedBy, at: judged.approvedAt ?? at });
-}
-
 /** Update project memory from settled operator answers and merges in work. Never from an agent's claim. */
 export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonly Work[], now: number = Date.now()): ProjectMemory {
   // 1. Settled operator answers: an answered request moves to `humanRequests` and the open one is

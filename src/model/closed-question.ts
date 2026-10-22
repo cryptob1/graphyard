@@ -105,7 +105,7 @@ export function closedQuestionRefusal(work: Work, proof: string): string | null 
   if (!declared) return `${work.key} declares no closed question for ${proof}; it is proven by its ordinary path`;
   if (!work.criteria.some(criterion => criterion.id === declared.criterion && criterion.proofs.includes(proof))) return `${declared.criterion} of ${work.key} does not require ${proof}`;
   if (reservedForAttestation(work, proof))
-    return `${proof} is established only by an approved attest decision — a two-party decision an answer never satisfies; request it with graphyard master decide ${work.key} attest`;
+    return `${proof} is established only by the master's attestation, which an answer never satisfies: graphyard master attest ${work.key} ${proof} REASON`;
   if (work.humanRequest && !work.humanRequest.answer)
     return `${work.key} waits on a human-only decision (${work.humanRequest.kind}); an answer never stands in for one, and only the human's answer resumes the item`;
   return null;

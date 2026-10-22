@@ -8,7 +8,7 @@ import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { atomicPrivateWrite, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { exhaustedProofEscalation, exhaustedProofKey, exhaustedProofRework, type ExhaustedProof } from '../src/daemon/decisions.js';
+import { exhaustedProofEscalation, exhaustedProofKey, exhaustedProofRework, type ExhaustedProof } from '../src/daemon/rework.js';
 import { sessionRetryLimit } from '../src/producer.js';
 import { describeAttempts, dispatchFailureAttention, dispatchFailureLimit, emptyDispatchCursor, extractProducerAccountsOrRuntimes, instantExitReason, isUnactedProducerAttempt, runDispatchTick, unactedProducerAttempts, type DispatchEffects } from '../src/auto-dispatch.js';
 
@@ -73,7 +73,7 @@ function dispatchEffects(items: () => Work[], log: string[], producers: any[]): 
   };
 }
 
-function decisionLoop(items: () => Work[], decided: { action: string; reason: string }[], approvers: string[], exhausted: () => ExhaustedProof[]): DaemonEffects {
+function decisionLoop(items: () => Work[], decided: { action: string; reason: string }[], exhausted: () => ExhaustedProof[]): DaemonEffects {
   return {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: items(), now: iso(1_000), jobs: [] }),
@@ -81,9 +81,7 @@ function decisionLoop(items: () => Work[], decided: { action: string; reason: st
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(1_000), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     exhaustedProofs: async () => exhausted(),
-    decide: async (_work: Work, action: string, reason: string) => { decided.push({ action, reason }); return { id: '5d8a8b9e-0000-4000-8000-000000001153' }; },
-    decisions: async () => ({ decisions: decided.map(entry => ({ id: '5d8a8b9e-0000-4000-8000-000000001153', action: entry.action, state: 'requested', input: {}, approvedBy: null })) }),
-    approver: async (_work: Work, decision: string) => { approvers.push(decision); return { agentName: 'graphyard-approver-gy-1153', pane: 'pane-approver' }; },
+    rework: async (_work: Work, reason: string) => { decided.push({ action: 'rework', reason }); return {}; },
     persist: async () => {},
   } as unknown as DaemonEffects;
 }
@@ -143,10 +141,10 @@ test('unit:never-started-producers-request-no-rework — replays GY-1127\'s thre
       candidate: { sha: H, baseSha: B, pr: 1127, branch: 'graphyard/gy-1127-1', author: 'implementer' },
       observation: observation({ sha: H, baseSha: B }, { at: iso(0) }),
     });
-    const decided: { action: string; reason: string }[] = [], approvers: string[] = [];
+    const decided: { action: string; reason: string }[] = [];
     const loopConfig = masterConfigSchema.parse({ ...config, autoMerge: true, workers: [] });
     const state = emptyDaemonState(loopConfig);
-    const effects = decisionLoop(() => [submitted], decided, approvers, () => [entry]);
+    const effects = decisionLoop(() => [submitted], decided, () => [entry]);
 
     await runCycle(loopConfig, state, effects, () => clock + 1_000);
     await runCycle(loopConfig, state, effects, () => clock + 2_000);
@@ -248,19 +246,18 @@ test('unit:acted-producer-failure-still-reworks — a head whose producer attemp
       candidate: { sha: H, baseSha: B, pr: 1127, branch: 'graphyard/gy-1127-1', author: 'implementer' },
       observation: observation({ sha: H, baseSha: B }, { at: iso(0) }),
     });
-    const decided: { action: string; reason: string }[] = [], approvers: string[] = [];
+    const decided: { action: string; reason: string }[] = [];
     const loopConfig = masterConfigSchema.parse({ ...config, autoMerge: true, workers: [] });
     const state = emptyDaemonState(loopConfig);
-    const effects = decisionLoop(() => [submitted], decided, approvers, () => [entry]);
+    const effects = decisionLoop(() => [submitted], decided, () => [entry]);
 
     await runCycle(loopConfig, state, effects, () => clock + 1_000);
     assert.equal(decided.length, 0, 'the rework waits one cycle after the escalation');
 
     await runCycle(loopConfig, state, effects, () => clock + 2_000);
-    assert.equal(decided.length, 1, 'rework decision is requested when an attempt acted and failed');
+    assert.equal(decided.length, 1, 'the rework is applied when an attempt acted and failed');
     assert.equal(decided[0].action, 'rework');
     assert.match(decided[0].reason, /ended without trusted evidence/);
-    assert.equal(approvers.length, 1, 'independent approver launched');
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -313,7 +310,7 @@ test('GY-1227 review follow-ups — shared unacted wording, unacknowledged sessi
   // A spent entry with no recorded attempt is acted in both the escalation and the rework.
   const empty: ExhaustedProof = { requestId: 'r', work: 'GY-1127', sha: H, group: 'unit', proofs: ['unit:a'], attempts: [], reason: 'spent' };
   assert.equal(unactedProducerAttempts([]), false);
-  assert.match(exhaustedProofEscalation(empty), /requests a rework decision for GY-1127/);
+  assert.match(exhaustedProofEscalation(empty), /on its next cycle it returns GY-1127 to a worker/);
   assert.ok(exhaustedProofRework(work(), [empty]), 'the rework the escalation announced is delivered');
 
   const root = await temporaryDirectory('exhausted-proof-runtime-gy1227');

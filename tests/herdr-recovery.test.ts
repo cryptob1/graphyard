@@ -5,7 +5,7 @@ import { existsSync } from 'node:fs';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
-import { Engine, launchFenceMs } from '../src/engine.js';
+import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -14,11 +14,11 @@ import { createInventory, exercise as run, requiredCases, requiredFences } from 
 // @ts-expect-error Dependency-free protected workflow script.
 import { contract, contracts, requireStagedContract } from '../scripts/contracts.mjs';
 
-// Real lease and launch fences are minutes long. The contract reads both from the candidate, so a
-// short-fenced deployment exercises the identical recovery path within a test run once this suite
-// states the fences its own engine ships; a trusted run always requires the production defaults.
-const leaseSeconds = 5, launchFence = 3000;
-const shortFences = { leaseMs: leaseSeconds * 1000, launchAuthorityMs: launchFence };
+// A real lease is minutes long. The contract reads it from the candidate, so a short-leased
+// deployment exercises the identical recovery path within a test run once this suite states the
+// lease its own engine ships; a trusted run always requires the production default.
+const leaseSeconds = 5;
+const shortFences = { leaseMs: leaseSeconds * 1000 };
 const operator: Principal = { id: 'recovery-operator', role: 'admin' };
 const machines = [1, 2].map(n => ({ id: `recovery-machine-${n}`, role: 'worker' as const, token: `test-machine-${n}-${'x'.repeat(32)}` }));
 let pg: EmbeddedPostgres; let store: Store; let http: ReturnType<typeof server>; let url: string;
@@ -31,7 +31,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('recovery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/recovery_test`); await store.init();
-  http = server(new Engine(store, leaseSeconds, 'owner/project', launchFence), [{ ...operator, token: 'r'.repeat(32) }, ...machines]);
+  http = server(new Engine(store, leaseSeconds, 'owner/project'), [{ ...operator, token: 'r'.repeat(32) }, ...machines]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
@@ -64,23 +64,18 @@ test('two machines recover an expired lease against the real HTTP server and Pos
   assert.deepEqual(result, requiredCases.map((id: string) => ({ id, result: 'pass' })));
 });
 
-test('the contract requires the shipped lease and launch-authority safety defaults', async () => {
+test('the contract requires the shipped lease safety default', async () => {
   // Bind the certified minimums to the defaults this repository actually ships, so lowering a
   // fence in src/engine.ts fails here instead of quietly certifying the shortened deployment.
-  assert.deepEqual(requiredFences, { leaseMs: new Engine(store).leaseSeconds * 1000, launchAuthorityMs: launchFenceMs });
-  assert.deepEqual(requiredFences, { leaseMs: 120_000, launchAuthorityMs: 120_000 });
+  assert.equal(requiredFences.leaseMs, new Engine(store).leaseSeconds * 1000);
+  assert.deepEqual(requiredFences, { leaseMs: 120_000 });
   // A candidate whose fences are seconds long cannot produce passing evidence for the real defaults.
   await assert.rejects(exercise(url, identities()), /shorter than the required 120000 ms safety default/);
 });
 
-test('each fence minimum is enforced on its own, not behind the other', async () => {
-  // With both minimums raised the lease assertion fires first and the launch assertion is never
-  // reached. Raising exactly one at a time against the same short-fenced engine isolates each:
-  // neither certifies a shortened fence because the other happens to fail earlier.
+test('the lease minimum is enforced', async () => {
   await assert.rejects(exercise(url, identities(), { ...shortFences, leaseMs: requiredFences.leaseMs }),
     /The claimed lease is shorter than the required 120000 ms safety default/);
-  await assert.rejects(exercise(url, identities(), { ...shortFences, launchAuthorityMs: requiredFences.launchAuthorityMs }),
-    /Launch authority is shorter than the required 120000 ms safety default/);
 });
 
 test('a candidate that lets every racing claim win cannot produce passing evidence', async () => {
@@ -91,23 +86,6 @@ test('a candidate that lets every racing claim win cannot produce passing eviden
     assert.rejects(exercise(weakened, identities(), shortFences, inventory), /Expected values to be strictly equal/));
   assert.deepEqual(inventory.cases, requiredCases.map((id: string) => ({ id, result: id === 'exclusive-claim' ? 'fail' : 'skipped' })));
   assert.equal(inventory.executed, 1); assert.equal(inventory.skipped, requiredCases.length - 1); assert.equal(inventory.complete, false);
-});
-
-test('a candidate that recovers containment before its launch fence expires cannot pass', async () => {
-  await withoutRefusal('/rework', async (weakened, refusals) => {
-    await assert.rejects(exercise(weakened, identities(), shortFences), /Unexpected status for/);
-    assert.equal(refusals(), 1, 'the run must stop on the first, pre-release rework refusal');
-  });
-});
-
-test('a candidate that recovers containment once the lease is released, while launch authority remains, cannot pass', async () => {
-  // Keep the pre-release refusal genuine and weaken only the check that follows the release, so
-  // the second assertion is proven non-vacuous on its own: the run passes the first refusal and
-  // still fails. Surrendering the lease must not be enough to lift the containment fence.
-  await withoutRefusal('/rework', async (weakened, refusals) => {
-    await assert.rejects(exercise(weakened, identities(), shortFences), /Unexpected status for work\/[0-9a-f-]+\/rework/);
-    assert.equal(refusals(), 2, 'the run must reach the post-release rework refusal');
-  }, 1);
 });
 
 test('a candidate that lets a superseded owner reset review state cannot pass', async () => {
@@ -125,7 +103,6 @@ test('the trusted registry selects fixed inventories and rejects unknown proofs'
   // The refusal states the bootstrap ordering rule: a contract reaches protected main first.
   assert.throws(() => contract('integration:invented'), /Unknown trusted acceptance proof integration:invented\. This protected checkout registers integration:claim-safety, integration:herdr-recovery, integration:merge-authorization, unit:ci-proofs-enumeration; merge a contract to main before requiring its proof\./);
   assert.throws(() => contract('toString'), /Unknown trusted acceptance proof/);
-  assert.equal(launchFenceMs, 120_000);
   // Every registered contract names the protected file a trusted run actually executes.
   for (const [proof, entry] of Object.entries(contracts as Record<string, { source: string }>))
     assert.ok(existsSync(new URL(`../${entry.source}`, import.meta.url)), `${proof} names a missing contract source`);

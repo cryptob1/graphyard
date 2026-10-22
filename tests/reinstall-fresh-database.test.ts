@@ -9,7 +9,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 /**
  * GY-1851: a repository reinstalled onto a fresh control-plane database, its install directory kept.
  * The control plane below is simulated: the coordinator's credential stays accepted (it is deployed
- * with the install, as GRAPHYARD_PRINCIPALS), while the operator-agent and approver identities lived
+ * with the install, as GRAPHYARD_PRINCIPALS), while the operator-agent identity lived
  * in the database and are gone with it. `master init` and `master autonomy` are the real commands.
  */
 // Loaded inside the test, so a tree without them fails as a test case, not at load.
@@ -42,7 +42,7 @@ const green = (loop: boolean) => ({
   setup: { protection: 'checks', loop },
 });
 
-test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator, operator-agent and approver credentials an install directory kept from an old database, archives the old cursor beside itself and starts a fresh one; accepted credentials are left alone', async () => {
+test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator and operator-agent credentials an install directory kept from an old database, archives the old cursor beside itself and starts a fresh one; accepted credentials are left alone', async () => {
   const { runUp, recordedCredentialAnswers } = await up();
   const { loadStoredMasterConfig, runAutonomyCommand, setupMaster } = await import('../src/master.js');
   const { daemonStatePath } = await import('../src/daemon/state.js');
@@ -98,19 +98,19 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
   const request: UpRequest = { repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', goalFile: null, browserProfile: null };
   const count = (command: string) => { const [first, second] = command.split(' '); return calls.filter(args => args[0] === first && (first === 'install' ? args.includes(second) : args[1] === second)).length; };
   const archives = async () => { const file = await cursor(); return (await readdir(dirname(file))).filter(name => name.startsWith(basename(file).replace(/\.json$/, '.archived-'))); };
-  const credential = async (which: 'operatorAgent' | 'approver') => (await readFile((await loadStoredMasterConfig(root))[which]!.credentialFile, 'utf8')).trim();
+  const credential = async () => (await readFile((await loadStoredMasterConfig(root)).operatorAgent!.credentialFile, 'utf8')).trim();
 
   // The first install, on the first database.
   const first = await runUp(request, deps([]));
   assert.equal(first.exitCode, 0, first.next);
-  assert.deepEqual(plane.agents.map(agent => agent.id), ['graphyard-master-shop-operator', 'graphyard-approver-shop']);
-  const old = { operator: await credential('operatorAgent'), approver: await credential('approver') };
+  assert.deepEqual(plane.agents.map(agent => agent.id), ['graphyard-master-shop-operator']);
+  const old = { operator: await credential() };
   // The loop ran a long while on it.
   loop!.cycle = 16602; await writeCursor(16602);
 
   // The database volume is removed and the plane starts on a fresh one: its operator agents are gone.
   plane = { agents: [] };
-  assert.deepEqual((await recordedCredentialAnswers(root, SERVER, planeFetch(plane))).map(answer => `${answer.identity} ${answer.status}`), ['coordinator 200', 'operator-agent 401', 'approver 401']);
+  assert.deepEqual((await recordedCredentialAnswers(root, SERVER, planeFetch(plane))).map(answer => `${answer.identity} ${answer.status}`), ['coordinator 200', 'operator-agent 401']);
   // The old loop runs on until it is stopped, and writes cycle 16603 from memory as it stops.
   loop!.cycle = 16603;
   const before = { apply: count('install --apply'), init: count('master init'), autonomy: count('master autonomy'), restart: count('master restart') };
@@ -118,14 +118,14 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
   const reinstall = await runUp(request, deps(events));
   assert.equal(reinstall.exitCode, 0, reinstall.next);
   const notes = events.flatMap(event => event.kind === 'note' ? [event.text] : []);
-  assert.ok(notes.some(text => /refused the recorded operator-agent, approver credentials \(401\): it serves a fresh database, so this run re-issues the coordinator, operator-agent and approver credentials/.test(text)), notes.join('\n'));
-  // Re-issued through the bootstrap path: the install, master init (the coordinator) and master autonomy (the operator agent and approver).
+  assert.ok(notes.some(text => /refused the recorded operator-agent credential \(401\): it serves a fresh database, so this run re-issues the coordinator and operator-agent credentials/.test(text)), notes.join('\n'));
+  // Re-issued through the bootstrap path: the install, master init (the coordinator) and master autonomy (the operator agent).
   assert.equal(count('install --apply'), before.apply + 1, 'the install runs again');
   assert.equal(count('master init'), before.init + 1, 'the coordinator credential is recorded again by master init');
   assert.equal(count('master autonomy'), before.autonomy + 1, 'master autonomy provisions the agent identities again');
-  assert.deepEqual(plane.agents.map(agent => agent.id), ['graphyard-master-shop-operator', 'graphyard-approver-shop'], 'both identities exist on the fresh database');
-  assert.notEqual(await credential('operatorAgent'), old.operator); assert.notEqual(await credential('approver'), old.approver);
-  assert.deepEqual((await recordedCredentialAnswers(root, SERVER, planeFetch(plane))).map(answer => answer.status), [200, 200, 200], 'every recorded credential is accepted now');
+  assert.deepEqual(plane.agents.map(agent => agent.id), ['graphyard-master-shop-operator'], 'the identity exists on the fresh database');
+  assert.notEqual(await credential(), old.operator);
+  assert.deepEqual((await recordedCredentialAnswers(root, SERVER, planeFetch(plane))).map(answer => answer.status), [200, 200], 'every recorded credential is accepted now');
   // The loop is stopped first, so its shutdown write lands before the archive: the cursor it wrote
   // last (cycle 16603) is archived beside itself, never deleted, and the loop starts on a fresh one.
   const archived = await archives();
@@ -138,16 +138,16 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
   // and it stays fresh through the loop's own next restart, which persists the in-memory state.
   await stopLoop(); await startLoop();
   assert.equal(JSON.parse(await readFile(await cursor(), 'utf8')).cycle, 0, 'the old cursor never comes back');
-  assert.ok(notes.some(text => /Re-issued the coordinator, operator-agent and approver credentials for the fresh database; the loop started a fresh cursor; the old one \(cycle 16603\) is archived at \S+\.archived-/.test(text)), notes.join('\n'));
+  assert.ok(notes.some(text => /Re-issued the coordinator and operator-agent credentials for the fresh database; the loop started a fresh cursor; the old one \(cycle 16603\) is archived at \S+\.archived-/.test(text)), notes.join('\n'));
   assert.equal(JSON.parse(await readFile(join(root, '.graphyard/up.json'), 'utf8')).reissue, null, 'the re-issue is done');
 
   // Accepted credentials change nothing: no install, no new credential, no archive, no restart.
-  const settled = { calls: calls.length, operator: await credential('operatorAgent'), approver: await credential('approver'), agents: plane.agents.length };
+  const settled = { calls: calls.length, operator: await credential(), agents: plane.agents.length };
   const quiet: UpEvent[] = [];
   const again = await runUp(request, deps(quiet));
   assert.equal(again.exitCode, 0, again.next);
   assert.deepEqual(calls.slice(settled.calls).filter(args => args[0] === 'install' || ['init', 'autonomy', 'restart'].includes(args[1])), []);
-  assert.equal(await credential('operatorAgent'), settled.operator); assert.equal(await credential('approver'), settled.approver);
+  assert.equal(await credential(), settled.operator);
   assert.equal(plane.agents.length, settled.agents);
   assert.equal((await archives()).length, 1);
   assert.equal(stops, 1);
@@ -155,15 +155,15 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
   assert.ok(!quiet.some(event => event.kind === 'note' && /fresh database/.test(event.text)));
 
   // A revoked identity also draws 401, but the plane still lists it: its database is not fresh, so nothing is re-issued.
-  plane.agents.find(agent => agent.id === 'graphyard-approver-shop')!.revoked = true;
+  plane.agents.find(agent => agent.id === 'graphyard-master-shop-operator')!.revoked = true;
   const revoked: UpEvent[] = [];
-  const kept = { calls: calls.length, approver: await credential('approver') };
+  const kept = { calls: calls.length, operator: await credential() };
   const afterRevoke = await runUp(request, deps(revoked));
   assert.equal(afterRevoke.exitCode, 0, afterRevoke.next);
   assert.deepEqual(calls.slice(kept.calls).filter(args => args[0] === 'install' || ['init', 'autonomy', 'restart'].includes(args[1])), []);
-  assert.equal(await credential('approver'), kept.approver);
+  assert.equal(await credential(), kept.operator);
   assert.equal(stops, 1); assert.equal((await archives()).length, 1);
-  assert.ok(revoked.some(event => event.kind === 'note' && /refused the recorded approver credential \(401\) but still lists the identity: its database is not fresh/.test(event.text)), JSON.stringify(revoked));
+  assert.ok(revoked.some(event => event.kind === 'note' && /refused the recorded operator-agent credential \(401\) but still lists the identity: its database is not fresh/.test(event.text)), JSON.stringify(revoked));
 
   // With no admin credential, or a failed listing, the revoked identity's absence is unknown: nothing
   // is re-issued and up.json keeps its steps, so the run after the listing answers again still sees it listed.
@@ -175,7 +175,7 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
     assert.deepEqual(calls.slice(kept.calls).filter(args => args[0] === 'install' || ['init', 'autonomy', 'restart'].includes(args[1])), []);
     assert.equal((await upState()).reissue ?? null, null); assert.deepEqual((await upState()).completed, kept.state.completed);
     assert.equal((await upState()).goal ?? null, kept.state.goal ?? null); assert.equal((await upState()).onboardingWork ?? null, kept.state.onboardingWork ?? null);
-    assert.ok(blind.some(event => event.kind === 'note' && /refused the recorded approver credential \(401\), but its operator-agent listing could not be read/.test(event.text) && why.test(event.text)), JSON.stringify(blind));
+    assert.ok(blind.some(event => event.kind === 'note' && /refused the recorded operator-agent credential \(401\), but its operator-agent listing could not be read/.test(event.text) && why.test(event.text)), JSON.stringify(blind));
     assert.equal(stops, 1); assert.equal((await archives()).length, 1);
   }
   admin = true; listingFails = false;
@@ -192,7 +192,7 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
  */
 const fakeHost = (checkout: string, unit: string, cursor: string) => {
   // master init and master autonomy ran here, in the host's checkout: the master's identities and their credential files are on the host only.
-  const config = { credentialFile: cursor.replace(/\.daemon\.json$/, '.token'), operatorAgent: { id: 'graphyard-master-shop-operator', credentialFile: `${checkout}/.graphyard/operator-agent.token` }, approver: { id: 'graphyard-approver-shop', credentialFile: `${checkout}/.graphyard/approver.token` } };
+  const config = { credentialFile: cursor.replace(/\.daemon\.json$/, '.token'), operatorAgent: { id: 'graphyard-master-shop-operator', credentialFile: `${checkout}/.graphyard/operator-agent.token` } };
   const files = new Map<string, string>([[`${checkout}/.graphyard/master.json`, JSON.stringify(config)], [config.credentialFile, `${MASTER}\n`]]);
   const commands: string[] = [];
   let loop: { cycle: number } | null = null;

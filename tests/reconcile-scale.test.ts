@@ -43,7 +43,7 @@ const createItem = async (title: string) =>
 /** A delivered item nothing is owed for any more, inserted beside its work-index row. */
 const doneDocument = (template: Work, key: string, over: Partial<Work> = {}): Work => ({
   ...structuredClone(template), id: randomUUID(), key, stage: 'done', stageEnteredAt: new Date().toISOString(),
-  lease: null, nextAction: undefined, actionQueue: undefined, containmentQuarantine: undefined, sessions: [], ...over,
+  lease: null, nextAction: undefined, actionQueue: undefined, sessions: [], ...over,
 });
 const insert = async (document: Work) => { await store.pool.query('INSERT INTO work_items(id, document) VALUES ($1, $2)', [document.id, JSON.stringify(document)]); return document; };
 

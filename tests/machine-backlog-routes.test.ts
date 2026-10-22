@@ -9,14 +9,13 @@ import { Store } from '../src/store.js';
 import { isClosed, type Principal, type Work } from '../src/model.js';
 
 // GY-402 against a real Postgres and the real routes: triage of the follow-up items filed before
-// GY-1249 retired the filing — a release applied at once, a closure applied only once an
-// independent approver approves it, and a merge that appends to an open follow-up item, filing none.
+// GY-1249 retired the filing — a release or a closure applied at once, and a merge that appends to an
+// open follow-up item, filing none.
 const repository = 'owner/machine-backlog';
 const operator: Principal = { id: 'backlog-operator', role: 'admin', sessionKind: 'ai' };
-const approver: Principal = { id: 'backlog-approver', role: 'admin', sessionKind: 'ai' };
 const coordinator: Principal = { id: 'backlog-master', role: 'coordinator', sessionKind: 'ai' };
 const worker: Principal = { id: 'backlog-worker', role: 'worker', sessionKind: 'ai' };
-const credentials = [operator, approver, coordinator, worker].map(principal => ({ ...principal, token: `backlog-${principal.id}-${'x'.repeat(32)}` }));
+const credentials = [operator, coordinator, worker].map(principal => ({ ...principal, token: `backlog-${principal.id}-${'x'.repeat(32)}` }));
 const token = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 
@@ -54,7 +53,7 @@ before(async () => {
 });
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
-test('unit:machine-backlog-triaged — a triage release applies at once with its priority; a triage closure waits for an independent approver and a refusal returns the item to triage', async () => {
+test('unit:machine-backlog-triaged — a triage release applies at once with its priority; a triage closure closes the item at once', async () => {
   const parent = await ok(operator, 'work', { title: 'Parent C', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:c'] }] }) as Work;
   const shipped = await ok(operator, 'work', { title: 'Shipped fix', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:c'] }] }) as Work;
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [shipped.id, JSON.stringify({ ...(await reload(shipped.key)), stage: 'done', closure: null })]);
@@ -68,30 +67,14 @@ test('unit:machine-backlog-triaged — a triage release applies at once with its
   assert.equal(release.priority, 1);
   assert.equal(release.triage?.state, 'applied');
   assert.ok((await events(release)).some(event => event.kind === 'triage.released'));
-  // A closure naming an undelivered item is refused; one naming the delivered fix is proposed, not applied.
+  // A closure naming an undelivered item is refused; one naming the delivered fix closes the item at once.
   assert.equal((await call(coordinator, `work/${closing.key}/triage`, { judgement: { outcome: 'close', ref: parent.key, reason: 'fixed' } })).status, 422);
-  const proposed = await ok(coordinator, `work/${closing.key}/triage`, { judgement: { outcome: 'close', ref: shipped.key, reason: 'The fix shipped in the delivered item' } }) as Work;
-  assert.equal(proposed.triage?.state, 'proposed');
-  assert.equal(proposed.stage, 'backlog');
-  const input = { kind: 'superseded', ref: shipped.key, reason: `Already fixed by ${shipped.key}: The fix shipped in the delivered item`, triageAt: proposed.triage!.at };
-  // The requester cannot approve its own closure; a refusal returns the item to triage.
-  const first = await ok(operator, `work/${closing.key}/decide`, { action: 'close', input, reason: 'triage judged it fixed' });
-  assert.equal((await call(operator, `work/${closing.key}/approve`, { decision: first.id, reason: 'self' })).status, 403);
-  await ok(approver, `work/${closing.key}/approve`, { action: 'refuse', decision: first.id, reason: 'The fix does not cover src/f.ts' });
-  const refused = await reload(closing.key);
-  assert.equal(refused.triage?.state, 'refused');
-  assert.equal(refused.stage, 'backlog');
-  // Judged again, and this time approved: the item is closed and its triage record applied.
-  const again = await ok(coordinator, `work/${closing.key}/triage`, { judgement: { outcome: 'close', ref: shipped.key, reason: 'The fix shipped; src/f.ts is covered by its test' } }) as Work;
-  const decision = await ok(operator, `work/${closing.key}/decide`, { action: 'close', input: { ...input, reason: `Already fixed by ${shipped.key}: covered`, triageAt: again.triage!.at }, reason: 'triage judged it fixed again' });
-  const approved = await ok(approver, `work/${closing.key}/approve`, { decision: decision.id, reason: 'The delivered item covers it' });
-  assert.equal(approved.state, 'applied', JSON.stringify(approved));
-  const closed = await reload(closing.key);
+  const closed = await ok(coordinator, `work/${closing.key}/triage`, { judgement: { outcome: 'close', ref: shipped.key, reason: 'The fix shipped in the delivered item' } }) as Work;
   assert.ok(isClosed(closed));
   assert.equal(closed.closure?.kind, 'superseded');
   assert.equal(closed.closure?.ref, shipped.key);
   assert.equal(closed.triage?.state, 'applied');
-  assert.equal(closed.triage?.decision, decision.id);
+  assert.ok((await events(closed)).some(event => event.kind === 'triage.applied'));
 });
 
 test('unit:machine-backlog-triaged — a triage merge appends the merged item\'s findings to the open follow-up item it names, deduplicated, and creates no item', async () => {
@@ -100,37 +83,11 @@ test('unit:machine-backlog-triaged — a triage merge appends the merged item\'s
   const merging = await followUp(parent, 42, ['src/g.ts — the bound is unchecked', 'src/h.ts — the cache never expires']);
   const before = (await store.list()).length;
   const judged = await ok(coordinator, `work/${merging.key}/triage`, { judgement: { outcome: 'merge', into: into.key, reason: 'the same parent' } }) as Work;
-  const decision = await ok(operator, `work/${merging.key}/decide`, { action: 'close', input: { kind: 'duplicate', ref: into.key, reason: `Merged into ${into.key} by triage: the same parent`, triageAt: judged.triage!.at }, reason: 'triage judged it a duplicate' });
-  const approved = await ok(approver, `work/${merging.key}/approve`, { decision: decision.id, reason: 'Same parent, same findings' });
-  assert.equal(approved.state, 'applied', JSON.stringify(approved));
-  assert.ok(isClosed(await reload(merging.key)));
+  assert.ok(isClosed(judged));
+  assert.equal(judged.closure?.kind, 'duplicate');
   const merged = await reload(into.key);
   assert.deepEqual(merged.origin?.reviewFollowUps?.findings.map(entry => entry.text), ['src/g.ts — the bound is unchecked', 'src/h.ts — the cache never expires']);
   assert.match(merged.description ?? '', /merged from GY-\d+:\n\d+\. src\/h\.ts — the cache never expires/);
   assert.ok((await events(merged)).some(event => event.kind === 'followups.appended'));
   assert.equal((await store.list()).length, before, 'the merge created no item');
-});
-
-test('unit:machine-backlog-triaged — the loop withdraws a triage closure a later recurrence overtook: the item returns to triage and an approval of its close decision closes nothing', async () => {
-  const parent = await ok(operator, 'work', { title: 'Parent E', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:e'] }] }) as Work;
-  const shipped = await ok(operator, 'work', { title: 'Shipped fix E', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:e'] }] }) as Work;
-  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [shipped.id, JSON.stringify({ ...(await reload(shipped.key)), stage: 'done', closure: null })]);
-  const closing = await followUp(parent, 51, ['src/i.ts — covered by the shipped fix']);
-  const proposed = await ok(coordinator, `work/${closing.key}/triage`, { judgement: { outcome: 'close', ref: shipped.key, reason: 'covered' } }) as Work;
-  const decision = await ok(operator, `work/${closing.key}/decide`, { action: 'close', input: { kind: 'superseded', ref: shipped.key, reason: `Already fixed by ${shipped.key}: covered`, triageAt: proposed.triage!.at }, reason: 'triage judged it covered' });
-  const withdraw = { withdraw: { triageAt: proposed.triage!.at, reason: 'a recurrence after the landing was linked to it' } };
-  // Only the coordinator withdraws; a withdrawal of a proposal the item no longer carries changes nothing.
-  assert.equal((await call(worker, `work/${closing.key}/triage`, withdraw)).status, 403);
-  const unchanged = await ok(coordinator, `work/${closing.key}/triage`, { withdraw: { ...withdraw.withdraw, triageAt: new Date(0).toISOString() } }) as Work;
-  assert.equal(unchanged.triage?.state, 'proposed');
-  const withdrawn = await ok(coordinator, `work/${closing.key}/triage`, withdraw) as Work;
-  assert.equal(withdrawn.triage?.state, 'refused');
-  assert.match(withdrawn.triage?.refusal ?? '', /Withdrawn by backlog-master: a recurrence after the landing/);
-  assert.ok((await events(withdrawn)).some(event => event.kind === 'triage.withdrawn'));
-  // The approver judging the close decision afterwards applies nothing: the item stays open, back in triage.
-  assert.equal((await call(approver, `work/${closing.key}/approve`, { decision: decision.id, reason: 'covered' })).status, 409);
-  const after = await reload(closing.key);
-  assert.equal(isClosed(after), false);
-  assert.equal(after.stage, 'backlog');
-  assert.equal(after.triage?.state, 'refused');
 });

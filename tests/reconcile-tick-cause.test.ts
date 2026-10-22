@@ -52,7 +52,7 @@ async function settle() {
       const { documentsRead, full, evaluated, live } = engine.lastReconcile;
       if (!documentsRead && !full && evaluated < live && !engine.reconcileTicks.at(-1)!.writes) return;
     }
-    const stuck = (await store.list()).filter(work => recorder.evaluated.includes(work.id)).map(work => `${work.key} ${work.stage} lease ${work.lease?.epoch ?? 'none'} escalations ${JSON.stringify(work.escalations ?? [])} next ${work.nextAction?.kind ?? 'none'}`);
+    const stuck = (await store.list()).filter(work => recorder.evaluated.includes(work.id)).map(work => `${work.key} ${work.stage} lease ${work.lease?.epoch ?? 'none'} next ${work.nextAction?.kind ?? 'none'}`);
     assert.fail(`the view never settled: ${JSON.stringify(engine.lastReconcile)}; still evaluating ${stuck.join(' | ')}`);
   } finally { recorder.restore(); }
 }

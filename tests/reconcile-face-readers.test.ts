@@ -204,7 +204,6 @@ test('unit:face-move-readers-match-full-evaluation — the view, the configurati
       key: work.key, stage: work.stage, ready: work.ready, epoch: work.epoch ?? null,
       lease: work.lease ? { owner: work.lease.owner, epoch: work.lease.epoch } : null,
       next: work.nextAction ? { kind: work.nextAction.kind, binding: work.nextAction.binding, inputs: work.nextAction.inputs } : null,
-      escalations: (work.escalations ?? []).map(entry => entry.trigger).sort(),
       rows: (work.actionQueue?.actions ?? []).map(row => ({ kind: row.kind, state: row.state, claim: row.claim?.executor ?? null, attempts: row.attempts, retry: row.retryAt ? 'set' : null, history: (row.history ?? []).map(entry => entry.event) })),
       retired: (work.actionQueue?.history ?? []).map(row => ({ kind: row.kind, state: row.state })),
       violations: [...work.violations].sort(),

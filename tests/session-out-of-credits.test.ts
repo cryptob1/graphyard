@@ -8,21 +8,20 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, failoverKey, runCycle, type DaemonEffects, type DaemonState, type LaunchedSession } from '../src/master-daemon.js';
-import { approverRoleHealth, approverSessionName, masterConfigSchema, observedExhaustions, recordObservedExhaustion, selectAccount, selectApproverAccount, unknownResetHoldMs, type MasterConfig } from '../src/master.js';
+import { masterConfigSchema, observedExhaustions, recordObservedExhaustion, selectAccount, unknownResetHoldMs, type MasterConfig } from '../src/master.js';
 import { detectRuntimeExhaustion } from '../src/master/environments.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
-// GY-1889: on 2026-10-17 several reviewer and approver sessions stopped on Claude Code's
+// GY-1889: on 2026-10-17 several reviewer sessions stopped on Claude Code's
 // out-of-usage-credits screen — "You're out of usage credits. Run /usage-credits to keep using
 // Fable 5.1 or /model to switch models." No source line recognised it: the loop read each reviewer
-// as never started, counted the attempt against its request, and read each approver as a stall,
+// as never started, counted the attempt against its request,
 // while master status fleet still listed the accounts eligible, so later launches went to the same
 // spent account. The screen is now read as the account's exhaustion (detection in src/fleet.ts,
 // judged by detectRuntimeExhaustion): the session's account is held — the screen names no reset,
-// so for the bounded unknown-reset hour — the session is closed, and its review request or
-// approver decision is launched again on the next eligible profile in the same cycle, neither
-// counted as a never-started attempt.
+// so for the bounded unknown-reset hour — the session is closed, and its review request is
+// launched again on the next eligible profile in the same cycle, not counted as a never-started attempt.
 
 /** The screen as Claude Code draws it, behind its own bullet, notice and hint on one line. */
 const screen = `● Reading the PR diff before reviewing.
@@ -130,75 +129,6 @@ test('unit:out-of-credits-session-fails-over-at-once — the screen is the accou
   assert.equal((await reload(work.id)).capacity!.exhaustions.length, 1);
 });
 
-test('unit:out-of-credits-session-fails-over-at-once — an approver session stopped on the same screen is closed and its decision relaunched on the next eligible approver account in the same cycle, its account held for the bounded hour, and no stall or never-started is recorded', async () => {
-  await fresh();
-  config = await configWithCredentials('approver');
-  // One machine-filed item the loop itself puts a close decision to: its approver is the session below.
-  const filed = await ok(operator, 'POST', 'work', { title: 'approver out of credits', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:wait'] }],
-    origin: { reviewFollowUps: { parent: 'GY-1', findings: [{ path: 'src/a.ts', text: 'src/a.ts — a finding' }] } } }) as Work;
-  const work = await ok(coordinator, 'POST', `work/${filed.id}/triage`, { judgement: { outcome: 'close', reason: 'Not worth doing once the parent shipped' } }) as Work;
-
-  const decisions: { id: string; action: string; state: string; input: any; approvedBy: string | null }[] = [], launches: (string | null)[] = [];
-  const state = emptyDaemonState(config);
-  const decisionRun = loop({
-    dispatch: async () => {},
-    decide: async (_work, action, _reason, input) => { const entry = { id: `decision-credits-${decisions.length + 1}`, action, state: 'requested', input: input ?? {}, approvedBy: null }; decisions.push(entry); return entry; },
-    decisions: async () => ({ decisions }),
-    // The launch as the production one makes it: the real account choice, then a pane. With the
-    // hold in place it answers with the next eligible account, so the relaunch below lands on env-b.
-    approver: async (entry, decision) => {
-      const chosen = await selectApproverAccount(config, entry.key, 'approver-agent', { quota: false, now: () => Date.now() + clock.skewMs, cacheMs: 0, registry: undefined });
-      const agentName = approverSessionName(entry, decision), pane = `pane-approver-${launches.length}`;
-      herdr.agents.push({ name: agentName, pane_id: pane, agent_status: 'working' });
-      launches.push(chosen.account?.name ?? null);
-      return { agentName, pane, account: chosen.account?.name ?? null, runtime: chosen.account?.kind ?? null, session: `registry-session-${launches.length}` };
-    },
-    roleHealth: async () => ({ approver: await approverRoleHealth(config, loginsOnly()) }),
-    endRegistrySession: async (session, reason) => { calls.registryEnded.push([session, reason]); },
-  });
-  await decisionRun.cycle(state);
-  assert.equal(decisions.length, 1, 'the loop requests the close decision');
-  assert.deepEqual(launches, ['env-a'], 'and puts it to an approver on the first account');
-
-  // The approver stops on Claude Code's out-of-usage-credits screen, as the approvers of GY-1889 did.
-  const name = approverSessionName(work, decisions[0].id);
-  herdr.agents.find(agent => agent.name === name)!.agent_status = 'idle';
-  herdr.output[name] = screen;
-  await decisionRun.cycle(state);
-
-  // Closed in that one cycle: pane and registry session, with the screen as the reason.
-  assert.deepEqual(calls.closed, ['pane-approver-0']);
-  assert.deepEqual(calls.registryEnded.map(([session]) => session), ['registry-session-1']);
-  assert.match(calls.registryEnded[0]![1], /You're out of usage credits/);
-  const failover = Object.values(state.actions).find(action => action.kind === 'failover');
-  assert.equal(failover?.state, 'done', failover?.detail);
-  assert.match(failover.detail, /exhausted env-a mid-session \(You're out of usage credits[\s\S]*; reset time unknown\) judging close decision/);
-  assert.match(failover.detail, /launched independent approver session \S+ on env-b/);
-  assert.deepEqual(launches, ['env-a', 'env-b'], 'the decision is relaunched in the same cycle, on the next eligible account');
-  assert.equal(decisions.length, 1, 'the decision is not requested again');
-
-  // The account is held for the bounded hour, and the exhaustion — not a stall, not a
-  // never-started attempt — is what the record and the watch carry.
-  const held = (await observedExhaustions(config))['env-a'];
-  assert.equal(held.resetsAt, null);
-  const bound = Date.parse(held.until) - Date.parse(held.at);
-  assert.ok(bound >= unknownResetHoldMs && bound < unknownResetHoldMs + 60_000, `the hold is the bounded unknown-reset hour, not ${bound}ms`);
-  assert.match(held.reason, new RegExp(notice.slice(0, 40)));
-  assert.equal(held.role, 'approver');
-  const recorded = (await reload(work.id)).capacity!.exhaustions.at(-1)!;
-  assert.deepEqual([recorded.role, recorded.account, recorded.resetsAt, recorded.partialWork.state], ['approver', 'env-a', null, 'not-applicable']);
-  const watch = Object.values(state.approvals).find(entry => entry.decision === decisions[0].id)!;
-  assert.equal(watch.account, 'env-b');
-  assert.ok(watch.ended.length && watch.ended.every(entry => /You're out of usage credits/.test(entry)), 'the watch keeps the screen as each session\'s end');
-  assert.ok(!Object.values(state.actions).some(action => /never started|\bstall\b/.test(action.detail)), 'no stall and no never-started attempt is recorded');
-
-  // The next cycle repeats nothing: one hold, one close, one relaunch, the new approver left to judge.
-  await decisionRun.cycle(state);
-  assert.deepEqual(launches, ['env-a', 'env-b']);
-  assert.equal(calls.closed.length, 1);
-  assert.equal((await reload(work.id)).capacity!.exhaustions.length, 1);
-});
-
 // ---------------------------------------------------------------------------
 // The loop as `master run` wires it, on a real control plane, with Herdr an inventory the test
 // controls. Everything that decides — the snapshot, the capacity record, the account hold (and
@@ -222,7 +152,6 @@ const ok = async (principal: Principal, method: 'GET' | 'POST', path: string, bo
   return result;
 };
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
-const loginsOnly = () => ({ quota: false, now: () => Date.now() + clock.skewMs, cacheMs: 0 });
 
 let config: MasterConfig;
 

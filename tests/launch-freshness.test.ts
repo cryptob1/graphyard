@@ -105,9 +105,7 @@ function daemonEffects(snapshot: () => Awaited<ReturnType<DaemonEffects['snapsho
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: snapshot().now, reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {},
     wakeObservation: async work => { log.push(`wake:${work.key}`); },
-    decide: async (work, action) => { log.push(`decide:${work.key}:${action}`); return { id: '5d8a8b9e-0000-4000-8000-000000000001' }; },
-    decisions: async () => ({ decisions: [] }),
-    approver: async () => ({ agentName: 'graphyard-approver-gy-42', pane: 'pane-1' }),
+    rework: async work => { log.push(`rework:${work.key}`); },
     persist: async () => {},
   };
 }
@@ -136,7 +134,7 @@ test('unit:stale-refusal-wakes-observation — a rework refused for a stale obse
   current = verdictItem(new Date(landed).toISOString());
   now = clock + 45_000;
   await runCycle(config, state, effects, () => now);
-  assert.deepEqual(log, ['wake:GY-42', 'decide:GY-42:rework'], 'the second attempt follows the observation');
+  assert.deepEqual(log, ['wake:GY-42', 'rework:GY-42'], 'the second attempt follows the observation');
 
   // A wake that brought no observation within its bound is sent again.
   const again: string[] = [];

@@ -104,7 +104,6 @@ test('integration:throughput-attention-settled-rule — master status raises no 
     assert.equal(standing.stall, null);
     assert.ok(standing.attention, 'still unverified until re-measured');
     assert.doesNotMatch(standing.attention!.text, /needs decision/);
-    assert.equal(standing.attention!.approvedBy ?? null, null, 'not the decide-then-approver path');
     assert.doesNotMatch(standing.attention!.next, /master decide/);
   }
   // Where a master really drove every delivery the needs-decision stands, but judged under the
@@ -116,17 +115,17 @@ test('integration:throughput-attention-settled-rule — master status raises no 
   assert.doesNotMatch(decision.attention!.text, /× its \S+ action was superseded/, 'no superseded control-plane action is counted as an exclusion');
 });
 
-test('unit:throughput-attention-names-owner — the needs-decision attention names the open owner item as the GY-N its decide-then-approver path acts on, and the owner item carries the settled AC-1', async () => {
+test('unit:throughput-attention-names-owner — the needs-decision attention names the open owner item as the GY-N its requirements revision acts on, and the owner item carries the settled AC-1', async () => {
   const file = '.graphyard/measurements/throughput/t.json', serving = { revision, version: '1' }, report = measure(blockedWindow());
   const owned = throughputClaimVisibility({ report, file }, serving, throughputStallBound, null, { key: 'GY-7300' });
   assert.equal(owned.stall!.owner, 'GY-7300');
   assert.match(owned.attention!.text, /needs decision on GY-7300: session-free deliveries cannot accumulate/);
-  assert.equal(owned.attention!.role, 'master'); assert.equal(owned.attention!.approvedBy, 'approver');
-  assert.match(owned.attention!.next, /graphyard master decide GY-7300 requirements .* graphyard master approver GY-7300 DECISION$/, 'the ask names no loop closure: the owner stays as it is (GY-2186)');
+  assert.equal(owned.attention!.role, 'master');
+  assert.match(owned.attention!.next, /^graphyard master requirements GY-7300 revision\.json "REASON" with a revision that settles/, 'the ask names no loop closure: the owner stays as it is (GY-2186)');
   assert.doesNotMatch(owned.attention!.next, /GY-N\b/);
   const masterless = throughputClaimVisibility({ report, file }, serving, throughputStallBound, null, null);
   assert.match(masterless.attention!.text, /needs decision on the item that owns the verification \(the loop files it\)/);
-  assert.match(masterless.attention!.next, /master decide GY-N requirements/);
+  assert.match(masterless.attention!.next, /master requirements GY-N revision\.json/);
   // Between measurements the line promises the owner within one cycle while a needs-decision stands.
   const progress = throughputClaimVisibility(null, serving, 3, null, null);
   assert.match(progress.attention!.text, /No open item owns the verification \(the loop files none, GY-2186\)/);
@@ -137,12 +136,4 @@ test('unit:throughput-attention-names-owner — the needs-decision attention nam
   assert.match(populationRule, /an approver session never exclude/);
   assert.match(criterion ?? '', /no coordination session other than an approver's recorded on it \(one recording no role excludes\)/);
   assert.deepEqual(throughputOwnerItem(revision, 0).criteria, [{ id: 'AC-1', text: criterion, proofs: ['manual:throughput-claim-verified'] }]);
-
-  // GY-1630: where the loop holds the decision effects it requests the decision itself, so the
-  // attention names the loop as the stall decision's agent-owner, never a master session to hand-drive it.
-  const loopOwned = throughputClaimVisibility({ report, file }, serving, throughputStallBound, null, { key: 'GY-7300' }, null, null, true);
-  assert.equal(loopOwned.attention!.role, 'control plane'); assert.equal(loopOwned.attention!.approvedBy, 'approver');
-  assert.match(loopOwned.attention!.next, /^The loop requests the requirements decision on GY-7300 itself and routes it to the independent approver/);
-  assert.doesNotMatch(loopOwned.attention!.next, /graphyard master (decide|approver)/);
-  assert.match(populationRule, /an approver session never exclude/);
 });

@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine, configuredReconcileFullMs } from '../src/engine.js';
-import { standingEscalations, type Principal, type Work } from '../src/model.js';
+import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1873: reconciliation wakes each item at the moment only the clock can change it. Every
@@ -120,20 +120,13 @@ test('unit:reconcile-evaluates-item-when-due — a lease expiring at T wakes its
     assert.equal(engine.reconcileTicks.at(-1)!.due, 1, 'the tick counts the item the clock woke');
     assert.equal((await store.list()).find(entry => entry.id === leased.id)!.lease, null, 'the lapse was reconciled');
     // The child held no due of its own: the parent's write is what reaches it, on the next pass.
-    // (The lapsed parent is evaluated beside it every pass now — its standing lease-loss — which
-    // is the behavior this item leaves unchanged.)
     recorded.evaluated.length = 0;
     await engine.reconcile();
     assert.ok(recorded.evaluated.includes(child.id), `the dependency's write wakes the child: ${JSON.stringify(recorded.evaluated)}`);
     assert.equal(engine.reconcileTicks.at(-1)!.due, 0, 'the child was not woken by a due of its own');
-    // Past the lease-loss settle bound the standing escalation settles and the record comes to
-    // rest. The full evaluation the 300 s interval brings may land in the tail and wake the fleet
-    // once; what the criterion holds is what the earlier passes named: nothing was evaluated
-    // before the expiry, the lapsed item was, and no pass counted a due beyond its own.
+    // The record comes to rest, so the next test starts from a settled fleet.
     shiftMs += 6 * 60_000;
     await settle();
-    const afterSettle = (await store.list()).find(entry => entry.id === leased.id)!;
-    assert.deepEqual(standingEscalations(afterSettle).map(entry => entry.trigger), [], 'the standing lease-loss settled');
   } finally { recorded.restore(); }
 });
 
@@ -193,7 +186,7 @@ test('unit:reconcile-due-times-match-full-evaluation — the default full pass i
     await store.pool.query('UPDATE work_items SET document = $2::jsonb WHERE id = $1', [stalled.id, JSON.stringify(item)]);
   };
   // The outcomes a run left, with every volatile instant scrubbed: stage, next action, lease,
-  // queue rows and their history, escalations, violations.
+  // queue rows and their history, violations.
   const project = async () => {
     // Item keys come from the same sequence both runs restarted, so they match; content hashes and
     // instants do not (fresh item identities, fresh base time), and both are scrubbed.
@@ -202,7 +195,6 @@ test('unit:reconcile-due-times-match-full-evaluation — the default full pass i
       key: work.key, stage: work.stage, ready: work.ready, epoch: work.epoch ?? null,
       lease: work.lease ? { owner: work.lease.owner, epoch: work.lease.epoch } : null,
       next: work.nextAction ? { kind: work.nextAction.kind, binding: work.nextAction.binding, inputs: work.nextAction.inputs } : null,
-      escalations: standingEscalations(work).map(entry => entry.trigger).sort(),
       rows: (work.actionQueue?.actions ?? []).map(row => ({ kind: row.kind, state: row.state, claim: row.claim?.executor ?? null, attempts: row.attempts, retry: row.retryAt ? 'set' : null, history: (row.history ?? []).map(entry => entry.event) })),
       retired: (work.actionQueue?.history ?? []).map(row => ({ kind: row.kind, state: row.state })),
       violations: [...work.violations].sort(),

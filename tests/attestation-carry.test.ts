@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { applyThroughEngine, type DecisionRecord } from '../src/server/decisions.js';
-import { currentEvidence, decideCarry, evaluate, requiredProofs, type Evidence, type Observation, type Principal, type TipMerge, type Work } from '../src/model.js';
+import { currentEvidence, decideCarry, evaluate, requiredProofs, type Evidence, type Observation, type TipMerge, type Work } from '../src/model.js';
 
 // GY-615. On 2026-09-26 GY-486, the merge-queue head, held an approved attestation of a manual:
 // proof. Every Graphyard-authored tip of that head asked for a new attestation, and the head waited
@@ -88,17 +87,4 @@ test('unit:attestation-carried-on-refresh — an attested manual proof carries t
   assert.equal(currentEvidence(onD, PROOF, now), undefined);
   // And a policy revision moved since the carry was decided: neither the record nor the carry applies.
   assert.equal(proven({ ...onB, policyRevision: 3 } as Work), false);
-});
-
-test('unit:attestation-carried-on-refresh — an approved attest decision names itself on the evidence it records', async () => {
-  const calls: unknown[][] = [];
-  const services = { engine: { execute: async (...args: unknown[]) => { calls.push(args); return {}; } } } as any;
-  const decision = { id: 'd-4994f0b0', action: 'attest', workId: 'gy-486', requestedBy: 'master-operator', reason: 'Attest the review convergence',
-    input: { proof: PROOF, sha: A, baseSha: M, policyRevision: 2, result: 'pass', executed: 1, skipped: 0 } } as unknown as DecisionRecord;
-  await applyThroughEngine(services, decision, { id: 'approver', role: 'operator-agent' } as Principal, 'ran it against base and candidate');
-  assert.equal(calls.length, 1);
-  const [actor, command, , input, key, context] = calls[0] as [Principal, string, string, unknown, string, { attestation?: unknown }];
-  assert.deepEqual([actor.id, command, key], ['master-operator', 'evidence', 'decision:d-4994f0b0']);
-  assert.deepEqual(input, decision.input, 'the decision input is recorded as it was approved');
-  assert.deepEqual(context.attestation, { decision: 'd-4994f0b0', requestedBy: 'master-operator', approvedBy: 'approver' });
 });

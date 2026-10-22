@@ -107,31 +107,12 @@ test('unit:profile-reserved-before-claim — two concurrent dispatchWork calls f
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:launch-failure-never-closes-live-pane — a rename refused after `pane run` leaves the pane of a running supervisor open and releases the claim through it', async () => {
+test('unit:launch-failure-closes-pane — a rename refused after `pane run` closes the pane, a watch supervisor there ending with it, and releases the claim', async () => {
   const fixture = await installation();
   try {
-    const profile = launchProfile('one', fixture.credential);
-    const herdr = fakeHerdr({ failRename: true }), claims = fakeClaims(fixture.root);
-    // The watch supervisor the command line started is running in its pane.
-    const supervised = new Set<string>();
-    const supervisor = ({ pane }: { key: string; epoch: number; pane: string | undefined }) => !!pane && supervised.has(pane);
-    const run = (command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') supervised.add(args[2]); return herdr.run(command, args); };
-    const error = await dispatchWork(fixture.root, work('GY-1'), profile, [], run, [work('GY-1')], claims.prepare, claims.release, 1, new Date().toISOString(), { supervisor }).then(() => null, failure => failure);
-    assert.ok(error, 'the launch fails');
-    assert.match(error.message, /agent_name_taken/);
-    assert.match(error.message, /pane pane-1 was left to its running supervisor, which stops the worker on the released epoch 1/);
-    const runIndex = herdr.calls.findIndex(args => args[0] === 'pane' && args[1] === 'run'), renameIndex = herdr.calls.findIndex(args => args[0] === 'agent' && args[1] === 'rename');
-    assert.ok(runIndex >= 0 && renameIndex > runIndex, 'the rename failed after the command line was in the pane');
-    const closedLive = herdr.calls.filter(args => args[0] === 'pane' && args[1] === 'close' && supervised.has(args[2]));
-    assert.deepEqual(closedLive, [], 'no pane close targets a pane with a running supervisor');
-    assert.equal(herdr.calls.filter(args => args[0] === 'tab' && args[1] === 'close').length, 0, 'nor is its tab closed');
-    assert.deepEqual(claims.released, ['GY-1@1'], 'the claim is released, so the supervisor stops its own worker on the lost lease');
-    assert.equal(herdr.typed.length, 1, 'a supervised pane is not relaunched over');
-
-    // A runtime that never came up under a pane with no supervisor is still cleaned up as before.
     const empty = fakeHerdr({ failRename: true }), emptyClaims = fakeClaims(fixture.root);
-    await assert.rejects(dispatchWork(fixture.root, work('GY-2'), launchProfile('two', fixture.credential), [], empty.run, [work('GY-2')], emptyClaims.prepare, emptyClaims.release, 1, new Date().toISOString(), { supervisor: () => false }), /agent_name_taken/);
-    assert.deepEqual(empty.closed, ['pane-1'], 'a pane with no running supervisor is closed');
+    await assert.rejects(dispatchWork(fixture.root, work('GY-2'), launchProfile('two', fixture.credential), [], empty.run, [work('GY-2')], emptyClaims.prepare, emptyClaims.release, 1, new Date().toISOString()), /agent_name_taken/);
+    assert.deepEqual(empty.closed, ['pane-1'], 'the pane is closed');
     assert.deepEqual(emptyClaims.released, ['GY-2@1']);
 
     // The host's own check reads the supervisor's exact command line from the process table.

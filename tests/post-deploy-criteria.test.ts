@@ -6,7 +6,7 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
-const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/approval.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/master/intent.js'), ...await import('../src/model/goal-plan.js') });
+const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/master/intent.js'), ...await import('../src/model/goal-plan.js') });
 
 // unit:post-deploy-criteria (GY-1660) — a criterion only the live install can satisfy after merge
 // and deploy deadlocked reviewer and worker (GY-1652 AC-3, GY-1657 AC-1..4). It is refused at
@@ -38,15 +38,12 @@ test('unit:post-deploy-criteria — an undeclared live-install observation is re
   assert.match(postDeployCriterionRefusal([gy1652, { ...restarted, id: 'AC-4' }])!, /^AC-3 \("on the live install"\), AC-4 \("restarted loop"\) are live-install or post-deploy observations/);
 });
 
-test('unit:post-deploy-criteria — the refusal holds on every requirements path: the shared criterion schema, a direct revision and a requirements decision', async () => {
-  const { criterionSchema, decisionInputs } = await modules();
+test('unit:post-deploy-criteria — the refusal holds on every requirements path: the shared criterion schema and a direct revision', async () => {
+  const { criterionSchema } = await modules();
   for (const criterion of [gy1652, gy1657, restarted]) {
     const refused = criterionSchema.safeParse(criterion);
     assert.equal(refused.success, false, `${criterion.id} is refused by the criterion schema every requirements input uses`);
     assert.match(refused.error!.issues.map(issue => issue.message).join('\n'), /manual:post-deploy\/NAME/);
-    const decision = decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [criterion], dependencies: [], exclusiveResources: [], producerProofs: [] });
-    assert.equal(decision.success, false, 'an approved master decide requirements cannot carry it either');
-    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [buildable, { ...criterion, proofs: ['manual:post-deploy/observed'] }], dependencies: [], exclusiveResources: [], producerProofs: [] }).success, true);
   }
 });
 
@@ -106,13 +103,12 @@ const linked = {
 };
 
 test('manual:intervention-pattern-escalation-build — GY-1660: each linked build-stage escalation is reproduced against the base rule and cannot recur on the candidate', async () => {
-  const { criterionSchema, postMergeProofRefusal, decisionInputs, postDeployReviewSection } = await modules();
+  const { criterionSchema, postMergeProofRefusal, postDeployReviewSection } = await modules();
   for (const [instance, criterion] of Object.entries(linked)) {
     // Base: the GY-188 rule alone accepted it, so it gated the merge it could only follow.
     assert.equal(postMergeProofRefusal(criterion), null, `${instance} passed the base's write-time rule`);
-    // Candidate: undeclared, no create, requirements revision or requirements decision can record it…
+    // Candidate: undeclared, no create or requirements revision can record it…
     assert.equal(criterionSchema.safeParse(criterion).success, false, `${instance} is refused undeclared`);
-    assert.equal(decisionInputs.requirements.safeParse({ expectedPolicyRevision: 1, criteria: [criterion], dependencies: [], exclusiveResources: [], producerProofs: [] }).success, false, instance);
     // …and declared, it is recorded, the reviewer judges it on pre-merge evidence, and it gates no merge.
     const declared = { ...criterion, proofs: [`manual:post-deploy/${criterion.proofs[0].split(':')[1]}`] };
     assert.equal(criterionSchema.safeParse(declared).success, true, `${instance} is accepted declared`);
@@ -259,10 +255,9 @@ function basePhrase(text: string): string | null {
   }
   return null;
 }
-const revision = (criteria: { id: string; text: string; proofs: string[] }[]) => ({ expectedPolicyRevision: 1, criteria, dependencies: [], exclusiveResources: [], producerProofs: [] });
 
 test('manual:intervention-pattern-escalation-build — GY-1685: each linked build-stage escalation is reproduced against the base rule and cannot recur on the candidate', async () => {
-  const { createSchema, criterionSchema, decisionInputs, liveObservationPhrase, postDeployOnlyRefusal, postMergeProofRefusal, postDeployReviewSection } = await modules();
+  const { createSchema, criterionSchema, criteriaSchema, liveObservationPhrase, postDeployOnlyRefusal, postMergeProofRefusal, postDeployReviewSection } = await modules();
   // The pinned base rule is GY-1660's: it reads GY-1660's own linked instances as the candidate still does, and reads
   // every wording GY-1660's tests pinned (above) the same way, so a divergence between the two below is GY-1685's.
   for (const criterion of [gy1652, gy1657, restarted]) assert.equal(basePhrase(criterion.text), liveObservationPhrase(criterion), criterion.text);
@@ -276,10 +271,10 @@ test('manual:intervention-pattern-escalation-build — GY-1685: each linked buil
     assert.equal(basePhrase(criterion.text), base, `${instance} against the base rule`);
     // Candidate: the wording is a live observation…
     assert.equal(liveObservationPhrase(criterion), phrase, `${instance} against the candidate`);
-    // …so undeclared, no create, requirements revision or requirements decision can record it…
+    // …so undeclared, no create or requirements revision can record it…
     assert.equal(criterionSchema.safeParse(criterion).success, false, `${instance} is refused undeclared`);
     assert.equal(createSchema.safeParse(intent([buildable, criterion])).success, false, instance);
-    assert.equal(decisionInputs.requirements.safeParse(revision([buildable, criterion])).success, false, instance);
+    assert.equal(criteriaSchema(50).safeParse([buildable, criterion]).success, false, instance);
     // …declared beside what the head can show, it is recorded on the item that ships the change and gates no merge…
     const declared = { ...criterion, proofs: [`manual:post-deploy/${criterion.proofs[0].split(':')[1]}`] };
     assert.equal(createSchema.safeParse(intent([buildable, declared])).success, true, `${instance} is accepted declared beside a buildable criterion`);
@@ -299,11 +294,11 @@ test('manual:intervention-pattern-escalation-build — GY-1685: each linked buil
   // this change moves beside a buildable criterion.
   const gy1662ac3 = escalated['GY-1662 AC-3'];
   assert.equal(liveObservationPhrase(gy1662ac1), null, 'GY-1662 AC-1 is what its head could show');
-  assert.equal(decisionInputs.requirements.safeParse(revision([gy1662ac1])).success, true, 'moving AC-3 off GY-1662 passes on base and candidate alike');
+  assert.equal(criteriaSchema(50).safeParse([gy1662ac1]).success, true, 'moving AC-3 off GY-1662 passes on base and candidate alike');
   // Candidate: the decision that keeps AC-3 on GY-1662, declared beside AC-1, is the one path open, and review never holds on it.
   const kept = { id: 'AC-3', text: gy1662ac3.text, proofs: ['manual:post-deploy/harness-contract-applied-on-install'] };
-  assert.equal(decisionInputs.requirements.safeParse(revision([gy1662ac1, kept])).success, true, 'AC-3 declared beside AC-1 stays on the item that ships the change');
-  assert.equal(decisionInputs.requirements.safeParse(revision([kept])).success, false, 'the follow-up GY-1666 would have carried, declared, is refused');
+  assert.equal(criteriaSchema(50).safeParse([gy1662ac1, kept]).success, true, 'AC-3 declared beside AC-1 stays on the item that ships the change');
+  assert.equal(criteriaSchema(50).safeParse([kept]).success, false, 'the follow-up GY-1666 would have carried, declared, is refused');
   assert.equal(createSchema.safeParse(intent([kept])).success, false);
   // The GY-188 refusal no longer sends a post-merge proof to a follow-up item of its own: that is how GY-1666 came to be.
   const message = postMergeProofRefusal({ id: 'AC-1', text: 'The rate is met', proofs: ['manual:rate-met-postmerge'] })!;
@@ -331,16 +326,15 @@ test('unit:post-deploy-criteria — the widened wordings read a served loop\'s c
 });
 
 test('unit:post-deploy-criteria — an item of nothing but declared post-deploy verifications is refused on every path, naming the item that ships the change', async () => {
-  const { createSchema, decisionInputs, derivedIntent, postDeployOnlyRefusal, postDeployChecks, planItemSchema } = await modules();
+  const { createSchema, criteriaSchema, derivedIntent, postDeployOnlyRefusal, postDeployChecks, planItemSchema } = await modules();
   const only = [{ id: 'AC-1', text: 'The live loop journals the remedy', proofs: ['manual:post-deploy/journal'] }, { id: 'AC-2', text: 'Production reports the rate', proofs: ['manual:post-deploy/rate'] }];
   assert.match(postDeployOnlyRefusal(only)!, /^AC-1, AC-2 are all declared post-deploy verifications, so no head can build anything this item's review judges before merge and its worker could only wait for the serving release\. Declare the verification on the item that ships the change it observes/);
   assert.match(postDeployOnlyRefusal(only.slice(0, 1))!, /^AC-1 is a declared post-deploy verification/);
   assert.equal(postDeployOnlyRefusal([]), null);
   assert.equal(postDeployOnlyRefusal([buildable, ...only]), null, 'one buildable criterion makes it an item');
-  const revision = (criteria: typeof only) => ({ expectedPolicyRevision: 1, criteria, dependencies: [], exclusiveResources: [], producerProofs: [] });
   assert.equal(createSchema.safeParse(intent(only)).success, false);
-  assert.equal(decisionInputs.requirements.safeParse(revision(only)).success, false, 'a requirements decision cannot leave an item with only declared verifications');
-  assert.equal(decisionInputs.requirements.safeParse(revision([buildable, ...only])).success, true);
+  assert.equal(criteriaSchema(50).safeParse(only).success, false, 'a requirements revision cannot leave an item with only declared verifications');
+  assert.equal(criteriaSchema(50).safeParse([buildable, ...only]).success, true);
   const plan = { ref: 'verify', title: 'Verify', plain: 'Checks the live rate.', outcomes: ['o1'], cases: ['c1'], criteria: only };
   assert.equal(planItemSchema.safeParse(plan).success, false, 'a goal plan item of only declared verifications is refused');
   assert.equal(planItemSchema.safeParse({ ...plan, criteria: [buildable, ...only] }).success, true);

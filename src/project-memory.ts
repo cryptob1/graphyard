@@ -18,7 +18,6 @@ export {
   recentChangesWindowMs,
   recordChangeInMemory,
   recordDecisionInMemory,
-  recordSettledDecision,
   retainedMemoryChanges,
   retainedMemoryDecisions,
   updateProjectMemoryFromWork,
@@ -68,9 +67,6 @@ export async function syncProjectMemory(
   if (options.work?.length) {
     memory = updateProjectMemoryFromWork(memory, options.work, now);
   }
-
-  // 2. Applied two-party decisions are recorded as the loop settles them (recordSettledDecision
-  //    in daemon/cycle-decisions.ts), with the approver's reason; a refused one settles nothing here.
 
   // Save to disk if root provided
   if (options.root) {

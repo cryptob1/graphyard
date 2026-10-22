@@ -58,8 +58,8 @@ const start = '<!-- graphyard -->', end = '<!-- /graphyard -->';
  * harness launches without the repository's project files (master.ts prepareSessionHarness).
  * It ends with the autonomy contract (autonomy.ts), so every installation's AGENTS.md carries it.
  */
-export const launchAuthorization = `Every session Graphyard launches — a worker under \`watch\`, and the reviewer, proof-producer
-and approver sessions the master and its loop start — receives its instruction as the
+export const launchAuthorization = `Every session Graphyard launches — a worker under \`watch\`, and the reviewer and proof-producer
+sessions the master and its loop start — receives its instruction as the
 session's own first request, on the runtime's command line, never as pasted text; no human
 sends "go". The one message such a session may later receive as a paste comes from that
 same launcher: the loop's single re-prompt of a session that has shown no activity, the

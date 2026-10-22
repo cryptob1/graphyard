@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
@@ -55,7 +55,7 @@ class World {
   pushes: string[] = [];
   recorded = new Map<number, MergeRecordEvent[]>();
   reworked = new Map<number, { confirmedAt: number }>();
-  decided: { n: number; binding: string }[] = [];
+  decided: { n: number }[] = [];
   refusedRequests = new Map<number, number>();
   submissions = new Map<number, Submission>();
   /** GY-2088: the heads each merge commit of a batch's chain holds, past main's tip. */
@@ -138,18 +138,16 @@ class World {
       },
     };
   }
-  decide: DaemonEffects['decide'] = async (work, action, _reason, input) => {
+  rework = async (work: Work) => {
     const n = Number(work.key.slice(3));
-    assert.equal(action, 'rework');
     const refused = this.refusedRequests.get(n) ?? 0;
-    if (refused < refusedDecisions(n)) { this.refusedRequests.set(n, refused + 1); throw new Error('decide: route down (HTTP 503)'); }
-    this.decided.push({ n, binding: (input as { binding: string }).binding });
+    if (refused < refusedDecisions(n)) { this.refusedRequests.set(n, refused + 1); throw new Error('rework: route down (HTTP 503)'); }
+    this.decided.push({ n });
     this.reworked.set(n, { confirmedAt: this.now() });
-    return { id: randomUUID() };
   };
 }
 
-test('unit:soak-merge-writer — a simulated day on the real loop: every submitted head is delivered exactly once with exactly one push of its merge commit, one merge in flight at a time, moved tips re-trialled within the bound then queued again, failed trials reworked exactly once through refused decision requests, crashes between push and record reconciled without a second push, record outages retried, state bounded, and every system invariant docs/master-agent.md names holding', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-writer — a simulated day on the real loop: every submitted head is delivered exactly once with exactly one push of its merge commit, one merge in flight at a time, moved tips re-trialled within the bound then queued again, failed trials reworked exactly once through refused rework requests, crashes between push and record reconciled without a second push, record outages retried, state bounded, and every system invariant docs/master-agent.md names holding', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submit(n, 1, start + n * submitEveryMs);
@@ -159,7 +157,7 @@ test('unit:soak-merge-writer — a simulated day on the real loop: every submitt
     closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, mergeWriter: reads, decide: world.decide } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, mergeWriter: reads, rework: world.rework } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   const invariantNames = new Set<string>();
   let failedCycles = 0;
@@ -233,7 +231,7 @@ test('unit:soak-merge-writer-batch — GY-2088: half a day on the real loop with
     closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
     recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
-    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(4), decide: world.decide } as unknown as DaemonEffects;
+    github: githubDouble, merge: githubDouble, shadow: null, mergeWriter: world.ports(4), rework: world.rework } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   for (let cycle = 0; cycle < dayCycles; cycle++) {
     now = start + cycle * cycleMs; world.cycle = cycle;

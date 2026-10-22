@@ -69,8 +69,6 @@ export interface InvariantInput {
   thresholds?: Partial<InvariantThresholds>;
   /** The loop's retained cycle measures: when each ran and how long it took. */
   metrics?: readonly { at: string; durationMs: number; workMs?: number }[];
-  /** The decisions the loop put to approvers: which session judged each and when it settled. */
-  approvals?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
   /** The docs-sync sessions the loop launched for docs-only conflicts (GY-566), and when each settled. */
   docsSyncs?: Readonly<Record<string, { work: string; agentName: string | null; pane: string | null; settledAt: string | null }>>;
   /** The session runtime's listing this cycle; null when it could not be read. */
@@ -89,8 +87,6 @@ export function followUpParent(work: Pick<Work, 'criteria' | 'dependencies' | 't
 /** Filed by the product rather than a person: a follow-up of an approval, a recurring fault class, or an intervention pattern. */
 export const machineFiled = (work: Pick<Work, 'criteria' | 'dependencies' | 'title' | 'origin'>) => followUpParent(work) !== null || !!work.origin?.faultClass || !!work.origin?.pattern;
 
-/** An approver session's name: the role word, the item's key, and the decision's id (master/autonomy.ts `approverSessionName`). */
-const approverNamePattern = /^(?:graphyard|gy)-approver-(gy-\d+)-[0-9a-f]+$/;
 const open = (work: Work) => work.stage !== 'done' && !isClosed(work);
 const time = (value: string | null | undefined) => { const parsed = value ? Date.parse(value) : Number.NaN; return Number.isFinite(parsed) ? parsed : null; };
 const minutes = (ms: number) => `${Math.round(ms / 60_000)} min`;
@@ -130,21 +126,9 @@ export function checkInvariants(record: InvariantRecord, input: InvariantInput):
       for (const session of item.sessions ?? []) if (session.state === 'running' && !session.endedAt && listed(session.agentName, session.pane))
         lingering.push({ subject: item.key, detail: `${session.kind} session ${session.agentName ?? session.pane ?? session.id} on ${item.key}, ${minutes(now - settled)} after it was delivered` });
     }
-    const named = new Set<string>();
-    for (const watch of Object.values(input.approvals ?? {})) {
-      const settled = time(watch.settledAt);
-      if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) { lingering.push({ subject: watch.work, detail: `approver session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after its decision settled` }); if (watch.agentName) named.add(watch.agentName); }
-    }
     for (const watch of Object.values(input.docsSyncs ?? {})) {
       const settled = time(watch.settledAt);
       if (settled !== null && now - settled > bound && listed(watch.agentName, watch.pane)) lingering.push({ subject: watch.work, detail: `docs-sync session ${watch.agentName ?? watch.pane} on ${watch.work}, ${minutes(now - settled)} after it settled` });
-    }
-    // An approver the loop no longer watches — launched by hand (`master approver`, GY-403), or its watch retired — is
-    // known by its name (master/autonomy.ts `approverSessionName`), which carries the item's key.
-    for (const agent of input.agents) {
-      const key = approverNamePattern.exec(agent.name ?? '')?.[1], item = key ? work.find(entry => entry.key.toLowerCase() === key) : undefined;
-      const settled = item?.stage === 'done' ? time(item.delivery?.mergedAt) ?? time(item.closure?.at) : null;
-      if (item && settled !== null && now - settled > bound && !named.has(agent.name!)) lingering.push({ subject: item.key, detail: `approver session ${agent.name} on ${item.key}, ${minutes(now - settled)} after it was delivered` });
     }
     judge('lingering-sessions', `no session open ${limits.sessionAfterSettleMinutes} min after its item is delivered or its decision settled`,
       lingering.length ? `${lingering.length} session(s) still open, e.g. ${lingering[0].detail}` : 'no session outlived its item or decision', !lingering.length, lingering.map(entry => entry.subject));

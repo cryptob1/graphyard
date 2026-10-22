@@ -10,7 +10,6 @@ import {
   projectMemoryWordBudget,
   recordDecisionInMemory,
   recordChangeInMemory,
-  recordSettledDecision,
   updateProjectMemoryFromWork,
   isDecisionRoleRelevant,
   type ProjectMemory,
@@ -279,24 +278,14 @@ test('unit:session-request-carries-project-memory — memory updates from settle
   assert.equal(memory.changes[0].key, 'GY-500');
   assert.deepEqual(memory.changes[0].files, ['src/deploy.ts']);
 
-  // 2. Two-party decisions enter as the loop settles them: applied ones with the approver's reason, never a refusal.
-  const watch = { work: 'GY-600', action: 'scope', decision: 'dec-approved-1' };
-  assert.equal(recordSettledDecision(memory, watch, { state: 'applied', approvedBy: 'graphyard-approver', approvedAt: '2026-10-02T09:15:00Z', approvalReason: 'The criterion names src/auth.ts', reason: 'Widen to src/auth.ts' }, '2026-10-02T09:20:00Z'), true);
-  assert.deepEqual(memory.decisions.find(d => d.key === 'GY-600'), { id: 'dec-approved-1', key: 'GY-600', action: 'scope', reason: 'The criterion names src/auth.ts', approvedBy: 'graphyard-approver', at: '2026-10-02T09:15:00Z' });
-  const refusedWatch = { work: 'GY-601', action: 'requirements', decision: 'dec-refused-1' };
-  assert.equal(recordSettledDecision(memory, refusedWatch, { state: 'refused', approvedBy: null, refusal: { approver: 'graphyard-approver', reason: 'Out of scope' } } as any, '2026-10-02T09:20:00Z'), false);
-  assert.equal(recordSettledDecision(memory, refusedWatch, { state: 'withdrawn', approvedBy: null }, '2026-10-02T09:20:00Z'), false);
-  assert.equal(recordSettledDecision(memory, refusedWatch, null, '2026-10-02T09:20:00Z'), false);
-  assert.ok(!memory.decisions.some(d => d.key === 'GY-601'), 'a refused decision is never remembered as approved');
-
-  // 3. A sync over the same work records nothing new.
+  // 2. A sync over the same work records nothing new.
   await syncProjectMemory({
     existing: memory,
     work,
     now: Date.parse('2026-10-02T10:00:00Z'),
   });
 
-  assert.equal(memory.decisions.length, 2);
+  assert.equal(memory.decisions.length, 1);
   assert.equal(memory.changes.length, 1);
 });
 
@@ -360,7 +349,6 @@ test('unit:session-request-carries-project-memory — master status shows projec
       { work: [], now: new Date().toISOString() },
       [],
       [],
-      {},
       {},
       { pending: [], completed: [] },
       'main',

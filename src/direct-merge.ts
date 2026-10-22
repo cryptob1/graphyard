@@ -122,7 +122,7 @@ export async function startDirectMerge(store: Store, environment: DirectMergeWin
     const delivered = await sweepDirectMerges(db, all, await directMergeWindows(db, environment), now);
     return { status: await directMergeStatus(db, environment, now), delivered: delivered.map(work => work.key) };
   });
-  console.log(swept.status.line ?? 'Direct-merge mode is off: every merge needs a merge execution or a two-party decision');
+  console.log(swept.status.line ?? 'Direct-merge mode is off: every merge needs its gates to pass');
   if (swept.delivered.length) console.log(`Direct-merge mode delivered ${swept.delivered.join(', ')}, merged inside its window`);
   return swept;
 }

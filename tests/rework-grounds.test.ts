@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { routineDecision } from '../src/master-daemon.js';
+import { neededRework } from '../src/daemon/rework.js';
 import type { Work } from '../src/model.js';
 
 // GY-163, 2026-09-24: a new head arrived with the previous head's review findings still open. The
@@ -22,14 +22,13 @@ function item(reviews: { state: string; reviewer: string; submittedAt?: string }
       files: ['src/a.ts'], scopeFiles: [], at, baseTip: base, baseTree: base, baseTipContained: true },
   } as unknown as Work;
 }
-const decide = (work: Work) => routineDecision(work, { autoMerge: true }, Date.parse(at));
+const decide = (work: Work) => neededRework(work);
 
 test('unit:rework-waits-for-review-and-keys-its-grounds — an unreviewed head is not sent back, and a verdict on the head is a request keyed on that verdict', () => {
   // Not yet reviewed: no rework is asked for.
   assert.equal(decide(item([])), null, 'rework before the head is reviewed is premature');
   // The reviewer requests changes on that head: a rework keyed on the verdict, not the head alone.
   const verdict = decide(item([{ state: 'CHANGES_REQUESTED', reviewer: 'graphyard-reviewer[bot]' }]));
-  assert.equal(verdict?.action, 'rework');
   assert.equal(verdict?.binding, `${head}:verdict:graphyard-reviewer[bot]`);
   // An approved head owes no rework.
   assert.equal(decide(item([{ state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]' }])), null);

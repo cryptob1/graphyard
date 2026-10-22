@@ -2,35 +2,32 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, mkdir, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises';
-import { basename, dirname, join } from 'node:path';
+import { chmod, mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { launchApprover, listHerdrAgents, loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster } from '../src/master.js';
-import { approvalStep, approvalWatchSchema } from '../src/master-daemon.js';
-import { launchProducer, readProducerLedger, reclaimCheckouts, reconcileProducers } from '../src/producer.js';
+import { loadMasterConfig, masterConfigSchema, saveProducerProfile, setupMaster } from '../src/master.js';
+import { launchProducer, readProducerLedger, reconcileProducers } from '../src/producer.js';
 import { narrowRoleRuntime, piRuntimeSchema } from '../src/runner/payloads.js';
-import { clearRuns, liveRun, registerRun } from '../src/runner/registry.js';
+import { clearRuns } from '../src/runner/registry.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { approverClone, attestConfirmation, piApproverWithAttestation } from '../src/master/autonomy.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-169 AC-3, proof integration:pi-narrow-roles. The master config selects the runtime of each
-// narrow role; with `pi` the approver and the unit proof producer run through the headless runner
+// narrow role; with `pi` the unit proof producer runs through the headless runner
 // on a fake Pi — a wrapper command, configured exactly as `pi-a` would be, that loads the real
 // Graphyard extension and makes the tool calls its scenario names the way Pi does, emitting Pi's
 // JSONL — and what the run submitted is applied through the control-plane routes with the role's
-// own credential. Without the setting both roles launch in Herdr as today.
+// own credential. Without the setting it launches in Herdr as today.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const extension = fileURLToPath(new URL('../integrations/pi/index.ts', import.meta.url));
 const tsx = import.meta.resolve('tsx');
-const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x'), approverToken = 'approver-token-'.padEnd(40, 'x'), producerToken = 'producer-token-'.padEnd(40, 'x');
+const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x'), producerToken = 'producer-token-'.padEnd(40, 'x');
 const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
 const H = 'c'.repeat(40), B = 'd'.repeat(40);
 const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
-const decision = '4cb51514-4cb5-4f21-9b0e-0f2a6c8d4e15';
 
 /** A Pi stand-in: loads the extension named by --extension and runs the scenario's tool calls through its guard and tools, printing Pi's JSONL. */
 const fakePi = `import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -73,15 +70,14 @@ async function installation(runtimes?: { approver?: 'herdr' | 'pi'; producer?: '
   await writeFile(join(root, 'README.md'), 'narrow roles\n');
   git('add', 'README.md'); git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.test', 'commit', '-q', '-m', 'initial');
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'workspace', run: { worktreeRoot: managed } }, coordinatorStatus, { probe: durable });
-  const producerFile = join(credentials, 'producer.token'), approverFile = join(credentials, 'approver.token');
-  await writeFile(producerFile, producerToken, { mode: 0o600 }); await writeFile(approverFile, approverToken, { mode: 0o600 });
+  const producerFile = join(credentials, 'producer.token');
+  await writeFile(producerFile, producerToken, { mode: 0o600 });
   await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'codex', credentialFile: producerFile }, async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
   // The Pi environment wrapper, as `pi-a` is: one command that runs Pi with its account.
   const script = join(scratch, 'fake-pi.mjs'), wrapper = join(scratch, 'pi-fake'), scenario = join(scratch, 'scenario.json');
   await writeFile(script, fakePi);
   await writeFile(wrapper, `#!/bin/sh\nFAKE_PI_SCENARIO='${scenario}' exec '${process.execPath}' --import '${tsx}' '${script}' "$@"\n`); await chmod(wrapper, 0o755);
   const file = join(root, '.graphyard/master.json'), config = JSON.parse(await readFile(file, 'utf8'));
-  config.approver = { id: 'graphyard-approver-project', credentialFile: approverFile };
   if (runtimes) config.run = { ...config.run, runtimes, pi: { command: wrapper, model: 'zai/glm-5.3-flash' } };
   await writeFile(file, JSON.stringify(masterConfigSchema.parse(config), null, 2), { mode: 0o600 });
   const posted: { url: string; auth: string | null; body: any }[] = [];
@@ -122,87 +118,6 @@ test('integration:pi-narrow-roles the master config selects each narrow role\'s 
   assert.throws(() => masterConfigSchema.shape.run.parse({ runtimes: { approver: 'opencode' } }), 'an unknown runtime is refused at load');
   assert.throws(() => masterConfigSchema.shape.run.parse({ runtimes: { reviewer: 'pi' } }), 'only the narrow roles are selectable');
   assert.deepEqual(piRuntimeSchema.parse({}), { command: 'pi', model: 'zai/glm-5.3-flash', approverTimeoutMinutes: 10 });
-});
-
-test('integration:pi-narrow-roles with pi selected the approver runs headless and its verdict is applied as the approver identity on the approve route, and the server still judges it', async () => {
-  const { root, managed, scenario, posted, fetcher, answer, cleanup } = await installation({ approver: 'pi' });
-  try {
-    // GY-564: the approver's clone detaches at the candidate head or refuses the launch, so the
-    // candidate here is the fixture repository's own head — a head the clone can actually supply.
-    const head = execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-    const item = work('GY-88', 'unit', ['unit:pi-graphyard-tools'], { candidate: { sha: head, baseSha: B, pr: 169, branch: 'graphyard/gy-88-1', author: 'implementer' } });
-    const reason = 'the requested rework is grounded in the reviewer finding';
-    await writeFile(scenario, JSON.stringify({ calls: [
-      { tool: 'bash', input: { command: 'node bin/graphyard.mjs master decisions GY-88' } },
-      { tool: 'bash', input: { command: `rm -f ${root}/README.md` } },
-      { tool: 'graphyard_decide', input: { decision, approve: 'yes', reason } },
-      { tool: 'graphyard_decide', input: { decision, approve: true, reason } },
-    ] }));
-    const launched = await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher, filesystem: durable });
-    assert.equal(launched.runtime, 'pi');
-    assert.equal(launched.pane, null, 'no terminal pane');
-    // While it runs, the loop's inventory lists it under its session name, so supervision waits on it.
-    const inventory = await listHerdrAgents(herdr());
-    assert.deepEqual(inventory.find(agent => agent.name === launched.agentName), { name: launched.agentName, agent: 'pi', agent_status: 'working' });
-    const watch = approvalWatchSchema.parse({ work: 'GY-88', action: 'rework', decision, agentName: launched.agentName, requestedAt: new Date().toISOString(), launchedAt: new Date().toISOString(), launches: 1, run: launched.run });
-    assert.equal(approvalStep(watch, { state: 'requested' }, { agents: inventory, available: true }, Date.now()).step, 'wait');
-
-    const record = await launched.settled!;
-    assert.deepEqual(record.result, { ok: true, tool: 'graphyard_decide', submitted: 1 });
-    assert.deepEqual(record.applied, [{ subject: `decision ${decision}`, outcome: 'applied', detail: `approved: ${reason}` }]);
-    assert.ok(record.events.some(event => event.kind === 'tool-end' && (event as any).error === true), 'the malformed call was rejected back to the agent');
-    assert.ok(record.events.some(event => event.kind === 'message' && /Graphyard autonomy contract: act without asking/.test((event as any).text)), 'the session ran under the autonomy contract');
-    // Applied once, as the approver identity — not the master's or its operator agent's — on the route `master approve` uses.
-    assert.deepEqual(posted, [{ url: 'https://graphyard.example/api/work/id-GY-88/approve', auth: `Bearer ${approverToken}`, body: { decision, reason } }]);
-    const launch = JSON.parse(await readFile(`${scenario}.launched`, 'utf8'));
-    assert.equal(launch.role, 'approver');
-    // GY-391: the approver works in a directory of its own under the managed root, never in the
-    // operator's repository, and the directory goes when the run ends.
-    assert.notEqual(launch.cwd, root, 'the approver does not run in the operator\'s repository');
-    assert.equal(dirname(launch.cwd), managed);
-    assert.match(basename(launch.cwd), /^graphyard-approval-gy-88-/);
-    assert.equal(await stat(launch.cwd).catch(() => null), null, 'the approver\'s directory is removed when its run ends');
-    assert.ok(record.events.some(event => event.kind === 'tool-end' && (event as any).error === true && /outside the worktree/.test(JSON.stringify(event))), 'rm inside the operator\'s repository is refused');
-    // GY-564: read-only is enforced, not asked. The approver reads a clone of its own with no
-    // remote, and its prompt never names the operator's checkout.
-    assert.deepEqual(launch.clone, { remotes: '', branch: null, toplevel: join(launch.cwd, 'checkout') }, 'a detached clone of its own with no remote');
-    assert.ok(launch.args.at(-1).includes(join(launch.cwd, 'checkout')), 'the prompt names the clone');
-    assert.ok(!launch.args.at(-1).includes(root), 'the prompt does not name the operator\'s repository');
-    assert.deepEqual(launch.args.slice(0, 2), ['--mode', 'json']);
-    assert.equal(launch.args[launch.args.indexOf('--extension') + 1], extension);
-    assert.equal(launch.args[launch.args.indexOf('--model') + 1], 'zai/glm-5.3-flash');
-    assert.equal(liveRun(launched.agentName), null);
-    assert.equal((await listHerdrAgents(herdr())).some(agent => agent.name === launched.agentName), false, 'an ended run is gone from the inventory');
-    assert.equal(approvalWatchSchema.parse({ ...watch, run: record }).run?.result?.ok, true, 'the watch keeps the run record');
-
-    // Separation is the server's: a verdict it refuses (this approver produced evidence for the
-    // item) is recorded as refused, and nothing retries it under another identity.
-    posted.length = 0;
-    answer(() => new Response(JSON.stringify({ error: 'The approver must not have produced evidence for this work' }), { status: 403 }));
-    await writeFile(scenario, JSON.stringify({ calls: [{ tool: 'graphyard_decide', input: { decision, approve: false, reason: 'not justified' } }] }));
-    const refused = await (await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher, filesystem: durable })).settled!;
-    assert.equal(posted.length, 1);
-    assert.deepEqual(posted[0].body, { action: 'refuse', decision, reason: 'not justified' });
-    assert.equal(refused.applied[0].outcome, 'refused');
-    assert.match(refused.applied[0].detail, /Graphyard refused work\/id-GY-88\/approve \(403\): The approver must not have produced evidence/);
-
-    // A verdict for another decision is not this run's submission, so nothing is applied.
-    posted.length = 0;
-    await writeFile(scenario, JSON.stringify({ calls: [{ tool: 'graphyard_decide', input: { decision: 'another-decision', approve: true, reason } }] }));
-    const stray = await (await launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr(), {}, undefined, { fetcher, filesystem: durable })).settled!;
-    assert.equal(stray.result?.ok === false && stray.result.reason, 'invalid-payload');
-    assert.deepEqual(posted, []);
-
-    // A live run's directory is its own: the reclaim pass leaves it, and takes it once the run ends.
-    const held = join(managed, 'graphyard-approval-gy-88-ccccccc-0123abcd');
-    await mkdir(held, { recursive: true });
-    const never = { id: 'r', events: [], onEvent: () => () => {}, cancel: () => {}, result: () => new Promise<never>(() => {}) };
-    registerRun({ name: 'approve-held', role: 'approver', work: 'GY-88', subject: decision, run: never, checkout: held });
-    const config = await loadMasterConfig(root);
-    assert.deepEqual((await reclaimCheckouts(root, config, { graceMs: 0, probe: durable })).removed, [], 'a live approver\'s directory is not reclaimed');
-    clearRuns();
-    assert.deepEqual((await reclaimCheckouts(root, config, { graceMs: 0, probe: durable })).removed, [held], 'an orphaned approver directory is reclaimed');
-  } finally { await cleanup(); }
 });
 
 test('integration:pi-narrow-roles with pi selected the unit proof producer runs headless, its evidence is submitted as the producer principal, and the session record keeps the run', async () => {
@@ -266,8 +181,6 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
     assert.equal(launched.runtime, undefined);
     assert.ok(calls.some(args => args[0] === 'tab' && args[1] === 'create'));
     assert.equal((await readProducerLedger(root)).producers[0].runtime, undefined);
-    // The approver with no setting takes today's Herdr path, which needs a registry runtime.
-    await assert.rejects(launchApprover(root, item, decision, undefined, { agents: [], available: true }, herdr()), /No runtime is configured for the approver/);
     assert.equal(existsSync(`${scenario}.launched`), false, 'Pi was never started');
   } finally { await cleanup(); }
 
@@ -279,39 +192,4 @@ test('integration:pi-narrow-roles without the setting, and for non-unit proof gr
     assert.equal(launched.pane, 'pane-1', 'an integration group still launches in Herdr');
     assert.equal(existsSync(`${selected.scenario}.launched`), false);
   } finally { await selected.cleanup(); }
-});
-
-test('integration:pi-narrow-roles the headless approver\'s prompt names only its own clone and still carries the attestation confirmation (GY-523)', () => {
-  const config = { repository: 'owner/project', cliPath: launcher, approver: { id: 'approver' } } as any;
-  const work = { key: 'GY-88', candidate: { sha: H, baseSha: B } } as unknown as Work;
-  const prompt = piApproverWithAttestation(config, work, 'd1', '/managed/approval/checkout');
-  assert.ok(prompt.includes('Read the code in /managed/approval/checkout, a clone of the repository made for this run alone'), 'the approver reads its own clone');
-  assert.ok(prompt.includes(attestConfirmation(B)) && prompt.indexOf(attestConfirmation(B)) < prompt.indexOf('graphyard_decide'), 'and is told to confirm an exercise record before it decides');
-});
-
-test('integration:pi-narrow-roles the approver clone detaches at the candidate head and refuses a head the repository cannot supply (GY-564)', async () => {
-  const scratch = await realpath(await temporaryDirectory('approver-clone'));
-  try {
-    const origin = join(scratch, 'repository');
-    await mkdir(origin);
-    const git = (...args: string[]) => execFileSync('git', args, { cwd: origin, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
-    git('init', '-q', '-b', 'main');
-    await writeFile(join(origin, 'README.md'), 'approver clone\n');
-    git('add', 'README.md');
-    git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.test', 'commit', '-q', '-m', 'initial');
-    const head = git('rev-parse', 'HEAD').trim();
-    const atCandidate = join(scratch, 'clone-of-head');
-    await approverClone(origin, atCandidate, head);
-    assert.equal(execFileSync('git', ['-C', atCandidate, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), head, 'detached at the candidate head');
-    assert.deepEqual(execFileSync('git', ['-C', atCandidate, 'remote'], { encoding: 'utf8' }).trim(), '', 'the clone keeps no remote');
-    // Without a candidate the clone takes the repository's current head.
-    const atCurrent = join(scratch, 'clone-of-current');
-    await approverClone(origin, atCurrent);
-    assert.equal(execFileSync('git', ['-C', atCurrent, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), head, 'the repository\'s current head when no candidate is bound');
-    // A candidate outside the operator's objects is fetched, and a fetch that still cannot supply
-    // it refuses the launch: an approver silently detached at HEAD would judge an unrelated tree.
-    const missing = 'e'.repeat(40);
-    await assert.rejects(approverClone(origin, join(scratch, 'clone-of-missing'), missing), /--detach/, `the missing candidate ${missing} refuses the launch`);
-    assert.equal(existsSync(join(scratch, 'clone-of-missing', 'README.md')), false, 'the refused clone never shows the operator\'s head');
-  } finally { await rm(scratch, { recursive: true, force: true }); }
 });

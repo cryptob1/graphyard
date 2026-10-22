@@ -122,7 +122,7 @@ test('unit:unsatisfied-settled-request-visible — master status names a request
     state: 'failed', verdict: 'DISMISSED', requestedAt: iso(0), tokenExpiresAt: iso(3_600_000), closedAt: iso(60_000), resolution, attention: null };
   const exhausted = { requestId: request.id, attempts: 4, started: 4, neverStarted: 0, limit: 4, unstartedLimit: 3, nextAt: null, exhausted: true, last: { state: 'failed', resolution } };
   // Sixty-three minutes after the request, with nothing running and nothing refused.
-  const status = buildMasterStatus({ work: [item], now: iso(3_780_000) }, [], [], {}, {}, { pending: [], completed: [record] }, 'main', undefined,
+  const status = buildMasterStatus({ work: [item], now: iso(3_780_000) }, [], [], {}, { pending: [], completed: [record] }, 'main', undefined,
     { producers: { pending: [], completed: [] }, failures: [], retries: [exhausted] });
   assert.equal(status.counts.dispatchRequested, 1);
   assert.equal(status.counts.dispatchRunning, 0, 'a settled session is not a request that is running');
@@ -144,9 +144,8 @@ test('unit:unsatisfied-settled-request-visible — master status names a request
   const both = unansweredRequestAttention([{ key: 'GY-84', dispatch: { review: status.work[0].dispatch!.review as RequestProgress, producers: [producer] } }]);
   assert.equal(both.length, 2);
   assert.match(both[1].text, /^Producer request for integration proofs for GY-84 has stood unanswered for 10m: its session completed without a verdict after attempt 1 — the session finished/);
-  assert.match(both[1].next, /graphyard master decide GY-84 rework REASON/);
-  assert.equal(both[1].approvedBy, 'approver');
-  assert.deepEqual(unansweredRequestOwner('GY-84', { kind: 'review' }).approvedBy, null);
+  assert.match(both[1].next, /graphyard master rework GY-84 REASON/);
+  assert.match(unansweredRequestOwner('GY-84', { kind: 'review' }).next, /graphyard master review GY-84/);
   // `master status` reports them beside its other attention and counts them apart from what runs.
   const report = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
   assert.match(report, /const unanswered = unansweredRequestAttention\(status\.work\);/);
@@ -189,9 +188,9 @@ test('integration:master-review-forces-attempt — master review launches the op
     assert.equal(liveReviewRequest(work({ autoDispatch: { review: { ...request, sha: H2 }, producers: [], history: [] } })), null);
     assert.equal(liveReviewRequest(work({ autoDispatch: { review: { ...request, state: 'satisfied' }, producers: [], history: [] } })), null);
     assert.equal(liveReviewRequest(work()), null);
-    // `master review` is exactly this command, on the one snapshot its guard judged, and it refuses the same way it always did.
+    // `master review` is exactly this command, on the snapshot it reads, and it refuses the same way it always did.
     const cli = await readFile(new URL('../src/cli/master/fleet.ts', import.meta.url), 'utf8');
-    assert.match(cli, /if \(id === 'review'\) \{\n\s+const snapshot = await masterApi\('work-snapshot'\)[^\n]*\n[^\n]*\n\s+return print\(await reviewCommand\(root, args, snapshot, await listHerdrAgents\(\)\)\);/);
+    assert.match(cli, /if \(id === 'review'\) \{\n\s+const snapshot = await masterApi\('work-snapshot'\);\n\s+return print\(await reviewCommand\(root, args, snapshot, await listHerdrAgents\(\)\)\);/);
     await assert.rejects(reviewCommand(root, [], { work: [item], now: new Date().toISOString() }, []), /Use master review GY-N/);
     await assert.rejects(reviewCommand(root, ['GY-9999'], { work: [item], now: new Date().toISOString() }, []), /Unknown work item GY-9999/);
   } finally { await cleanup(); }
