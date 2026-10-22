@@ -118,7 +118,7 @@ test('unit:triage-refused-closure-not-reproposed — the closure an approver ref
   for (const clock of [NOW + 6 * 60_000, NOW + 12 * 60_000, NOW + 3_600_000]) {
     const actions = step([work], clock);
     assert.deepEqual(actions.map(action => action.state), ['held'], 'later passes start no session for it');
-    assert.match(actions[0]!.detail, /proposed again the closure \(superseded of GY-1427\) the approver refused .*requests no close decision/);
+    assert.match(actions[0]!.detail, /proposed again the closure \(superseded of GY-1427\) withdrawn at .*has not changed since/);
     await triageSettled();
   }
   assert.equal(starts.length, 1);
@@ -150,7 +150,7 @@ test('unit:triage-sees-closure-refusal — triage judging an item whose closure 
   const starts = run({ outcome: 'release', priority: 2, reason: 'rescoped to the half GY-1427 left' });
   const prompt = starts[0]!.prompt;
   assert.match(prompt, /No judgement of it stands/);
-  assert.match(prompt, /proposed closing it \(superseded of GY-1427\) and the independent approver refused that closure at \S+: "GY-1427 fixed only the dispatch half; rescope this item to the rest"\./);
+  assert.match(prompt, /proposed closing it \(superseded of GY-1427\) and that closure was withdrawn at \S+: "GY-1427 fixed only the dispatch half; rescope this item to the rest"\./);
   assert.match(prompt, /Do not propose that closure \(superseded of GY-1427\) again/);
   assert.match(prompt, /release it with a priority, rescoped to the work it still names, or close or merge it on a different ref the refusal did not weigh/);
   await triageSettled();
@@ -162,6 +162,6 @@ test('unit:triage-sees-closure-refusal — triage judging an item whose closure 
   clearTriageRuns();
   const fresh = fakeRunner(() => null);
   triageStep({ work: [stale], clock: NOW, settings: researchSettings({ research: {} }), config: { repository: 'owner/project' }, cwd: process.cwd(), runner: fresh.runner, record: async () => {} });
-  assert.doesNotMatch(fresh.starts[0]!.prompt, /approver refused/);
+  assert.doesNotMatch(fresh.starts[0]!.prompt, /was withdrawn/);
   await triageSettled();
 });

@@ -111,7 +111,7 @@ test('integration:loop-records-due-observation-reading — the deployment-verifi
   assert.equal(run.closed.find(entry => entry.key === 'GY-1724')!.idempotency, `reading:close:${passing.id}:${serving}`);
   // A fail records the reading, raises the item's escalation naming the measured values and is asked again on the backoff, never closed.
   const escalation = run.state.actions[`escalation:reading:${failing.id}`];
-  assert.equal(escalation?.kind, 'escalation');
+  assert.equal(escalation?.kind, 'attention');
   assert.match(escalation!.detail, /GY-1726's reading of manual:webhook-deliveries-clean-24h-on-serving-release failed on the serving release bbbbbbbbbbbb: .*3 failed deliveries \(2 × 502, 1 connection failure\)/);
   assert.equal(run.state.actions[`reading:${failing.id}`]?.state, 'waiting');
   // A reading this host cannot take records why, so the item is never left owed to nobody.

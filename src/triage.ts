@@ -15,11 +15,9 @@ import type { Run, RunResult, Runner } from './runner/types.js';
 // delivered items, and submits one judgement through the `graphyard_triage_decision` tool: release
 // it with a priority, close it (already fixed by a named delivered item, or not worth doing), or
 // merge it into another open item. The loop records the judgement on the item (POST
-// work/ID/triage). A release applies at once; a closure or merge is proposed, and the loop requests
-// the `close` decision for it, which an independent approver session judges before it is applied.
-// A refused closure is put to the next triage session with the refusal's reason, and the same
-// closure proposed again while the item is unchanged is dropped unrecorded, so it never launches
-// another approver session (GY-1448). A run that fails is retried on a later cycle; an item still
+// work/ID/triage), which applies it at once. A withdrawn closure is put to the next triage session
+// with its reason, and the same closure proposed again while the item is unchanged is dropped
+// unrecorded (GY-1448). A run that fails is retried on a later cycle; an item still
 // untriaged a day after it was filed is raised as attention (model/machine-backlog.ts triageAttention).
 // ---------------------------------------------------------------------------
 
@@ -37,7 +35,7 @@ const triageTimeoutMs = (settings: Pick<ResearchSettings, 'timeoutMinutes'>) => 
 const clip = (text: string, limit: number) => text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 
 /**
- * The closure an approver refused on this item while its evidence is unchanged since (GY-1448): the
+ * The closure withdrawn on this item while its evidence is unchanged since (GY-1448): the
  * item's triage record is `refused` and nothing saved the item after the refusal (a description
  * amended, findings merged in). Null once the item changes, or when it carries no refused closure.
  */
@@ -47,7 +45,7 @@ export function refusedClosure(work: Pick<Work, 'triage' | 'updatedAt'>): { kind
   if (!closure || Date.parse(work.updatedAt) > Date.parse(triage!.at)) return null;
   return { kind: closure.kind, ref: closure.ref, refusal: triage!.refusal ?? null, at: triage!.at };
 }
-/** Whether `judgement` proposes again the closure the approver refused on `work` — same kind and ref — with the item's evidence unchanged. */
+/** Whether `judgement` proposes again the closure withdrawn on `work` — same kind and ref — with the item's evidence unchanged. */
 export function repeatsRefusedClosure(work: Pick<Work, 'triage' | 'updatedAt'>, judgement: TriageJudgement) {
   const refused = refusedClosure(work), closure = triageClosure(judgement);
   return !!refused && !!closure && closure.kind === refused.kind && closure.ref === refused.ref;
@@ -67,20 +65,20 @@ export function triagePrompt(config: { repository: string }, work: Work, all: re
     + `Recently delivered items: ${delivered.map(item => `${item.key} ${clip(item.title, 120)}`).join('; ') || 'none'}. `
     + `Other open items: ${open.map(item => `${item.key} [${item.stage}] ${clip(item.title, 120)}`).join('; ') || 'none'}. `
     + 'Read this checkout (the base branch) where it helps, and judge the item. Choose exactly one: release it with a priority from 0 (most urgent) to 4, when it names real work still worth doing; close it with a reason, naming as ref the delivered item that already fixed it, or with no ref when it is not worth doing; or merge it into another open item that already covers it, naming that item as into. '
-    + 'A closure or merge is applied only after an independent approver agrees, so state the evidence it can check. This session is read-only and nobody reads it: do not edit, commit, push, claim work or ask anyone anything. '
+    + 'A closure or merge is applied at once, so state the evidence for it. This session is read-only and nobody reads it: do not edit, commit, push, claim work or ask anyone anything. '
     + `Then call the ${triageTool} tool exactly once with outcome, priority, ref or into as the outcome needs, and reason, and stop.`;
 }
 
 /**
- * What triage is told of a closure the approver refused (GY-1448): the closure and the refusal's
+ * What triage is told of a closure that was withdrawn (GY-1448): the closure and the refusal's
  * reason, and that the same closure is not proposed again unless it names evidence the refusal did not weigh.
  */
 function refusalNote(work: Work) {
   const triage = work.triage;
   const closure = triage?.state === 'refused' ? triageClosure(triage.judgement) : null;
   if (!closure) return '';
-  return `An earlier triage proposed closing it (${closureName(closure)}) and the independent approver refused that closure at ${triage!.at}: "${clip(triage!.refusal ?? 'no reason recorded', 2000)}". `
-    + `Do not propose that closure (${closureName(closure)}) again: ${refusedClosure(work) ? 'the item has not changed since the refusal, so the loop drops the same closure unrecorded and requests no decision for it' : 'propose it only naming the new evidence that answers the refusal'}. `
+  return `An earlier triage proposed closing it (${closureName(closure)}) and that closure was withdrawn at ${triage!.at}: "${clip(triage!.refusal ?? 'no reason recorded', 2000)}". `
+    + `Do not propose that closure (${closureName(closure)}) again: ${refusedClosure(work) ? 'the item has not changed since the refusal, so the loop drops the same closure unrecorded' : 'propose it only naming the new evidence that answers the refusal'}. `
     + 'Follow the refusal instead: release it with a priority, rescoped to the work it still names, or close or merge it on a different ref the refusal did not weigh, stating that new evidence. ';
 }
 
@@ -147,12 +145,12 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
     const failed = failedAt.get(work.id);
     if (failed !== undefined && input.clock - failed < triageRetryMs) continue;
     if (live.size >= (input.settings.triageConcurrency ?? triageConcurrency)) break;
-    // A run already proposed again the closure the approver refused, and the item has not changed
+    // A run already proposed again the withdrawn closure, and the item has not changed
     // since (GY-1448): another session would only propose it once more, so the item waits for its
     // evidence to change, or for the master once it is overdue (untriagedAttention).
     const refused = refusedClosure(work);
     if (refused && repeatedAt.get(work.id) === refused.at) {
-      actions.push({ work: work.key, state: 'held', detail: `Holding machine-filed ${work.key} out of triage: its triage proposed again the closure (${closureName(refused)}) the approver refused at ${refused.at}, and the item has not changed since, so the loop requests no close decision for it` });
+      actions.push({ work: work.key, state: 'held', detail: `Holding machine-filed ${work.key} out of triage: its triage proposed again the closure (${closureName(refused)}) withdrawn at ${refused.at}, and the item has not changed since` });
       continue;
     }
     // Started outside the run registry, as a scratch run (runner/pi.ts): nothing adopts it after a
@@ -170,9 +168,7 @@ export function triageStep(input: TriageStepInput): TriageStepAction[] {
 async function settleTriage(input: TriageStepInput, work: Work, result: RunResult<TriageJudgement>) {
   if (!result.ok) { failedAt.set(work.id, Date.now()); return; }
   failedAt.delete(work.id);
-  // The closure the approver refused, proposed again on unchanged evidence, is never recorded: its
-  // fresh judgement time would bind a new close decision the refusal does not match, and launch
-  // another approver session for a closure already refused (GY-1448).
+  // The withdrawn closure, proposed again on unchanged evidence, is never recorded (GY-1448).
   if (repeatsRefusedClosure(work, result.payload)) { repeatedAt.set(work.id, work.triage!.at); return; }
   await recordJudgement(input, work, { judgement: result.payload, runtime: input.runner.name });
 }
@@ -180,7 +176,7 @@ async function settleTriage(input: TriageStepInput, work: Work, result: RunResul
 /**
  * Each machine-filed item still untriaged past `triageDeadlineMs` as attention (GY-402): it names the
  * triage step that has not judged it. The master's to answer — the loop runs the triage session once
- * `run.research` names the research account, and a closure it proposes goes to the approver.
+ * `run.research` names the research account.
  */
 export function untriagedAttention(snapshot: { work: readonly Work[]; now: string }): AttentionItem[] {
   const now = Date.parse(snapshot.now);

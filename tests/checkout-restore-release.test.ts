@@ -687,7 +687,7 @@ test('unit:clean-drift-settles-and-restarts — a request that finds no dirty pa
   assert.equal(guard.expected(), moved);
   assert.equal(state.actions['escalation:dirty-checkout']?.state, 'done');
   assert.match(state.actions['escalation:dirty-checkout']!.detail, new RegExp(`clean again at ${moved.slice(0, 12)}, the commit the loop runs`));
-  assert.ok(journal.some(line => line.includes('escalation done:')));
+  assert.ok(journal.some(line => line.includes('attention done:')));
   const stored = await readCheckoutRestoreRequest(file);
   assert.equal(stored?.outcome?.state, 'adopted');
   assert.equal(stored?.outcome?.restart?.state, 'requested');
@@ -766,7 +766,7 @@ test('unit:adoption-reverts-when-restart-fails — an adopted HEAD whose restart
   assert.match(state.actions['escalation:dirty-checkout']!.detail, new RegExp(`its HEAD moved from ${loaded.slice(0, 12)} to ${moved.slice(0, 12)} while the loop was running`));
   assert.equal(outcome!.restart?.state, 'failed');
   assert.match(outcome!.restart!.detail, /No medium found; the adoption of \w{12} is reverted and the drift escalation stands until a restart lands$/);
-  const done = journal.findIndex(line => line.includes('escalation done:')), raised = journal.findIndex((line, index) => index > done && line.includes('escalation failed:'));
+  const done = journal.findIndex(line => line.includes('attention done:')), raised = journal.findIndex((line, index) => index > done && line.includes('attention failed:'));
   assert.ok(done >= 0 && raised > done, `settled then raised again: ${journal.join('\n')}`);
   assert.ok((await guard.betweenCycles()).refusal, 'the next cycle still reports the drift');
   // The next pass: adopted again, asked again, and this time the restart lands with the escalation settled onto the HEAD before it.

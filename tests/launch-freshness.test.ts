@@ -121,7 +121,7 @@ test('unit:stale-refusal-wakes-observation — a rework refused for a stale obse
 
   const first = await runCycle(config, state, effects, () => now);
   assert.deepEqual(log, ['wake:GY-42'], 'the refusal wakes the observation job immediately, and decides nothing');
-  assert.match(first.actions.find(action => action.work === 'GY-42' && action.kind === 'decision')!.detail, /rework waits for a fresh observation/);
+  assert.match(first.actions.find(action => action.work === 'GY-42' && action.kind === 'judgement')!.detail, /rework waits for a fresh observation/);
   assert.match(first.actions.find(action => action.kind === 'refresh')!.detail, /Woke the observation job of GY-42/);
 
   // The next cycle, before the woken observation lands: no second wake, and still no attempt.

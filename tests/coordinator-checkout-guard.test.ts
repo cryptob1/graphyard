@@ -180,7 +180,7 @@ test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from
     assert.match(escalation.detail, /GY-852 epoch 3 \(graphyard-claude-1\): src\/loop\.ts/, 'the live lease whose changed files match is named');
     assert.ok(!escalation.detail.includes('GY-853'), 'a live lease matching none of the paths is not named');
     assert.ok(!escalation.detail.includes('GY-854'), 'an expired lease is not named');
-    assert.ok(log.some(line => line.includes('escalation failed')), 'the refusal is logged');
+    assert.ok(log.some(line => line.includes('attention failed')), 'the refusal is logged');
     assert.deepEqual(dirtyCheckoutLeases(work, dirty, Date.parse(iso(hour - 1))).map(lease => lease.key), ['GY-852'], 'only the matching live lease is attributed');
     assert.match(dirtyCheckoutEscalation('refused', []), /^refused$/, 'with no matching lease the refusal stands alone');
 

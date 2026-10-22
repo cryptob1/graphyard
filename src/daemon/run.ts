@@ -43,7 +43,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     budget: latencyBudget(state.latency),
     lock: state.lock, cycle: state.cycle, lastCycleAt: state.lastCycleAt, lagMs,
     unresolved: recent.filter(action => action.state === 'started' || action.state === 'indeterminate'),
-    escalations: recent.filter(action => action.kind === 'escalation').slice(0, 20),
+    escalations: recent.filter(action => action.kind === 'attention').slice(0, 20),
     actions: recent.slice(0, 40),
     metrics: state.metrics.at(-1) ?? null,
     // Where the last cycle's time went, against the interval and the liveness bound it is judged
@@ -83,7 +83,7 @@ export async function noteConfigReload(state: DaemonState, reload: ConfigReload,
   state.config = carryUndeclared(previous, { at: reload.at, changed: reload.changed.slice(0, 100), refused: reload.refused?.slice(0, 1000) ?? null });
   const noted: DaemonAction[] = [];
   if (reload.refused && previous?.refused !== state.config.refused) {
-    noted.push(storeAction(state, `escalation:config:${reload.at}`, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
+    noted.push(storeAction(state, `escalation:config:${reload.at}`, { kind: 'attention', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
   }
   // GY-2600: a dead Herdr workspace replaced with a live one is recorded with its reason.
   if (reload.workspace) {
@@ -113,7 +113,7 @@ export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof w
   }
   const key = `escalation:watchdog:${plan.windowMs}`;
   if (state.actions[key]?.state === 'failed') return [];
-  const entry = storeAction(state, key, { kind: 'escalation', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at });
+  const entry = storeAction(state, key, { kind: 'attention', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at });
   await persist(state);
   return [entry];
 }
@@ -506,7 +506,7 @@ export function coordinatorCheckoutGuard(deps: {
         storeAction(state, escalationKey, { ...raised, state: 'done', detail, cycle: state.cycle, at: new Date(deps.now()).toISOString() });
         await deps.persist(state);
         // Said in the journal too (GY-1531): the remedy the refusal named ended it, visibly beside it.
-        deps.log(`[graphyard-master] escalation done: ${detail}`);
+        deps.log(`[graphyard-master] attention done: ${detail}`);
       }
       return null;
     }
@@ -535,9 +535,9 @@ export function coordinatorCheckoutGuard(deps: {
     }
     const state = deps.state(), existing = state.actions[escalationKey];
     if (detailChanged(existing, detail)) {
-      storeAction(state, escalationKey, { kind: 'escalation', work: null, principal: null, state: 'failed', detail, attempts: (existing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: new Date(deps.now()).toISOString() });
+      storeAction(state, escalationKey, { kind: 'attention', work: null, principal: null, state: 'failed', detail, attempts: (existing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: new Date(deps.now()).toISOString() });
       await deps.persist(state);
-      deps.log(`[graphyard-master] escalation failed: ${detail}`);
+      deps.log(`[graphyard-master] attention failed: ${detail}`);
     } else touchStanding(state, escalationKey, new Date(deps.now()).toISOString());
     return detail;
   };

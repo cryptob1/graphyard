@@ -14,12 +14,14 @@ import { itemClockSchema, latencySampleSchema } from './latency-clock.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 
 // 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
-export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'escalation', 'config', 'session', 'reclaim', 'decision', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
+// A cursor's rows of the retired 'decision' and 'escalation' kinds (GY-2874) load as 'judgement' and 'attention'.
+const retiredActionKinds: Record<string, string> = { decision: 'judgement', escalation: 'attention' };
+export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'attention', 'config', 'session', 'reclaim', 'judgement', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** The most an action's detail may carry: daemonActionSchema's bound, which record() enforces. */
 export const actionDetailMax = 2000;
 export const daemonActionSchema = z.object({
-  kind: z.enum(daemonActionKinds),
+  kind: z.preprocess(kind => retiredActionKinds[kind as string] ?? kind, z.enum(daemonActionKinds)),
   work: z.string().nullable().default(null),
   principal: z.string().nullable().default(null),
   state: z.enum(['started', 'done', 'failed', 'indeterminate', 'waiting']),

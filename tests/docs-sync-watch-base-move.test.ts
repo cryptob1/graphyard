@@ -185,7 +185,7 @@ test('unit:docs-sync-hold-wait-recorded — a standing hold answers the session,
   for (const part of [name, reviewed.slice(0, 12), tip.slice(0, 12), deadline]) assert.ok(hold.wait.includes(part), `the wait names ${part}: ${hold.wait}`);
   const again = await route(clock + minute).hold(work);
   assert.ok(again.held && again.wait === hold.wait, 'the wait is stable from cycle to cycle');
-  const subjects = (now: number, docsSyncs = state.docsSyncs) => actionableSubjects({ autoMerge: true, run: config().run }, [work], now, { docsSyncs }).filter(subject => subject.kind === 'decision').map(subject => subject.detail.replace(/: .*$/s, ''));
+  const subjects = (now: number, docsSyncs = state.docsSyncs) => actionableSubjects({ autoMerge: true, run: config().run }, [work], now, { docsSyncs }).filter(subject => subject.kind === 'judgement').map(subject => subject.detail.replace(/: .*$/s, ''));
   assert.ok(docsSyncHolding(state.docsSyncs, work, clock + minute), 'the hold stands inside its bound');
   assert.deepEqual(subjects(clock + minute), [], 'no decision subject while the hold stands');
   assert.deepEqual(subjects(clock + minute, {}), ['GY-42 returns to a worker'], 'without the hold the step owes the rework');
@@ -308,7 +308,7 @@ test('integration:docs-sync-stall-named-attention — a hold past half its bound
   await run.cycle(clock + docsSyncStallMs);
   await run.cycle(clock + docsSyncStallMs + minute);
   const attention = run.state.actions[key] as { kind: string; detail: string; attempts: number } | undefined;
-  assert.ok(attention && attention.kind === 'escalation' && attention.detail.includes(name), `an attention names ${name}`);
+  assert.ok(attention && attention.kind === 'attention' && attention.detail.includes(name), `an attention names ${name}`);
   assert.equal(attention.attempts, 1, 'raised once');
   assert.deepEqual(run.decided, []);
 });

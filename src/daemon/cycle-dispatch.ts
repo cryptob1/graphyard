@@ -267,7 +267,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
   // GY-1774: a health read carried past the step's bound holds dispatch this cycle, as an unanswered plane cannot record a launch; the next cycle reads again, joining it.
   const unrecordable = claimable.length && !workersSpent && effects.planeHealth ? await carriedCall(cycle, 'dispatch', 'dispatch', 'planeHealth', () => effects.planeHealth!(), error => `the control plane's health read was carried to the next cycle, which reads it again: ${message(error)}`) : null;
   if (unrecordable && detailChanged(state.actions['escalation:dispatch:plane'], `Dispatch held: ${unrecordable}`))
-    performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'escalation', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, 'escalation:dispatch:plane', { kind: 'attention', work: null, principal: null, state: 'done', detail: `Dispatch held: ${unrecordable}`, attempts: (state.actions['escalation:dispatch:plane']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   // A host below its memory floor launches no worker (GY-612): the crossing is recorded once each
   // way — deferred with its reason and top consumers, resumed once memory recovers — and master
   // status raises one `resources` attention item while it stands. Running sessions are left alone.
@@ -318,7 +318,7 @@ async function dispatchStepWithin(cycle: Cycle, saturation: Cycle, health: Retur
       if (!saturatedFleet(health, held)) {
         const detail = `No worker profile can take ${item.key}: ${launchable.map(entry => `${entry.profile.name} (${entry.reason})`).join('; ') || 'no launch profile is configured'}`;
         const escalationKey = `escalation:dispatch:${item.id}`;
-        if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+        if (detailChanged(state.actions[escalationKey], detail)) performed.push(await record(state, escalationKey, { kind: 'attention', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       } else {
         // GY-1890: the fleet is saturated — every profile is held by a live attempt or otherwise
         // unavailable while work is claimable. That wait is the fleet's slot capacity, so it is
@@ -475,12 +475,12 @@ export const memoryActionKey = 'escalation:dispatch:memory';
 export async function hostMemoryStep(cycle: Pick<Cycle, 'state' | 'effects' | 'now' | 'config' | 'performed'>) {
   const { state, effects, now, config, performed } = cycle;
   if (!effects.hostMemory) return false;
-  const reading = await carriedCall(cycle, 'dispatch', 'escalation', 'hostMemory', () => effects.hostMemory!(), () => null).catch(() => null);
+  const reading = await carriedCall(cycle, 'dispatch', 'attention', 'hostMemory', () => effects.hostMemory!(), () => null).catch(() => null);
   // An unreadable host keeps the last judgment: a deferral is not lifted by a failed read.
   if (!reading) return !!state.memory?.low;
   const judged = judgeHostMemory(state.memory, reading, now(), config.hostId ?? null);
   state.memory = judged.state;
-  if (judged.event) performed.push(await record(state, memoryActionKey, { kind: 'escalation', work: null, principal: null, state: 'done', detail: judged.detail.slice(0, 1000),
+  if (judged.event) performed.push(await record(state, memoryActionKey, { kind: 'attention', work: null, principal: null, state: 'done', detail: judged.detail.slice(0, 1000),
     attempts: (state.actions[memoryActionKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
   return judged.state.low;
 }

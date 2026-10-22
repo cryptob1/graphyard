@@ -8,7 +8,7 @@ import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { atomicPrivateWrite, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { exhaustedProofEscalation, exhaustedProofKey, exhaustedProofRework, type ExhaustedProof } from '../src/daemon/rework.js';
+import { exhaustedProofDetail, exhaustedProofKey, exhaustedProofRework, type ExhaustedProof } from '../src/daemon/rework.js';
 import { sessionRetryLimit } from '../src/producer.js';
 import { describeAttempts, dispatchFailureAttention, dispatchFailureLimit, emptyDispatchCursor, extractProducerAccountsOrRuntimes, instantExitReason, isUnactedProducerAttempt, runDispatchTick, unactedProducerAttempts, type DispatchEffects } from '../src/auto-dispatch.js';
 
@@ -310,7 +310,7 @@ test('GY-1227 review follow-ups — shared unacted wording, unacknowledged sessi
   // A spent entry with no recorded attempt is acted in both the escalation and the rework.
   const empty: ExhaustedProof = { requestId: 'r', work: 'GY-1127', sha: H, group: 'unit', proofs: ['unit:a'], attempts: [], reason: 'spent' };
   assert.equal(unactedProducerAttempts([]), false);
-  assert.match(exhaustedProofEscalation(empty), /on its next cycle it returns GY-1127 to a worker/);
+  assert.match(exhaustedProofDetail(empty), /on its next cycle it returns GY-1127 to a worker/);
   assert.ok(exhaustedProofRework(work(), [empty]), 'the rework the escalation announced is delivered');
 
   const root = await temporaryDirectory('exhausted-proof-runtime-gy1227');

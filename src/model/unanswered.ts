@@ -61,7 +61,7 @@ export const answeringVerdicts = ['APPROVED', 'CHANGES_REQUESTED'];
  */
 export interface UnansweredRequest { requestId: string; kind: DispatchKind; group?: string; sinceMs: number; state: string; verdict: string | null; attempts: number; resolution: string | null; unexercised?: string[];
   settledMs: number | null; next: UnansweredNext }
-export type UnansweredNext = { kind: 'relaunch'; attempt: number; limit: number } | ({ kind: 'decision' } & RequestRemedy) | null;
+export type UnansweredNext = { kind: 'relaunch'; attempt: number; limit: number } | ({ kind: 'remedy' } & RequestRemedy) | null;
 
 /**
  * A request nothing is going to answer: its session settled — with a verdict the gate cannot
@@ -83,7 +83,7 @@ export function unansweredRequest(request: RequestProgress, kind: DispatchKind):
   // What answers it now: the decision its evidence calls for; else, for a session that settled
   // without failing, the relaunch the loop owes it on its next tick up to the attempt limit
   // (auto-dispatch.ts `session`); a failed or expired one has its retry schedule, which is spent.
-  const next: UnansweredNext = kind === 'producer' && request.remedy ? { kind: 'decision', ...request.remedy }
+  const next: UnansweredNext = kind === 'producer' && request.remedy ? { kind: 'remedy', ...request.remedy }
     : !retriedSessionStates.includes(session.state) && attempts < requestAttemptLimit ? { kind: 'relaunch', attempt: attempts + 1, limit: requestAttemptLimit } : null;
   return { requestId: request.requestId, kind, ...(request.group ? { group: request.group } : {}), sinceMs: request.sinceMs,
     state: session.state, verdict: session.verdict ?? null, attempts, resolution: session.resolution ?? null, settledMs, next,

@@ -95,7 +95,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     // Past half its bound without moving the head: raised once, naming the session, before the silence budget could (GY-1436).
     const stallKey = `escalation:docs-sync-stall:${key}`;
     if (clock - Date.parse(watch.launchedAt) >= docsSyncStallMs && !state.actions[stallKey])
-      await note(stallKey, item, 'escalation', 'done', `${item.key}: docs-sync session ${session} has held the conflict of ${watch.head.slice(0, 12)} with base ${watch.base.slice(0, 12)} past half its ${docsSyncHoldMs / 60_000}-minute bound without moving the head; at ${deadline} the conflict returns to a worker (close the session to return it now)`);
+      await note(stallKey, item, 'attention', 'done', `${item.key}: docs-sync session ${session} has held the conflict of ${watch.head.slice(0, 12)} with base ${watch.base.slice(0, 12)} past half its ${docsSyncHoldMs / 60_000}-minute bound without moving the head; at ${deadline} the conflict returns to a worker (close the session to return it now)`);
     return { held: true, watch, deadline, wait: `${item.key}: rework decision held by docs-sync session ${session} on head ${watch.head.slice(0, 12)} against base ${watch.base.slice(0, 12)} until ${deadline}, the end of its ${docsSyncHoldMs / 60_000}-minute bound` };
   };
   /**
@@ -124,18 +124,18 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       const name = docsSyncSessionName(plan), running = (await sessions()).agents.find(agent => agent.name === name);
       if (running) {
         state.docsSyncs[key] = docsSyncWatchSchema.parse({ work: item.key, head, base, paths: plan.paths, agentName: name, pane: running.pane_id ?? null, launchedAt: stamp });
-        await note(actionKey, item, 'decision', 'done', `Adopted docs-sync session ${name}, already running in Herdr for ${item.key} at ${head.slice(0, 12)}: ${routed.reason}; no rework decision is requested while it runs`);
+        await note(actionKey, item, 'judgement', 'done', `Adopted docs-sync session ${name}, already running in Herdr for ${item.key} at ${head.slice(0, 12)}: ${routed.reason}; no rework decision is requested while it runs`);
         return standing(item, key, state.docsSyncs[key], cutoff);
       }
       try {
         const launched = await effects.docsSync!(item, plan); inventorySpent();
         state.docsSyncs[key] = docsSyncWatchSchema.parse({ work: item.key, head, base, paths: plan.paths, agentName: launched.agentName, pane: launched.pane, session: launched.session, launchedAt: stamp });
-        await note(actionKey, item, 'decision', 'done', `Launched docs-sync session ${launched.agentName}${launched.account ? ` on ${launched.account}` : ''} for ${item.key}: ${routed.reason}; no rework decision is requested, and the approval is kept if the diff outside docs/ is unchanged`);
+        await note(actionKey, item, 'judgement', 'done', `Launched docs-sync session ${launched.agentName}${launched.account ? ` on ${launched.account}` : ''} for ${item.key}: ${routed.reason}; no rework decision is requested, and the approval is kept if the diff outside docs/ is unchanged`);
         return standing(item, key, state.docsSyncs[key], cutoff);
       } catch (error) {
         state.docsSyncs[key] = docsSyncWatchSchema.parse({ work: item.key, head, base, paths: plan.paths, agentName: null, pane: null, launchedAt: stamp, failed: `the docs-sync session could not be launched: ${message(error)}`.slice(0, 1000), settledAt: stamp });
         markRework(item.key, head);
-        await note(actionKey, item, 'decision', 'failed', `Could not launch the docs-sync session for ${item.key}, so the conflict returns to a worker: ${message(error)}`);
+        await note(actionKey, item, 'judgement', 'failed', `Could not launch the docs-sync session for ${item.key}, so the conflict returns to a worker: ${message(error)}`);
         return { held: false };
       }
     }
@@ -149,7 +149,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
         watch.settledAt = stamp;
         await settle(item, watch, watch.failed);
         markRework(item.key, head);
-        await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the docs-sync hold ends`, undefined);
+        await note(`docs-sync:${key}`, item, 'judgement', 'failed', `${item.key}: ${watch.failed}, so the docs-sync hold ends`, undefined);
         return { held: false };
       }
       watch.base = base; watch.paths = paths!;
@@ -172,7 +172,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
       await settle(item, watch, watch.failed);
       markRework(item.key, head);
       // GY-1541: the cutoff stop is the loop's own designed route (GY-1434), as the own-accord stop below is: no decision fault.
-      await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined);
+      await note(`docs-sync:${key}`, item, 'judgement', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined);
       return { held: false };
     }
     // A hold the loop found ended stays ended (GY-1436): a session Herdr lists working again before
@@ -199,7 +199,7 @@ export function docsSyncRoute({ config, state, effects, snapshot, sessions, note
     watch.settledAt = stamp;
     await settle(item, watch, watch.failed);
     markRework(item.key, head);
-    await note(`docs-sync:${key}`, item, 'decision', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined);
+    await note(`docs-sync:${key}`, item, 'judgement', 'failed', `${item.key}: ${watch.failed}, so the conflict returns to a worker`, undefined);
     return { held: false };
   };
   /** Whether a docs-sync holds the item's conflict. */

@@ -43,7 +43,7 @@ test('unit:failed-step-logs-and-retries — a loop step that throws is one log l
   assert.equal(state.cycle, 2);
   // Nothing is classified, remedied, blocked, decided or escalated: no record of the failure exists beyond the log line.
   assert.ok(!Object.values(state.actions).some(action => action.detail.includes('herdr socket refused')), 'no action row records the failure');
-  assert.ok(!Object.values(state.actions).some(action => ['blocker', 'decision', 'escalation', 'fault'].includes(action.kind)));
+  assert.ok(!Object.values(state.actions).some(action => ['blocker', 'judgement', 'attention', 'fault'].includes(action.kind)));
   for (const retired of ['faults', 'doctor', 'stepStalls', 'dispatchFailures']) assert.ok(!(retired in state), `the cursor keeps no ${retired}`);
   assert.equal(state.failures.consecutive, 0, 'a failed step is no failed cycle');
 });

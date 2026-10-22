@@ -25,4 +25,4 @@ export const proposedConcurrency: Record<FleetRoleName, number> = { worker: 4, r
  * roles headless (GY-169) — the approver's verdict, a producer's proofs, and the doctor's rounds
  * (GY-711) — and, from GY-1746, the worker role, where dispatch tries it first for low and medium risk items.
  */
-export const proposedRuntimeRoles: Partial<Record<string, readonly FleetRoleName[]>> = { pi: ['worker', 'approver', 'producer'] };
+export const proposedRuntimeRoles: Partial<Record<string, readonly FleetRoleName[]>> = { pi: ['worker', 'producer'] };

@@ -266,7 +266,7 @@ test('a disabled automatic merge keeps the loop cycling, never merges, and asks 
     const state = emptyDaemonState(master);
     const result = await runCycle(master, state, effects({ snapshot: async () => ({ work: [mergeable], now: iso(0) }) }, log), () => clock);
     assert.deepEqual(log.filter(entry => entry.startsWith('merge')), []);
-    assert.deepEqual(result.actions.filter(action => action.kind === 'merge' || action.kind === 'escalation'), [], 'GY-1235: GitHub merges on its branch protection');
+    assert.deepEqual(result.actions.filter(action => action.kind === 'merge' || action.kind === 'attention'), [], 'GY-1235: GitHub merges on its branch protection');
     assert.equal(result.metrics.cycle, 0);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
@@ -297,7 +297,7 @@ test('an unhealthy profile is routed around and an exhausted reviewer is escalat
     }, log), () => clock);
     assert.deepEqual(log.filter(entry => entry.startsWith('dispatch')), ['dispatch:GY-60']);
     assert.equal(result.actions.find(action => action.kind === 'dispatch')!.principal, 'spare-principal', 'the loop routes around the unhealthy profile');
-    const escalation = result.actions.find(action => action.kind === 'escalation' && /reviewer profile/.test(action.detail))!;
+    const escalation = result.actions.find(action => action.kind === 'review' && /reviewer profile/.test(action.detail))!;
     assert.match(escalation.detail, /exhausted for the current candidate/);
     assert.match(escalation.detail, /never an approval/);
     assert.equal(result.actions.some(action => action.kind === 'merge'), false, 'an exhausted reviewer never becomes a merge');
@@ -485,15 +485,15 @@ test('a busy fleet is capacity, not an escalation; a fleet that cannot take work
     const ready = work({ id: 'ready-1', key: 'GY-80' });
     const busy = effects({ agents: () => [{ name: 'agent-codex', pane_id: 'pane-1', agent_status: 'working' }], snapshot: async () => ({ work: [ready], now: iso(0) }) });
     const working = await runCycle(master, emptyDaemonState(master), busy, () => clock);
-    assert.equal(working.actions.some(action => action.kind === 'escalation'), false, 'every worker working is normal capacity');
+    assert.equal(working.actions.some(action => action.kind === 'attention'), false, 'every worker working is normal capacity');
     assert.equal(working.health[0].busy, true);
 
     const broken = effects({ snapshot: async () => ({ work: [ready], now: iso(0) }), credentials: async () => ({ codex: { available: false, reason: 'Worker credential file is unreadable' } }) });
     const state = emptyDaemonState(master);
     const first = await runCycle(master, state, broken, () => clock);
-    assert.match(first.actions.find(action => action.kind === 'escalation')!.detail, /No worker profile can take GY-80.*unreadable/);
+    assert.match(first.actions.find(action => action.kind === 'attention')!.detail, /No worker profile can take GY-80.*unreadable/);
     const second = await runCycle(master, state, broken, () => clock + 20_000);
-    assert.equal(second.actions.some(action => action.kind === 'escalation'), false, 'an unchanged escalation is stated once, not every cycle');
+    assert.equal(second.actions.some(action => action.kind === 'attention'), false, 'an unchanged escalation is stated once, not every cycle');
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -540,7 +540,7 @@ test('a stable detail over the bound is recorded once, not re-recorded every cyc
     assert.equal(escalation.attempts, 1);
     for (let cycle = 1; cycle <= 4; cycle++) {
       const again = await runCycle(master, state, broken, () => clock + cycle * 20_000);
-      assert.equal(again.actions.some(action => action.kind === 'escalation'), false, `cycle ${cycle} does not report the unchanged escalation again`);
+      assert.equal(again.actions.some(action => action.kind === 'attention'), false, `cycle ${cycle} does not report the unchanged escalation again`);
       assert.equal(state.actions[key], escalation, `cycle ${cycle} does not rewrite the stored action`);
       assert.equal(state.actions[key].attempts, 1, `cycle ${cycle} leaves the attempts count unchanged`);
     }

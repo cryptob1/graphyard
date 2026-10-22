@@ -89,10 +89,10 @@ export function actionableSubjects(config: Pick<MasterConfig, 'autoMerge' | 'run
     // A rework the loop owes is a subject until it is applied, unless a docs-sync session holds the conflict inside its bound (GY-1436).
     const rework = neededRework(item);
     const docsHeld = !!rework && rework.binding === `${item.candidate?.sha}:conflict` && !!context.docsSyncs && !!docsSyncHolding(context.docsSyncs, item, now);
-    if (rework && !docsHeld) add('decision', item, `${item.key} returns to a worker: ${rework.reason}`);
+    if (rework && !docsHeld) add('judgement', item, `${item.key} returns to a worker: ${rework.reason}`);
     if (item.stage === 'done') continue;
     const stall = stalled.get(item.key);
-    if (stall) add('escalation', item, `${item.key} holds its ${stall.gate ?? 'unevaluated'} gate with no action, no dependency and no recorded human need: ${stall.refusal ?? stall.detail}`);
+    if (stall) add('attention', item, `${item.key} holds its ${stall.gate ?? 'unevaluated'} gate with no action, no dependency and no recorded human need: ${stall.refusal ?? stall.detail}`);
     // GY-1890: with no launch profile free the wait on a claimable item is the fleet's slot
     // capacity, so it is a capacity subject, not a dispatch one: the loop cannot end it by acting.
     // An item whose own launch is in flight already holds its slot: it waits on that launch, not the fleet.

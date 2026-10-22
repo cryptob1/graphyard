@@ -428,7 +428,7 @@ async function closeStepWithin(cycle: Cycle) {
     });
   });
 
-  const runtime = effects.herdr ? await carriedCall(cycle, 'sessions', 'escalation', 'herdr', () => effects.herdr!(), () => null) : null; // GY-1774: a carried inventory is recorded, and read again next cycle
+  const runtime = effects.herdr ? await carriedCall(cycle, 'sessions', 'attention', 'herdr', () => effects.herdr!(), () => null) : null; // GY-1774: a carried inventory is recorded, and read again next cycle
 
   await resumeStep(cycle, failedOver, runtime?.available !== false);
   await closeExitedWorkerSessions(cycle, runtime ?? null);

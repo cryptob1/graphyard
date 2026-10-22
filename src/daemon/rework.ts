@@ -100,11 +100,11 @@ export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = 
  */
 export interface ExhaustedProof { requestId: string; work: string; sha: string; group: string | null; proofs: string[]; attempts: string[]; reason: string }
 /** The attention that announces an exhausted request; the rework follows on a later cycle. */
-export const exhaustedProofKey = (entry: Pick<ExhaustedProof, 'work' | 'requestId'>) => `escalation:proof-exhausted:${entry.work}:${entry.requestId}`;
+export const exhaustedProofKey = (entry: Pick<ExhaustedProof, 'work' | 'requestId'>) => `proof-exhausted:${entry.work}:${entry.requestId}`;
 const groupName = (entry: ExhaustedProof) => `the ${entry.group ?? 'producer'} proof group${entry.proofs.length ? ` (${entry.proofs.join(', ')})` : ''}`;
 const quoteAttempts = (entry: ExhaustedProof, limit = 1600) => { const text = entry.attempts.map(attempt => `"${attempt}"`).join('; '); return text.length > limit ? `${text.slice(0, limit - 1)}…` : text || 'no attempt recorded'; };
 /** The attention the loop raises the cycle it first sees the request spent: group, every attempt's outcome, and the next step's owner. */
-export function exhaustedProofEscalation(entry: ExhaustedProof) {
+export function exhaustedProofDetail(entry: ExhaustedProof) {
   const unacted = unactedProducerAttempts(entry.attempts);
   if (unacted) {
     const runtimesOrAccounts = extractProducerAccountsOrRuntimes(entry.attempts);
@@ -175,7 +175,7 @@ export async function reworkStep(cycle: Cycle) {
   const stamp = new Date(clock).toISOString();
   const note = async (key: string, item: Work, kind: DaemonActionKind, outcome: 'done' | 'failed', detail: string, at = now()) =>
     performed.push(await record(state, key, { kind, work: item.key, principal: null, state: outcome, detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, epoch: item.epoch, cycle: state.cycle }, at, effects.persist));
-  const noteWait = async (item: Work, detail: string) => { const key = `wait:rework:${item.id}`; if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'done', detail); };
+  const noteWait = async (item: Work, detail: string) => { const key = `wait:rework:${item.id}`; if (detailChanged(state.actions[key], detail)) await note(key, item, 'judgement', 'done', detail); };
   const docsSync = docsSyncRoute({ config, state, effects, snapshot, sessions: async () => ({ agents, available: true }), note, inventorySpent: () => {}, stamp, clock });
   await docsSync.sweep();
   await retireDepartedWakes(cycle);
@@ -185,7 +185,7 @@ export async function reworkStep(cycle: Cycle) {
   // GY-971 planned bot rounds; GY-1764: reported to the review gate, and an unreported plan holds its item's rework.
   const mechanicalRead = effects.mechanicalFixes ? await effects.mechanicalFixes().catch(() => null) : null, mechanical = mechanicalRead?.requests ?? [];
   const planUnreported = await reportMechanicalPlans(snapshot.work, mechanical, effects, clock, planReportSink(state, note), effects.mechanicalFixes ? mechanicalRead : undefined);
-  for (const item of snapshot.work) await isolate('decision', item, item.key, async () => {
+  for (const item of snapshot.work) await isolate('judgement', item, item.key, async () => {
     if (planUnreported.has(item.id)) return;
     const rework = neededRework(item, exhausted, mechanical);
     if (!rework) return retireMootWake(item, 'the item no longer needs the rework the wake was to feed');
@@ -206,9 +206,9 @@ export async function reworkStep(cycle: Cycle) {
       // The verdict-to-rework latency the loop is judged on (metrics.ts `latencyTargets`).
       const verdictAt = verdict ? Date.parse(verdict.at) : Number.NaN;
       if (Number.isFinite(verdictAt) && rework.binding.includes(':verdict:')) state.latency.push(latencySampleSchema.parse({ work: item.key, at: stamp, verdictToReworkMs: Math.max(0, Math.round(clock - verdictAt)) }));
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'done', detail: `Returned ${item.key} to a worker: ${rework.reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'judgement', work: item.key, principal: null, state: 'done', detail: `Returned ${item.key} to a worker: ${rework.reason}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     } catch (error) {
-      performed.push(await record(state, key, { kind: 'decision', work: item.key, principal: null, state: 'failed', detail: `Could not return ${item.key} to a worker: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
+      performed.push(await record(state, key, { kind: 'judgement', work: item.key, principal: null, state: 'failed', detail: `Could not return ${item.key} to a worker: ${message(error)}`, attempts, epoch: item.epoch, cycle: state.cycle }, now(), effects.persist));
     }
   });
 }

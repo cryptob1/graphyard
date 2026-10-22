@@ -1,5 +1,5 @@
 import type pg from 'pg';
-import { demand, type Principal, type Work } from '../model.js';
+import { demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
 import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
 import { deliveredObservationRefusal } from '../model/loop-observation.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
@@ -43,6 +43,7 @@ export async function closeWork(services: Services, caller: Principal, id: strin
     demand(['admin', 'coordinator', 'operator-agent'].includes(actor.role), 'Only the master (coordinator or operator agent) or an admin may close work', 403);
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    demand(operatorScopeIncludes(actor, work!), 'Work item is outside this operator-agent scope', 403);
     const refused = closeRefusal(work!); demand(!refused, refused!, 409);
     const badRef = closureRefRefusal(work!, all, data.kind, ref) ?? (data.kind === 'delivered-observation' ? deliveredObservationRefusal(work!, all, ref!, now) : null); demand(!badRef, badRef!, 422);
     if (ancestry) demand(ancestry.contained, `Commit ${ref} is not an ancestor of the base branch (${ancestry.base.slice(0, 12)}); an item is superseded only by work that landed`, 422);

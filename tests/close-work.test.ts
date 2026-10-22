@@ -149,6 +149,19 @@ test('integration:close-refusals — a live lease is ended by the close, and onl
   assert.equal((await ok(operator, `work/${(await released('admin closes')).id}/close`, { kind: 'obsolete', reason: 'Not wanted' })).stage, 'done');
 });
 
+test('integration:close-out-of-scope — an operator agent scoped to one item cannot close another', async () => {
+  const [mine, other] = [await released('in scope'), await released('out of scope')];
+  const agent: Principal = { id: 'close-agent', role: 'operator-agent', sessionKind: 'ai', scope: { repositories: [repository], workItems: [mine.key] } } as Principal;
+  const authorizer = engine.operatorAuthorizer;
+  engine.operatorAuthorizer = (async (_db: unknown, _now: Date, actor: Principal) => actor) as unknown as Engine['operatorAuthorizer'];
+  const services = { engine, repository, principals: [] } as unknown as Services;
+  try {
+    await assert.rejects(closeWork(services, agent, other.id, { kind: 'obsolete', reason: 'Not wanted' }, randomUUID()), /outside this operator-agent scope/);
+    assert.equal((await reload(other.id)).stage, 'ready', 'the out-of-scope item is untouched');
+    assert.equal((await closeWork(services, agent, mine.id, { kind: 'obsolete', reason: 'Not wanted' }, randomUUID()) as Work).stage, 'done');
+  } finally { engine.operatorAuthorizer = authorizer; }
+});
+
 test('integration:close-withdraws-human-request — the parked human-only request is withdrawn and leaves the Needs-you list', async () => {
   const work = await released('parked on a human');
   const claimed = await ok(worker, `work/${work.id}/claim`, {}) as Work;

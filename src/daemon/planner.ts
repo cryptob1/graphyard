@@ -8,7 +8,7 @@ import { goalPlanSchema, maxPlanRounds, planNoteMaxWords, planRefusals, mergedIt
 import { capacityRefusal, selectFleetSession } from '../fleet.js';
 import { heldAwareProbe } from '../master/environments.js';
 import { Refusal, RefusedResponse } from '../model/refusal.js';
-import { refusedOutright } from './acceptance.js';
+import { acceptanceRole, refusedOutright } from './acceptance.js';
 import { simplicityParagraph } from '../reviewer.js';
 /** A plan the control plane rejects as input (422): it counts as a refused plan round. Authority and state refusals (401, 403, 409) do not, and are posted again in an hour. */
 const invalidPlan = (error: unknown) => (error instanceof Refusal || error instanceof RefusedResponse) && error.status === 422;
@@ -148,13 +148,13 @@ export async function plannerStep(cycle: Cycle) {
   const note: Note = async (goal, outcome, detail) => {
     const key = `planner:${goal.id}`;
     if (!detailChanged(state.actions[key], clip(detail, 1000))) return;
-    performed.push(await record(state, key, { kind: 'decision', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'judgement', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
   };
   const isolate = carriedIsolate(cycle, 'triage'); // GY-1774: a call carried past the step's bound is recorded waiting on its goal, never noted as a failure
-  const goals = await isolate('decision', null, 'the goals being planned', () => planner.goals());
+  const goals = await isolate('judgement', null, 'the goals being planned', () => planner.goals());
   for (const goal of goals ?? []) {
     if (!goal.merged) continue;
-    await isolate('decision', null, `the plan of ${goal.key}`, async () => {
+    await isolate('judgement', null, `the plan of ${goal.key}`, async () => {
       const result = pending.get(goal.id);
       if (result && result.revision !== goal.revision) pending.delete(goal.id);
       if (goal.stage === 'planning') return planning(cycle, planner, goal, note);
@@ -167,7 +167,7 @@ export async function plannerStep(cycle: Cycle) {
 
 function deferred(cycle: Cycle, goal: Goal, result: Pending, step: 'plan' | 'judge', note: Note) {
   pending.delete(goal.id); later(cycle, goal, step, planPollMs);
-  return note(goal, 'waiting', `The ${step === 'plan' ? 'planner' : 'approver'} is at its registry capacity (${result.deferred}); ${goal.key}'s ${step === 'plan' ? 'plan' : 'plan judgement'} starts no fallback and is launched again in five minutes`);
+  return note(goal, 'waiting', `The ${step === 'plan' ? 'planner' : 'acceptance role'} is at its registry capacity (${result.deferred}); ${goal.key}'s ${step === 'plan' ? 'plan' : 'plan judgement'} starts no fallback and is launched again in five minutes`);
 }
 
 async function planning(cycle: Cycle, planner: PlannerEffects, goal: Goal, note: Note) {
@@ -271,7 +271,7 @@ interface Calls {
 }
 /**
  * The planner's effects under the live configuration: runners as the acceptance role's (the
- * registry's planner or approver role when an operator defines one, else Pi on `run.diagnostician`'s
+ * registry's planner or acceptance role when an operator defines one, else Pi on `run.diagnostician`'s
  * models), plans and verdicts posted as the master's operator-agent identity.
  */
 export function plannerEffects(config: MasterConfig, root: string, calls: Calls): PlannerEffects {
@@ -282,7 +282,7 @@ export function plannerEffects(config: MasterConfig, root: string, calls: Calls)
     goals: async () => (await calls.asCoordinator('goals?open=1')).goals,
     runner: async (role, attempt, goal) => {
       if (attempt === 'primary') {
-        const [name, principal] = role === 'plan' ? [plannerRole, config.operatorAgent!.id] as const : ['approver', config.operatorAgent!.id] as const;
+        const name = role === 'plan' ? plannerRole : acceptanceRole, principal = config.operatorAgent!.id;
         const fleet = await selectFleetSession(config, name, { name, principal }, await heldAwareProbe(config, { work: goal.key })); // an account held here, or its twin, is spent (GY-1574)
         if (fleet) { const launched = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launched.command, model: launched.model, release: fleet.release }; }
       }

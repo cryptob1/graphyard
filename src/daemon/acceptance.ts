@@ -207,7 +207,7 @@ const later = (cycle: Cycle, goal: Goal, step: string, ms: number) => { retryAt.
 /** A run the full role deferred: dropped, and launched again after one poll interval. */
 function deferred(cycle: Cycle, goal: Goal, result: Pending, step: 'draft' | 'judge', note: Note) {
   pending.delete(goal.id); later(cycle, goal, step, acceptancePollMs);
-  return note(goal, 'waiting', `The ${step === 'draft' ? 'acceptance role' : 'approver'} is at its registry capacity (${result.deferred}); ${goal.key}'s ${step === 'draft' ? 'draft' : 'judgement'} starts no fallback and is launched again in five minutes`);
+  return note(goal, 'waiting', `The acceptance role is at its registry capacity (${result.deferred}); ${goal.key}'s ${step === 'draft' ? 'draft' : 'judgement'} starts no fallback and is launched again in five minutes`);
 }
 
 /**
@@ -222,13 +222,13 @@ export async function acceptanceStep(cycle: Cycle) {
   const note: Note = async (goal, outcome, detail, caught) => {
     const key = `acceptance:${goal.id}`;
     if (!detailChanged(state.actions[key], clip(detail, 1000))) return;
-    performed.push(await record(state, key, { kind: 'decision', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'judgement', work: goal.key, principal: null, state: outcome, detail: clip(detail, 1000), attempts: (state.actions[key]?.attempts ?? 0) + (outcome === 'failed' ? 1 : 0), cycle: state.cycle }, now(), effects.persist));
   };
   // GY-1774: a call carried past the step's bound is recorded waiting on its goal and retried next cycle, never noted as a failure.
   const isolate = carriedIsolate(cycle, 'triage');
-  const goals = await isolate('decision', null, 'the goals', () => acceptance.goals());
+  const goals = await isolate('judgement', null, 'the goals', () => acceptance.goals());
   for (const goal of goals ?? []) {
-    await isolate('decision', null, `the acceptance of ${goal.key}`, async () => {
+    await isolate('judgement', null, `the acceptance of ${goal.key}`, async () => {
       const result = pending.get(goal.id);
       if (result && result.revision !== goal.revision) pending.delete(goal.id);
       if (goal.stage === 'acceptance-drafting') return drafting(cycle, acceptance, goal, note);
@@ -236,7 +236,7 @@ export async function acceptanceStep(cycle: Cycle) {
       if (goal.stage === 'accepted') return accepted(cycle, acceptance, goal, note);
     });
     // GY-1806: a requested case change is judged whatever the goal's stage (a delivered goal included), so no implementer blocks on it.
-    if (goal.caseChanges?.some(change => change.state === 'requested')) await isolate('decision', null, `the case changes of ${goal.key}`, () => caseChangeStep(cycle, acceptance, goal, note));
+    if (goal.caseChanges?.some(change => change.state === 'requested')) await isolate('judgement', null, `the case changes of ${goal.key}`, () => caseChangeStep(cycle, acceptance, goal, note));
   }
 }
 
@@ -508,7 +508,7 @@ export function acceptanceEffects(config: MasterConfig, root: string, calls: Cal
     goals: async () => (await calls.asCoordinator('goals')).goals, // every goal: a delivered one still protects its cases and may carry a requested change (GY-1806)
     runner: async (role, attempt, goal) => {
       if (attempt === 'primary') {
-        const [name, principal] = role === 'draft' ? [acceptanceRole, config.operatorAgent!.id] as const : ['approver', config.operatorAgent!.id] as const;
+        const name = acceptanceRole, principal = config.operatorAgent!.id;
         const fleet = await selectFleetSession(config, name, { name, principal }, await heldAwareProbe(config, { work: goal.key })); // an account held here, or its twin, is spent (GY-1574)
         if (fleet) { const launched = registryHeadlessLaunch(fleet.account); return { runner: registryRunner(fleet.account), runtime: launched.command, model: launched.model, release: fleet.release }; }
       }

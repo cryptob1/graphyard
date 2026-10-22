@@ -55,7 +55,7 @@ export function reconcilePendingActions(state: DaemonState, work: Work[], now: n
       // A per-item deployment record from before GY-1981 (done = merged): nothing records or retries one now.
       next.state = 'done';
       next.detail = 'Resumed: per-item deployment records are retired; the item was delivered at its merge';
-    } else if (action.kind === 'decision') {
+    } else if (action.kind === 'judgement') {
       // A rework the restart interrupted is decided again from the snapshot: one that applied left the item reworked.
       next.state = 'failed';
       next.detail = 'Resumed: the rework was interrupted; the next cycle decides it again from the snapshot';

@@ -112,7 +112,7 @@ export const piRuntimeSchema = z.object({
 export type PiRuntime = z.infer<typeof piRuntimeSchema>;
 
 /** The runtime a narrow role launches on; the producer runs on Pi only for the unit group. */
-export function narrowRoleRuntime(run: { runtimes?: z.infer<typeof narrowRoleRuntimeSchema> } | undefined, role: 'approver' | 'producer', group?: string): NarrowRoleRuntime {
+export function narrowRoleRuntime(run: { runtimes?: z.infer<typeof narrowRoleRuntimeSchema> } | undefined, role: 'producer', group?: string): NarrowRoleRuntime {
   const selected = run?.runtimes?.[role] ?? 'herdr';
-  return role === 'producer' && selected === 'pi' && group !== 'unit' ? 'herdr' : selected;
+  return selected === 'pi' && group !== 'unit' ? 'herdr' : selected;
 }

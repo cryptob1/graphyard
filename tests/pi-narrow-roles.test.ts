@@ -109,9 +109,8 @@ function herdr(calls: string[][] = []) {
 const evidence = (proof: string, result = 'pass') => ({ proof, sha: H, baseSha: B, policyRevision: 4, result, executed: 3, skipped: 0, exercise: { criterion: 'AC-2', behaviour: 'schema checks removed', result: 'fail', executed: 3 } });
 
 test('integration:pi-narrow-roles the master config selects each narrow role\'s runtime, and an absent setting is today\'s Herdr launch', () => {
-  assert.equal(narrowRoleRuntime(undefined, 'approver'), 'herdr');
+  assert.equal(narrowRoleRuntime(undefined, 'producer', 'unit'), 'herdr');
   assert.equal(narrowRoleRuntime({}, 'producer', 'unit'), 'herdr');
-  assert.equal(narrowRoleRuntime({ runtimes: { approver: 'pi' } }, 'approver'), 'pi');
   assert.equal(narrowRoleRuntime({ runtimes: { approver: 'pi' } }, 'producer', 'unit'), 'herdr', 'each role is selected on its own');
   assert.equal(narrowRoleRuntime({ runtimes: { producer: 'pi' } }, 'producer', 'unit'), 'pi');
   assert.equal(narrowRoleRuntime({ runtimes: { producer: 'pi' } }, 'producer', 'integration'), 'herdr', 'only the unit proof producer runs on Pi');

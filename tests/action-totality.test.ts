@@ -328,10 +328,10 @@ test('unit:actionless-item-visible — an item with no action and nothing moving
   // The coordination loop counts it as a subject, so its wait accumulates against the silence
   // bound instead of being absent from every measure the loop keeps.
   const subjects = actionableSubjects({ autoMerge: true, run: { proofWorkflow: false } } as any, world, now.getTime());
-  const escalation = subjects.find(subject => subject.work === 'GY-MUTE' && subject.kind === 'escalation');
+  const escalation = subjects.find(subject => subject.work === 'GY-MUTE' && subject.kind === 'attention');
   assert.ok(escalation, 'the loop has a subject for it');
   assert.match(escalation!.detail, /holds its review gate with no action, no dependency and no recorded human need/);
-  assert.equal(subjects.some(subject => subject.work === 'GY-DEP' && subject.kind === 'escalation'), false);
+  assert.equal(subjects.some(subject => subject.work === 'GY-DEP' && subject.kind === 'attention'), false);
 
   // The dashboard names it too, and reads the same items as stalled as the control plane does.
   assert.deepEqual(stalledCards(computed, now.getTime()).map(card => card.item.key), stalledItems(world, now, 0).map(entry => entry.key),

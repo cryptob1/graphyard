@@ -101,7 +101,7 @@ test('unit:producer-manual-proof-never-escalated — a judged manual failure rew
     persist: async () => {},
   } as unknown as DaemonEffects;
   const result = await runCycle(config, emptyDaemonState(config), deps, () => Date.parse(at));
-  assert.ok(!result.actions.some(action => action.kind === 'escalation' && /operator-witnessed/.test(action.detail ?? '')), 'no proof is parked for an operator witness');
+  assert.ok(!result.actions.some(action => action.kind === 'attention' && /operator-witnessed/.test(action.detail ?? '')), 'no proof is parked for an operator witness');
   for (const action of result.actions)
     assert.doesNotMatch(action.detail ?? '', new RegExp(PROOF), 'a producer-runnable manual proof is never parked as operator-witnessed');
 });

@@ -429,7 +429,7 @@ export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string
   let entry = running.get(key), sent = false;
   // A step whose budget is spent starts no phase: it stays owed to the next cycle, which starts it on a fresh budget.
   if (!entry && budgetLeft() === 0) {
-    await recordCarried(cycle, `carried:${key}`, { kind: 'decision', work: null }, new StepCallCarriedError(`the ${step} step's budget passed before the ${name} phase was made (${stepCallBoundMs} ms per call, 0 ms left); the phase stays owed and is retried next cycle`, false), `The ${step} step's ${name} phase`);
+    await recordCarried(cycle, `carried:${key}`, { kind: 'judgement', work: null }, new StepCallCarriedError(`the ${step} step's budget passed before the ${name} phase was made (${stepCallBoundMs} ms per call, 0 ms left); the phase stays owed and is retried next cycle`, false), `The ${step} step's ${name} phase`);
     return;
   }
   if (!entry) {
@@ -455,7 +455,7 @@ export async function boundedPhase(cycle: Cycle, step: BoundedStep, name: string
   try { await Promise.race([flight, expired]); }
   catch (error) {
     if (!carried) throw error;
-    await recordCarried(cycle, `carried:${key}`, { kind: 'decision', work: null }, error, `The ${step} step's ${name} phase`);
+    await recordCarried(cycle, `carried:${key}`, { kind: 'judgement', work: null }, error, `The ${step} step's ${name} phase`);
     return;
   } finally { stopped = true; clearTimeout(timer); if (!gate.over) gate.open = false; }
   if (carriedRow(previous)) await retireCarried(cycle, `carried:${key}`, previous, `The ${step} step's ${name} phase, carried on cycle ${previous.cycle}, ran through on its retry`);

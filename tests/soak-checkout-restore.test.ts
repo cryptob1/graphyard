@@ -232,7 +232,7 @@ test('unit:soak-checkout-restore-served-once — over two simulated days of the 
   assert.ok(after.every(entry => entry.escalation === 'done'), 'the escalation stays settled');
   assert.equal(new Set(after.map(entry => entry.attempts)).size, 1, 'no further failed attempt is recorded');
   assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:dirty-checkout')).length, 1, 'one escalation row all days');
-  assert.ok(!journal.some(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart|escalation failed/.test(entry.line) && !/restart done/.test(entry.line)),
+  assert.ok(!journal.some(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart|attention failed/.test(entry.line) && !/restart done/.test(entry.line)),
     `the last restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts.at(-1)!.at && /checkout-restore|loop-restart/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
   assert.ok(new Set(reads.map(entry => entry.pid)).size >= 4, 'the days ran four loop processes');
 });
@@ -306,9 +306,9 @@ test('integration:soak-checkout-restore-drift — over two simulated days of the
   assert.ok(after.every(entry => entry.escalation === 'done' && entry.pid !== restarts[0].pid), 'the escalation stays settled under a new loop process');
   assert.equal(new Set(after.map(entry => entry.attempts)).size, 1, 'no further failed attempt is recorded');
   assert.equal(Object.keys(state.actions).filter(key => key.startsWith('escalation:dirty-checkout')).length, 1, 'one escalation row all days');
-  assert.ok(!journal.some(entry => entry.at > restarts[0].at && /checkout-restore|escalation failed|loop-restart/.test(entry.line) && !/restart done/.test(entry.line)),
-    `the restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts[0].at && /checkout-restore|escalation failed/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
-  const settledLine = journal.find(entry => entry.pid === served[0].pid && entry.line.includes('escalation done:'));
+  assert.ok(!journal.some(entry => entry.at > restarts[0].at && /checkout-restore|attention failed|loop-restart/.test(entry.line) && !/restart done/.test(entry.line)),
+    `the restarted loop serves nothing again: ${journal.filter(entry => entry.at > restarts[0].at && /checkout-restore|attention failed/.test(entry.line)).map(entry => entry.line).join(' | ')}`);
+  const settledLine = journal.find(entry => entry.pid === served[0].pid && entry.line.includes('attention done:'));
   assert.ok(settledLine && settledLine.at <= restarts[0].at && settledLine.line.includes(`is clean again at ${adopted.slice(0, 12)}, the commit the loop runs`), `the serving loop settled the drift onto the adopted HEAD before restarting: ${settledLine?.line}`);
 });
 
@@ -376,5 +376,5 @@ test('integration:soak-checkout-restore-diverged — over two simulated days of 
   assert.ok(after.every(entry => entry.escalation === 'done' && entry.pid !== restarts[0].pid), 'the escalation stays settled under a new loop process');
   assert.equal(new Set(after.map(entry => entry.attempts)).size, 1, 'no further failed attempt is recorded');
   assert.equal(git(main, 'for-each-ref', '--format=%(refname)', checkoutRestoreRefPrefix).split('\n').filter(Boolean).length, 1, 'no later cycle saved another ref');
-  assert.ok(!journal.some(entry => entry.at > restarts[0].at && /checkout-restore|escalation failed|loop-restart/.test(entry.line) && !/restart done/.test(entry.line)), 'the restarted loop serves nothing again');
+  assert.ok(!journal.some(entry => entry.at > restarts[0].at && /checkout-restore|attention failed|loop-restart/.test(entry.line) && !/restart done/.test(entry.line)), 'the restarted loop serves nothing again');
 });

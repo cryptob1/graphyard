@@ -239,7 +239,7 @@ test('integration:master-config-reload — a running loop adopts master.json cha
     assert.equal(result.cycles.length, 4);
     const actions = Object.values(state.actions);
     assert.ok(actions.some(action => action.kind === 'config' && /Adopted .*autoMerge/.test(action.detail)));
-    assert.equal(actions.filter(action => action.kind === 'escalation' && /bound to; restart master run/.test(action.detail)).length, 1, 'a standing refusal is recorded once');
+    assert.equal(actions.filter(action => action.kind === 'attention' && /bound to; restart master run/.test(action.detail)).length, 1, 'a standing refusal is recorded once');
     assert.equal(state.config!.refused, reloads[3].refused);
     const noted = await noteConfigReload(emptyDaemonState(manual), reloads[2], async () => {});
     assert.equal(noted[0].state, 'failed');

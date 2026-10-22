@@ -1,4 +1,4 @@
-// Concern: cycle steps 5–7 — shepherd reviews, escalate merges the gates never authorized, the release-level deployment reading.
+// Concern: cycle steps 5–7 — shepherd reviews, name merges the gates never authorized, the release-level deployment reading.
 import { reviewProviderOf, reviewerProfileFor, exhaustedReviewerProfiles } from '../model.js';
 import { type Work } from '../model.js';
 import { mergedWithoutAuthorization, unauthorizedMergeViolation } from '../model/merge-authorization.js';
@@ -6,7 +6,7 @@ import { boundDeployment, type DaemonAction, type DaemonState, deploymentObserva
 import { candidateKey } from './reconcile.js';
 import { readyToRetry } from './sessions.js';
 import { detailChanged } from './text.js';
-import { exhaustedProofEscalation, exhaustedProofKey, standingVerdict } from './rework.js';
+import { exhaustedProofDetail, exhaustedProofKey, standingVerdict } from './rework.js';
 import { record } from './effects.js';
 import type { Cycle } from './cycle.js';
 import { defaultDeploymentReuseMinutes, deploymentDetail, deploymentStepBudgetMs, reusableDeployment, stillVerifying, withinDeploymentBudget } from './deployment.js';
@@ -17,7 +17,7 @@ import { throughputRemeasureAt } from '../throughput.js';
 export async function shepherdStep(cycle: Cycle) {
   const { state, effects, now, performed, isolate, open } = cycle;
   // 5. Shepherd reviews for submitted candidates. Graphyard dispatches provider reviews; the daemon
-  //    records exactly one request per candidate and escalates what only a human may resolve.
+  //    records exactly one request per candidate.
   //    Proofs gate nothing and no producer is requested (GY-1266, GY-1235).
   //    A producer request whose attempts are used up is raised here the cycle it is first seen
   //    (GY-496); the rework step applies the rework on a later cycle (rework.ts).
@@ -28,20 +28,15 @@ export async function shepherdStep(cycle: Cycle) {
       const key = candidateKey('review', item);
       const provider = reviewProviderOf(item.policy);
       const exhausted = provider === 'agent' && !reviewerProfileFor(item) && exhaustedReviewerProfiles(item).length > 0;
-      if (exhausted) {
-        const escalation = `${item.key}: every configured reviewer profile is exhausted for the current candidate (${exhaustedReviewerProfiles(item).join(', ')}); add reviewer capacity or revise the review policy. Exhaustion is never an approval.`;
-        const escalationKey = `escalation:review:${item.id}:${item.candidate!.sha}:${item.policyRevision}`;
-        if (state.actions[escalationKey]?.state !== 'done') performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: escalation, attempts: 1, cycle: state.cycle }, now(), effects.persist));
-      } else {
-        const detail = provider === 'github' ? `${item.key}: an independent reviewer session's approval of the current commit is required; the coordinator cannot supply it`
+      const detail = exhausted ? `${item.key}: every configured reviewer profile is exhausted for the current candidate (${exhaustedReviewerProfiles(item).join(', ')}); add reviewer capacity or revise the review policy. Exhaustion is never an approval.`
+        : provider === 'github' ? `${item.key}: an independent reviewer session's approval of the current commit is required; the coordinator cannot supply it`
           : item.reviewRequest ? `${item.key}: Graphyard dispatched ${provider} review to profile ${item.reviewRequest.profile ?? provider}; waiting for a verdict on ${item.candidate!.sha.slice(0, 12)}`
             : `${item.key}: waiting for Graphyard to dispatch a ${provider} review for ${item.candidate!.sha.slice(0, 12)}`;
-        if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
-      }
+      if (detailChanged(state.actions[key], detail)) performed.push(await record(state, key, { kind: 'review', work: item.key, principal: null, state: 'done', detail, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }
     for (const entry of exhausted.filter(entry => entry.work === item.key && entry.sha === item.candidate!.sha)) {
       const key = exhaustedProofKey(entry);
-      if (!state.actions[key]) performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: exhaustedProofEscalation(entry), attempts: 1, cycle: state.cycle }, now(), effects.persist));
+      if (!state.actions[key]) performed.push(await record(state, key, { kind: 'proof', work: item.key, principal: null, state: 'done', detail: exhaustedProofDetail(entry), attempts: 1, cycle: state.cycle }, now(), effects.persist));
     }
   });
 }
@@ -53,10 +48,10 @@ export async function shepherdStep(cycle: Cycle) {
  */
 export async function mergeStep(cycle: Cycle) {
   const { state, effects, now, performed, isolate, open } = cycle;
-  for (const item of open.filter(mergedWithoutAuthorization)) await isolate('escalation', item, item.key, async () => {
-    const key = `${candidateKey('escalation', item)}:merged`;
+  for (const item of open.filter(mergedWithoutAuthorization)) await isolate('merge', item, item.key, async () => {
+    const key = `${candidateKey('merge', item)}:unauthorized`;
     if (state.actions[key]?.state === 'done') return;
-    performed.push(await record(state, key, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage with its violation; graphyard master create FILE files the follow-up that re-verifies what the merge skipped`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
+    performed.push(await record(state, key, { kind: 'merge', work: item.key, principal: null, state: 'done', detail: `${item.key} was merged (${item.observation!.mergeSha?.slice(0, 12) ?? 'merge commit unknown'} at ${item.observation!.mergedAt ?? 'an unrecorded time'}) though its gates had not passed on that head: ${unauthorizedMergeViolation}. It stays at the merge stage with its violation; graphyard master create FILE files the follow-up that re-verifies what the merge skipped`, attempts: 1, cycle: state.cycle }, now(), effects.persist));
   });
 }
 

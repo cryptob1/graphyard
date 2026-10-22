@@ -12,7 +12,7 @@ type LedgerRead = { answered?: readonly AnsweredApproval[] };
 type Effects = { recordMechanicalPlan?: (item: Work, plan: { reviewId: number; head: string } | null, answered?: { reviewId: number; head: string }) => Promise<unknown>; mechanicalFixes?: unknown };
 /** Where a report's outcome goes: `fail` names a write that failed; `settle` ends what an earlier failure of the same report recorded, once delivery settled its target. */
 export type PlanReportSink = { fail: (item: Work, detail: string) => Promise<void>; settle: (item: Work) => Promise<void> };
-type Note = (key: string, item: Work, kind: 'decision', outcome: 'done' | 'failed', detail: string) => Promise<unknown>;
+type Note = (key: string, item: Work, kind: 'judgement', outcome: 'done' | 'failed', detail: string) => Promise<unknown>;
 
 /**
  * The loop's sink (cycle-decisions.ts): a failed write is one `mechanical-plan:ID` action row, rewritten when its text
@@ -21,8 +21,8 @@ type Note = (key: string, item: Work, kind: 'decision', outcome: 'done' | 'faile
 export function planReportSink(state: Pick<DaemonState, 'actions'>, note: Note): PlanReportSink {
   const keyOf = (item: Work) => `mechanical-plan:${item.id}`;
   return {
-    async fail(item, detail) { const key = keyOf(item); if (detailChanged(state.actions[key], detail)) await note(key, item, 'decision', 'failed', detail); },
-    async settle(item) { const key = keyOf(item); if (state.actions[key]?.state !== 'failed') return; await note(key, item, 'decision', 'done', `${item.key}'s mechanical plan report is settled: the item was delivered after the cycle's snapshot, so the write it owed has no target`); },
+    async fail(item, detail) { const key = keyOf(item); if (detailChanged(state.actions[key], detail)) await note(key, item, 'judgement', 'failed', detail); },
+    async settle(item) { const key = keyOf(item); if (state.actions[key]?.state !== 'failed') return; await note(key, item, 'judgement', 'done', `${item.key}'s mechanical plan report is settled: the item was delivered after the cycle's snapshot, so the write it owed has no target`); },
   };
 }
 

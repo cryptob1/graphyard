@@ -254,11 +254,11 @@ test('integration:unattended-full-cycle — with no master session and no human 
 
   const kinds = steps(performed);
   assert.equal(kinds.filter(entry => entry === 'dispatch:GY-84:done').length, 4, 'every attempt was dispatched by the loop');
-  assert.equal(performed.filter(action => action.kind === 'decision' && /^Returned GY-84 to a worker: /.test(action.detail)).length, 2, 'one rework per round');
+  assert.equal(performed.filter(action => action.kind === 'judgement' && /^Returned GY-84 to a worker: /.test(action.detail)).length, 2, 'one rework per round');
   assert.deepEqual(kinds.filter(entry => entry.startsWith('merge:')), [], 'GitHub merged the green candidate; the loop merges nothing (GY-1235)');
   assert.equal(item.delivery?.mergeSha, hex('merge-GY-84-4'), 'the delivery is the fourth attempt\'s, after the rework rounds it needed');
   // Nothing in the drive was left to a person: every recorded action is the loop's own.
-  const escalations = performed.filter(action => action.kind === 'escalation');
+  const escalations = performed.filter(action => action.kind === 'attention');
   assert.deepEqual(escalations.map(action => action.detail), [], 'an unattended cycle escalates nothing it can do itself');
 
   // The rework behind each of those rounds, read from the item alone: a verdict standing against the exact head.
@@ -356,7 +356,7 @@ test('integration:no-actionable-silence — every cycle records what it could ac
   // The subject the wake reads names the item and what holds it, for as long as nothing can act.
   assert.deepEqual(actionableSubjects(master, simulation.work, simulation.now()).map(subject => [subject.kind, subject.work]), [['dispatch', 'GY-400']]);
   assert.match(actionableSubjects(master, simulation.work, simulation.now())[0].detail, /GY-400 is claimable and waiting for a worker/);
-  assert.deepEqual(steps(first.actions), ['escalation:GY-400:done'], 'and what it did: the escalation naming the profile it cannot use');
+  assert.deepEqual(steps(first.actions), ['attention:GY-400:done'], 'and what it did: the attention line naming the profile it cannot use');
 
   let last = first;
   // Over an hour of stillness: the progress watchdog's bound, not the responsive cadence's.
@@ -490,7 +490,7 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
   const noted = emptyDaemonState(master);
   await runDaemon(master, noted, simulation.effects(), { once: true, intervalMs, identity: { pid: process.pid, host: master.hostId }, now: simulation.now, log: () => {}, signals: [],
     environment: { NOTIFY_SOCKET: '/run/notify', WATCHDOG_USEC: String(30 * 1_000_000) } });
-  assert.ok(Object.values(noted.actions).some(action => action.kind === 'escalation' && /watchdog window/.test(action.detail)), 'the mismatch is recorded where master status reads it');
+  assert.ok(Object.values(noted.actions).some(action => action.kind === 'attention' && /watchdog window/.test(action.detail)), 'the mismatch is recorded where master status reads it');
 
   // The report `master status` prints puts it first, ahead of every work item, and counts it.
   const directory = await temporaryDirectory('loop');
@@ -532,7 +532,7 @@ test('a rework the server refuses is applied again on a later cycle, automatic m
   simulation.refusals.rework = 1;
   const performed: DaemonAction[] = [];
   for (let pass = 0; pass < 12 && !item.reworkRequested && item.epoch === 1; pass++) performed.push(...(await cycle(state, master, simulation, effects)).actions);
-  assert.ok(performed.some(action => action.kind === 'decision' && action.state === 'failed' && /Could not return GY-701 to a worker: .*503/.test(action.detail)), performed.map(action => action.detail).join('\n'));
+  assert.ok(performed.some(action => action.kind === 'judgement' && action.state === 'failed' && /Could not return GY-701 to a worker: .*503/.test(action.detail)), performed.map(action => action.detail).join('\n'));
   assert.equal(simulation.reworks.get(item.id)!.length, 1, 'applied once the server accepts it');
   assert.match(simulation.reworks.get(item.id)![0].reason, /graphyard-reviewer\[bot\] requested changes/);
 
@@ -603,7 +603,7 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
     assert.equal(standingVerdict(item), null, `${name}: no verdict stands`);
     assert.equal(neededRework(item), null, `${name}: no rework is needed`);
     const { actions } = await run();
-    assert.deepEqual(actions.filter(action => action.kind === 'decision').map(action => action.detail), [], `${name}: the loop asks for no rework`);
+    assert.deepEqual(actions.filter(action => action.kind === 'judgement').map(action => action.detail), [], `${name}: the loop asks for no rework`);
     assert.equal((simulation.reworks.get(item.id) ?? []).length, 0, `${name}: and none reached the control plane`);
   }
 

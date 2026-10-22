@@ -104,14 +104,14 @@ test('unit:stuck-merge-attention — master status names an item held at the mer
   // A refused reconciliation recorded before GY-2874 is still carried on the row.
   const refusedRow = buildMasterStatus({ work: [{ ...stuck, violations: [unauthorizedMergeViolation, 'Reconciliation by decision d1 refused: gate acceptance had not passed: proof missing'] }], now: at }, [], []).work[0];
   assert.equal(refusedRow.merged?.refusal, 'Reconciliation by decision d1 refused: gate acceptance had not passed: proof missing');
-  // The durable loop names the stuck item once as an escalation; GitHub merges, so nothing is offered a merge.
+  // The durable loop names the stuck item once; GitHub merges, so nothing is offered a merge.
   const effects: DaemonEffects = { agents: () => [], credentials: async () => ({}), snapshot: async () => ({ work: [stuck, waiting], now: at }), closeSession: () => {}, dispatch: async () => {},
     observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}), persist: async () => {} };
   const state = emptyDaemonState(config);
   const cycle = await runCycle(config, state, effects);
-  const escalation = cycle.actions.find(action => action.kind === 'escalation' && action.work === 'GY-81')!;
+  const escalation = cycle.actions.find(action => action.kind === 'merge' && action.work === 'GY-81')!;
   assert.match(escalation.detail, /was merged \(cccccccccccc at 2026-09-20T19:50:22Z\) though its gates had not passed on that head/);
   assert.match(escalation.detail, /graphyard master create FILE files the follow-up that re-verifies what the merge skipped/);
   const again = await runCycle(config, state, effects);
-  assert.equal(again.actions.some(action => action.kind === 'escalation' && action.work === 'GY-81'), false, 'the escalation is recorded once');
+  assert.equal(again.actions.some(action => action.kind === 'merge' && action.work === 'GY-81'), false, 'the escalation is recorded once');
 });

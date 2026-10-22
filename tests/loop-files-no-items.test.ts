@@ -84,7 +84,7 @@ test('unit:loop-files-no-items — a cycle with a failing base test, a flaked re
     assert.doesNotMatch(action.detail, /^Filed /, `nothing is filed: ${action.detail}`);
     // A throughput or owner escalation would be a work-item ask; a launch-profile escalation on a
     // review-stage item is not a filing, so only those are forbidden here.
-    if (action.kind === 'escalation' && /needs decision on |owner|Filed /.test(action.detail)) escalations.push(`${action.work}: ${action.detail}`);
+    if (action.kind === 'attention' && /needs decision on |owner|Filed /.test(action.detail)) escalations.push(`${action.work}: ${action.detail}`);
   }
   assert.deepEqual(escalations, [], `no throughput or owner escalation is raised: ${JSON.stringify(escalations)}`);
   assert.deepEqual(Object.keys(state.actions).filter(key => key.includes('throughput:owner')), [], 'no throughput owner record');

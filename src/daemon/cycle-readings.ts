@@ -220,7 +220,7 @@ export async function readingsStep(cycle: Cycle, served: DaemonState['deployment
     if (failed.length) {
       const measured = failed.map(entry => `${entry.proof}: ${detailOf(entry)}`).join('; ');
       const escalationKey = readingEscalationKey(item), escalation = `${item.key}'s reading of ${failed.map(entry => entry.proof).join(', ')} failed on the serving release ${short(release)}: ${measured}. The failed reading is recorded on the item; the loop reads it again on its backoff, and a later passing reading closes the item`;
-      if (detailChanged(state.actions[escalationKey], escalation)) performed.push(await record(state, escalationKey, { kind: 'escalation', work: item.key, principal: null, state: 'done', detail: escalation.slice(0, 2000), attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
+      if (detailChanged(state.actions[escalationKey], escalation)) performed.push(await record(state, escalationKey, { kind: 'attention', work: item.key, principal: null, state: 'done', detail: escalation.slice(0, 2000), attempts: (state.actions[escalationKey]?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
       return note('waiting', `Recorded ${item.key}'s failed reading on release ${short(release)}: ${measured}${cannot ? `; ${cannot}` : ''}`);
     }
     return close(item, release, readings.map(entry => ({ proof: entry.proof, detail: detailOf(entry) === 'already recorded' ? loopReadingOn(item, entry.proof, release)!.reading!.detail : detailOf(entry) })), note);

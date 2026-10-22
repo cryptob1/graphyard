@@ -4,7 +4,7 @@ import { randomUUID } from 'node:crypto';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { reconcileFleetSessions, runtimeSessionGone, settledRecordSessions, type FleetClient } from '../src/fleet.js';
+import { reconcileFleetSessions, settledRecordSessions, type FleetClient } from '../src/fleet.js';
 import { NoHealthyAccountError, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
@@ -52,8 +52,6 @@ async function config(): Promise<MasterConfig> {
 test('unit:reviewer-producer-sessions-end-with-record — a reviewer or producer registry session ends once its ledger record settles, and is kept while the record is pending; Herdr alone never judges one gone', async () => {
   const review = session('reviewer', 'GY-1'), pendingReview = session('reviewer', 'GY-2'), proof = session('producer', 'GY-3'), unrecorded = session('producer', 'GY-4');
   const { registry, client } = registryOf([review, pendingReview, proof, unrecorded]);
-  // Nothing in Herdr: a reviewer's or producer's Herdr name is not one the registry session determines, so no inventory ends it.
-  for (const entry of registry.sessions) assert.equal(runtimeSessionGone(entry, { agents: [], available: true }, HOST, clock), null);
 
   const settled = new Map([
     ...settledRecordSessions('reviewer', [{ session: review.id, state: 'completed', key: 'GY-1', agentName: 'review-claude-1' }, { session: pendingReview.id, state: 'pending', key: 'GY-2', agentName: 'review-claude-1' }]),

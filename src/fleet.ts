@@ -110,35 +110,6 @@ export function outOfCreditsScreen(output: string): ExhaustionSignal | null {
 }
 
 /**
- * How long a registry session is left alone after its selection before its runtime session is
- * looked for: the launch that follows a selection creates the Herdr tab within seconds, and a launch
- * on another process of this host may still be making it.
- */
-export const runtimeGraceMs = 60_000;
-/** The Herdr name prefixes every approver session for `key` starts with (see `approverSessionName`). */
-const approverPrefixes = (key: string) => ['graphyard-approver', 'gy-approver'].map(prefix => `${sessionName(prefix, key)}-`);
-/**
- * Why a live registry session no longer has a runtime session behind it, or null while it may. A
- * registry session records a launch, not a process: nothing reports a session's end, so a session
- * that judged its decision and exited kept its role's slot until its outer window passed, and after
- * `concurrency` launches the role stopped launching (GY-190). Herdr is the host's own record of what
- * runs, so a session selected on this host, past the launch grace, whose runtime session Herdr no
- * longer lists, has ended. Only roles whose runtime session name the registry session determines are
- * judged here — an approver is named for its item — and only from an inventory that could be read.
- * A reviewer's or producer's Herdr name comes from its local profile and request, which the registry
- * session does not carry, so those end with the ledger record that keeps their session id instead
- * (`settledRecordSessions`, GY-205); every other role's liveness stays with its lease or request.
- */
-export function runtimeSessionGone(session: FleetSession, runtime: RuntimeInventory | undefined, host: string | null | undefined, now: number): string | null {
-  if (session.endedAt || !runtime?.available || !host || session.host !== host) return null;
-  if (now - Date.parse(session.selectedAt) < runtimeGraceMs) return null;
-  if (session.role !== 'approver' || !session.work) return null;
-  const prefixes = approverPrefixes(session.work);
-  if (runtime.agents.some(agent => !!agent.name && prefixes.some(prefix => agent.name!.startsWith(prefix)))) return null;
-  return `its approver session for ${session.work} is gone from Herdr on ${host}`;
-}
-
-/**
  * Why the registry passed an account over, in the launcher's own three causes. Only a quota the
  * registry reads as spent is `exhausted`: a disabled, misplaced, unregistered or session-limited
  * account is something a master fixes in one command, and reporting it as spent would read as a
@@ -306,13 +277,7 @@ export async function selectFleetSession(config: FleetConfig, role: FleetRoleNam
     if (observation) observation.smoke = smoke;
     else observations.push({ account: account.name, quota: { loggedIn: null, state: 'unknown', usage: [], resetsAt: null, reason: null }, health: null, smoke });
   }));
-  // A session of this role whose runtime session is gone is ended before the choice, so the role's
-  // count is of sessions that actually run and a finished approver never refuses the next one.
   const now = probe.now?.() ?? Date.now();
-  for (const session of liveSessions(registry).filter(entry => entry.role === role)) {
-    const gone = runtimeSessionGone(session, probe.runtime, host, now);
-    if (gone) await client.end(session.id, gone).catch(() => {});
-  }
   const chosen = await client.select({ role, host, work: probe.work ?? null, group: probe.group ?? null, principal: probe.principal ?? profile.principal ?? null, ...probe.prefer ? { prefer: probe.prefer } : {}, ...probe.exclude?.length ? { exclude: probe.exclude } : {}, observations: observations.map(({ account, quota, smoke }) => ({ account, quota, ...(smoke ? { smoke } : {}) })) });
   const at = new Date(now).toISOString();
   const skipped: AccountSkip[] = chosen.skipped.map(entry => ({ at, role: role as AccountSkip['role'], profile: profile.name, environment: entry.account, reason: entry.reason, work: probe.work ?? null, cause: skipCause(entry.reason) }));
@@ -347,7 +312,7 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
     const twin = account && reason ? [exhaustedTwin(fleet.registry, account, now)].find(other => other && reason.includes(`same provider login as ${other.name},`)) ?? null : null;
     return { environment: name, healthy: !reason, reason, quota: twin ? 'exhausted' : account?.quota.state ?? 'unknown', resetsAt: twin ? twin.quota.resetsAt : account?.quota.resetsAt ?? null };
   });
-  const running = liveSessions(fleet.registry).filter(session => session.role === role && !runtimeSessionGone(session, probe.runtime, host, now)).length;
+  const running = liveSessions(fleet.registry).filter(session => session.role === role).length;
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
   const usable = !full && accounts.some(account => account.healthy);
   return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running };
@@ -365,8 +330,7 @@ export function settledRecordSessions(role: 'reviewer' | 'producer', records: re
 
 /**
  * The loop's reconciliation of the registry against what runs (GY-190): every live registry session
- * whose runtime session is gone from this host's Herdr, and every session the caller names as
- * finished (an approver whose decision is judged), is ended with the reason why. Returns what it
+ * the caller names as finished is ended with the reason why. Returns what it
  * ended. A configuration that names no control plane has no registry to reconcile.
  */
 export async function reconcileFleetSessions(config: FleetConfig, runtime: RuntimeInventory, finished: ReadonlyMap<string, string>, probe: FleetProbe = {}) {
@@ -374,7 +338,7 @@ export async function reconcileFleetSessions(config: FleetConfig, runtime: Runti
   const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs);
   const registry = await client.document(), now = probe.now?.() ?? Date.now(), ended: { session: string; role: FleetRoleName; work: string | null; account: string; reason: string }[] = [];
   for (const session of liveSessions(registry)) {
-    const reason = finished.get(session.id) ?? runtimeSessionGone(session, runtime, config.hostId, now);
+    const reason = finished.get(session.id);
     if (!reason) continue;
     await client.end(session.id, reason);
     ended.push({ session: session.id, role: session.role, work: session.work, account: session.account, reason });
@@ -607,8 +571,8 @@ export const connectProvider = (id: string): ConnectProvider | null => connectPr
 
 /**
  * The roles a newly connected account joins by default, by capability (GY-409 AC-4): strong-model
- * accounts join worker and reviewer; cheap models (GLM, Flash-class) join research, the approver
- * and the unit producer. Every role listed that exists in the registry takes the account appended
+ * accounts join worker and reviewer; cheap models (GLM, Flash-class) join research and the unit
+ * producer. Every role listed that exists in the registry takes the account appended
  * to its failover order. `research` is the host's own (master.json) configuration, not a registry
  * role: the account joins it only once the host has made the account's Pi wrapper the research
  * command, and the host's result is what reports it — the card never claims a placement the
@@ -616,7 +580,7 @@ export const connectProvider = (id: string): ConnectProvider | null => connectPr
  */
 export function connectDefaultRoles(tier: ConnectProvider['tier'], runtime?: string): readonly string[] {
   // Only a Pi account joins the worker role among the cheap ones: worker dispatch treats every other runtime as strong (GY-1746).
-  return tier === 'fast' ? ['research', ...(runtime === 'pi' ? ['worker'] : []), 'approver', 'producer'] : ['worker', 'reviewer'];
+  return tier === 'fast' ? ['research', ...(runtime === 'pi' ? ['worker'] : []), 'producer'] : ['worker', 'reviewer'];
 }
 
 /**

@@ -166,7 +166,7 @@ test('unit:exhausted-proofs-escalate — a producer request whose attempts are u
     const state = emptyDaemonState(loopConfig), effects = reworkLoop(() => [submitted], decided, () => [entry]);
     await runCycle(loopConfig, state, effects, () => clock + 1_000);
     const raised = state.actions[exhaustedProofKey(entry)];
-    assert.equal(raised?.kind, 'escalation');
+    assert.equal(raised?.kind, 'proof');
     assert.match(raised.detail, /producer attempts for the unit proof group \(unit:exhaustion-only-provider-notice, unit:tmp-reclaim\) on a1ffffffffff are used up/);
     assert.match(raised.detail, /"attempt 1 on producer-a: failed — the headless run ended \(no-payload: run 1 found/);
     assert.match(raised.detail, /Next step, owned by the master loop: on its next cycle it returns GY-421 to a worker quoting these attempts/);
