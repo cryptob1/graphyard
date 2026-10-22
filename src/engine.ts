@@ -7,7 +7,7 @@ import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileRereadSql, recon
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
-import { authorizedForProof, unauthorizedProofs } from './model/proof.js';
+import { authorizedForProof, grantsAuthorize, unauthorizedProofs } from './model/proof.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
 import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
@@ -1233,12 +1233,13 @@ export class Engine {
         work.lease = null;
       }
       if (command === 'reading') {
-        // A reading is the loop's own observation of the serving release, never producer evidence, so no roster
-        // pattern makes one: only the loop's coordinator records it, and an admin, whatever its patterns, does not (GY-2876).
+        // A reading is the loop's own observation of the serving release: only the loop's coordinator records it, and
+        // only for a proof its roster --proof patterns name, so proof authority stays the roster's alone (GY-2876).
         demand(actor.role === 'coordinator', 'Coordinator permission required: only the loop records a reading', 403);
         // The one record of this kind: the loop's reading of a proof only it records (GY-1762), bound as loopObservation reads it.
         const proofs = loopObservationProofs(work);
         demand(!!proofs?.includes(data.proof), `${work.key} is not a loop-owned observation item owing ${data.proof}; a reading is recorded only on an item whose every criterion is a post-deploy observation the loop takes`, 409);
+        demand(grantsAuthorize(actor.proofs ?? [], data.proof), `${actor.id} has no roster --proof pattern for ${data.proof}; a reading is recorded only under one`, 403);
         demand(data.policyRevision === work.policyRevision, `The reading names policy revision ${data.policyRevision}; ${work.key} is at ${work.policyRevision}`, 409);
         const request = followUpRequest(work), parent = request ? all.find(item => item.id === request.work) : null;
         if (request) {

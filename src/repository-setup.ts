@@ -417,7 +417,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const workerPrincipals = [...new Set(proposal.profiles.workers.map(profile => profile.principal))];
   const desired = [
     { id: 'operator', role: 'admin' as const, proofs: ['manual:*'] },
-    { id: 'master', role: 'coordinator' as const },
+    { id: 'master', role: 'coordinator' as const, proofs: ['manual:*'] },
     ...workerPrincipals.map(id => ({ id, role: 'worker' as const })),
     { id: 'evidence', role: 'producer' as const, proofs: grants },
   ];

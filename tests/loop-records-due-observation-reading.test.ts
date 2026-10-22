@@ -284,7 +284,7 @@ test('integration:loop-records-due-observation-reading — the reads run under t
 // reading of anything else, and closing as delivered-observation closes the superseded pull request.
 const repository = 'owner/loop-readings';
 const operator: Principal = { id: 'readings-operator', role: 'admin', sessionKind: 'human' };
-const coordinator: Principal = { id: 'readings-master', role: 'coordinator', sessionKind: 'ai' };
+const coordinator: Principal = { id: 'readings-master', role: 'coordinator', sessionKind: 'ai', proofs: ['manual:*'] };
 const worker: Principal = { id: 'readings-worker', role: 'worker', sessionKind: 'ai' };
 const credentials = [operator, coordinator, worker].map(principal => ({ ...principal, token: `readings-${principal.id}-${'x'.repeat(32)}` }));
 let database: EmbeddedPostgres, store: Store, engine: Engine;
@@ -322,6 +322,8 @@ test('integration:loop-records-due-observation-reading — the coordinator recor
   await assert.rejects(engine.execute(worker, 'reading', item.id, reading, randomUUID()), /Coordinator permission required/);
   // GY-2876: no admin records a trusted reading, with or without a roster pattern for the proof.
   for (const admin of [operator, { ...operator, proofs: ['manual:*'] }]) await assert.rejects(engine.execute(admin, 'reading', item.id, reading, randomUUID()), /only the loop records a reading/);
+  // A coordinator without a roster pattern for the proof is refused; the loop's, with one, records it below.
+  await assert.rejects(engine.execute({ ...coordinator, proofs: undefined }, 'reading', item.id, reading, randomUUID()), /no roster --proof pattern for manual:/);
   await assert.rejects(engine.execute(coordinator, 'reading', code.id, { ...reading, proof: 'unit:code' }, randomUUID()), /not a loop-owned observation item/);
   await assert.rejects(engine.execute(coordinator, 'reading', item.id, { ...reading, baseSha: sha('f') }, randomUUID()), /bound to the parent delivery's merge/);
   const { closeWork } = await import('../src/server/close.js');

@@ -263,7 +263,8 @@ export function plannedPrincipals(installId: string, options: { workers?: number
   // and every agent principal is ai. The operator attests manual proofs through its roster pattern.
   return [
     { id: `${installId}-operator`, role: 'admin' as Role, sessionKind: 'human' as DeclaredSessionKind, proofs: ['manual:*'] },
-    { id: `${installId}-master`, role: 'coordinator' as Role, sessionKind: 'ai' as DeclaredSessionKind },
+    // The master's pattern covers only the post-deploy readings the loop records; a coordinator submits no evidence.
+    { id: `${installId}-master`, role: 'coordinator' as Role, sessionKind: 'ai' as DeclaredSessionKind, proofs: ['manual:*'] },
     ...Array.from({ length: workers }, (_, index) => ({ id: `${installId}-worker-${index + 1}`, role: 'worker' as Role, sessionKind: 'ai' as DeclaredSessionKind })),
     { id: `${installId}-dashboard`, role: 'reader' as Role, sessionKind: 'ai' as DeclaredSessionKind },
     // The e2e identity runs the deployment's own end-to-end cases (GY-2167): a case's first step

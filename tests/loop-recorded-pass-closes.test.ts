@@ -29,7 +29,7 @@ const filed = sha('a'), recordedOn = sha('b'), servedNow = sha('d'), mergeSha = 
 const proof = 'manual:post-deploy/reclaim-pressure-below-false', own = 'manual:reclaim-pressure-below-false-on-serving-release';
 const repository = 'owner/recorded-pass';
 const operator: Principal = { id: 'recorded-operator', role: 'admin', sessionKind: 'human' };
-const coordinator: Principal = { id: 'recorded-master', role: 'coordinator', sessionKind: 'ai' };
+const coordinator: Principal = { id: 'recorded-master', role: 'coordinator', sessionKind: 'ai', proofs: ['manual:*'] };
 
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
