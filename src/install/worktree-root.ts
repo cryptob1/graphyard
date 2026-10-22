@@ -131,6 +131,25 @@ export async function removeSessionCheckout(repository: string, base: string, di
   await rmdir(base).catch(() => {});
 }
 
+/**
+ * Remove every managed directory under `base` that no live session owns and that is older than
+ * `graceMs`: what a session that died before settling left, or a settlement whose removal failed.
+ * A launch allocates its directory before it records the session, hence the grace.
+ */
+export async function removeUnownedCheckouts(repository: string, base: string, live: Iterable<string>, options: { now?: number; graceMs: number; run?: Run }) {
+  const now = options.now ?? Date.now(), owned = new Set([...live].map(path => resolve(path)));
+  const removed: string[] = [], errors: string[] = [];
+  for (const entry of await readdir(base, { withFileTypes: true }).catch(() => [])) {
+    const directory = resolve(base, entry.name);
+    if (!entry.isDirectory() || !managedName.test(entry.name) || owned.has(directory)) continue;
+    const info = await lstat(directory).catch(() => null);
+    if (!info || now - info.mtimeMs < options.graceMs) continue;
+    try { await removeSessionCheckout(repository, base, directory, options.run); removed.push(directory); }
+    catch (error) { errors.push(`${directory}: ${error instanceof Error ? error.message : String(error)}`); }
+  }
+  return { removed, errors };
+}
+
 /** What the root itself holds, as `du` counts it; null when it cannot be measured in time. */
 export async function directoryBytes(path: string, timeoutMs = 10_000): Promise<number | null> {
   try {

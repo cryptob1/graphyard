@@ -11,7 +11,7 @@ import { dispatchRefusal } from '../server/plane-health.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { rerunFailedChecks } from '../master/profiles.js';
 import type { CapacityRole, PartialWork } from '../model/capacity.js';
-import { readProducerLedger, saveProducerLedger, launchProducer } from '../producer.js';
+import { readProducerLedger, saveProducerLedger, launchProducer, sweepManagedCheckouts } from '../producer.js';
 import { followUpThreadIds, readReviewLedger, updateReviewLedger, launchReview } from '../reviewer.js';
 import { defaultAwaitReviewers, readDispatchCursor } from '../auto-dispatch.js';
 import { relaunchSession } from './relaunch.js';
@@ -166,6 +166,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     closeSession: pane => closeHerdrPane(pane, run),
     removeWorktree: path => removeAttemptWorktree(root, path, run),
+    sweepCheckouts: () => sweepManagedCheckouts(root, current()),
     planeHealth: () => dispatchRefusal(current().url, fetcher),
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),

@@ -181,7 +181,7 @@ export function endedAttemptWorktrees(work: Work[], hostId: string, now: number)
 }
 
 /** Step 3: end unbounded attempts, reconcile lapsed leases, remove ended attempts' worktrees and sweep leftover panes. */
-export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaimLease', 'removeWorktree', 'preserveWork', 'reportCapacity'], reclaimStepWithin);
+export const reclaimStep = (cycle: Cycle) => withinStepBudget(cycle, 'reclaim', ['panes', 'closeSession', 'reclaimLease', 'removeWorktree', 'sweepCheckouts', 'preserveWork', 'reportCapacity'], reclaimStepWithin);
 async function reclaimStepWithin(cycle: Cycle) {
   const { config, state, effects, now, clock, performed, isolate, open, snapshot } = cycle;
   // 3a'. Stop renewing an attempt past its no-submission bound (GY-1460).
@@ -211,6 +211,12 @@ async function reclaimStepWithin(cycle: Cycle) {
       performed.push(await record(state, key, { kind: 'reclaim', work: item.key, principal: null, epoch: space.epoch, state: 'failed', detail: `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`.slice(0, actionDetailMax), attempts: (previous?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
     }
   }
+
+  // 3b'. Managed checkouts no live session owns are removed, so an unsettled or failed removal is retried every cycle.
+  //     One carried past the step's bound is asked again next cycle.
+  const swept = await effects.sweepCheckouts?.().catch(error => stepCallCarried(error) ? null : { removed: [], errors: [message(error)] });
+  if (swept && (swept.removed.length || swept.errors.length)) performed.push(await record(state, 'reclaim:checkouts', { kind: 'reclaim', work: null, principal: null, state: swept.errors.length ? 'failed' : 'done',
+    detail: [swept.removed.length ? `Removed ${swept.removed.length} unowned managed checkout(s)` : '', ...swept.errors].filter(Boolean).join('; ').slice(0, actionDetailMax), attempts: (state.actions['reclaim:checkouts']?.attempts ?? 0) + 1, cycle: state.cycle }, now(), effects.persist));
 
   // 3c. Reclaim the panes its ended launches left agentless (GY-842).
   await reclaimLaunchedPanes(cycle);

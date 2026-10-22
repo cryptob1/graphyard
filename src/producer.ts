@@ -10,12 +10,12 @@ import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import { evidenceProves } from './model/mechanical-proofs.js';
-import { removeSessionCheckout, sessionCheckout, worktreeRoot, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
+import { removeSessionCheckout, removeUnownedCheckouts, sessionCheckout, worktreeRoot, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { anchorSessionCheckout, sessionWritable, verifySessionSandbox, type SessionSandboxProbe, assertSessionLedgerRoom, boundSessionLedger, readReviewLedger, releaseClosedRequests, unrecordedPaneStopped, type SessionLedgerSpec } from './reviewer.js';
 import { closedQuestionFor } from './model/closed-question.js';
 import { paneAlreadyGone, withPaneGone } from './request-settlement.js';
 import { narrowRoleRuntime, piRuntimeSchema } from './runner/payloads.js';
-import { liveRun, registeredRun, unendedRunOnDisk, type RunAdopter } from './runner/registry.js';
+import { liveRun, liveRuns, registeredRun, unendedRunOnDisk, type RunAdopter } from './runner/registry.js';
 import type { EvidencePayload } from './runner/payloads.js';
 import { sessionVerificationEnvironment } from './master/harness.js';
 import { withVerificationPath } from './master/verification-slots.js';
@@ -753,4 +753,16 @@ export function summarizeProducers(records: ProducerRecord[]) {
     // GY-93: how the request reached the session, and whether the session has taken it up.
     delivery: record.delivery ?? null, activity: record.state === 'pending' ? sessionActivity(record) : null, acknowledgedAt: record.acknowledgedAt ?? null, repromptedAt: record.repromptedAt ?? null, neverStarted: neverStarted(record) });
   return { pending: records.filter(record => record.state === 'pending').map(describe), completed: records.filter(record => record.state !== 'pending').slice(-20).map(describe) };
+}
+
+/**
+ * Take back the managed checkouts nothing owns any more (GY-2876 review): no pending producer or
+ * reviewer record and no live run of this process. The grace outlasts a merge trial, whose
+ * checkout no record names.
+ */
+export async function sweepManagedCheckouts(root: string, config: MasterConfig, now = Date.now()) {
+  const [producers, reviews] = await Promise.all([readProducerLedger(root), readReviewLedger(root)]);
+  const live = [...producers.producers, ...reviews.reviews].filter(record => record.state === 'pending' && record.checkout).map(record => record.checkout!);
+  for (const entry of liveRuns()) if (entry.checkout) live.push(entry.checkout);
+  return removeUnownedCheckouts(root, worktreeRoot(root, config), live, { now, graceMs: 60 * 60_000 });
 }

@@ -109,6 +109,8 @@ export interface DaemonEffects extends ReadingEffects {
   loadedRelease?: LoopRelease | null;
   /** Removes an ended attempt's assignment worktree with `git worktree remove` (never forced); whether one was removed. A loop wired without it removes none. */
   removeWorktree?: (path: string) => Promise<boolean>;
+  /** Removes the managed checkouts no live session owns past their grace (a session that died unsettled, a failed settlement); what it removed and could not. */
+  sweepCheckouts?: () => Promise<{ removed: string[]; errors: string[] }>;
   /** Why the plane cannot record a dispatch's result (its /healthz verdict), or null when it can. */
   planeHealth?: () => Promise<string | null>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`); absent, the loop applies no rework. */

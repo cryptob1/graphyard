@@ -20,7 +20,7 @@ import { accountLaunch } from '../src/master/environments.js';
 import { grantWorkerPaths, verifyWorkerSandbox } from '../src/worker-sandbox.js';
 import { launchProducer, producerPrompt, readProducerLedger, reconcileProducers, producerIdleGraceMs, type ProducerBinding } from '../src/producer.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
-import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, probeFilesystem, removeSessionCheckout, sessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
+import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, probeFilesystem, removeSessionCheckout, removeUnownedCheckouts, sessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces: integration:managed-worktree-root,
@@ -273,6 +273,20 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     assert.deepEqual(await readdir(managed), ['.verification-slots'], 'an installation with no session leaves nothing behind but the host verification lock directory (GY-612)');
     assert.deepEqual(await readdir(join(managed, '.verification-slots')), [], 'and that holds no slot');
   } finally { await cleanup(); }
+});
+
+test('integration:ephemeral-checkout-reclaim — a managed checkout no live session owns is removed past its grace: one a dead session or a failed settlement left', async () => {
+  const base = await temporaryDirectory('graphyard-unowned-');
+  const orphan = await allocateSessionCheckout(base, 'trial', 'GY-1', H, randomUUID());
+  const owned = await allocateSessionCheckout(base, 'proof', 'GY-2', H, randomUUID());
+  const young = await allocateSessionCheckout(base, 'review', 'GY-3', H, randomUUID());
+  const old = new Date(Date.now() - 2 * 60 * 60_000);
+  for (const checkout of [orphan, owned]) await utimes(checkout.directory, old, old);
+  const swept = await removeUnownedCheckouts(base, base, [owned.directory], { graceMs: 60 * 60_000, run: async () => '' });
+  assert.deepEqual(swept, { removed: [orphan.directory], errors: [] });
+  assert.equal(existsSync(orphan.directory), false);
+  assert.equal(existsSync(owned.directory), true);
+  assert.equal(existsSync(young.directory), true);
 });
 
 test('integration:worktree-root-preflight — setup refuses a tmpfs or a volume without the configured room, and master status warns before the volume or quota is exhausted', async () => {
