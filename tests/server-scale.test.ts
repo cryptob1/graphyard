@@ -218,11 +218,10 @@ test('unit:status-degrades-per-section — master status still returns every oth
     const master = masterConfig(credential, join(secrets, 'checkouts'));
     await writeDaemonState(master, emptyDaemonState(master));
     const asked: string[] = [], goalsPath = 'goals?open=1&view=summary';
-    // The real server over the seeded store, except the goals route, which never answers
-    // inside the reader's timeout, as the intervention report did on 2026-09-25.
-    const masterApi = async (path: string, _credential?: string, timeoutMs?: number) => {
+    // The real server over the seeded store, except the goals route, which times out.
+    const masterApi = async (path: string, _credential?: string, _timeoutMs?: number) => {
       asked.push(path);
-      if (path === goalsPath) { await sleep(timeoutMs ?? 30_000); throw new Error(`GET ${path}: The operation was aborted due to timeout`); }
+      if (path === goalsPath) { await sleep(100); throw new Error(`GET ${path}: The operation was aborted due to timeout`); }
       const answer = await read(path);
       if (answer.status !== 200) throw new Error(`GET ${path} answered ${answer.status}`);
       return answer.body;
