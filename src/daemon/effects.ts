@@ -25,9 +25,6 @@ export function refusedBodyDetail(result: unknown): string {
   return `${body.error}: ${named}`;
 }
 
-/** GY-852: paste by pane_id, else name (profiles reuse names across sessions). */
-export const promptTarget = (agent: Pick<HerdrAgent, 'name' | 'pane_id'>) => agent.pane_id ?? agent.name ?? '';
-
 export interface DaemonEffects {
   /** The coordination read: the work snapshot, one GET. */
   snapshot: () => Promise<{ work: Work[]; now: string }>;
@@ -52,8 +49,6 @@ export interface DaemonEffects {
   dispatchTick?: (snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
-  /** Types one prompt into a session's pane. */
-  promptSession?: (agent: HerdrAgent, text: string) => void | Promise<void>;
   /** The control-plane merge executor's reads (cycle-merge-writer.ts); absent, the merge writer does nothing. */
   mergeWriter?: MergeWriterReads | null;
   /** The headless runs a restart left running (GY-453). */

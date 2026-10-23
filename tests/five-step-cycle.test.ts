@@ -53,10 +53,13 @@ function mergePorts() {
 test('unit:five-step-cycle — one cycle records exactly snapshot, close, dispatch, merge writer and persist in that order: the claimable item is dispatched, the submitted head trialled and merged, the Done item\'s session closed, the cursor persisted, and no other step, carry, wake or reading is recorded', async () => {
   const work = store(), merge = mergePorts();
   const dispatched: string[] = [], closed: string[] = [], recorded: { key: string; id: string; state: string | undefined }[] = [];
-  let persisted: DaemonState | null = null;
+  let persisted: DaemonState | null = null, launches = 0;
+  // The production wiring's master session, visible in Herdr and idle for hours: the cycle never wakes it.
+  const master = { name: config.masterAgentName, pane_id: 'pm', agent_status: 'idle' };
   const effects: DaemonEffects = {
     snapshot: async () => ({ work, now: iso(start) }),
-    agents: () => [], herdr: () => ({ agents: [], available: true }),
+    agents: () => [master], herdr: () => ({ agents: [master], available: true }),
+    masterSession: { launch: async () => { launches += 1; throw new Error('the master session is visible'); } },
     credentials: async () => ({ w1: { available: true, reason: null } }),
     closeSession: pane => { closed.push(pane); },
     recordSession: async (target, handle) => { recorded.push({ key: target.key, id: handle.id, state: handle.state }); },
@@ -65,6 +68,7 @@ test('unit:five-step-cycle — one cycle records exactly snapshot, close, dispat
     persist: async state => { persisted = structuredClone(state); },
   };
   const state = emptyDaemonState(config);
+  state.master = { ...state.master, agentName: config.masterAgentName, pane: 'pm', startedAt: iso(start - 6 * 3_600_000) };
   const result = await runCycle(config, state, effects, () => start);
   await mergeWriterIdle(state);
 
@@ -81,5 +85,7 @@ test('unit:five-step-cycle — one cycle records exactly snapshot, close, dispat
   assert.deepEqual(cursor.metrics.at(-1)?.steps, [...cycleSteps]);
   assert.deepEqual(Object.values(state.actions).map(action => action.kind).sort(), ['close', 'dispatch'], 'nothing but the close and the dispatch is recorded as an action');
   assert.ok(!Object.keys(state.actions).some(key => /^(wake|capacity|deployment|reading|carried|attention|invariant|upgrade)/.test(key)), Object.keys(state.actions).join(', '));
+  assert.equal(launches, 0, 'the visible master session is not relaunched');
+  assert.equal(state.master.lastWake, null, 'the idle master session is not woken');
   assert.ok(!('deployment' in state) && !('upgrade' in state) && !('invariants' in state), 'the cursor carries no deployment, upgrade or invariant state');
 });

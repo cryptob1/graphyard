@@ -1,7 +1,7 @@
 // Concern: the continuous deploy graphyard-deploy.service runs (`graphyard upgrade --watch`): each new
-// base tip is checked out, built, restarted and health-checked; a failing one is rolled back to the
-// previous tip and the watch waits for the next tip. The master loop restarts itself onto the tip
-// this records (daemon/run.ts restartCause).
+// base tip is checked out, built, restarted, health-checked and pinned; a failing one is rolled back
+// to the previous tip, unless it already migrated the database, and the watch waits for the next tip.
+// The master loop restarts itself onto the tip this records (daemon/run.ts restartCause).
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -32,18 +32,25 @@ export interface DeployWatchPorts {
   restart(commit: string): Promise<void>;
   /** /healthz answers healthy at the commit. */
   health(commit: string): Promise<void>;
+  /** Advances the known-good coordinator pin the loop's unit loads, so the loop's restart loads the commit. */
+  pin(commit: string): Promise<void>;
+  /** The database's schema generation, or null when it cannot be read. */
+  database(): Promise<number | null>;
 }
-const steps = ['checkout', 'build', 'restart', 'health'] as const;
+const steps = ['checkout', 'build', 'restart', 'health', 'pin'] as const;
 
 /**
  * One pass: fetch, and when the base tip is new, deploy it. A failure at any step rolls back to the
- * previous tip through the same steps and records the failed tip, which waits for the next one.
+ * previous tip through the same steps and records the failed tip, which waits for the next one —
+ * unless the failed deploy migrated the database, which the previous tip would refuse: then the tip
+ * is kept and recorded as served.
  */
-export async function deployOnce(file: string, ports: DeployWatchPorts, log: (line: string) => void = line => console.error(line)): Promise<'unchanged' | 'deployed' | 'rolled-back'> {
+export async function deployOnce(file: string, ports: DeployWatchPorts, log: (line: string) => void = line => console.error(line)): Promise<'unchanged' | 'deployed' | 'rolled-back' | 'kept'> {
   const tip = await ports.fetch();
   const record = readDeployRecord(file) ?? { tip: await ports.head(), failed: null, reason: null, at: new Date().toISOString() };
   if (tip === record.tip || tip === record.failed) return 'unchanged';
   const run = async (commit: string) => { for (const step of steps) { log(`[graphyard-deploy] ${step} ${commit.slice(0, 12)}`); try { await ports[step](commit); } catch (error) { throw new Error(`${step} failed: ${error instanceof Error ? error.message : String(error)}`); } } };
+  const before = await ports.database().catch(() => null);
   try {
     await run(tip);
     await writeDeployRecord(file, { tip, failed: null, reason: null, at: new Date().toISOString() });
@@ -51,6 +58,13 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
     return 'deployed';
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    const after = await ports.database().catch(() => null);
+    if (before !== null && after !== null && after > before) {
+      log(`[graphyard-deploy] ${tip.slice(0, 12)} ${reason}; kept: it migrated the database from generation ${before} to ${after}, which the previous tip would refuse`);
+      await ports.pin(tip).catch(failed => log(`[graphyard-deploy] the pin of ${tip.slice(0, 12)} failed: ${failed instanceof Error ? failed.message : String(failed)}`));
+      await writeDeployRecord(file, { tip, failed: null, reason: `${reason}; kept because it migrated the database from generation ${before} to ${after}`.slice(0, 2000), at: new Date().toISOString() });
+      return 'kept';
+    }
     log(`[graphyard-deploy] ${tip.slice(0, 12)} ${reason}; rolling back to ${record.tip?.slice(0, 12) ?? 'nothing'}`);
     let rollback = '';
     if (record.tip) try { await run(record.tip); } catch (failed) { rollback = `; the rollback to ${record.tip.slice(0, 12)} failed too: ${failed instanceof Error ? failed.message : String(failed)}`; }

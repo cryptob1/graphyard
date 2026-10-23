@@ -6,7 +6,7 @@ import { RefusedResponse } from '../model/refusal.js';
 import { sweepManagedCheckouts } from '../producer.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
 import { masterSessionEffects } from '../master/master-session.js';
-import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, inspectWorkerCredentials, deliverPrompt, dispatchWork, removeAttemptWorktree } from '../master.js';
+import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, inspectWorkerCredentials, dispatchWork, removeAttemptWorktree } from '../master.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
@@ -14,7 +14,7 @@ import { worktreeRoot } from '../install/worktree-root.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
-import { promptTarget, refusedBodyDetail, type DaemonEffects } from './effects.js';
+import { refusedBodyDetail, type DaemonEffects } from './effects.js';
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
@@ -65,7 +65,6 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run }));
     })().finally(() => { ticking = null; }),
     masterSession: masterSessionEffects(root, current, run),
-    promptSession: async (agent, text) => { await deliverPrompt(promptTarget(agent), text, run); },
     // The executor merges in this checkout's object store, pushes with the install's deploy key alone and records each step as the coordinator under one key per (step, commits).
     get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const }); },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),

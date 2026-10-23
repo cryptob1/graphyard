@@ -1,9 +1,9 @@
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
-import { assertDispatchable, finishedAgentStates } from '../master.js';
+import { assertDispatchable } from '../master.js';
 import { dispatchSort } from '../coordination.js';
-import { masterHandover, masterHeartbeatIntervalMs, masterWakeText } from '../master/master-session.js';
+import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
@@ -189,8 +189,7 @@ async function closeStep(cycle: Cycle) {
 
 /**
  * Dispatch: each claimable item to a free worker profile, each head nothing can carry forward back
- * to a worker, the reviewer and producer sessions the dispatcher owes, and the master session —
- * launched when absent, re-prompted when idle.
+ * to a worker, the reviewer and producer sessions the dispatcher owes, and the master session when absent.
  */
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
@@ -239,9 +238,9 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
   }
 }
 
-/** The loop's own master session: launched when Herdr shows none, re-prompted once per heartbeat while it sits idle. */
+/** The loop's own master session: launched when Herdr shows none, adopted when it does; the cycle never prompts it. */
 async function masterSession(cycle: Cycle, open: Work[]) {
-  const { config, state, effects, herdr, clock, launcher, snapshot } = cycle;
+  const { config, state, effects, herdr, launcher, snapshot } = cycle;
   const sessions = effects.masterSession;
   if (!sessions || !herdr.available) return;
   const master = state.master;
@@ -260,9 +259,4 @@ async function masterSession(cycle: Cycle, open: Work[]) {
     return;
   }
   if (!master.agentName) state.master = { ...emptyMasterSession(), agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: snapshot.now, adopted: true };
-  const since = Date.parse(state.master.lastWake?.at ?? state.master.startedAt ?? snapshot.now);
-  if (!finishedAgentStates.includes(handle.agent_status ?? '') || !effects.promptSession || clock - since < masterHeartbeatIntervalMs(config)) return;
-  await effects.promptSession(handle, masterWakeText(config.cliPath, Math.round((clock - since) / 60_000)));
-  state.master.lastWake = { at: new Date(clock).toISOString(), causes: [], heartbeat: true };
 }
-

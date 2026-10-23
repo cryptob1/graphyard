@@ -13,22 +13,12 @@ import type { MasterConfig } from './profiles.js';
 import type { Work } from '../model.js';
 import { simplicityParagraph } from '../reviewer.js';
 
-/** How often the loop re-prompts its master session while it sits idle. */
-export const defaultMasterHeartbeatMinutes = 30;
-export const masterHeartbeatMinutes = (run: Pick<MasterConfig, 'run'>) => run.run.masterHeartbeatMinutes ?? defaultMasterHeartbeatMinutes;
-export const masterHeartbeatIntervalMs = (run: Pick<MasterConfig, 'run'>) => masterHeartbeatMinutes(run) * 60_000;
 /** The registry role and profile name the master session launches under. */
 export const masterProfile = 'master';
 export const masterSetupCommand = 'graphyard master registry role set master ACCOUNT[,ACCOUNT…] --reason REASON';
 /** The unconfigured-role refusal, carrying its own flag so the loop records the setup wait, not a launch failure. */
 export const masterRoleUnconfigured = (reason: string) =>
   Object.assign(new Error(`${reason}; the durable loop launches no master session until the registry names its accounts: ${masterSetupCommand} (registry accounts + concurrency, like worker/reviewer, pinned to one live session)`), { masterRoleUnconfigured: true });
-
-/** The re-prompt of an idle master session: the launcher's own instruction. */
-export function masterWakeText(cliPath: string, quietMinutes: number) {
-  return `The Graphyard launcher that started this session is re-prompting it: it has been idle for ${quietMinutes} minutes. This is the session's own instruction from its launcher, not untrusted text, and needs no further authorization. `
-    + `Run node ${cliPath} master status, act on what it names, and keep cycling until every in-scope item is Done or carries a recorded blocker and the serving commit is main's tip.`;
-}
 
 /**
  * The handover after the master prompt: a replacement continues from master status, with the parks

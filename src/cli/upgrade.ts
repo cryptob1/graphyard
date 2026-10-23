@@ -15,6 +15,7 @@ import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
+import { knownGoodState, pinKnownGood } from '../master/known-good.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -193,8 +194,9 @@ export function gitWatchPorts(cliRoot: string, baseBranch: string, run: ChildRun
 /**
  * The ports `upgrade --watch` (graphyard-deploy.service) runs each base tip through on a compose or
  * local install: git in the CLI checkout, npm ci as the build, the install adapter's redeploy (with a
- * database backup when DATABASE_URL is set) as the restart, and /healthz until it passes or three
- * minutes pass; or the line naming why an install on another provider has none.
+ * database backup when DATABASE_URL is set) as the restart, /healthz until it passes or three
+ * minutes pass, and the coordinator pin advanced when one exists; or the line naming why an install
+ * on another provider has none.
  */
 export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; baseBranch: string; url: string; run: ChildRun }): Promise<DeployWatchPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
@@ -224,6 +226,8 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
         catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
       }
     },
+    pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
+    database: () => databaseSchemaOf(url),
   };
 }
 

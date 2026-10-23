@@ -19,7 +19,7 @@ Launches take the first account under `run.quotaCeilingPercent`, else fail over;
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr; re-prompted while idle past `run.masterHeartbeatMinutes` (30).
+`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr.
 
 ### A closed Herdr workspace is replaced
 

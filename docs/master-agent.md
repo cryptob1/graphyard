@@ -13,7 +13,7 @@ Cycle until every in-scope item is Done or carries a recorded blocker and the se
 
 1. **snapshot**: the work snapshot and Herdr's session list.
 2. **close**: end sessions whose item left the stage they were launched for; reconcile leases that lapsed unsubmitted; remove ended attempts' worktrees.
-3. **dispatch**: claimable items to free worker profiles; unmergeable heads back to a worker; reviewer and producer requests; the master session, launched when absent, re-prompted while idle.
+3. **dispatch**: claimable items to free worker profiles; unmergeable heads back to a worker; reviewer and producer requests; the master session, launched when absent.
 4. **merge writer**: trial and merge each submitted head in order ([delivery](delivery.md)).
 5. **persist**: the loop cursor.
 

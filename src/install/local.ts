@@ -155,6 +155,8 @@ async function readText(file: string) {
 }
 
 const digest = (...parts: string[]) => createHash('sha256').update(parts.join('\0')).digest('hex');
+/** The commit the source root holds: part of the deployed stamp, so a deploy of a moved checkout restarts the runtime onto it. */
+const sourceRevision = (root: string) => { try { return execFileSync('git', ['-C', root, 'rev-parse', 'HEAD'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return ''; } };
 
 /** Whether the process the last apply started without systemd is still alive. */
 function detachedAlive(paths: LocalPaths) {
@@ -246,11 +248,11 @@ export const localAdapter: ProviderAdapter = {
   },
   async deploy(ctx) {
     const local = settings(ctx), { paths, supervisor } = local;
-    const environment = await readText(paths.environment) ?? '';
+    const environment = await readText(paths.environment) ?? '', revision = sourceRevision(ctx.sourceRoot);
     if (supervisor.systemd) {
       const unitPath = join(supervisor.systemd.unitDirectory, local.unit);
       const text = localUnitText(ctx);
-      const stamp = digest(text, environment);
+      const stamp = digest(text, environment, revision);
       const active = await supervisor.systemctl(['is-active', local.unit]).then(state => state.trim() === 'active', () => false);
       if (active && await readText(paths.deployed) === `${stamp}\n` && await readText(unitPath) === text) return;
       if (await readText(unitPath) !== text) {
@@ -265,7 +267,7 @@ export const localAdapter: ProviderAdapter = {
       await writePrivate(paths.deployed, `${stamp}\n`);
       return;
     }
-    const stamp = digest(local.command.join('\0'), environment);
+    const stamp = digest(local.command.join('\0'), environment, revision);
     const running = detachedAlive(paths);
     if (running && await readText(paths.deployed) === `${stamp}\n`) return;
     if (running) await supervisor.kill(running);

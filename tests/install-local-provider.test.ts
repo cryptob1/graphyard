@@ -176,6 +176,13 @@ test('integration:local-provider-embedded-postgres — --apply creates the clust
     assert.deepEqual({ config: await snapshot(fixture.configHome, path => path.startsWith(paths.data)), units: await snapshot(unitDirectory) }, before, 'no file under the install directory or the unit directory changed');
     assert.deepEqual(systemd.calls.slice(calls).map(args => args[0]), ['is-active'], 'it only read the unit\'s state');
     assert.equal(systemd.starts(), starts, 'the runtime was not restarted');
+
+    // A deploy from a source root at another commit (upgrade --watch moved the checkout) restarts the runtime onto it.
+    const moved = await temporaryDirectory('local-source');
+    execFileSync('git', ['init', '--quiet', moved]);
+    execFileSync('git', ['-C', moved, '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--quiet', '--allow-empty', '-m', 'tip']);
+    assert.equal(await applyProvider(await prepareInstall(fixture.root, inputs, { ...deps, sourceRoot: moved }, 'apply')), url);
+    assert.equal(systemd.starts(), starts + 1, 'the runtime restarted for the moved source');
   } finally { await systemd.stop(); await fixture.cleanup(); }
 });
 

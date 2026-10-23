@@ -61,6 +61,7 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const steps: string[] = [];
+  let schema = 7;
   const ports: DeployWatchPorts = {
     ...gitWatchPorts(checkout, 'main', defaultChildRun),
     build: async sha => { steps.push(`build ${sha.slice(0, 7)}`); },
@@ -70,11 +71,13 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
       const response = await fetch(`${url}/healthz`), body = await response.json() as { ok: boolean; commit: string };
       if (!response.ok || !body.ok || body.commit !== sha) throw new Error(`/healthz answered ${response.status} for ${body.commit.slice(0, 7)}`);
     },
+    pin: async sha => { steps.push(`pin ${sha.slice(0, 7)}`); },
+    database: async () => schema,
   };
   const root = await temporaryDirectory('deploy-record'), file = deployRecordPath(root);
   try {
     await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
-    assert.deepEqual(steps, [`build ${b.slice(0, 7)}`, `restart ${b.slice(0, 7)}`, `healthz ${b.slice(0, 7)}`]);
+    assert.deepEqual(steps, [`build ${b.slice(0, 7)}`, `restart ${b.slice(0, 7)}`, `healthz ${b.slice(0, 7)}`, `pin ${b.slice(0, 7)}`], 'the healthy tip is pinned, so the loop\'s restart loads it');
     assert.equal(git(checkout, 'rev-parse', 'HEAD'), b, 'the checkout is on the new tip');
     assert.equal(readDeployRecord(file)?.tip, b, 'the served tip is recorded');
     // The loop restarts itself onto the tip the deploy unit serves.
@@ -88,13 +91,25 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
     healthy = sha => sha !== c;
     steps.length = 0;
     await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
-    assert.deepEqual(steps, [`build ${c.slice(0, 7)}`, `restart ${c.slice(0, 7)}`, `healthz ${c.slice(0, 7)}`, `build ${b.slice(0, 7)}`, `restart ${b.slice(0, 7)}`, `healthz ${b.slice(0, 7)}`]);
+    assert.deepEqual(steps, [`build ${c.slice(0, 7)}`, `restart ${c.slice(0, 7)}`, `healthz ${c.slice(0, 7)}`, `build ${b.slice(0, 7)}`, `restart ${b.slice(0, 7)}`, `healthz ${b.slice(0, 7)}`, `pin ${b.slice(0, 7)}`]);
     assert.equal(git(checkout, 'rev-parse', 'HEAD'), b, 'the checkout is back on the previous tip');
     assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed], [b, c]);
     assert.match(readDeployRecord(file)?.reason ?? '', /health failed: \/healthz answered 503/);
     steps.length = 0;
     await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
     assert.deepEqual(steps, [], 'the failed tip is not tried again until the base moves');
+
+    // A tip that migrated the database before failing is kept: the previous tip would refuse the migrated database.
+    const d = await commit('D');
+    healthy = sha => sha !== d;
+    const restart = ports.restart;
+    ports.restart = async sha => { await restart(sha); schema = 8; };
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [`build ${d.slice(0, 7)}`, `restart ${d.slice(0, 7)}`, `healthz ${d.slice(0, 7)}`, `pin ${d.slice(0, 7)}`], 'no rollback across the migration');
+    assert.equal(git(checkout, 'rev-parse', 'HEAD'), d);
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed], [d, null]);
+    assert.match(readDeployRecord(file)?.reason ?? '', /kept because it migrated the database from generation 7 to 8/);
   } finally { server.close(); }
 
   assert.ok(!cycleSteps.some(step => /deploy|upgrade/.test(step)), 'the master loop\'s cycle holds no deploy step');
