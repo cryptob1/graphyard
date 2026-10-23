@@ -122,10 +122,6 @@ function findExhaustion(output: string, now: number, retrying: boolean): Exhaust
 export function detectExhaustion(output: string, now: number): ExhaustionSignal | null {
   return findExhaustion(output, now, false);
 }
-/** Working session stuck on a spent account: limit notice plus runtime retry marker (GY-1223). */
-export function detectRetryingExhaustion(output: string, now: number): ExhaustionSignal | null {
-  return findExhaustion(output, now, true);
-}
 /** Leading or status-named 429; not a 429 inside an id or echoed body (GY-1245). */
 const providerStatus429 = /^(?:(?:\w+\s+)?error:?\s*)?429\b(?![\d.])|\b(?:http(?:\/[\d.]+)?|status(?:\s*code)?|code)["']?\s*[:=]?\s*["']?429\b(?![\d.])/i;
 /** Provider quota/rate refusal in a headless error (GY-1092); never agent prose. */
@@ -133,17 +129,6 @@ export function providerLimit(error: string, now: number): ExhaustionSignal | nu
   const text = error.replace(/\s+/g, ' ').trim();
   if (!text || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
   return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
-}
-
-/** GY-1705 silent `done` pane (still untouched / no reader): assumed-reset hold. Idle is not this. */
-export const silentPaneExhaustionReason =
-  'session ended without working, without an outcome and without a readable provider limit notice; account treated as spent until an assumed reset';
-export function silentPaneExhaustion(input: {
-  listed: boolean; everWorking: boolean; hasOutcome: boolean; notice: ExhaustionSignal | null;
-  pastStartBound: boolean; ended: boolean;
-}): ExhaustionSignal | null {
-  if (!input.listed || !input.ended || input.everWorking || input.hasOutcome || input.notice || !input.pastStartBound) return null;
-  return { reason: silentPaneExhaustionReason, resetsAt: null };
 }
 
 /** Headless run event for limit detection (GY-1705); only string errors are limit text. */
@@ -262,15 +247,6 @@ export function capacityRetryAt(accounts: readonly Pick<CapacityAccount, 'resets
 /** One identity per capacity episode: the role and exactly which accounts are spent until when. */
 export const capacitySignature = (role: CapacityRole, accounts: readonly CapacityAccount[]) =>
   `${role}:${[...accounts].map(entry => `${entry.profile}/${entry.account}@${entry.resetsAt ?? 'unknown'}`).sort().join(',')}`;
-/** The one line `master status` and the dashboard say about a spent role. */
-export function describeCapacity(role: CapacityRole, accounts: readonly CapacityAccount[]) {
-  const retryAt = capacityRetryAt(accounts);
-  return `${role} capacity is exhausted on every configured account (${accounts.map(entry => `${entry.account} resets ${entry.resetsAt ?? 'at an unknown time'}`).join(', ')}); `
-    + `${role} launches are paused${retryAt ? ` until ${retryAt}` : ' until an account reports quota again'}, and nothing else is delayed`;
-}
-export function standingCapacity(work: { capacity?: CapacityState | null }, role?: CapacityRole): SpentCapacity[] {
-  return (work.capacity?.spent ?? []).filter(entry => !role || entry.role === role);
-}
 
 type AttemptWork = { capacity?: CapacityState | null; pipeline?: { attempts?: readonly { epoch: number; end: string | null }[] } | null };
 /** GY-1708: one epoch's exhaustion/attempt counts after mid-attempt limit (double-count shows as two rows). */

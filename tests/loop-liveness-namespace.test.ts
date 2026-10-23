@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { acquireDaemonLock, daemonStateSchema, emptyDaemonState, loopAttention, loopLiveness, type DaemonState } from '../src/master-daemon.js';
+import { acquireDaemonLock, daemonStateSchema, emptyDaemonState, loopLiveness, type DaemonState } from '../src/master-daemon.js';
 import { hostPidProbe } from '../src/daemon/liveness.js';
 // A namespace import, so the symbols GY-1370 adds read as missing test cases on a base without them, not a failed load.
 import * as daemon from '../src/master-daemon.js';
@@ -82,7 +82,7 @@ const unseen = 2 ** 22 - 1;
 const state = (lastCycleAt: string) => ({ cycle: 12712, lastCycleAt,
   lock: { id: 'lock', pid: unseen, host: 'vishrog', startedAt: '2026-10-06T11:13:53.515Z', heartbeatAt: lastCycleAt } });
 
-test('unit:loop-liveness-confined-reader — a pid outside the reader\'s own PID namespace is unknown, not gone, so a cycling loop raises no loop-liveness attention', () => {
+test('unit:loop-liveness-confined-reader — a pid outside the reader\'s own PID namespace is unknown, not gone, so a cycling loop reads running', () => {
   assert.equal(hostPidProbe(process.pid, () => 'pid:[4026535170]'), null, 'a pid number names nothing outside the namespace it was taken in (GY-1370)');
   assert.equal(hostPidProbe(process.pid, () => 'pid:[4026535170]', 'pid:[4026535170]'), true, 'a pid it sees in the lock\'s own namespace is alive');
   assert.equal(hostPidProbe(unseen, () => 'pid:[4026531836]'), false, 'the host namespace sees every host pid');
@@ -92,12 +92,10 @@ test('unit:loop-liveness-confined-reader — a pid outside the reader\'s own PID
   const confined = () => null;
   const cycling = loopLiveness(state('2026-10-06T11:14:50.470Z'), now, intervalMs, 'vishrog', confined);
   assert.equal(cycling.state, 'running');
-  assert.deepEqual(loopAttention({ liveness: cycling }), []);
 
   // A loop that really died still surfaces to that reader, on the two-interval stall bound.
   const dead = loopLiveness(state('2026-10-06T11:05:00.000Z'), now, intervalMs, 'vishrog', confined);
   assert.equal(dead.state, 'stalled');
-  assert.match(loopAttention({ liveness: dead })[0].next, /graphyard master restart/);
 
   // The host's own reading still reports the gone process at once.
   assert.match(loopLiveness(state('2026-10-06T11:14:50.470Z'), now, intervalMs, 'vishrog', () => false).detail, /names a process that is gone/);

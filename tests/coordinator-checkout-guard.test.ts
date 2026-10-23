@@ -2,24 +2,17 @@ import { test } from 'node:test';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
-import type { Work } from '../src/model.js';
-import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema, workerProfileSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { accountLaunch } from '../src/master/environments.js';
 import { installWorkerHarness, prepareSessionHarness, sessionHarnessPlan, workerHarnessPlan } from '../src/master/harness.js';
-import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, workerConfinementRefusal } from '../src/master/profiles.js';
+import { coordinatorCheckoutRoot, workerConfinementRefusal } from '../src/master/profiles.js';
 import { grantWorkerPaths, runtimeSandboxes, workerPaths, writablePaths } from '../src/worker-sandbox.js';
 
-// GY-857: workers are confined to their assigned worktrees, and the loop never
-// starts, self-upgrades or restarts from a coordinator checkout holding uncommitted work — the
-// two halves of the containment that was missing when worker sessions wrote half-finished files
-// into the coordinator checkout by absolute path and a restart loaded them into the live loop.
+// GY-857: workers are confined to their assigned worktrees — worker sessions once wrote
+// half-finished files into the coordinator checkout by absolute path.
 
-const iso = (offsetMs: number) => new Date(Date.parse('2030-01-01T00:00:00Z') + offsetMs).toISOString();
-const hour = 3_600_000;
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const addedDirectories = (args: string[], cwd: string) => args.flatMap((arg, index) => arg === '--add-dir' ? [join(cwd, args[index + 1])] : []);
 const openCodeConfined = JSON.stringify({ edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'deny' });
@@ -114,95 +107,4 @@ test('unit:worker-confined-to-worktree — every worker profile is launched with
     assert.match(workerConfinementRefusal({ kind: 'opencode', agentArgs: [], environment: {} })!, /external_directory/);
     assert.match(workerConfinementRefusal({ kind: 'opencode', agentArgs: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","external_directory":"allow"}' } })!, /external_directory/);
   } finally { await fixture.dispose(); }
-});
-
-/** Effects the loop reads: a snapshot over `work`, and stubs for everything else. */
-function loopEffects(work: unknown[], overrides: Record<string, unknown> = {}): DaemonEffects {
-  const base = {
-    agents: () => [] as never[],
-    credentials: async (profiles: { name: string }[]) => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
-    workerCredentials: async () => ({}), producerCredentials: async () => ({}),
-    mutate: async () => ({}), dispatchWorker: async () => ({}), launchReview: async () => ({}), launchProducer: async () => ({}), merge: async () => ({}),
-    snapshot: async () => ({ work: work as Work[], now: iso(0) }),
-    closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
-  };
-  return { ...base, ...overrides } as DaemonEffects;
-}
-const loopOptions = (fixture: Fixture, extra: Partial<Parameters<typeof runDaemon>[3]> = {}) => ({
-  once: true, intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: [] as NodeJS.Signals[], log: () => {}, ...extra,
-});
-
-test('unit:dirty-coordinator-checkout-refused — the loop refuses to start from a dirty coordinator checkout, raises attention naming the paths and the live leases they match, skips the self-upgrade', async () => {
-  const fixture = await coordinatorFixture();
-  try {
-    const { main, config } = fixture;
-    // Clean baseline: the checkout is clean, so the loop cycles and the upgrade gate passes.
-    let upgrades = 0;
-    const cleanState = emptyDaemonState(config);
-    const clean = await runDaemon(config, cleanState, loopEffects([], { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped', reason: 'nothing deployed yet' }; } }), loopOptions(fixture));
-    assert.equal(clean.cycles.length, 1, 'a clean checkout starts the loop');
-    assert.equal(upgrades, 1, 'the between-cycles self-upgrade runs on a clean checkout');
-    assert.equal(cleanState.actions['attention:dirty-checkout'], undefined);
-
-    // Dirty it the way the incident was: a modified module and an untracked test. A scratch file
-    // outside the source paths is nobody's code and dirties nothing.
-    const original = await readFile(join(main, 'src', 'loop.ts'), 'utf8');
-    await writeFile(join(main, 'src', 'loop.ts'), `${original}\nexport const halfFinished = true;\n`);
-    await writeFile(join(main, 'tests', 'scratch.test.ts'), 'import { test } from "node:test";\n');
-    await writeFile(join(main, 'notes.txt'), 'not source\n');
-    const checkout = await readCoordinatorCheckout(main);
-    assert.ok(checkout.modified.includes('src/loop.ts'), 'the modified module is read as dirty');
-    assert.ok(checkout.untracked.includes('tests/scratch.test.ts'), 'the untracked test is read as uncommitted source');
-    assert.equal(checkout.untracked.includes('notes.txt'), false, 'a scratch file outside the source paths is not uncommitted source');
-    const dirty = dirtyCheckoutPaths(checkout);
-    assert.match(coordinatorCheckoutRefusal(checkout, 'the master loop')!, /refuses to start, self-upgrade or restart/);
-
-    // The loop: refused, with the attention naming the paths and the live leases whose observed
-    // changed files they match — and no cycle, so no dirty code runs.
-    const work = [
-      { key: 'GY-852', id: 'w1', lease: { epoch: 3, owner: 'graphyard-claude-1', expiresAt: iso(hour) }, observation: { files: ['src/loop.ts'] } },
-      { key: 'GY-853', id: 'w2', lease: { epoch: 1, owner: 'graphyard-codex-1', expiresAt: iso(hour) }, observation: { files: ['web/app.ts'] } },
-      { key: 'GY-854', id: 'w3', lease: { epoch: 2, owner: 'graphyard-claude-2', expiresAt: iso(-hour) }, observation: { files: ['src/loop.ts'] } },
-      { key: 'G-Y855', id: 'w4', lease: null },
-    ];
-    const state = emptyDaemonState(config);
-    const log: string[] = [];
-    const refused = await runDaemon(config, state, loopEffects(work), loopOptions(fixture, { log: line => log.push(line) }));
-    assert.deepEqual(refused.cycles, [], 'the loop cycles nothing from a dirty checkout');
-    const escalation = state.actions['attention:dirty-checkout'];
-    assert.ok(escalation, 'the refusal is raised as attention on the cursor');
-    assert.equal(escalation.kind, 'attention');
-    assert.match(escalation.detail, /src\/loop\.ts/);
-    assert.match(escalation.detail, /tests\/scratch\.test\.ts/);
-    assert.match(escalation.detail, /the master loop refuses to start, self-upgrade or restart/);
-    assert.match(escalation.detail, /GY-852 epoch 3 \(graphyard-claude-1\): src\/loop\.ts/, 'the live lease whose changed files match is named');
-    assert.ok(!escalation.detail.includes('GY-853'), 'a live lease matching none of the paths is not named');
-    assert.ok(!escalation.detail.includes('GY-854'), 'an expired lease is not named');
-    assert.ok(log.some(line => line.includes('attention failed')), 'the refusal is logged');
-    assert.deepEqual(dirtyCheckoutLeases(work, dirty, Date.parse(iso(hour - 1))).map(lease => lease.key), ['GY-852'], 'only the matching live lease is attributed');
-    assert.match(dirtyCheckoutEscalation('refused', []), /^refused$/, 'with no matching lease the refusal stands alone');
-
-    // The between-cycles gate: the self-upgrade is skipped while the checkout is dirty.
-    const upgradeState = emptyDaemonState(config);
-    upgrades = 0;
-    await runDaemon(config, upgradeState, loopEffects(work, { selfUpgrade: async () => { upgrades++; return { outcome: 'skipped', reason: 'nothing deployed yet' }; } }), loopOptions(fixture));
-    assert.equal(upgrades, 0, 'the self-upgrade never moves a dirty checkout');
-
-    // Clean again: the loop starts.
-    await writeFile(join(main, 'src', 'loop.ts'), original);
-    await rm(join(main, 'tests', 'scratch.test.ts'));
-    await rm(join(main, 'notes.txt'));
-    const resumed = emptyDaemonState(config);
-    const resumedRun = await runDaemon(config, resumed, loopEffects([]), loopOptions(fixture));
-    assert.equal(resumedRun.cycles.length, 1, 'a cleaned checkout starts the loop again');
-  } finally { await fixture.dispose(); }
-});
-
-test('unit:coordinator-guard-tests-exist — this file carries the coordinator checkout guard proofs', async () => {
-  const text = await readFile(fileURLToPath(import.meta.url), 'utf8');
-  for (const proof of ['unit:worker-confined-to-worktree', 'unit:dirty-coordinator-checkout-refused']) {
-    assert.ok(text.includes(`'${proof}`), `${proof} is exercised in tests/coordinator-checkout-guard.test.ts`);
-  }
 });

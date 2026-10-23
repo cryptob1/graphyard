@@ -1,18 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, readdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { emptyDaemonState } from '../src/master-daemon.js';
-import { preserveInterruptedAttempt } from '../src/daemon/effects.js';
-import { preservePartialWork } from '../src/master/launch.js';
-import { childRunner } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-07 clock is the explicit now handed to unsubmittedAttempt over fixtures derived from it; the DB tests build stamps relative to Date.now().
 
@@ -24,12 +16,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // goes to a fresh attempt.
 // Each test is named for the proof it produces.
 
-const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const config = (): MasterConfig => masterConfigSchema.parse({
-  version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
-  repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
-  autoMerge: true, mergeMethod: 'merge', workers: [],
-});
 const clock = Date.parse('2026-10-07T15:00:00.000Z');
 const iso = (offset: number) => new Date(clock + offset).toISOString();
 const minute = 60_000;
@@ -61,16 +47,15 @@ async function bound() {
 }
 
 test('unit:unsubmitted-attempt-fault — an attempt past the no-submission bound with no submission is named with the item and epoch, however recently its lease renewed', async () => {
-  const { workerSubmissionBoundMs, unsubmittedAttempt, unsubmittedAttemptText } = await bound();
+  const { workerSubmissionBoundMs, unsubmittedAttempt } = await bound();
   assert.equal(workerSubmissionBoundMs, 60 * minute, 'the bound is 60 minutes');
   // GY-1457 epoch 1: 60 m 11 s held, its lease renewed seconds ago.
   const late = held(60 * minute + 11_000);
   const attempt = unsubmittedAttempt(late, clock);
   assert.ok(attempt, 'the attempt is past the bound');
   assert.equal(attempt.key, 'GY-1457');
-  const text = unsubmittedAttemptText(attempt);
-  assert.match(text, /GY-1457 epoch 1 \(graphyard-claude-1\) has held its lease 0 minutes past the 60-minute worker bound without a submission/);
-  assert.match(text, new RegExp(`lease renewed to ${late.lease!.expiresAt.replace(/[.]/g, '\\.')}`), 'the renewal does not hide it');
+  assert.deepEqual([attempt.epoch, attempt.owner, attempt.pastBoundMs], [1, 'graphyard-claude-1', 11_000]);
+  assert.equal(attempt.leaseExpiresAt, late.lease!.expiresAt, 'the renewal does not hide it');
   // Inside the bound, no lease, or a claim the record cannot date: no attempt.
   assert.equal(unsubmittedAttempt(held(59 * minute), clock), null);
   assert.equal(unsubmittedAttempt(held(2 * 60 * minute, { lease: null }), clock), null);
@@ -81,7 +66,7 @@ test('unit:unsubmitted-attempt-fault — an attempt past the no-submission bound
   // An earlier epoch's candidate is no candidate for this epoch.
   const reworked = held(61 * minute, { epoch: 2, lease: { owner: 'graphyard-claude-1', epoch: 2, expiresAt: iso(110_000) }, lastAssignment: { owner: 'graphyard-claude-1', epoch: 2, claimedAt: iso(-61 * minute) },
     submission: { epoch: 1, pr: 40 } as Work['submission'], candidate: { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 40, branch: 'graphyard/gy-1457-1', author: 'graphyard-claude-1' } });
-  assert.match(unsubmittedAttemptText(unsubmittedAttempt(reworked, clock)!), /GY-1457 epoch 2/);
+  assert.equal(unsubmittedAttempt(reworked, clock)?.epoch, 2);
 });
 
 test('unit:renew-lease-nosubmission-refusal — the server refuses renewal ten minutes past the loop\'s reclaim bound unsubmitted, not before, and not while submission progress is fresh', async () => {
@@ -101,34 +86,6 @@ test('unit:nosubmission-bound-moot-after-submit — an epoch with a submission i
   const submitted = held(5 * 60 * minute, { submission: { epoch: 1, pr: 41 } as Work['submission'] });
   assert.equal(unsubmittedAttempt(submitted, clock), null);
   assert.equal(noSubmissionRenewalRefused(submitted, clock), false);
-});
-
-test('unit:single-nosubmission-bound — one module declares the no-submission bound, one predicate names the attempt and stops renewing', async () => {
-  const declared = await bound();
-  const source = new URL('../src/', import.meta.url);
-  const files = (await readdir(source, { recursive: true })).filter(file => file.endsWith('.ts')).map(file => file.replaceAll('\\', '/'));
-  const texts = new Map(await Promise.all(files.map(async file => [file, await readFile(new URL(file, source), 'utf8')] as const)));
-  const home = 'model/attempt-bound.ts';
-  // No second bound constant: every no-submission, submission-bound or reclaim-bound declaration lives in attempt-bound.ts.
-  const boundDeclaration = /\b(?:const|let|var)\s+(\w*(?:[Nn]oSubmission|[Ss]ubmissionBound|[Ww]orkerReclaim|[Uu]nsubmitted)\w*)\s*[:=]/g;
-  const boundFunction = /\bfunction\s+(\w*(?:[Nn]oSubmission|[Ss]ubmissionBound|[Uu]nsubmitted)\w*)\s*\(/g;
-  for (const [file, text] of texts) {
-    if (file === home) continue;
-    for (const pattern of [boundDeclaration, boundFunction]) {
-      const names = [...text.matchAll(pattern)].map(match => match[1]).filter(name => !/^unsubmitted$/.test(name!));
-      assert.deepEqual(names, [], `${file} declares no no-submission bound or judgement of its own`);
-    }
-  }
-  for (const name of ['workerSubmissionBoundMs', 'workerReclaimBoundMs', 'workerNoSubmissionRefusalMs', 'unsubmittedAttempt', 'noSubmissionRenewalRefused', 'lapsedAtNoSubmissionBound'])
-    assert.match(texts.get(home)!, new RegExp(`export (?:const|function) ${name}\\b`), `${home} declares ${name}`);
-  assert.equal(declared.workerReclaimBoundMs, 2 * declared.workerSubmissionBoundMs);
-  assert.equal(declared.workerNoSubmissionRefusalMs, declared.workerReclaimBoundMs + 10 * minute);
-  // One stop-renewing path: the loop's end and the server's refusal both judge the attempt by unsubmittedAttempt.
-  assert.match(texts.get('daemon/cycle-reclaim.ts')!, /unsubmittedAttempt\(item, clock\)/, 'the loop ends the attempt from the one predicate');
-  assert.match(texts.get('engine.ts')!, /noSubmissionRenewalRefused\(work, now\.getTime\(\)\)/, 'the server refuses renewal from the one predicate');
-  assert.match(texts.get(home)!, /function noSubmissionRenewalRefused[^{]*\{\s*const attempt = unsubmittedAttempt\(work, now\)/, 'the refusal reads the same predicate the end reads');
-  const callers = [...texts].filter(([file, text]) => file !== home && /\bunsubmittedAttempt\(/.test(text)).map(([file]) => file).sort();
-  assert.deepEqual(callers, ['daemon/cycle-reclaim.ts'], 'only the loop\'s end reads the predicate directly');
 });
 
 // The server side: renewal refused, lapse, reclaim, branch kept.
@@ -189,33 +146,4 @@ test('integration:unsubmitted-attempt-reclaimed — past two bounds unsubmitted 
   assert.equal(work.epoch, epoch + 1);
   assert.equal(work.lease?.owner, replacement.id);
   assert.equal(unsubmittedAttempt(work, Date.now()), null, 'the fresh attempt starts its own clock');
-});
-
-test('integration:unsubmitted-end-keeps-branch — the ended attempt\'s work is committed on its branch by the existing preserve path and its workspace stays on the record', async () => {
-  await bound();
-  let work = await claimed('unsubmitted-keeps-branch');
-  const epoch = work.epoch, branch = work.workspaces.find(entry => entry.epoch === epoch)!.branch;
-  await age(work, 130 * minute + minute);
-  await assert.rejects(heartbeat(work), /past the worker no-submission bound/);
-  await overwrite(work, document => { document.lease = { ...document.lease!, expiresAt: new Date(Date.now() - 1_000).toISOString() }; });
-  await engine.reconcile();
-  work = await reload(work);
-  assert.equal(work.lease, null);
-  assert.equal(work.workspaces.find(entry => entry.epoch === epoch)?.branch, branch, 'the attempt\'s workspace and branch stay on the record');
-  // The reclaim step's preserve path, over a real worktree on that branch holding uncommitted work.
-  const run = childRunner({ timeoutMs: 30_000 });
-  const tree = await temporaryDirectory('unsubmitted-worktree');
-  const git = (...args: string[]) => run('git', ['-C', tree, ...args]);
-  await git('init', '-q', '-b', branch); await git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'base');
-  await writeFile(join(tree, 'partial.ts'), 'export const partial = 1;\n');
-  const reported: Record<string, unknown>[] = [];
-  const state = emptyDaemonState(config()), performed: never[] = [];
-  const effects = { persist: async () => {}, reportCapacity: async (_: Work, body: Record<string, unknown>) => { reported.push(body); },
-    preserveWork: (_: Work, attempt: number, cause?: string) => preservePartialWork(tree, `${work.key} attempt ${attempt} ${cause}`, run) } as never;
-  const recorded = await preserveInterruptedAttempt(state, effects, work, epoch, undefined, 'held its lease past the worker no-submission bound and was not renewed', () => Date.now(), performed);
-  assert.equal(recorded?.state, 'done');
-  const partial = reported[0]?.partialWork as { state: string; branch?: string; commit?: string };
-  assert.equal(partial.state, 'committed');
-  assert.equal(partial.branch, branch, 'the partial work is committed on the attempt branch');
-  assert.equal((await git('log', '-1', '--format=%s', branch)).trim().startsWith('WIP:'), true);
 });

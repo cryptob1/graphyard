@@ -19,7 +19,7 @@ Launches take the first account under `run.quotaCeilingPercent`, else fail over;
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunches on exit, limit notice, `run.masterSessionMinutes` (240); changed subjects wake it.
+`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr.
 
 ### A closed Herdr workspace is replaced
 
@@ -49,4 +49,4 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted
 
 **Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
 
-**Idle-with-lease** (25 quiet minutes): one re-prompt; from 45min quiet a new attempt starts. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown, stalled-gate fault past 120min; from 130min renewal refused. Open scope asks exempt. **Blocked**: destructive prompts declined; usage-limit menu fails over; others fail after **5min**.
+**Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown; from 130min renewal refused. Open scope asks exempt.

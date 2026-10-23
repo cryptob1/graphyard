@@ -166,8 +166,7 @@ const baseEffects = (work: () => Promise<Work[]>, at: () => number) => ({
   agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
   snapshot: async () => ({ work: await work(), now: new Date(at()).toISOString() }),
   closeSession: () => {}, dispatch: async () => {},
-  observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date(at()).toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-  recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+  decisions: async () => ({ decisions: [] }), persist: async () => {},
   github: trap('the GitHub client'), merge: trap('GitHub\'s merge'), shadow: trap('the shadow gate'),
 });
 
@@ -265,7 +264,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   assert.equal(status.status, 200);
   for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
   assert.equal(status.body.mergeWriter.merger, 'control-plane', 'and reports the merge writer');
-  for (const path of ['src/master-status.ts', 'src/cli/master-status.ts', 'src/daemon/cycle-delivery.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
+  for (const path of ['src/cli/master-status.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
 });
 
 /** `worktree GY-N EPOCH` as the launcher runs it from the coordinator checkout, against the live plane as the worker. */

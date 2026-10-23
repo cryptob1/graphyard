@@ -15,13 +15,11 @@ import { reconcileAutoDispatch, reviewNeed } from '../src/model/dispatch.js';
 import { reviewProviders } from '../src/model/review.js';
 import { attachCommand, runningSessions, sessionHandleLimit, sessionSummary } from '../src/model/sessions.js';
 import { dispatchEffects, launchedSessionHandle, runDispatchTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
-import { runCycle, emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // @ts-expect-error Dependency-free worker entry point.
 import { pullOnce, transportRetries } from '../scripts/graphyard-pull.mjs';
-import { agentRequestAttention, agentRequestReport, actionReport, sessionReport } from '../src/cli/master-status.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import WorkDetails from '../web/pages/work-details.js';
 // Time-bomb allowance (GY-1694): the 2026-09-01 boundAt is reviewer config and the 2026-09-20 `at`/clock is the fixed now handed to reconcileActions and evaluate; Date.now() serves only the live engine tests.
@@ -37,7 +35,7 @@ import WorkDetails from '../web/pages/work-details.js';
  * integration:no-llm-in-critical-path, integration:typed-agent-requests and
  * integration:session-handles-visible.
  *
- * No test here runs a master session; `runCycle` and `runDispatchTick` appear only where what the
+ * No test here runs a master session; `runDispatchTick` appears only where what the
  * loop records about a session is the subject.
  */
 
@@ -446,7 +444,7 @@ test('integration:no-llm-in-critical-path — every judgment has one action that
 
 // ---- AC-7: typed agent requests ---------------------------------------------------------------
 
-test('integration:typed-agent-requests — an agent that needs something records a typed request, names its decider and exits without holding its lease, and master status shows it with how long it has waited', async () => {
+test('integration:typed-agent-requests — an agent that needs something records a typed request, names its decider and exits without holding its lease', async () => {
   // Every type names exactly one decider, from those the project allows.
   assert.deepEqual([...agentRequestTypes], ['blocker', 'note']);
   assert.deepEqual(agentRequestTypes.map(type => deciderFor('GY-9', { type }).kind), ['follow-up', 'rule']);
@@ -466,17 +464,6 @@ test('integration:typed-agent-requests — an agent that needs something records
   assert.match(blocker.decider.command!, /graphyard master create — a follow-up item naming GY-\d+/);
   assert.equal(blocked.blocker, 'the deployment provider is refusing every token');
   assert.equal(blocked.lease, null);
-  // Master status shows the open request with its decider and how long it has waited, addressed
-  // to an agent; and the control plane names the escalation that leaves the executor loop for it.
-  const snapshot = { work: await store.list(), now: new Date(Date.now() + 90_000).toISOString() };
-  const line = agentRequestAttention(snapshot).find(entry => entry.subject === blocked.key)!;
-  assert.match(line.text, /recorded a blocker on GY-\d+ 1.5 min ago and released its lease/);
-  assert.match(line.text, /decided by a tracked follow-up work item/);
-  assert.deepEqual([line.role, line.human, line.humanOnly], ['master', false, null]);
-  assert.equal(line.next, blocker.decider.command);
-  assert.ok(agentRequestReport(snapshot).some(entry => entry.key === blocked.key && entry.waitedMs >= 90_000));
-  assert.ok(actionReport(snapshot).next.some(entry => entry.key === blocked.key && entry.kind === 'attention'));
-
   // A note is a record, not a hand-off: it keeps the lease and asks nobody for anything.
   let noted = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
   noted = await engine.execute(worker, 'request', noted.id, { type: 'note', epoch: noted.epoch, reason: 'the third fixture is the slow one; it dominates the suite' }, randomUUID());
@@ -489,8 +476,6 @@ test('integration:typed-agent-requests — an agent that needs something records
   const human = openAgentRequests(money, new Date())[0];
   assert.equal(human.decider.kind, 'human');
   assert.match(human.decider.who, /spending money or accounts/);
-  const humanLine = agentRequestAttention({ work: await store.list(), now: new Date().toISOString() }).find(entry => entry.subject === money.key)!;
-  assert.deepEqual([humanLine.role, humanLine.human, humanLine.humanOnly], ['human', true, 'spending money or opening third-party accounts']);
 
   // A request from an attempt that ended is asked afresh: the next claim closes it.
   await engine.execute(worker, 'release', noted.id, { epoch: noted.epoch }, randomUUID());
@@ -540,36 +525,6 @@ test('integration:typed-agent-requests — an agent that needs something records
   const noted2 = await engine.execute(producer, 'request', unrelated.id, { type: 'note', reason: 'the acceptance fixture needs a wider timeout on this host' }, randomUUID());
   assert.equal(openAgentRequests(noted2, new Date())[0].requestedBy, producer.id);
   assert.equal(noted2.blocker, null);
-
-  // A session that ends waiting on input instead of recording one of these is recorded as failed
-  // with that reason, and the record names the request it should have made.
-  // Only one assignment may be held by this worker, so the cycle's observation is unambiguous.
-  for (const open of await store.list()) {
-    if (open.stage === 'done' || open.lease?.owner !== worker.id) continue;
-    await engine.execute(worker, 'release', open.id, { epoch: open.lease.epoch }, randomUUID());
-  }
-  let waiting = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  waiting = await reload(waiting);
-  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: '/outside/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-1', masterAgentName: 'm', workers: [{ name: 'claude-worker', principal: worker.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }] });
-  const state = emptyDaemonState(config);
-  const sessions: unknown[] = [];
-  const effects: DaemonEffects = {
-    closeSession: () => {}, dispatch: async () => ({}),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => ({}),
-    agents: () => [{ name: 'work-claude', pane_id: 'pane-9', agent_status: 'blocked' } as any],
-    credentials: async () => ({ 'claude-worker': { available: true, reason: null } }),
-    recordSession: async (item, handle) => { sessions.push(handle); return engine.execute(executorA, 'session', item.id, handle, randomUUID()); },
-    snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
-    persist: async () => {},
-  };
-  const cycle = await runCycle(config, state, effects);
-  const failure = cycle.actions.find(action => action.kind === 'session' && action.work === waiting.key);
-  assert.ok(failure, `the cycle recorded a session failure for ${waiting.key}; it recorded ${JSON.stringify(cycle.actions.map(action => [action.kind, action.work, action.state]))}`);
-  assert.equal(failure!.state, 'failed');
-  assert.match(failure!.detail, /is waiting on input \(Herdr reports it blocked\)/);
-  assert.match(failure!.detail, /records a typed request and exits — POST \/api\/work\/GY-\d+\/request with a type of blocker or note — which names its decider and frees the item/);
-  await engine.execute(worker, 'release', waiting.id, { epoch: waiting.epoch }, randomUUID());
 });
 
 test('integration:typed-agent-requests — the bound on recorded requests retires resolved ones and never evicts an open ask', async () => {
@@ -604,7 +559,7 @@ test('integration:typed-agent-requests — the bound on recorded requests retire
 
 // ---- AC-8: session handles --------------------------------------------------------------------
 
-test('integration:session-handles-visible — every launched session records a durable handle on the item, and master status and the dashboard show what it is working on and how to attach to it', async () => {
+test('integration:session-handles-visible — every launched session records a durable handle on the item, and the dashboard shows what it is working on and how to attach to it', async () => {
   let item = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
   const handle = { id: `${worker.id}:${item.epoch}`, kind: 'implementation' as const, epoch: item.epoch, runtime: 'claude', host: 'vishrog', workspace: 'wE', tab: 'tab-17', pane: 'pane-42', attach: 'herdr pane attach pane-42 --workspace wE', transcript: '/home/agent/.claude/transcripts/gy-87.jsonl', subject: `${item.key}: the inverted loop`, state: 'running' as const };
   item = await engine.execute(worker, 'session', item.id, handle, randomUUID());
@@ -663,13 +618,7 @@ test('integration:session-handles-visible — every launched session records a d
   assert.ok(!survivors.some(entry => entry.id === 'sweep-0'), 'a finished handle is what makes room');
   assert.ok(survivors.every(entry => entry.state === 'running'), 'and nothing running was retired');
 
-  // Master status reports each running session with what it works on and the command that attaches.
   const snapshot = { work: await store.list(), now: new Date().toISOString() };
-  const report = sessionReport(snapshot);
-  const running = report.running.find(entry => entry.id === handle.id && entry.key === item.key)!;
-  assert.equal(running.subject, `${item.key}: the inverted loop`);
-  assert.equal(running.attach, 'herdr pane attach pane-42 --workspace wE');
-  assert.equal(running.key, item.key);
   assert.ok(runningSessions(snapshot.work, new Date()).length >= 2);
 
   // A finished session keeps its handle and links its transcript, so its work stays readable.
@@ -681,7 +630,6 @@ test('integration:session-handles-visible — every launched session records a d
   assert.equal(finished.attach, 'vishrog:/home/agent/.claude/transcripts/gy-87.jsonl', 'a finished session links its transcript');
   assert.equal(attachCommand({ state: 'finished', attach: null, transcript: null, host: 'h' }), 'no attach command and no transcript were recorded for this session');
   assert.equal(attachCommand({ state: 'running', attach: null, transcript: null, host: 'h' }), 'no attach command and no transcript were recorded for this session');
-  assert.ok(sessionReport({ work: await store.list(), now: new Date().toISOString() }).finished.some(entry => entry.id === handle.id && entry.key === item.key));
 
   // The dashboard drawer shows the same facts: the running session, its subject and its attach
   // command, and the typed action the control plane computed for the item.
@@ -704,7 +652,7 @@ test('integration:session-handles-visible — every launched session records a d
   await engine.execute(worker, 'release', current.id, { epoch: current.epoch }, randomUUID());
 });
 
-test('integration:session-handles-visible — the reviewer launcher records a handle for every session it starts, and a session blocked at a prompt keeps the attach command somebody needs', async () => {
+test('integration:session-handles-visible — the reviewer launcher records a handle for every session it starts', async () => {
   // A launched reviewer session used to exist only in this host's own ledger, which
   // is the relaying the handle exists to end. The dispatcher records one for each launch, from
   // the coordinates the launcher itself returns.
@@ -774,31 +722,6 @@ test('integration:session-handles-visible — the reviewer launcher records a ha
   assert.equal(review.id, reviewable.autoDispatch!.review!.id);
   assert.equal(launchedSessionHandle('review', reviewable.autoDispatch!.review!, 'subject', 'host-1', undefined, 'claude', 'wF').attach, undefined,
     'a launcher that reports no pane records no attach command it cannot honour');
-
-  // A worker session Herdr reports blocked is waiting on input, not gone: the attempt is recorded
-  // as failed with that reason, and the handle stays running — the one moment anybody needs the
-  // attach command is this one.
-  let waiting = await engine.execute(worker, 'claim', (await release(await created())).id, {}, randomUUID());
-  waiting = await reload(waiting);
-  const blockedConfig = masterConfigSchema.parse({ ...fleetConfig, workers: [{ name: 'claude-worker', principal: worker.id, agentName: 'work-claude', mode: 'launch', kind: 'claude', credentialFile: '/outside/worker.token', approvals: 'auto' }] });
-  const daemonEffects: DaemonEffects = {
-    closeSession: () => {}, dispatch: async () => ({}),
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => ({}),
-    agents: () => [{ name: 'work-claude', pane_id: 'pane-9', agent_status: 'blocked' } as any],
-    credentials: async () => ({ 'claude-worker': { available: true, reason: null } }),
-    recordSession: async (work, handle) => engine.execute(executorA, 'session', work.id, handle, randomUUID()),
-    snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
-    persist: async () => {},
-  };
-  const cycle = await runCycle(blockedConfig, emptyDaemonState(blockedConfig), daemonEffects);
-  const failure = cycle.actions.find(action => action.kind === 'session' && action.work === waiting.key);
-  assert.equal(failure?.state, 'failed', 'the attempt is recorded as failed with the reason');
-  const blocked = (await reload(waiting)).sessions!.find(handle => handle.id === `${worker.id}:${waiting.epoch}`)!;
-  assert.equal(blocked.state, 'running', 'a session waiting at a prompt has not ended');
-  assert.equal(attachCommand(blocked), 'herdr pane attach pane-9 --workspace wF', 'and the command that attaches to it still works');
-  assert.match(blocked.outcome!, /waiting on input instead of recording a typed request/);
-  await engine.execute(worker, 'release', waiting.id, { epoch: waiting.epoch }, randomUUID());
 });
 
 // ---- The pure model, exercised directly -------------------------------------------------------

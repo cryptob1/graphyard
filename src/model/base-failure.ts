@@ -1,12 +1,4 @@
-// Concern: base failures (GY-528) — a test that fails on the base branch as well as on the
-// candidate. Such a failure is not the candidate's to fix: requesting rework for it spent one
-// approver session per blocked item (2026-09-26: nine items, each refused as "a date time-bomb
-// unrelated to" the item) and nothing raised the fault against the base. This module holds the
-// pure half: reading failing test names from a test-runner log, and the attention and P0 item a
-// base failure raises. The merge writer's trial proves the failure on the base tip (GY-1834); the
-// loop's step is src/daemon/cycle-base-failures.ts.
-import { createHash } from 'node:crypto';
-import type { Work } from './work.js';
+
 
 // A CI log line may start with its timestamp; a terminal log may carry colour codes.
 const timestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z ?/;
@@ -41,8 +33,6 @@ export interface BaseFailure {
   /** When the base head's run of the check passed again, and on which commit. */
   cleared: { at: string; baseSha: string; jobId: number | null } | null;
 }
-/** The record key of a base failure: deduplicated by test name and base head. */
-export const baseFailureKey = (test: string, baseSha: string) => `${baseSha.slice(0, 40)}:${createHash('sha256').update(test).digest('hex').slice(0, 16)}`;
 export const short = (sha: string) => sha.slice(0, 12);
 export const runOf = (failure: Pick<BaseFailure, 'jobId' | 'url'>) => failure.url ?? (failure.jobId !== null ? `job ${failure.jobId}` : 'an unnamed run');
 

@@ -6,13 +6,12 @@ import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Loaded inside each case, so a tree without this change fails these cases rather than the file.
-const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/master-verification.js'), ...await import('../src/cli/master/intent.js') });
+const modules = async () => ({ ...await import('../src/model/post-merge-proofs.js'), ...await import('../src/model.js'), ...await import('../src/model/bootstrap.js'), ...await import('../src/model/landability.js'), ...await import('../src/reviewer.js'), ...await import('../src/cli/master/intent.js') });
 
 // unit:post-deploy-criteria (GY-1660) — a criterion only the live install can satisfy after merge
 // and deploy deadlocked reviewer and worker (GY-1652 AC-3, GY-1657 AC-1..4). It is refused at
 // create and requirements revision unless declared with a manual:post-deploy/ proof; a declared
-// one is judged on the head's pre-merge evidence and checked by master verify-deployment on the
-// serving release, which reports it owed when it fails.
+// one is judged on the head's pre-merge evidence.
 // GY-1685 widens the wordings read as live (live host, on the installation, the release serving a merge,
 // a cycle after the fix) and refuses an item of nothing but declared verifications: the declaration rides
 // the item that ships the change.
@@ -161,7 +160,7 @@ test('unit:post-deploy-criteria — the reviewer judges a declared criterion on 
   assert.ok(reviewPrompt(config, binding, undefined, undefined, declared, undefined, undefined, null, null, null, null, plane).includes(section));
 });
 
-const release = 'c'.repeat(40), mergeSha = 'd'.repeat(40);
+const mergeSha = 'd'.repeat(40);
 function delivered(overrides: Partial<Work> = {}): Work {
   const at = new Date(Date.now() - 3_600_000).toISOString();
   return { id: 'e4b2a3c8-1c0e-4d0a-9b4e-1f2a3b4c5d6e', key: 'GY-42', title: 'Harness remedy', description: '', type: 'bug', priority: 1, dependencies: [],
@@ -169,53 +168,6 @@ function delivered(overrides: Partial<Work> = {}): Work {
     policy: { checks: ['test'], review: true }, stage: 'done', revision: 3, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [], delivery: { mergedAt: at, mergeSha, authorizationRevision: 2 }, ...overrides } as Work;
 }
-
-test('unit:post-deploy-criteria — the post-deploy check reads a declared criterion on the serving release and reports it owed when it fails', async () => {
-  const { createSchema, postDeployChecks } = await modules();
-  const checks = postDeployChecks(delivered(), release);
-  assert.equal(checks.length, 1);
-  const [owed] = checks;
-  assert.equal(owed.result, 'owed'); assert.equal(owed.criterion, 'AC-3');
-  const followUp = owed.followUp!;
-  assert.equal(followUp.title, `Post-deploy verification of GY-42 AC-3 (harness-drift-cleared) on release ${release.slice(0, 12)}`);
-  assert.deepEqual(followUp.input.dependencies, ['e4b2a3c8-1c0e-4d0a-9b4e-1f2a3b4c5d6e']);
-  assert.match(followUp.input.description, new RegExp(`^Post-deploy follow-up: ${followUp.requestId}\n\nGY-42 was delivered with AC-3 declared a post-deploy verification`));
-  // An operator-agent creation must carry its reason.
-  assert.match(followUp.input.reason, /^GY-42 AC-3's declared post-deploy verification manual:post-deploy\/harness-drift-cleared is unobserved on the serving release/);
-  // The follow-up's own criterion observes its head against the serving release: accepted, and never itself post-deploy, so it files no further follow-up.
-  // The server's create input is this schema with the operator agent's reason beside it.
-  const { reason: _reason, ...created } = followUp.input;
-  const parsed = createSchema.parse(created);
-  assert.match(parsed.criteria[0].text, new RegExp(`^From this head against the serving release ${release.slice(0, 12)} that carries GY-42's merge`));
-  assert.deepEqual(postDeployChecks(delivered({ criteria: parsed.criteria.map(({ id, text, proofs }) => ({ id, text, proofs })) }), release), []);
-  // Passing evidence recorded at the serving release is the observation: nothing is owed.
-  const evidence = [{ id: 'e1', proof: 'manual:post-deploy/harness-drift-cleared', sha: release, baseSha: mergeSha, policyRevision: 1, producer: 'p', trusted: true, result: 'pass' as const, executed: 1, skipped: 0, at: new Date().toISOString() }];
-  assert.deepEqual(postDeployChecks(delivered({ evidence }), release).map(check => [check.result, check.followUp]), [['observed', null]]);
-  assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], sha: 'e'.repeat(40) }] }), release)[0].result, 'owed', 'evidence at another commit observes nothing on this release');
-  // Only evidence the acceptance gate itself would accept observes it: an untrusted, stale-policy, expired, revoked,
-  // implementer-produced or failing record at the serving release is no observation, and the follow-up is owed.
-  for (const [why, rejected] of [
-    ['untrusted', { trusted: false }], ['under an earlier policy', { policyRevision: 0 }], ['expired', { expiresAt: new Date(Date.now() - 1000).toISOString() }],
-    ['revoked', { revocation: { at: new Date().toISOString(), by: 'operator', reason: 'wrong' } }], ['from an implementer', { producer: 'graphyard-claude-2' }], ['failing', { result: 'fail' }],
-  ] as const) {
-    const checked = postDeployChecks(delivered({ evidence: [{ ...evidence[0], ...rejected } as never], workspaces: [{ owner: 'graphyard-claude-2' }] as never }), release);
-    assert.equal(checked[0].result, 'owed', `${why} evidence observes nothing`);
-  }
-  // Evidence bound to the delivery only: a record from before the merge, or against another base, is a pre-merge record, never the live observation.
-  const premerge = new Date(Date.parse(delivered().delivery!.mergedAt) - 60_000).toISOString();
-  assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], at: premerge }] }), release)[0].result, 'owed', 'evidence recorded before the merge observes nothing');
-  assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], baseSha: 'e'.repeat(40) }] }), release)[0].result, 'owed', 'evidence against another base observes nothing');
-  // The latest applicable record decides: a later trusted failure outranks an earlier pass, and a later pass an earlier failure.
-  const later = new Date(Date.now() + 1000).toISOString();
-  assert.equal(postDeployChecks(delivered({ evidence: [evidence[0], { ...evidence[0], id: 'e2', result: 'fail' as const, at: later }] as never }), release)[0].result, 'owed', 'a later failure is the current observation');
-  assert.equal(postDeployChecks(delivered({ evidence: [{ ...evidence[0], id: 'e2', result: 'fail' as const }, { ...evidence[0], at: later }] as never }), release)[0].result, 'observed', 'a later pass is the current observation');
-  // Two declared proofs of one criterion owe two distinct follow-ups, even when their names share a prefix longer than any title.
-  const long = 'x'.repeat(240);
-  const longWork = delivered({ criteria: [{ ...gy1652, proofs: [`manual:post-deploy/${long}-a`, `manual:post-deploy/${long}-b`] }] });
-  const twice = postDeployChecks(longWork, release);
-  assert.equal(twice[0].followUp!.title, twice[1].followUp!.title, 'the titles are cut alike');
-  assert.notEqual(twice[0].followUp!.requestId, twice[1].followUp!.requestId);
-});
 
 // The linked instances of GY-1685's pattern, as their criteria were written when each item blocked, each run below
 // against the live-observation rule as the base ships it and against the candidate's. GY-1662 was filed at 17:45Z on
@@ -324,7 +276,7 @@ test('unit:post-deploy-criteria — the widened wordings read a served loop\'s c
 });
 
 test('unit:post-deploy-criteria — an item of nothing but declared post-deploy verifications is refused on every path, naming the item that ships the change', async () => {
-  const { createSchema, criteriaSchema, derivedIntent, postDeployOnlyRefusal, postDeployChecks } = await modules();
+  const { createSchema, criteriaSchema, derivedIntent, postDeployOnlyRefusal } = await modules();
   const only = [{ id: 'AC-1', text: 'The live loop journals the remedy', proofs: ['manual:post-deploy/journal'] }, { id: 'AC-2', text: 'Production reports the rate', proofs: ['manual:post-deploy/rate'] }];
   assert.match(postDeployOnlyRefusal(only)!, /^AC-1, AC-2 are all declared post-deploy verifications, so no head can build anything this item's review judges before merge and its worker could only wait for the serving release\. Declare the verification on the item that ships the change it observes/);
   assert.match(postDeployOnlyRefusal(only.slice(0, 1))!, /^AC-1 is a declared post-deploy verification/);
@@ -342,9 +294,4 @@ test('unit:post-deploy-criteria — an item of nothing but declared post-deploy 
   await assert.rejects(derivedIntent('create', [file, 'file it'], deps), /^Error: AC-1, AC-2 are all declared post-deploy verifications/);
   await writeFile(file, JSON.stringify({ criteria: only, dependencies: [] }));
   await assert.rejects(derivedIntent('requirements', ['GY-8', file, 'revise'], deps), /^Error: AC-1, AC-2 are all declared post-deploy verifications/);
-  // GY-1660's own follow-up stands: the one verify-deployment files is anchored to its head, so it is no declared verification and is accepted.
-  const [owed] = postDeployChecks(delivered(), release);
-  assert.equal(owed.result, 'owed');
-  assert.equal(postDeployOnlyRefusal(owed.followUp!.input.criteria), null);
-  assert.equal(createSchema.safeParse(intent(owed.followUp!.input.criteria)).success, true);
 });

@@ -26,7 +26,6 @@ test('unit:uncapped-dispatch-roster-proofs — six ready items with six free wor
   const effects: DaemonEffects = {
     agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work, now: at }), closeSession: () => {}, dispatch: async item => { dispatched.push(item.key); },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at, reason: 'not configured', deployed: [], pending: [] }), recordDeployment: async () => {},
     persist: async state => { written.push(JSON.parse(JSON.stringify(state))); },
   };
   const state = emptyDaemonState(config);
@@ -38,7 +37,7 @@ test('unit:uncapped-dispatch-roster-proofs — six ready items with six free wor
   assert.ok(written.length > 0);
   for (const cursor of [state, ...written]) {
     for (const field of ['latency', 'clocks', 'reclaim', 'memory']) assert.equal(field in cursor, false, `the cursor carries no ${field}`);
-    for (const metric of cursor.metrics) assert.deepEqual(Object.keys(metric).sort(), ['actionable', 'actions', 'at', 'cycle', 'open'], 'a cycle records no measurement');
+    for (const metric of cursor.metrics) assert.deepEqual(Object.keys(metric).sort(), ['actions', 'at', 'cycle', 'open', 'steps'], 'a cycle records no measurement');
     assert.deepEqual(Object.keys(cursor.actions).filter(key => /^(throughput|wip|reclaim:(resources|trees|tmp)|attention:dispatch:memory|sweep:panes:)/.test(key)), []);
     assert.doesNotMatch(JSON.stringify(cursor), /durationMs|childWaitMs|workMs|planeWaitMs|timings|standing agentless/);
   }

@@ -1,7 +1,6 @@
 // Concern: the worker bound (GY-1460) — an attempt holding its lease past the no-submission bound, read from the item's own record.
 import { isClosed } from './closure.js';
-import type { Candidate, Lease, Work } from './work.js';
-import type {} from '../pipeline-speed.js'; // the timeline's `Work.pipeline`
+import type { Candidate, Lease, Work } from './work.js'; // the timeline's `Work.pipeline`
 
 /**
  * GY-1460: the worker bound. An attempt holding its lease this long without a submission is a
@@ -30,7 +29,6 @@ export interface UnsubmittedAttempt {
   /** Past `workerReclaimBoundMs`: the loop stops renewing the lease. */
   reclaim: boolean;
 }
-const minutes = (ms: number) => Math.floor(ms / 60_000);
 /** When the attempt holding `epoch` was claimed, from the assignment or the pipeline timeline. */
 function attemptClaimedAt(work: Work, epoch: number): string | null {
   const attempts = work.pipeline?.attempts ?? [];
@@ -113,13 +111,4 @@ export function lapsedAtNoSubmissionBound(work: Pick<Work, 'submission'> & Parti
   if (!claimedAt || !boundFrom || expiresAt - Date.parse(boundFrom) < workerNoSubmissionRefusalMs) return false;
   const progressAt = submissionProgressAt(work as Work, lease.epoch, lease.owner ?? '', claimedAt);
   return !progressAt || expiresAt - Date.parse(progressAt) > submissionProgressCadenceMs;
-}
-/** The fault line for an attempt past the worker bound: key, epoch, minutes past the bound, the renewal evidence and, past the reclaim bound, the reclaim. */
-export function unsubmittedAttemptText(attempt: UnsubmittedAttempt): string {
-  const held = `${attempt.key} epoch ${attempt.epoch} (${attempt.owner}) has held its lease ${minutes(attempt.pastBoundMs)} minutes past the ${minutes(workerSubmissionBoundMs)}-minute worker bound without a submission`;
-  const renewal = `claimed at ${attempt.claimedAt}, lease ${attempt.live ? 'renewed to' : 'lapsed at'} ${attempt.leaseExpiresAt}${attempt.session ? `, session last observed ${attempt.session.state} at ${attempt.session.at}` : ''}${attempt.progressAt ? `, last submission progress at ${attempt.progressAt}` : ', no submission progress observed'}`;
-  const reclaim = !attempt.reclaim ? `; past ${minutes(workerReclaimBoundMs)} minutes with no submission the loop stops renewing the lease`
-    : attempt.live ? `; past the ${minutes(workerReclaimBoundMs)}-minute bound the loop ends the attempt and stops its supervisor, returning ${attempt.key} to the queue with its worktree kept`
-      : `; past the ${minutes(workerReclaimBoundMs)}-minute bound the lease lapsed unrenewed, and the reclaim returns ${attempt.key} to the queue with its worktree kept`;
-  return `${held} (${renewal})${reclaim}`;
 }

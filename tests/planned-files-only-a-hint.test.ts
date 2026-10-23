@@ -100,8 +100,7 @@ test('unit:planned-files-only-a-hint — an item with twelve planned source file
     agents: () => [], credentials: async items => Object.fromEntries(items.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: (await store.list()).filter(item => item.id === w.id), now: new Date().toISOString() }),
     closeSession: () => {}, dispatch: async item => { dispatched.push(item); },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    persist: async () => {},
   };
   const state = emptyDaemonState(config);
   try {

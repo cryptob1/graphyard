@@ -53,8 +53,10 @@ export function perInstallUnits(repository: string): InstallUnits {
 }
 export const legacyInstallUnits: InstallUnits = { version: 1, slug: null, master: legacyLoopUnit, executorTemplate: legacyExecutorTemplate, alias: true };
 
+/** The install's deploy unit (GY-2877), named beside its loop unit: `graphyard-deploy.service` for the legacy alias, `graphyard-deploy-OWNER-NAME.service` otherwise. */
+export const deployUnitOf = (units: Pick<InstallUnits, 'master'>) => units.master.replace(/^graphyard-master/, 'graphyard-deploy');
 /** Every unit an install owns, by exact name or template: what its harness may restart. */
-export const ownedUnits = (units: InstallUnits) => [units.master, units.executorTemplate];
+export const ownedUnits = (units: InstallUnits) => [units.master, deployUnitOf(units), units.executorTemplate];
 
 /** The command that records an install's own units in its checkout: `master init` resolves and writes them. */
 export const initialiseUnitsCommand = 'graphyard master init';

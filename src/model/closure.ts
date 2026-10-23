@@ -77,9 +77,3 @@ export function closureRefRefusal(work: Work, all: readonly Work[], kind: Closur
   if (kind === 'duplicate') return `--duplicate-of names a work item (GY-N), not ${ref}`;
   return commitRef.test(ref ?? '') ? null : `--superseded-by names a commit SHA or a work item (GY-N), not ${ref}`;
 }
-
-/** The closed items, newest first and bounded: the history `master status` shows apart from open work. */
-export function closedHistory(work: readonly Work[], limit = 20) {
-  return work.filter(isClosed).sort((a, b) => b.closure!.at.localeCompare(a.closure!.at)).slice(0, limit)
-    .map(item => ({ key: item.key, title: item.title, kind: item.closure!.kind, ref: item.closure!.ref, reason: item.closure!.reason, by: item.closure!.by, at: item.closure!.at }));
-}

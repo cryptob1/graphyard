@@ -13,7 +13,6 @@ import { evidenceIndependenceRefusals, type Evidence, type Work } from '../src/m
 import { reconcileAutoDispatch, type DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { dispatchSummary, emptyDispatchCursor, runAutoDispatch, tickRetryDelay, type DispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { proofOutcome } from '../src/producer.js';
 import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork, type CoordinationRounds } from '../src/server/work-view.js';
 import { assertTiming, minimumSamples, steadyState } from './helpers/timing.js';
@@ -238,48 +237,6 @@ test('integration:store-bounded-waits — the store pool bounds the wait for a c
   }
 });
 
-test('integration:dispatch-read-resilience — a dispatcher tick whose read times out or fails retries promptly with backoff, and master status reports the last successful tick and consecutive failures', async () => {
-  const intervalMs = 60_000, stopping = new AbortController();
-  const cursor: DispatchCursor = emptyDispatchCursor(config);
-  const persisted: DispatchCursor[] = []; const log: string[] = [];
-  let reads = 0;
-  const effects: DispatchEffects = {
-    snapshot: async () => {
-      reads++;
-      if (reads === 1) return new Promise<never>(() => {}); // a read that never answers
-      if (reads === 2) throw new Error('fetch failed: connection reset');
-      return snapshot();
-    },
-    agents: () => [],
-    credentials: async () => ({}),
-    reconcileReviews: async () => ({ reviews: [] }),
-    reconcileProducers: async () => ({ producers: [] }),
-    launchReview: async () => {}, launchProducer: async () => {},
-    persist: async state => { persisted.push(structuredClone(state)); if (state.lastSuccessAt) stopping.abort(); },
-  };
-  // Generous above the two-second p95 the latency test bounds a real read at: a slow but
-  // correct read must count as success, not as a failure that spins extra retries.
-  const readTimeoutMs = 2_500, retryMinMs = 100;
-  const started = performance.now();
-  const run = await runAutoDispatch(config, cursor, effects, { intervalMs, signal: stopping.signal, log: line => log.push(line), readTimeoutMs, retryMinMs });
-  const elapsed = performance.now() - started;
-  // Two failures and a success, well inside one interval: nothing waited a whole interval to retry.
-  assert.equal(reads, 3); assert.equal(run.ticks.length, 1);
-  assertTiming({ name: 'dispatch-read-resilience.recovery', test: 'integration:dispatch-read-resilience', statistic: 'elapsed', budgetMs: Math.min(10_000, intervalMs), samples: [elapsed] });
-  assert.match(log[0], new RegExp(`tick failed \\(1 in a row, retrying in 100ms\\): work snapshot read timed out after ${readTimeoutMs}ms`));
-  assert.match(log[1], /tick failed \(2 in a row, retrying in 200ms\): fetch failed/);
-  const failing = persisted.find(state => state.consecutiveFailures === 2)!;
-  assert.ok(failing, 'the failure streak is persisted before the retry');
-  const blind = dispatchSummary(failing, Date.now(), intervalMs);
-  assert.equal(blind.lastSuccessAt, null); assert.equal(blind.consecutiveFailures, 2); assert.match(blind.lastFailure!.reason, /connection reset/); assert.equal(blind.running, false);
-  const recovered = dispatchSummary(cursor, Date.now(), intervalMs);
-  assert.equal(recovered.consecutiveFailures, 0); assert.ok(recovered.lastSuccessAt); assert.equal(recovered.running, true);
-  assert.equal(recovered.lastFailure!.reason, failing.lastFailure!.reason, 'the last failure stays visible after recovery');
-  // Backoff widens but never waits longer than the interval it replaces.
-  assert.deepEqual([1, 2, 3, 4].map(failures => tickRetryDelay(failures, 10_000)), [1_000, 2_000, 4_000, 8_000]);
-  assert.equal(tickRetryDelay(9, 10_000), 10_000);
-});
-
 test('integration:cycle-within-interval — a coordination cycle over the 100-item ledger completes within its configured interval', async () => {
   const intervalMs = config.run.intervalSeconds * 1000;
   const state: DaemonState = emptyDaemonState(config);
@@ -288,8 +245,6 @@ test('integration:cycle-within-interval — a coordination cycle over the 100-it
     credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot,
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
     persist: async () => {},
   };
   const startedAt = Date.now();

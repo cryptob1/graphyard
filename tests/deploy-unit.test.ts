@@ -1,0 +1,146 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import { createServer as createHttpServer } from 'node:http';
+import { createServer } from 'node:net';
+import { writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
+import { buildPlan, prepareInstall } from '../src/install/index.js';
+import type { LocalSupervisor } from '../src/install/local.js';
+import { gitWatchPorts } from '../src/cli/upgrade.js';
+import { deployRecordPath, readDeployRecord, watchMain, type DeployWatchPorts } from '../src/deploy-watch.js';
+import { cycleSteps } from '../src/master-daemon.js';
+import { restartCause } from '../src/daemon/run.js';
+import { defaultChildRun } from '../src/child-runner.js';
+import { harness } from './install-harness.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// GY-2877: the continuous deploy runs in its own unit, graphyard-deploy.service, beside the loop's.
+
+const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
+const freePort = () => new Promise<number>((accept, reject) => {
+  const server = createServer(); server.once('error', reject);
+  server.listen(0, '127.0.0.1', () => { const { port } = server.address() as { port: number }; server.close(() => accept(port)); });
+});
+const foreground = (): LocalSupervisor => ({ systemd: null, reason: 'no systemd user manager answers (test host)', systemctl: async () => { throw new Error('no systemd'); }, detach: async () => { throw new Error('a plan starts nothing'); }, kill: async () => {} });
+
+/** An origin, a second clone that pushes to it, and the CLI checkout the deploy unit watches, at commit A. */
+async function repositories() {
+  const base = await temporaryDirectory('deploy-watch');
+  const origin = join(base, 'origin.git'), pusher = join(base, 'pusher'), checkout = join(base, 'checkout');
+  git(base, 'init', '-q', '--bare', '-b', 'main', origin);
+  git(base, 'clone', '-q', origin, pusher);
+  const commit = async (name: string) => { await writeFile(join(pusher, 'release.txt'), name); git(pusher, 'add', '.'); git(pusher, 'commit', '-q', '-m', name); git(pusher, 'push', '-q', 'origin', 'HEAD:main'); return git(pusher, 'rev-parse', 'HEAD'); };
+  const a = await commit('A');
+  git(base, 'clone', '-q', origin, checkout);
+  git(checkout, 'checkout', '-q', '--detach', a);
+  return { checkout, commit, a };
+}
+
+test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.service beside graphyard-master.service for compose and local; upgrade --watch once against an origin that moved builds, restarts, checks /healthz and records the tip, and on a failing health check rolls back to the previous tip; the loop restarts onto the recorded tip, and its cycle holds no deploy step', async () => {
+  for (const provider of ['compose', 'local'] as const) {
+    const fixture = await harness({ provider });
+    try {
+      const deps = provider === 'local' ? { ...fixture.deps, fetch, localSupervisor: foreground() } : fixture.deps;
+      const plan = await buildPlan(await prepareInstall(fixture.root, { repository: 'owner/project', provider, ...(provider === 'local' ? { port: await freePort() } : {}) }, deps, 'plan'));
+      const units = plan.actions.find(action => action.id === 'local.units');
+      assert.ok(units, `the ${provider} plan lists the units`);
+      assert.match(units.title, /graphyard-master\.service .*graphyard-deploy\.service \(upgrade --watch/);
+      assert.deepEqual(units.values?.map(value => value.value), ['graphyard-master-owner-project.service', 'graphyard-deploy-owner-project.service']);
+    } finally { await fixture.cleanup(); }
+  }
+
+  // The deploy unit's pass, against a checkout whose origin moved from A to B.
+  const { checkout, commit, a } = await repositories();
+  const b = await commit('B');
+  let served = a, healthy = (sha: string) => sha !== 'never';
+  const server = createHttpServer((request, response) => {
+    const ok = request.url === '/healthz' && healthy(served);
+    response.writeHead(ok ? 200 : 503, { 'Content-Type': 'application/json' }).end(JSON.stringify({ ok, commit: served }));
+  });
+  await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
+  const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
+  const steps: string[] = [];
+  let schema: number | null = 7;
+  const migrates: Record<string, number> = {};
+  const ports: DeployWatchPorts = {
+    ...gitWatchPorts(checkout, 'main', defaultChildRun),
+    build: async sha => { steps.push(`build ${sha.slice(0, 7)}`); },
+    restart: async sha => { steps.push(`restart ${sha.slice(0, 7)}`); served = sha; },
+    health: async sha => {
+      steps.push(`healthz ${sha.slice(0, 7)}`);
+      const response = await fetch(`${url}/healthz`), body = await response.json() as { ok: boolean; commit: string };
+      if (!response.ok || !body.ok || body.commit !== sha) throw new Error(`/healthz answered ${response.status} for ${body.commit.slice(0, 7)}`);
+    },
+    pin: async sha => { steps.push(`pin ${sha.slice(0, 7)}`); },
+    schema: async sha => migrates[sha] ?? 7,
+    database: async () => schema,
+  };
+  const root = await temporaryDirectory('deploy-record'), file = deployRecordPath(root);
+  try {
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [`build ${b.slice(0, 7)}`, `restart ${b.slice(0, 7)}`, `healthz ${b.slice(0, 7)}`, `pin ${b.slice(0, 7)}`], 'the healthy tip is pinned, so the loop\'s restart loads it');
+    assert.equal(git(checkout, 'rev-parse', 'HEAD'), b, 'the checkout is on the new tip');
+    assert.equal(readDeployRecord(file)?.tip, b, 'the served tip is recorded');
+    // The loop restarts itself onto the tip the deploy unit serves.
+    const config = { credentialFile: join(root, 'coordinator.token'), cliPath: join(checkout, 'bin', 'graphyard.mjs') }, head = () => git(checkout, 'rev-parse', 'HEAD');
+    assert.match(restartCause(config, root, a, head) ?? '', new RegExp(`serves ${b.slice(0, 12)}, not ${a.slice(0, 12)}`));
+    assert.equal(restartCause(config, root, b, head), null);
+    assert.equal(restartCause(config, root, a, () => a), null, 'a checkout that does not hold the served tip is no restart: the restart would load the same commit again');
+
+    // A tip whose health check fails is rolled back to the previous tip, and waits for the next one.
+    const c = await commit('C');
+    healthy = sha => sha !== c;
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [`build ${c.slice(0, 7)}`, `restart ${c.slice(0, 7)}`, `healthz ${c.slice(0, 7)}`, `build ${b.slice(0, 7)}`, `restart ${b.slice(0, 7)}`, `healthz ${b.slice(0, 7)}`, `pin ${b.slice(0, 7)}`]);
+    assert.equal(git(checkout, 'rev-parse', 'HEAD'), b, 'the checkout is back on the previous tip');
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed], [b, c]);
+    assert.match(readDeployRecord(file)?.reason ?? '', /health failed: \/healthz answered 503/);
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [], 'the failed tip is not tried again until the base moves');
+
+    // A tip that migrated the database before failing is kept: the previous tip would refuse the migrated database.
+    const d = await commit('D');
+    healthy = sha => sha !== d;
+    const restart = ports.restart;
+    ports.restart = async sha => { await restart(sha); schema = 8; };
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [`build ${d.slice(0, 7)}`, `restart ${d.slice(0, 7)}`, `healthz ${d.slice(0, 7)}`, `pin ${d.slice(0, 7)}`], 'no rollback across the migration');
+    assert.equal(git(checkout, 'rev-parse', 'HEAD'), d);
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed], [d, null]);
+    assert.match(readDeployRecord(file)?.reason ?? '', /kept because it migrated the database from generation 7 to 8/);
+
+    // A tip whose code migrates past the previous tip's, failing while the database cannot be read, is kept too: no downgrade on an unknown schema.
+    const e = await commit('E');
+    healthy = sha => sha !== e;
+    migrates[d] = 8; migrates[e] = 9; schema = null;
+    ports.restart = restart;
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [`build ${e.slice(0, 7)}`, `restart ${e.slice(0, 7)}`, `healthz ${e.slice(0, 7)}`, `pin ${e.slice(0, 7)}`], 'no rollback when the migration cannot be ruled out');
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed], [e, null]);
+    assert.match(readDeployRecord(file)?.reason ?? '', /kept because the database may be at generation 9, past the 8 the previous tip supports/);
+
+    // A rollback that fails is not recorded as served: later passes retry it until the previous tip is restored.
+    const f = await commit('F');
+    healthy = sha => sha !== f;
+    let flaky = true;
+    const build = ports.build;
+    ports.build = async sha => { await build(sha); if (sha === e && flaky) throw new Error('npm ci timed out'); };
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed, readDeployRecord(file)?.restore], [null, f, e], 'the unfinished rollback is recorded, not served');
+    assert.match(readDeployRecord(file)?.reason ?? '', /the rollback to .* failed \(attempt 1 of 5\): build failed: npm ci timed out/);
+    flaky = false;
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [`build ${e.slice(0, 7)}`, `restart ${e.slice(0, 7)}`, `healthz ${e.slice(0, 7)}`, `pin ${e.slice(0, 7)}`], 'the next pass completes the rollback');
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed, readDeployRecord(file)?.restore], [e, f, undefined]);
+    assert.equal(git(checkout, 'rev-parse', 'HEAD'), e);
+  } finally { server.close(); }
+
+  assert.ok(!cycleSteps.some(step => /deploy|upgrade/.test(step)), 'the master loop\'s cycle holds no deploy step');
+});

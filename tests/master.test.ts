@@ -6,9 +6,8 @@ import { execFile, execFileSync } from 'node:child_process';
 import { createServer } from 'node:http';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
-import { assertDispatchable, assertMasterBinding, buildMasterStatus, dispatchWork, inspectWorkerCredentials, loadMasterConfig, masterInstructions, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
+import { assertDispatchable, assertMasterBinding, dispatchWork, inspectWorkerCredentials, loadMasterConfig, masterInstructions, observeHerdrAgents, prepareWorkerLaunch, saveWorkerProfile, setupMaster, startMaster, workerProfileSchema } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
-import { snapshotWithClock } from '../src/cli/coordination-snapshot.js';
 import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -105,37 +104,9 @@ test('Muse launch profiles validate like every other runtime and carry no embedd
   assert.equal(workerProfileSchema.safeParse({ ...muse, kind: 'muse-code' }).success, false);
 });
 
-test('master status derives ownership from Graphyard and only joins Herdr health', async () => {
-  const active = work({ stage: 'build', lease: { owner: 'worker-a', epoch: 3, expiresAt: '2030-01-01T00:10:00Z' }, gates: [{ name: 'build', passed: false, reasons: ['Worker has not submitted'] }] });
-  const result = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [{ name: 'profile-a', principal: 'worker-a', agentName: 'eng-a', mode: 'existing', agentArgs: [], approvals: 'auto', environment: {} }], [{ name: 'eng-a', agent_status: 'working', pane_id: 'p1' }]);
-  assert.equal(result.work[0].owner, 'worker-a'); assert.equal(result.work[0].session, 'working'); assert.equal(result.counts.active, 1);
-  const spoofed = buildMasterStatus({ work: [active], now: '2030-01-01T00:20:00Z' }, [], [{ name: 'worker-a', agent_status: 'working' }]);
-  assert.equal(spoofed.work[0].owner, null, 'Herdr cannot extend an expired Graphyard assignment');
+test('an unavailable Herdr leaves Graphyard work state authoritative', async () => {
   const unavailable = await observeHerdrAgents(() => { throw new Error('daemon unavailable'); });
   assert.equal(unavailable.available, false); assert.deepEqual(unavailable.agents, []); assert.match(unavailable.reason!, /Graphyard work state remains authoritative/);
-});
-
-test('Muse lifecycle telemetry is health-only: working, idle, blocked, done, exit, offline, and lease loss', () => {
-  const active = work({ stage: 'build', lease: { owner: 'muse-1', epoch: 3, expiresAt: '2030-01-01T00:10:00Z' } });
-  const profile = { name: 'muse-primary', principal: 'muse-1', agentName: 'engineering-muse-1', mode: 'launch' as const, kind: 'muse' as const, credentialFile: '/private/muse-1.token', agentArgs: [], approvals: 'auto' as const, environment: {} };
-  const agent = (state: string) => [{ name: profile.agentName, agent: 'muse', agent_status: state, pane_id: 'muse-pane', cwd: '/worktrees/GY-42-3' }];
-  for (const state of ['working', 'idle']) {
-    const status = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], agent(state));
-    assert.equal(status.work[0].owner, 'muse-1'); assert.equal(status.work[0].session, state); assert.equal(status.work[0].attention, null);
-    assert.equal(status.workers[0].state, state); assert.equal(status.workers[0].pane, 'muse-pane'); assert.equal(status.counts.active, 1);
-  }
-  for (const state of ['blocked', 'done']) {
-    const status = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], agent(state));
-    assert.equal(status.work[0].owner, 'muse-1', `a ${state} Muse session neither releases nor advances Graphyard work`); assert.equal(status.work[0].session, state);
-    assert.match(status.work[0].attention!, new RegExp(`session is ${state}`));
-  }
-  const exited = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], []);
-  assert.equal(exited.work[0].owner, 'muse-1', 'a Muse exit cannot release or change Graphyard ownership');
-  assert.equal(exited.work[0].session, 'offline'); assert.match(exited.work[0].attention!, /offline/); assert.equal(exited.workers[0].state, 'offline');
-  const expired = buildMasterStatus({ work: [active], now: '2030-01-01T00:20:00Z' }, [profile], agent('working'));
-  assert.equal(expired.work[0].owner, null, 'Muse telemetry cannot extend a lost lease'); assert.equal(expired.counts.active, 0);
-  const spoofed = buildMasterStatus({ work: [active], now: '2030-01-01T00:00:00Z' }, [profile], [{ name: 'muse-1', agent: 'muse', agent_status: 'working' }]);
-  assert.equal(spoofed.work[0].session, 'offline', 'a Muse session named after the principal is not the profile session');
 });
 
 test('master commands refuse a changed repository or managed base binding', () => {
@@ -338,7 +309,6 @@ test('launch profiles verify a private worker credential and match its principal
     await rm(credential);
     assert.equal((await loadMasterConfig(root)).workers.length, 1, 'one unavailable worker must not disable coordinator commands');
     const health = await inspectWorkerCredentials(root, recovered.workers); assert.equal(health.launch.available, false); assert.match(health.launch.reason!, /worker\.token|ENOENT/);
-    const status = buildMasterStatus({ work: [], now: new Date().toISOString() }, recovered.workers, [], health); assert.equal(status.workers[0].credential.available, false);
     await writeFile(credential, workerToken, { mode: 0o600 });
     await chmod(credential, 0o644);
     await assert.rejects(saveWorkerProfile(root, { name: 'other', principal: 'worker-b', agentName: 'eng-b', mode: 'launch', kind: 'claude', credentialFile: credential }, async () => ({ actor: { id: 'worker-b', role: 'worker' } })), /0600/);
@@ -400,49 +370,4 @@ test('worker preparation claims and creates the assigned worktree from the curre
     execFileSync('git', ['remote', 'set-url', 'origin', 'https://github.com/other/project.git'], { cwd: root });
     await assert.rejects(prepareWorkerLaunch(root, 'GY-42', 'launch'), /different repositories/);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
-});
-
-test('master status surfaces reviewer failover and exhausted reviewer capacity', () => {
-  const profiles = [
-    { name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 },
-    { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer', timeoutSeconds: 900 },
-  ];
-  const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 42, branch: 'graphyard/gy-42-1', author: 'worker' };
-  const failover = (profile: string, runtime: string, exhaustion: 'usage-limit' | 'timeout', nextProfile: string | null, overrides: Record<string, unknown> = {}) =>
-    ({ profile, reviewerApp: profile, runtime, exhaustion, reason: `${profile} exhausted`, at: '2030-01-01T00:00:00Z', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: 2, requestCommentId: 5, nextProfile, ...overrides });
-  const agentPolicy = { checks: ['test'], review: true, reviewProvider: 'agent' as const, reviewerProfiles: profiles };
-  const pending = work({ stage: 'review', policy: agentPolicy, gates: [{ name: 'review', passed: false, reasons: ['Waiting for reviewer profile cursor-reviewer'] }],
-    reviewFailovers: [failover('claude-reviewer', 'claude', 'usage-limit', 'cursor-reviewer')] });
-  const dispatched = buildMasterStatus({ work: [pending], now: '2030-01-01T00:05:00Z' }, [], []);
-  assert.equal(dispatched.work[0].review!.provider, 'agent');
-  assert.equal(dispatched.work[0].review!.profile, 'cursor-reviewer');
-  assert.equal(dispatched.work[0].review!.runtime, 'cursor');
-  assert.equal(dispatched.work[0].review!.exhausted, false);
-  assert.deepEqual(dispatched.work[0].review!.failedOver.map(entry => [entry.profile, entry.exhaustion, entry.nextProfile]), [['claude-reviewer', 'usage-limit', 'cursor-reviewer']]);
-  assert.equal(dispatched.counts.reviewFailover, 1);
-  assert.equal(dispatched.work[0].attention, null);
-  const exhausted = work({ stage: 'review', policy: agentPolicy, gates: [{ name: 'review', passed: false, reasons: ['Every configured reviewer profile is exhausted for this candidate'] }],
-    reviewFailovers: [failover('claude-reviewer', 'claude', 'usage-limit', 'cursor-reviewer'), failover('cursor-reviewer', 'cursor', 'timeout', null)] });
-  const stalled = buildMasterStatus({ work: [exhausted], now: '2030-01-01T00:05:00Z' }, [], []);
-  assert.equal(stalled.work[0].review!.profile, null); assert.equal(stalled.work[0].review!.exhausted, true);
-  assert.match(stalled.work[0].attention!, /Every configured reviewer profile is exhausted/);
-  assert.match(stalled.work[0].attention!, /cursor-reviewer: timeout/);
-  assert.equal(stalled.counts.attention, 1);
-  // Failover recorded for a superseded candidate is history, not a current capacity problem.
-  const rebased = work({ stage: 'review', policy: agentPolicy, gates: [{ name: 'review', passed: false, reasons: ['Waiting'] }],
-    reviewFailovers: [failover('claude-reviewer', 'claude', 'usage-limit', null, { sha: 'c'.repeat(40) })] });
-  const fresh = buildMasterStatus({ work: [rebased], now: '2030-01-01T00:05:00Z' }, [], []);
-  assert.deepEqual(fresh.work[0].review!.failedOver, []); assert.equal(fresh.work[0].review!.profile, 'claude-reviewer');
-  assert.equal(fresh.counts.reviewFailover, 0);
-  // Codex and formal GitHub policies expose no agent reviewer state at all.
-  for (const policy of [{ checks: ['test'], review: true }, { checks: ['test'], review: true, reviewProvider: 'codex' as const }])
-    assert.equal(buildMasterStatus({ work: [work({ policy })], now: '2030-01-01T00:05:00Z' }, [], []).work[0].review, null);
-});
-
-test('the clock the coordinator verifies with is bounded by the read that produced the snapshot', async () => {
-  const times = [1_000, 1_400];
-  const { snapshot, clockOffset } = await snapshotWithClock(async () => ({ work: [], now: new Date(1_200).toISOString() }), () => times.shift()!);
-  assert.deepEqual({ now: snapshot.now, clockOffset }, { now: new Date(1_200).toISOString(), clockOffset: { min: -200, max: 200 } });
-  const unreadable = await snapshotWithClock(async () => ({ work: [], now: 'not-a-time' }), () => 1_000);
-  assert.deepEqual(unreadable.clockOffset, { min: NaN, max: NaN });
 });

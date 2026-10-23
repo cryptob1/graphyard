@@ -11,7 +11,7 @@ import { masterConfigSchema } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { deliveredByMergeWriter, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeReviewMark, wholeFindings } from '../src/model/post-merge-review.js';
-import { dispatchEffects, dispatchFailureAttention, dispatchSummary, emptyDispatchCursor, filePostMergeFollowUps, launchWaitAttention, launchWaits, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, reviewLaunchWaitAttentionMs, runDispatchTick, selectReviewerProfile, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
+import { dispatchEffects, emptyDispatchCursor, filePostMergeFollowUps, postFollowUpItem, postMergeRequest, postMergeWaitReason, reviewedAfterMerge, runDispatchTick, selectReviewerProfile, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
 import { controlPlaneRefusal, controlPlaneVerdict, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
 import { readProjectMemory } from '../src/project-memory.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -211,38 +211,6 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   } finally { await rm(memoryRoot, { recursive: true, force: true }); }
   assert.equal(launched.stage, 'done');
   assert.equal(await filePostMergeFollowUps(launched, record(launched), {}, new Date(clock)), null, 'no verdict, nothing to file');
-});
-
-// GY-2085: the designed post-merge wait of a normal-risk control-plane head (GY-1525) is no
-// session-liveness fault: launchWaitAttention raises nothing for it, and `master status` keeps reporting it.
-const designedWait = async () => {
-  const log: string[] = [], reviews: any[] = [];
-  let items: Work[] = [];
-  const effects = stubEffects(() => items, log, reviews);
-  const head = planeHead('GY-16', ['src/feature.ts']);
-  reconcileAutoDispatch(head, [head], new Date(clock - 20 * 60_000));
-  items = [head];
-  const cursor = emptyDispatchCursor(config);
-  const tick = await runDispatchTick(config, cursor, effects, () => clock);
-  return { tick, cursor, items, log };
-};
-
-test('unit:post-merge-wait-raises-no-attention — a normal-risk control-plane head whose pre-merge review request has waited past reviewLaunchWaitAttentionMs records the designed post-merge wait and raises no launch-review attention', async () => {
-  const { tick, cursor, items, log } = await designedWait();
-  assert.deepEqual(tick.waiting.map(entry => [entry.work, entry.reason]), [['GY-16', postMergeWaitReason]], 'the tick records the designed wait and launches no reviewer');
-  assert.deepEqual(log, [], 'no pre-merge session is launched');
-  const rows = launchWaits(items, cursor, clock);
-  assert.ok(rows.length === 1 && rows[0].waitedMs > reviewLaunchWaitAttentionMs, 'the designed wait is past the attention bound');
-  assert.deepEqual(launchWaitAttention(rows), [], 'the designed wait is no session-liveness fault');
-});
-
-test('unit:post-merge-wait-still-reported — launchWaits and dispatchSummary keep listing the designed post-merge wait with how long it has waited and its reason; only the fault is dropped', async () => {
-  const { cursor, items } = await designedWait();
-  const summary = dispatchSummary(cursor, clock, 10_000, [], items);
-  assert.deepEqual(summary.waiting, launchWaits(items, cursor, clock));
-  assert.deepEqual(summary.waiting.map(row => [row.work, row.reason]), [['GY-16', postMergeWaitReason]]);
-  assert.ok(summary.waiting[0].waitedMs >= 20 * 60_000, 'how long it has waited is still reported');
-  assert.deepEqual(dispatchFailureAttention(summary), [], 'only the fault is dropped, not the report');
 });
 
 // ——— Over a real control plane: the launch, the verdict, the follow-up items, the delivered item untouched. ———

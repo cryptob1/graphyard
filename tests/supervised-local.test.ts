@@ -10,7 +10,7 @@ import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
 import type { MasterConfig } from '../src/master/profiles.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): boundAt and the 2026-10-08 fixture instants are past and handed explicitly as seen/now to the registry, evaluate and buildMasterStatus; new Date() only stamps stub snapshots.
+// Time-bomb allowance (GY-1694): boundAt and the 2026-10-08 fixture instants are past and handed explicitly as seen/now to the registry and evaluate; new Date() only stamps stub snapshots.
 
 /**
  * GY-1501: supervised mode for local installs. Each test is named for the proof it produces:
@@ -155,7 +155,6 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   const { evaluate } = await import('../src/model/gates.js');
   const { withRoleDefaults } = await import('../src/master/profiles.js');
   const { selectReviewerProfile } = await import('../src/auto-dispatch.js');
-  const { buildMasterStatus } = await import('../src/master/status.js');
   const reviewGate = (item: Work) => evaluate(item, [item], new Date('2026-10-08T00:05:00.000Z')).gates.find(gate => gate.name === 'review')!;
 
   // Items keep policy review true and the GitHub review provider: an unreviewed candidate never merges.
@@ -180,19 +179,11 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   // The same identities in autonomous mode are kept.
   const autonomous = withRoleDefaults(baseConfig(identities));
   assert.ok(autonomous.reviewer && autonomous.operatorAgent);
-
-  // master status: one line naming who reviews and the promotion command; none in autonomous mode.
-  const now = '2026-10-08T00:05:00.000Z';
-  const line = buildMasterStatus({ work: [unreviewed], now }, [], [], {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR }).supervision;
-  assert.match(line!, /an agent reviewer reviews each head and the control plane merges it/);
-  assert.match(line!, /graphyard master promote --admin-token-stdin/);
-  assert.equal(buildMasterStatus({ work: [unreviewed], now }, [], []).supervision, null);
 });
 
 test('unit:supervised-no-identity-collapse — up --local hands the operator\'s gh login to no worker, reviewer or producer credential; master status raises no own-login attention, since no pull request awaits the operator', async () => {
   const { runUp } = await import('../src/up.js');
   const { recordSupervision, loadStoredMasterConfig } = await import('../src/master/config.js');
-  const { buildMasterStatus, supervisionReport } = await import('../src/master/status.js');
   // Every child up --local runs: none is given the gh credential, on its arguments, stdin or environment.
   const previous = process.env.GH_TOKEN;
   process.env.GH_TOKEN = GH_TOKEN;
@@ -211,12 +202,6 @@ test('unit:supervised-no-identity-collapse — up --local hands the operator\'s 
   assert.deepEqual({ ...after, supervision: undefined, operatorLogin: undefined }, { ...before, supervision: undefined, operatorLogin: undefined });
   assert.equal(after.credentialFile, before.credentialFile);
   assert.ok(!JSON.stringify(after).includes(GH_TOKEN));
-
-  // GY-1978: no pull request awaits the operator's approval, so master status raises no own-login attention.
-  const own = work([], 'Octo-Operator');
-  const status = buildMasterStatus({ work: [own], now: '2026-10-08T00:05:00.000Z' }, [], [], {}, undefined, 'main', undefined, undefined, undefined, undefined, 'graphyard', null, { mode: 'supervised', operatorLogin: OPERATOR });
-  assert.ok(!status.attentionItems.some(item => /operator's own login/.test(item.text)));
-  assert.match(supervisionReport({ mode: 'supervised', operatorLogin: OPERATOR })!, /^Supervised: /); assert.equal(supervisionReport({ operatorLogin: OPERATOR }), null);
 });
 
 test('unit:supervised-master-prompt — the supervised master prompt says an agent reviews and the control plane merges; the autonomous prompt is unchanged', async () => {

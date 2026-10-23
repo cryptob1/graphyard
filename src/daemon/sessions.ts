@@ -1,7 +1,7 @@
 // Concern: launched sessions — worker profile health.
 import type { Work } from '../model.js';
 import { agentAssignment, finishedAgentStates, reclaimableAgent, type WorkerProfile, type HerdrAgent } from '../master.js';
-import { type DaemonAction, type DaemonState, message, profileCooldownMs } from './state.js';
+import { type DaemonAction, type DaemonState, profileCooldownMs } from './state.js';
 
 export interface ProfileHealth { profile: WorkerProfile; healthy: boolean; busy: boolean; reason: string | null }
 /**
@@ -36,16 +36,6 @@ function agentReason(profile: WorkerProfile, agent: HerdrAgent, work: readonly W
   const owner = agentAssignment(profile, agent, work, now);
   if (owner) return `Herdr agent ${profile.agentName} is ${status} under ${owner.key}'s live lease; remedy: bounded close or relaunch once that lease ends${agent.pane_id ? `, or herdr pane close ${agent.pane_id} on the host` : ''}`;
   return `Herdr agent ${profile.agentName} is ${status} with no pane to close; remedy: relaunch the session or restart Herdr on the host`;
-}
-
-/**
- * GY-1708: whether a profile's agent still consumes the role's machine bound. A finished agent no
- * live lease owns is reclaimable, so the mid-attempt exhaustion redispatch may take the name; an
- * agent that still owns a live lease (or is not finished) blocks a second session of the same role.
- */
-export function occupiesRoleBound(profile: WorkerProfile, agent: HerdrAgent | undefined, work: readonly Work[], now: number): boolean {
-  if (!agent) return false;
-  return !reclaimableAgent(profile, agent, work, now);
 }
 
 /** Retry a refused action on a widening cycle interval rather than on every pass. */

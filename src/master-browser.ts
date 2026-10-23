@@ -266,16 +266,6 @@ export const sudoStateSchema = z.object({
 }).strict();
 export type SudoState = z.infer<typeof sudoStateSchema>;
 const sudoFile = (root: string) => resolve(actionsDirectory(root), 'sudo.json');
-export async function readSudoState(root: string): Promise<SudoState | null> {
-  try { await privateFile(sudoFile(root)); return sudoStateSchema.parse(JSON.parse(await readFile(sudoFile(root), 'utf8'))); }
-  catch (error: any) { if (error.code === 'ENOENT' || /ENOENT/.test(String(error.message))) return null; throw error; }
-}
-/** What the operator must do right now, if anything. */
-export function sudoAttention(state: SudoState | null, now = Date.now()) {
-  if (!state || state.state !== 'waiting') return null;
-  if (Date.parse(state.deadline) <= now) return { ...state, instruction: `The ${state.flow} flow timed out waiting for sudo approval; rerun master browser ${state.flow}` };
-  return { ...state, instruction: `${sudoInstruction(state, 'your device')}; the ${state.flow} flow is waiting` };
-}
 /**
  * Where a waiting flow takes an authenticator or email code (GY-1450): a local page, a command, or
  * both; and, when known, whether the drive shares the operator's live Chrome session (GY-1457):
@@ -983,9 +973,6 @@ export async function appendAdministrationEntry(root: string, entry: Administrat
   if (ledger.entries.some(existing => existing.id === entry.id)) throw new Error('Administration ledger entries are immutable');
   await mkdir(actionsDirectory(root), { recursive: true, mode: 0o700 });
   await atomicPrivateWrite(ledgerFile(root), administrationLedgerSchema.parse({ ...ledger, entries: [...ledger.entries, administrationEntrySchema.parse(entry)] }));
-}
-export function summarizeAdministration(entries: AdministrationEntry[], sudo: SudoState | null, now = Date.now()) {
-  return { sudo: sudoAttention(sudo, now), recent: entries.slice(-5).reverse().map(({ id, flow, completedAt, actor, outcome, verified, reason, record }) => ({ id, flow, at: completedAt, by: actor.browser ?? actor.cli ?? actor.os, outcome, verified, reason: reason ?? null, record })), total: entries.length };
 }
 
 // ---- Confirm-access fixtures ----------------------------------------------------------------

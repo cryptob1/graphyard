@@ -155,38 +155,3 @@ export function reconcileReviewConflict(work: Work, now: Date): ReviewConflictTr
   if (withheld.size && observation!.reviews.some(review => review.id !== undefined && withheld.has(review.id))) observation!.reviews = observation!.reviews.filter(review => review.id === undefined || !withheld.has(review.id));
   return transitions;
 }
-
-/**
- * Why a recorded conflict is settled for attention although no fresh review resolved it, or null
- * while it still stands on a live head (GY-1364). A delivered item's head is never reviewed again,
- * and a head the item has left is a binding nothing will review: the fresh review the attention
- * line promises never comes, so the line would stand forever. Such a conflict stays on the item's
- * record, and the gates still read `openReviewConflict` until the next reconcile supersedes it.
- */
-export function settledReviewConflict(work: Pick<Work, 'stage' | 'candidate' | 'reviewConflict'>): string | null {
-  const conflict = openReviewConflict(work);
-  if (!conflict) return null;
-  if (work.stage === 'done') return `${short(conflict.sha)} was delivered`;
-  // With no candidate observed there is no current head to compare; reconcile supersedes that case.
-  if (work.candidate && work.candidate.sha !== conflict.sha) return `the item left ${short(conflict.sha)} for ${short(work.candidate.sha)}`;
-  return null;
-}
-
-/**
- * The attention line for every item whose review request is conflicted on its live head: the item,
- * the head, both verdicts and the sessions that posted them, read from the reviewer ledger by
- * review id (a session the ledger has no record of is named as such — that is the launcher fault
- * itself). A conflict `settledReviewConflict` names is history, not attention.
- */
-export function reviewConflictAttention(work: Pick<Work, 'key' | 'stage' | 'candidate' | 'reviewConflict'>[], records: { id: string; agentName: string; profile: string; requestId?: string; verdict?: { reviewId: number } }[]): { subject: string; text: string; next: string }[] {
-  return work.flatMap(item => {
-    const conflict = openReviewConflict(item);
-    if (!conflict || settledReviewConflict(item)) return [];
-    const session = (verdict: ObservedVerdict) => {
-      const record = records.find(entry => entry.verdict?.reviewId === verdict.id);
-      return `${describe(verdict)} from ${record ? `session ${record.agentName} (${record.profile}, record ${record.id.slice(0, 8)})` : 'a session the reviewer ledger has no record of'}`;
-    };
-    return [{ subject: item.key, text: `Review of ${item.key} head ${short(conflict.sha)} (PR #${conflict.pr}) is conflicted: ${conflict.reviewer} posted ${conflict.verdicts.map(session).join(' and ')}${conflict.requestId ? ` for request ${conflict.requestId}` : ''}. Neither verdict is acted on — no rework, no approval, no carry — until a fresh review of the head resolves it`,
-      next: `Nothing to run by hand: the control plane requests a fresh review of ${short(conflict.sha)} and the loop launches it; once the loop stops relaunching it (its session settled unanswered or its attempts are spent), graphyard master review ${item.key}` }];
-  });
-}

@@ -1,12 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { mergeRecordKey, mergeWriterIdle, mergeWriterKeptQueue, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import type { MergeRecordEvent } from '../src/merge-writer/executor.js';
-import { systemInvariants } from '../src/model/invariants.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -19,8 +16,7 @@ import type { Work } from '../src/model.js';
  * replay; and the record route is down for an hour, longer than the replay bound. Some heads fail
  * their trial and the refusal's reply is lost, or its request never arrives until the replay. The
  * writer must request each such rework once, deliver every item (a failed one on its reworked head), push each merge commit once, never send a refused key again, replay each lost
- * write at most the bound, keep its state bounded, keep other items moving once the route is back,
- * and hold every system invariant docs/master-agent.md#system-invariants names.
+ * write at most the bound, keep its state bounded, and keep other items moving once the route is back.
  */
 const minute = 60_000;
 const start = Date.parse('2030-06-01T00:00:00Z');
@@ -28,8 +24,6 @@ const iso = (at: number) => new Date(at).toISOString();
 const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
-const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`the merge writer step called GitHub (${String(name)})`); } });
-const docs = fileURLToPath(new URL('../docs/master-agent.md', import.meta.url));
 const reused = 'Idempotency key reused with different input';
 
 /** The day's script, by item ordinal and cycle. */
@@ -124,7 +118,7 @@ class World {
   }
 }
 
-test('unit:soak-merge-record-retry — a simulated day of lost record replies, a stretch of kept-but-unanswered writes, reused-key refusals in flight and on replay, failed-trial refusals whose reply is lost or which first arrive on replay, and an hour-long record outage past the replay bound: each such rework requested once, every item delivered with one push of its merge commit, no refused key sent again, each lost write replayed at most the bound, state bounded, other items moving once the route is back, and every system invariant holding', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-record-retry — a simulated day of lost record replies, a stretch of kept-but-unanswered writes, reused-key refusals in flight and on replay, failed-trial refusals whose reply is lost or which first arrive on replay, and an hour-long record outage past the replay bound: each such rework requested once, every item delivered with one push of its merge commit, no refused key sent again, each lost write replayed at most the bound, state bounded, and other items moving once the route is back', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submittedAt.set(n, start + n * submitEveryMs);
@@ -132,12 +126,10 @@ test('unit:soak-merge-record-retry — a simulated day of lost record replies, a
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    persist: async () => {},
     rework: async (item: Work) => { const n = Number(item.key.slice(3)); world.reworked.set(n, (world.reworked.get(n) ?? 0) + 1); },
-    github: githubDouble, merge: githubDouble, mergeWriter: reads } as unknown as DaemonEffects;
+    mergeWriter: reads } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
-  const invariantNames = new Set<string>();
   const details: string[] = [];
   let heldDuringOutage = 0;
   for (let cycle = 0; cycle < cycles; cycle++) {
@@ -149,7 +141,6 @@ test('unit:soak-merge-record-retry — a simulated day of lost record replies, a
     if (routeDown(cycle) && unconfirmed.length) heldDuringOutage += 1;
     assert.ok(unconfirmed.length <= mergeWriterKeptUnconfirmed && state.mergeWriter.queue.length <= mergeWriterKeptQueue, `cycle ${cycle}: the state is bounded`);
     assert.ok(unconfirmed.every(entry => entry.replays < mergeWriterUnconfirmedReplays), `cycle ${cycle}: no write is kept past the replay bound`);
-    for (const check of state.invariants.report) { invariantNames.add(check.invariant); assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`); }
   }
   const final = world.snapshot();
   assert.equal(final.length, items);
@@ -178,7 +169,4 @@ test('unit:soak-merge-record-retry — a simulated day of lost record replies, a
   assert.ok(final.some(item => Date.parse(item.delivery!.mergedAt) >= start + 330 * cycleMs), 'items were delivered once the route was back');
   assert.equal(state.mergeWriter.unconfirmed, undefined, 'no write is still owed');
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).mergeWriter, state.mergeWriter);
-  const guide = readFileSync(docs, 'utf8');
-  const section = guide.slice(guide.indexOf('### System invariants'), guide.indexOf('## Research and diagnosis'));
-  for (const invariant of systemInvariants) { assert.ok(section.includes(`\`${invariant}\``), `docs/master-agent.md#system-invariants names ${invariant}`); assert.ok(invariantNames.has(invariant), `${invariant} was judged over the day`); }
 });

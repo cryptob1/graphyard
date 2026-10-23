@@ -13,7 +13,6 @@ import type { SessionHandleInput } from '../src/model/sessions.js';
 import { registeredLaunch } from '../src/model/session-state.js';
 import { masterConfigSchema, registeredReview, type MasterConfig } from '../src/master.js';
 import { dispatchEffects, emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
-import { relaunchSession } from '../src/master-daemon.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-01 boundAt is reviewer-binding fixture data nothing ages; the ticks run on a clock seeded from Date.now() and new Date() stamps snapshots and requests on that clock.
 
@@ -56,7 +55,7 @@ async function host() {
   return { root, master, cleanup: () => Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]) };
 }
 
-test('integration:every-launch-registered — the loop\'s reviewer launches, its quota failover relaunch and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
+test('integration:every-launch-registered — the loop\'s reviewer launches and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
   const { root, master, cleanup } = await host();
   try {
     let item = await engine.execute(operator, 'create', null, { title: 'Launch paths', criteria: [{ id: 'AC-1', text: 'Registered', proofs: ['unit:registered'] }] }, randomUUID());
@@ -111,24 +110,6 @@ test('integration:every-launch-registered — the loop\'s reviewer launches, its
       const raced = (await reload(item.id)).sessions!.find(handle => handle.id === request.id)!;
       assert.deepEqual([raced.state, raced.pane, raced.agentName, raced.outcome], ['running', 'wA:p80', 'review-claude-3', null], `the reviewer that runs stays recorded open (refused ${refusedFirst ? 'after' : 'before'} the winner's coordinates)`);
     }
-
-    // The loop's quota failover: the reviewer that ran out of quota is ended, its record closed with
-    // that reason, and its request's next session is registered before its runtime starts on another
-    // profile, then coordinated — one record for the request, open on the relaunched session.
-    const failoverConfig = masterConfigSchema.parse({ ...master, reviewers: [...master.reviewers, { name: 'codex-reviewer', agentName: 'review-codex', kind: 'codex', approvals: 'auto' }] });
-    order.length = 0;
-    const exhausted = (await reload(item.id)).sessions!.find(handle => handle.id === request.id)!;
-    assert.equal(exhausted.state, 'running');
-    const relaunched = await relaunchSession(failoverConfig, { role: 'reviewer', record: 'ledger-1', profile: 'claude-reviewer', agentName: exhausted.agentName!, pane: exhausted.pane, work: item.key, requestId: request.id }, withReview(await reload(item.id)), [], {
-      review: async profile => { order.push(`start:failover-review:${profile.name}`); return { pane: 'wA:p90', agentName: 'review-codex' }; },
-      producer: async () => { throw new Error('unused'); },
-      record: handle => { order.push(`record:${handle.id}:${handle.state}${handle.pane ? `:${handle.pane}` : ''}`); return mutate(`work/${item.id}/session`, handle); },
-    });
-    assert.equal(relaunched.profile, 'codex-reviewer', 'the profile that ran out goes last');
-    assert.deepEqual(order, [`record:${request.id}:finished`, `record:${request.id}:running`, 'start:failover-review:codex-reviewer', `record:${request.id}:running:wA:p90`], 'the exhausted session is closed, then the relaunch registered, started and coordinated');
-    const failedOver = (await reload(item.id)).sessions!.filter(handle => handle.id === request.id);
-    assert.equal(failedOver.length, 1, 'one record for the request');
-    assert.deepEqual([failedOver[0].state, failedOver[0].pane, failedOver[0].agentName, failedOver[0].runtime, failedOver[0].attach], ['running', 'wA:p90', 'review-codex', 'codex', 'herdr pane attach wA:p90 --workspace wA']);
 
     // A launch that fails ends its registration with why, rather than leaving an open record to be lost.
     await assert.rejects(registeredLaunch(handle => mutate(`work/${item.id}/session`, handle), { id: 'doomed', kind: 'coordination', runtime: 'claude', host: 'machine-a', subject: `${item.key}: doomed`, state: 'running' },

@@ -6,8 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { concurrentOverlap } from '../src/coordination.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { candidateConflicts, fetchCandidateHeads, gitConflictProbe } from '../src/conflicts.js';
-import { assertDispatchable, buildMasterStatus, dispatchSchedule, dispatchWork, masterConfigSchema, sequenceAdvice, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { assertDispatchable, dispatchWork, masterConfigSchema, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -60,8 +59,6 @@ test('unit:overlap-detection — dispatch never holds an overlapping item, exclu
   assert.doesNotThrow(() => assertDispatchable(item, [item, live], iso(0)));
   const reserved = claimed('GY-3', { exclusiveResources: ['staging'] });
   assert.throws(() => assertDispatchable(work('GY-4', { exclusiveResources: ['staging'] }), [reserved], iso(0)), /exclusive resources/);
-  const plan = dispatchSchedule([item, live, work('GY-5'), work('GY-6')], clock);
-  assert.deepEqual(plan.order.map(entry => entry.key), ['GY-1', 'GY-5', 'GY-6'], 'the claimed item is not in the plan; the overlapping item keeps its place in the order');
 
   // `master dispatch` launches the overlapping item with no override and records the overlap.
   const root = await temporaryDirectory('overlap'); const credentialDirectory = await temporaryDirectory('overlap-credentials');
@@ -99,58 +96,12 @@ test('integration:overlap-scheduler — the durable loop offers ready items olde
       agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
       snapshot: async () => ({ work: snapshotWork, now: iso(0) }),
       closeSession: () => {}, dispatch: async (item, profile) => { log.push(`${item.key}→${profile.name}`); },
- observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-      recordDeployment: async () => {}, persist: async () => {},
+      persist: async () => {},
     };
     const state = emptyDaemonState(master);
     await runCycle(master, state, effects, () => clock);
     assert.deepEqual(log, ['GY-overlap→one', 'GY-older→two', 'GY-newer→three'], 'the returned rework first, then oldest first; the item overlapping GY-inflight is not held');
   } finally { await rm(directory, { recursive: true, force: true }); }
-});
-
-test('integration:overlap-scheduler — master status shows what each item runs beside and the conflict set of every open candidate', async () => {
-  const held = submitted('GY-held', ['src/cli/master.ts'], 'f'.repeat(40), { reworkRequested: true });
-  const live = reworking('GY-live', ['src/cli/master.ts'], '0'.repeat(40));
-  const left = submitted('GY-left', ['src/sync.ts'], 'c'.repeat(40));
-  const right = submitted('GY-right', ['src/sync.ts'], 'd'.repeat(40));
-  const apart = submitted('GY-apart', ['web/'], 'e'.repeat(40));
-  const report = candidateConflicts([left, right, apart], (a, b) => [a, b].includes('e'.repeat(40)) ? [] : ['src/sync.ts']);
-  assert.deepEqual(report, { 'GY-left': { conflicts: [{ key: 'GY-right', files: ['src/sync.ts'] }], unprobed: [] }, 'GY-right': { conflicts: [{ key: 'GY-left', files: ['src/sync.ts'] }], unprobed: [] }, 'GY-apart': { conflicts: [], unprobed: [] } });
-  const unprobed = candidateConflicts([left, right], () => null);
-  assert.deepEqual(unprobed['GY-left'], { conflicts: [], unprobed: ['GY-right'] }, 'an unfetched head is reported as unprobed, never as conflict-free');
-  const status = buildMasterStatus({ work: [held, live, left, right, apart, work('GY-ready')], now: iso(0) }, [], [], {}, { pending: [], completed: [] }, 'main', undefined, undefined, { report, available: true, reason: null });
-  const row = (key: string) => status.work.find(entry => entry.key === key)!;
-  assert.deepEqual(row('GY-held').overlap.concurrent.map(entry => [entry.key, entry.paths]), [['GY-live', ['src/cli/master.ts']]]);
-  assert.deepEqual(row('GY-live').overlap.concurrent, [], 'GY-held, sent back for rework and unclaimed, is not in flight');
-  assert.deepEqual(row('GY-left').conflicts, { candidates: ['GY-right'], files: [{ key: 'GY-right', files: ['src/sync.ts'] }], unprobed: [], probed: true });
-  assert.deepEqual(row('GY-apart').conflicts?.candidates, []); assert.equal(row('GY-ready').conflicts, null, 'only open candidates have a conflict set');
-  assert.deepEqual(status.schedule.order.map(entry => entry.key), ['GY-held', 'GY-ready']);
-  assert.deepEqual(status.conflicts.sequence, ['GY-apart', 'GY-held', 'GY-live', 'GY-left', 'GY-right'], 'the fewest-conflict candidate lands first');
-  assert.deepEqual(status.conflicts.conflicting, [{ key: 'GY-left', conflicts: ['GY-right'] }, { key: 'GY-right', conflicts: ['GY-left'] }]);
-  assert.deepEqual(sequenceAdvice([]), { sequence: [], conflicting: [] });
-  const unavailable = buildMasterStatus({ work: [left], now: iso(0) }, [], [], {}, { pending: [], completed: [] }, 'main', undefined);
-  assert.equal(unavailable.work[0].conflicts?.probed, false); assert.equal(unavailable.conflicts.available, false); assert.match(unavailable.conflicts.reason!, /not probed/);
-});
-
-test('integration:overlap-scheduler — the conflict probe is a real in-memory git merge of the two candidate heads', async () => {
-  const root = await temporaryDirectory('merge-tree');
-  try {
-    const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
-    git('init', '-q', '-b', 'main'); git('config', 'user.email', 't@example.com'); git('config', 'user.name', 'T');
-    await writeFile(join(root, 'shared.txt'), 'a\nb\nc\n'); await writeFile(join(root, 'other.txt'), 'x\n'); git('add', '.'); git('commit', '-q', '-m', 'base');
-    git('checkout', '-q', '-b', 'one'); await writeFile(join(root, 'shared.txt'), 'one\nb\nc\n'); git('commit', '-q', '-am', 'one'); const one = git('rev-parse', 'HEAD');
-    git('checkout', '-q', 'main'); git('checkout', '-q', '-b', 'two'); await writeFile(join(root, 'shared.txt'), 'two\nb\nc\n'); git('commit', '-q', '-am', 'two'); const two = git('rev-parse', 'HEAD');
-    git('checkout', '-q', 'main'); git('checkout', '-q', '-b', 'three'); await writeFile(join(root, 'other.txt'), 'y\n'); git('commit', '-q', '-am', 'three'); const three = git('rev-parse', 'HEAD');
-    const probe = gitConflictProbe(root);
-    assert.deepEqual(probe(one, two), ['shared.txt']); assert.deepEqual(probe(one, three), []); assert.equal(probe(one, 'f'.repeat(40)), null);
-    assert.equal(execFileSync('git', ['-C', root, 'status', '--porcelain'], { encoding: 'utf8' }), '', 'the probe touches no worktree');
-    const items = [submitted('GY-one', ['shared.txt'], one), submitted('GY-two', ['shared.txt'], two), submitted('GY-three', ['other.txt'], three)];
-    assert.deepEqual(candidateConflicts(items, probe)['GY-one'], { conflicts: [{ key: 'GY-two', files: ['shared.txt'] }], unprobed: [] });
-    const fetched: string[][] = [];
-    assert.deepEqual(fetchCandidateHeads(root, items, (_command, args) => { fetched.push(args); return ''; }), { fetched: true, reason: null });
-    assert.deepEqual(fetched[0].slice(-3), ['+refs/heads/graphyard/gy-one-1:refs/remotes/origin/graphyard/gy-one-1', '+refs/heads/graphyard/gy-two-1:refs/remotes/origin/graphyard/gy-two-1', '+refs/heads/graphyard/gy-three-1:refs/remotes/origin/graphyard/gy-three-1']);
-    assert.match(fetchCandidateHeads(root, items, () => { throw new Error('no network'); }).reason!, /could not be fetched: no network/);
-  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('unit:overlap-holds-nothing — whatever the priority or pull-request state, an overlapping item is dispatchable', () => {
@@ -169,5 +120,4 @@ test('unit:overlap-holds-nothing — whatever the priority or pull-request state
   const all = [...ahead, ...candidates];
   assert.ok(concurrentOverlap(candidates[2], all, clock).length > 0, 'GY-175 overlaps work in flight');
   for (const item of candidates) assert.doesNotThrow(() => assertDispatchable(item, all, iso(0)), `${item.key} is dispatchable`);
-  assert.deepEqual(dispatchSchedule(all, clock).order.map(entry => entry.key).sort(), ['GY-172', 'GY-175', 'GY-177']);
 });

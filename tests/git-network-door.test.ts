@@ -178,14 +178,10 @@ export interface AllowlistEntry {
 export const allowlist: Record<string, AllowlistEntry> = {
   'scripts/ci-tests.mjs': { subcommands: ['ls-remote'], runs: 'the CI runner reading the merge queue refs while selecting this run\'s tests', credential: 'the Actions checkout token the runner already holds', door: 'it runs on a GitHub Actions runner, a different machine from the loop that hosts the merge writer, and reads the queue refs with the token Actions hands that runner; the writer has no port a CI job can call' },
   'scripts/prepare-acceptance.mjs': { subcommands: ['fetch'], runs: 'the trusted acceptance job preparing the exact candidate head and base', credential: 'none stored: an anonymous https fetch of a public repository inside the candidate build context', door: 'it runs inside the trusted acceptance job on a CI runner, which must build from the exact head and base it reads itself; the merge writer lives in the loop on another machine and no port reaches it from CI' },
-  'src/cli/checkout-restore-release.ts': { subcommands: ['clone', 'fetch'], runs: 'the serving release\'s own CLI answering `master checkout-restore --serve` (the base-tip read and the local snapshot clone)', credential: 'the loop checkout\'s own git credential for the fetch; the --shared clone is local and needs none', door: 'the clone is a --shared local copy of the checkout\'s own object store and never reaches the remote; the base-tip fetch serves a restore that runs when the loop, and so its merge writer, may be down or wedged, so it cannot wait on the merge writer\'s queue' },
   'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)', door: 'the push exists only in the PR form, which the engine accepts only while GitHub is the merger (GY-1523) — exactly when the control plane is not the merge writer, so there is no writer queue to hand the push to; the writer\'s one push door (sync-push) carries only a pure base sync of the worker\'s own assigned branch, and the answer to a sandbox that cannot push is `complete --head`, which pushes nothing (GY-1925)' },
   'src/cli/workspace-worktree.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s workspace tools (`handoff`, `restore-branch`)', credential: 'the workspace checkout\'s own git credential', door: 'the fetch refreshes the workspace checkout\'s own remote-tracking refs for `restore-branch`\'s lease push and for an adopted pull request\'s branch, which the merge writer neither holds nor pushes; a rework workspace reads the registered local head and fetches nothing (GY-2017), and `restore-branch`\'s lease push replaces a worker branch the merge writer has no lease on' },
-  'src/conflicts.ts': { subcommands: ['fetch'], runs: 'the master status pipeline probing candidate conflicts', credential: 'the coordinator checkout\'s own git credential', door: 'it reads the open candidates\' worker branches, which the merge writer never fetches (its one read is the base tip), synchronously inside the status probe\'s time budget; the writer has no port for branch reads and is not wired under the github merger' },
   'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)', door: 'it is the merge writer: its base fetch and leased push are the door itself' },
-  'src/daemon/deployment.ts': { subcommands: ['fetch'], runs: 'the loop\'s deployment observation (the base tip it reads ancestry against)', credential: 'the coordinator checkout\'s own git credential', door: 'deployment observation must read the base tip and rc/* records fresh every cycle, including while the merge writer is stalled or disabled (github delivery mode runs none), and it writes nothing' },
-  'src/daemon/held-cli.ts': { subcommands: ['clone'], runs: 'the loop pinning a held CLI snapshot', credential: 'none: a --shared clone of the checkout\'s own object store', door: 'a --shared clone of the checkout\'s own object store: it never reaches the remote, so there is no network call to move' },
-  'src/daemon/upgrade.ts': { subcommands: ['fetch'], runs: 'the loop\'s self-upgrade reading the base tip', credential: 'the coordinator checkout\'s own git credential', door: 'the self-upgrade decides whether to restart the loop that runs the merge writer, so it must read the base tip without it, from a writer that may be the one owed the restart' },
+  'src/cli/upgrade.ts': { subcommands: ['fetch'], runs: 'graphyard-deploy.service (`upgrade --watch`) reading the base tip it deploys; GY-2877 moved this read out of the loop\'s self-upgrade with the deploy itself', credential: 'the coordinator checkout\'s own git credential', door: 'the deploy restarts the loop that runs the merge writer, so it must read the base tip without it, from a writer that may be the one owed the restart' },
   'src/master/worktrees.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s cycle preparation (cycleBaseTip, one fetch per cycle)', credential: 'the coordinator checkout\'s own git credential', door: 'the worker launcher prepares worktrees from the base tip in the coordinator\'s own object store, once per cycle; the merge writer runs as a serial queue step and publishes no base read other processes can await, so routing it there would serialize every launch behind merges' },
   'src/merge-writer/executor.ts': { subcommands: ['push'], runs: 'the merge writer itself — the one process meant to reach the remote; its leased push args run in cycle-merge-writer.ts', credential: 'the leased deploy key (deployKeySshCommand), forced only onto the tip it was tested on', door: 'it is the merge writer: pushArgs is the door\'s own leased push, defined here and executed only by the writer\'s ports' },
   'src/up.ts': { subcommands: ['fetch', 'push'], runs: '`graphyard up` publishing onboarding and moving the host checkout to the installed ref', credential: 'the operator\'s own git credential on the installing machine', door: '`graphyard up` runs on the operator\'s machine while onboarding a repository, before any loop or merge writer serves it, and pushes only its own onboarding branch, never the base the merge writer owns' },
@@ -207,19 +203,15 @@ export const allowlist: Record<string, AllowlistEntry> = {
  * GY-1943: the acceptance and planner cluster. Each file either leaves both lists, its calls moved
  * behind the merge writer, or keeps an entry stating why its call cannot go through it.
  */
-export const acceptanceAndPlannerCluster = ['src/conflicts.ts', 'scripts/prepare-acceptance.mjs', 'scripts/ci-tests.mjs'];
+export const acceptanceAndPlannerCluster = ['scripts/prepare-acceptance.mjs', 'scripts/ci-tests.mjs'];
 
 export const baseline = [
   'scripts/ci-tests.mjs',
   'scripts/prepare-acceptance.mjs',
-  'src/cli/checkout-restore-release.ts',
   'src/cli/complete.ts',
+  'src/cli/upgrade.ts',
   'src/cli/workspace-worktree.ts',
-  'src/conflicts.ts',
   'src/daemon/cycle-merge-writer.ts',
-  'src/daemon/deployment.ts',
-  'src/daemon/held-cli.ts',
-  'src/daemon/upgrade.ts',
   'src/master/worktrees.ts',
   'src/merge-writer/executor.ts',
   'src/up.ts',
@@ -234,8 +226,7 @@ export const baseline = [
  * with the promotion drive (simplify 1a): only the plane's exact-candidate client remains there.
  */
 export const releaseCluster = [
-  'src/release-project.ts', 'src/daemon/deployment.ts',
-  'src/daemon/upgrade.ts', 'src/master/branch-release.ts', 'src/daemon/cycle-merge-writer.ts', 'src/merge-writer/executor.ts',
+  'src/release-project.ts', 'src/cli/upgrade.ts', 'src/master/branch-release.ts', 'src/daemon/cycle-merge-writer.ts', 'src/merge-writer/executor.ts',
 ];
 
 const spoken = (subcommands: string[]) => subcommands.length <= 1 ? subcommands.join('') : `${subcommands.slice(0, -1).join(', ')} and ${subcommands[subcommands.length - 1]}`;
@@ -316,9 +307,7 @@ test('unit:git-network-door — every release and promotion cluster file is off 
  * so each entry keeps its place and states why; a file that does move leaves this list too.
  */
 export const docsSyncWorkspaceCluster = [
-  'src/cli/checkout-restore-release.ts',
   'src/cli/workspace-worktree.ts',
-  'src/daemon/held-cli.ts',
   'src/master/worktrees.ts',
   'src/up.ts',
 ];

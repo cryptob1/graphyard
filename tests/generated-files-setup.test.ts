@@ -5,14 +5,12 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { configuredGeneratedFiles, parseGeneratedFiles } from '../src/generated-files.js';
-import { generatedFilesAssignment, generatedFilesDrift, generatedFilesVariable } from '../src/install/generated-files.js';
-import { installationOwner } from '../src/master.js';
+import { generatedFilesAssignment, generatedFilesVariable } from '../src/install/generated-files.js';
 import { applyProposal, scanProposal } from '../src/repository-setup.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-77 AC-1 / AC-2: the installers derive GRAPHYARD_GENERATED_FILES from the managed
-// repository's generated-file manifest and set it beside GRAPHYARD_PRINCIPALS, master status
-// reports drift against the manifest with the exact command to fix it, and the documented
+// repository's generated-file manifest and set it beside GRAPHYARD_PRINCIPALS, and the documented
 // command yields a value the server parses while an unparseable one refuses start-up.
 
 const repository = fileURLToPath(new URL('..', import.meta.url));
@@ -124,28 +122,6 @@ test('integration:generated-files-setup — init --scan --apply sets the derived
   } finally { await rm(undeclared, { recursive: true, force: true }); }
 });
 
-test('integration:generated-files-setup — master status reports deployment drift with the exact command to fix it', () => {
-  const manifest = generatedFilesAssignment(repository);
-  assert.ok(manifest);
-  // The production shape that started this item: the deployment reports the variable unset.
-  const deployed: Record<string, string | null> = { GRAPHYARD_MAX_REVIEWERS: '4', [generatedFilesVariable]: null };
-  const [unset] = generatedFilesDrift(deployed[generatedFilesVariable], manifest);
-  assert.match(unset, /GRAPHYARD_GENERATED_FILES is unset on the deployment, so the regression guard treats every file as owned; the repository manifest declares docs\/protocol\.md,docs\/README\.md\. Set GRAPHYARD_GENERATED_FILES=docs\/protocol\.md,docs\/README\.md on the deployment\./);
-  const owner = installationOwner('delegation-limits', unset);
-  assert.equal(owner.role, 'master');
-  assert.equal(owner.next, 'Set GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md on the deployment (Railway: railway variables --set GRAPHYARD_GENERATED_FILES=docs/protocol.md,docs/README.md --service graphyard), then redeploy');
-  // A matching value raises nothing, whatever order the operator used; a stale, refused, or
-  // unreported value is raised the same way, and a repository without a manifest never drifts.
-  assert.deepEqual(generatedFilesDrift('docs/README.md , docs/protocol.md', manifest), []);
-  const [stale] = generatedFilesDrift('docs/README.md', manifest);
-  assert.match(stale, /no longer matches the repository manifest.*Set GRAPHYARD_GENERATED_FILES=docs\/protocol\.md,docs\/README\.md on the deployment\./);
-  const [garbage] = generatedFilesDrift('{"generated":["docs/README.md"]}', manifest);
-  assert.match(garbage, /does not parse.*Set GRAPHYARD_GENERATED_FILES=docs\/protocol\.md,docs\/README\.md on the deployment\./);
-  const [unreported] = generatedFilesDrift(undefined, manifest);
-  assert.match(unreported, /does not report GRAPHYARD_GENERATED_FILES \(deploy main first\).*Set GRAPHYARD_GENERATED_FILES=docs\/protocol\.md,docs\/README\.md on the deployment\./);
-  assert.deepEqual(generatedFilesDrift('docs/README.md', null), []);
-});
-
 test('integration:generated-files-setup — the server refuses an unparseable value at start-up and reports the deployed one', async () => {
   const child = spawnSync(process.execPath, ['--import', 'tsx', 'src/server.ts'], {
     cwd: repository, encoding: 'utf8', timeout: 60_000,
@@ -158,12 +134,6 @@ test('integration:generated-files-setup — the server refuses an unparseable va
   const main = await readFile(new URL('../src/server/main.ts', import.meta.url), 'utf8');
   assert.match(main, /const generatedFiles = configuredGeneratedFiles\(\);/);
   assert.match(main, /delegationLimits\.deployed\[generatedFilesVariable\] = process\.env\.GRAPHYARD_GENERATED_FILES/);
-  // The wiring that carries the drift to master status and the principals instruction.
-  const status = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
-  assert.match(status, /generatedFilesAssignment\(root\)/);
-  assert.match(status, /installationOwner\('delegation-limits', text\)/);
-  // The drift is counted like every other attention item, so the summary count never hides it.
-  assert.match(status, /attention: status\.counts\.attention \+ diskAttention\.length \+ generatedFiles\.length/);
   const setup = await readFile(new URL('../src/repository-setup.ts', import.meta.url), 'utf8');
   assert.match(setup, /generatedFilesAssignment\(root\)/);
 });

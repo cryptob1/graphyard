@@ -2,15 +2,13 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { mechanicalReviewHold, mechanicalRoundStartMs } from '../src/mechanical-findings.js';
-import { reportMechanicalPlans } from '../src/daemon/mechanical-plan-report.js';
 
 // GY-1814. The release-candidate soak failed every run of 2026-10-14 on the mechanical-fix day.
 // The mechanical-fix day (tests/soak-review.test.ts) merged each approved head within milliseconds of its approval landing,
 // because the approval is observed and its gates re-evaluated inside one control-plane observation job
 // while the loop's plan report runs later in the daemon's decisions step: since GY-1764 the review gate
-// holds only a plan the loop reported, so in that window it held nothing. These tests pin the fixed paths:
-// the loop's provisional report of an approval
-// the ledger has not answered, with the gate's hold over both.
+// holds only a plan the loop reported, so in that window it held nothing. This test pins the fixed path:
+// the review gate holds an approval naming mechanical findings from its own observation.
 //
 // Every instant in this file is the fixture's own fixed clock below, handed explicitly to the code under
 // test; the file takes no wall-clock reading of its own.
@@ -33,37 +31,6 @@ const item = (extra: Partial<Work> = {}): Work => ({
 } as unknown as Work);
 const observed = (reviews: Partial<typeof approval>[]): Partial<Work> => ({ observation: { candidate, reviews: reviews as typeof approval[], checks: [], merged: false, prState: 'open', draft: false, at: iso(now - minute) } as unknown as Work['observation'] });
 
-test('unit:soak-red-regression — the loop reports an approval the ledger has not answered as the plan that holds its head: suppressed when the ledger answered none or supplies no answered list, re-confirmed while it stands, and never past the round window', async () => {
-  const plans: ({ reviewId: number; head: string } | null)[] = [];
-  const sink = { fail: async () => {}, settle: async () => {} };
-  const run = async (mechanicalFixes: () => Promise<{ requests: unknown[]; answered?: { key: string; reviewId: number }[] }>, extra: Partial<Work> = {}) => {
-    plans.length = 0;
-    await reportMechanicalPlans([item(extra)], [], { mechanicalFixes: mechanicalFixes as never, recordMechanicalPlan: async (_work, plan) => { plans.push(plan); } }, now, sink);
-    return plans;
-  };
-  // The race the soak caught: the approval is observed and its head re-evaluated inside the observation job,
-  // before the ledger pass that plans it. The loop reports the approval itself, and the gate holds.
-  assert.deepEqual(await run(async () => ({ requests: [], answered: [] })), [{ reviewId, head }], 'an unanswered approval is reported as the plan that holds its head');
-  assert.match(mechanicalReviewHold(item({ mechanicalPlan: { reviewId, head, at: iso(now) } }), now) ?? '', new RegExp(`Approval ${reviewId} of ${short} names 2 findings classified mechanical`), 'the reported plan holds the head');
-  // An approval the ledger answered without a plan — follow-ups filed, a fresh read present, a fallback — is
-  // cleared, never re-held past the answer (GY-1764).
-  assert.deepEqual(await run(async () => ({ requests: [], answered: [{ key, reviewId }] })), [null], 'the ledger\'s answer clears the approval');
-  assert.equal(mechanicalReviewHold(item({ mechanicalPlan: null, mechanicalAnswered: { reviewId, head } }), now), null, 'and the gate releases on the clear');
-  // One ledger snapshot decides plan and answer: a snapshot handed to the report is the only read made.
-  let reads = 0;
-  plans.length = 0;
-  await reportMechanicalPlans([item()], [], { mechanicalFixes: (async () => { reads++; return { requests: [], answered: [] }; }) as never, recordMechanicalPlan: async (_work, plan) => { plans.push(plan); } }, now, sink, { answered: [{ key, reviewId }] });
-  assert.deepEqual([reads, plans], [0, [null]], 'the cycle\'s own snapshot answers the approval without a second ledger read');
-  // An effects wiring that supplies no answered list answers everything: the gate never holds what nothing backs.
-  assert.deepEqual(await run(async () => ({ requests: [] })), [null], 'a read without an answered list reports none');
-  // A matching report stands while the ledger still plans nothing: it is re-confirmed, whatever its stamp.
-  assert.deepEqual(await run(async () => ({ requests: [], answered: [] }), { mechanicalPlan: { reviewId, head, at: iso(now - 6 * minute) } }), [{ reviewId, head }], 'a standing matching plan is re-confirmed');
-  // Past the round window the approval holds nothing and owes no report: the findings return to follow-ups.
-  const late = iso(now - mechanicalRoundStartMs - hour);
-  assert.deepEqual(await run(async () => ({ requests: [], answered: [] }), observed([{ ...approval, submittedAt: late }])), [], 'an approval past its round window is not reported');
-  assert.equal(mechanicalReviewHold(item(observed([{ ...approval, submittedAt: late }])), now), null, 'and the gate releases past the window');
-});
-
 test('unit:soak-red-regression — the review gate holds an approval naming mechanical findings from its observation until its round window: a reported plan for that approval holds whatever its stamp, a plan for another approval holds, the clear of this approval releases, and the round window releases the rest', async () => {
   // The race the soak caught, closed at the gate: the approval is observed with no report of the loop's yet.
   assert.match(mechanicalReviewHold(item(), now) ?? '', new RegExp(`Approval ${reviewId} of ${short} names 2 findings classified mechanical`), 'an approval the loop has not reported yet holds its head');
@@ -78,16 +45,4 @@ test('unit:soak-red-regression — the review gate holds an approval naming mech
   assert.equal(mechanicalReviewHold(item({ mechanicalPlan: null, mechanicalAnswered: { reviewId, head: base } }), now), null, 'the clear of a carried approval names the refreshed candidate head, and still releases the approval it answered by review id');
   const late = iso(now - mechanicalRoundStartMs - minute);
   assert.equal(mechanicalReviewHold(item(observed([{ ...approval, submittedAt: late }])), now), null, 'an approval past its round window holds nothing');
-});
-
-test('unit:soak-red-regression — a plan report that cannot be written names when the gate actually releases: the round window for an approval still inside it, the confirmation\'s freshness otherwise', async () => {
-  const details: string[] = [], sink = { fail: async (_: Work, detail: string) => { details.push(detail); }, settle: async () => {} };
-  const refused = { mechanicalFixes: (async () => ({ requests: [], answered: [] })) as never, recordMechanicalPlan: async () => { throw new Error('503 Service Unavailable'); } };
-  // The approval is inside its round: the gate holds it past the confirmation's freshness until a report lands or the window lapses (Codex, PR #1215).
-  await reportMechanicalPlans([item()], [], refused, now, sink);
-  assert.deepEqual(details, [`Could not report ${key}'s mechanical plan (review ${reviewId} on ${short}): 503 Service Unavailable; the review gate drops the hold once its last confirmation passes 5 minutes old, except over an approval still inside its mechanical round, which it holds until a report lands or ${iso(Date.parse(submittedAt) + mechanicalRoundStartMs)}`]);
-  // A stale plan whose approval left the round holds nothing past its freshness, so the detail names only that.
-  details.length = 0;
-  await reportMechanicalPlans([item({ ...observed([{ ...approval, submittedAt: iso(now - mechanicalRoundStartMs - hour) }]), mechanicalPlan: { reviewId, head, at: iso(now - 10 * minute) } })], [], refused, now, sink);
-  assert.deepEqual(details, [`Could not report ${key}'s mechanical plan (none): 503 Service Unavailable; the review gate drops the hold once its last confirmation passes 5 minutes old`]);
 });

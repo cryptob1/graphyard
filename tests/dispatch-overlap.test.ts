@@ -6,7 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { concurrentOverlap, exclusionPaths } from '../src/coordination.js';
 import { dispatchHold } from '../src/model/concerns.js';
-import { assertDispatchable, buildMasterStatus, dispatchSchedule, dispatchWork, masterConfigSchema, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { assertDispatchable, dispatchWork, masterConfigSchema, setupMaster, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
@@ -59,8 +59,7 @@ async function daemon(profiles: string[]) {
     agents: () => [], credentials: async items => Object.fromEntries(items.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: snapshotWork, now: iso(offsetMs) }),
     closeSession: () => {}, dispatch: async (item, profile) => { log.push(`${item.key}→${profile.name}`); },
- observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    persist: async () => {},
   };
   return { master, effects, log, state: emptyDaemonState(master), set: (items: Work[], atMs = 0) => { snapshotWork = items; offsetMs = atMs; }, cleanup: () => rm(directory, { recursive: true, force: true }) };
 }
@@ -76,9 +75,6 @@ test('unit:optimistic-dispatch — two items overlapping on the same files both 
   const all = [building, building2, inReview, first, second];
   for (const item of [first, second]) assert.doesNotThrow(() => assertDispatchable(item, all, iso(0)), `${item.key} is dispatchable whatever it overlaps`);
   assert.equal(dispatchHold(first, all, new Date(clock)), null, 'the concern layer holds nothing for overlap either');
-  const schedule = dispatchSchedule(all, clock);
-  assert.deepEqual(schedule.order.map(entry => entry.key), ['GY-190', 'GY-191'], 'both are offered');
-  assert.deepEqual(Object.keys(schedule), ['order'], 'the schedule carries no holds');
   // The overlap is reported, for the record: the in-flight items whose candidates touch the same files.
   assert.deepEqual(concurrentOverlap(first, all, clock).map(entry => [entry.key, entry.state, entry.paths]), [['GY-166', 'submitted', [file]]]);
   assert.deepEqual(concurrentOverlap(first, [first, second], clock), [], 'two dispatchable peers are not in flight');
@@ -93,17 +89,6 @@ test('unit:optimistic-dispatch — two items overlapping on the same files both 
     await runCycle(loop.master, loop.state, loop.effects, () => clock);
     assert.deepEqual(loop.log, ['GY-190→one', 'GY-191→two'], 'overlapping items are dispatched together, never held');
   } finally { await loop.cleanup(); }
-
-  // Master status records what each item runs beside and counts every open item as runnable at once.
-  const profiles = ['one', 'two', 'three'].map(name => launchProfile(name, '/credentials/worker.token'));
-  const status = buildMasterStatus({ work: all, now: iso(0) }, profiles, [], {}, { pending: [], completed: [] });
-  const row = status.work.find(entry => entry.key === 'GY-190')!;
-  assert.deepEqual(row.overlap.concurrent.map(entry => entry.key), ['GY-166']);
-  assert.equal(row.attention, null, 'an overlap raises no attention');
-  assert.equal(status.effectiveConcurrency.effective, 5); assert.equal(status.effectiveConcurrency.inFlight, 3); assert.equal(status.effectiveConcurrency.dispatchable, 2);
-  assert.equal(status.counts.effectiveConcurrency, 5);
-  assert.match(status.effectiveConcurrency.statement, /^5 items could be in flight at once \(3 in flight, 2 dispatchable; file overlap holds nothing\); 3 of 3 launch profiles idle; the dispatcher starts every dispatchable item while a worker profile is free$/);
-  assert.ok(!('held' in status.counts) && !('holdsOverdue' in status.counts));
 
   // The launcher dispatches over the overlap without any override, and records it.
   const root = await temporaryDirectory('optimistic'); const credentialDirectory = await temporaryDirectory('optimistic-credentials');

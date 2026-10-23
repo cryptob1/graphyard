@@ -18,11 +18,7 @@ test('managed instructions refresh one section and preserve all surrounding oper
   const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
   const original = `# Operator rules\n${bootstrap}\nNever delete customer data.\n`;
   const first = managedInstructions(original);
-  assert.match(first, /dedicated master coordinator must keep cycling: status, dispatch ready work,\nshepherd review, record what the merge writer's trial landed, then deployment verification/);
-  assert.match(first, /both conditions hold: \(1\) every in-scope item is Done or has a genuinely\nexternal blocker recorded in Graphyard; and \(2\) every merged change is deployed and\nlive-verified against the exact deployed release, or a genuinely external deployment\nblocker is recorded in Graphyard/);
-  assert.match(first, /Delivered work is immutable, so a deployment\nblocker is recorded as a follow-up work item naming the delivered item, its merge\ncommit, and the external cause/);
-  assert.match(first, /An observed merge alone does not end the loop/);
-  for (const condition of ['Ordinary review findings', 'rework', 'idle workers', 'proof setup', 'Close finished agent\\s+sessions']) assert.match(first, new RegExp(condition));
+  assert.match(first, /dedicated master coordinator keeps cycling: run master status and act on what it names,\nuntil every in-scope item is Done or carries a recorded blocker and the serving commit is\nmain's tip/);
   const surrounding = `${first}\n## Team review\nAsk the maintainer.\n`;
   const updated = managedInstructions(surrounding);
   assert.ok(updated.startsWith(original)); assert.ok(updated.endsWith('## Team review\nAsk the maintainer.\n'));

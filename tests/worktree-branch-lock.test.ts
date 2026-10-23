@@ -13,9 +13,8 @@ import { Engine } from '../src/engine.js';
 import { pipelineTimeline } from '../src/pipeline-speed.js';
 import { releaseHeldBranch } from '../src/master/worktrees.js';
 import { runChild } from '../src/child-runner.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import { masterConfigSchema, prepareWorkerLaunch, saveWorkerProfile, setupMaster, type MasterConfig } from '../src/master.js';
-import { workerCommand, workspaceDispatchFailure } from '../src/master/dispatch.js';
+import { prepareWorkerLaunch, saveWorkerProfile, setupMaster } from '../src/master.js';
+import { workerCommand } from '../src/master/dispatch.js';
 import { workspaceCommands } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 import type { Principal, Work } from '../src/model.js';
@@ -246,63 +245,6 @@ test('unit:workspace-failure-spares-profile — the engine keeps the preserved-a
   await assert.rejects(engine.execute(worker, 'release', worked.id, { epoch: workedEpoch, failure: { message: 'stale epoch' } }, id()), /Lease missing, expired, or superseded/);
 });
 
-test('unit:workspace-failure-spares-profile — the loop cools off no profile for a workspace failure and keeps the git message on the item\'s record; any other failure still does', async () => {
-  const home = await temporaryDirectory('branch-lock-home');
-  const config: MasterConfig = masterConfigSchema.parse({
-    version: 1, url: 'https://graphyard.example', credentialFile: join(home, 'coordinator.token'), cliPath: launcher,
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 4242, hostId: 'lock-host', masterAgentName: 'graphyard-master-lock',
-    workers: [{ name: 'builder', principal: 'worker-a', agentName: 'agent-builder', mode: 'launch', kind: 'claude' as const, credentialFile: join(home, 'builder.token') }],
-    run: { intervalSeconds: 20 },
-  });
-  const item = (epoch: number): Work => ({
-    id: `id-gy-860-${epoch}`, key: `GY-86${epoch}`, title: `Item ${epoch}`, description: '', type: 'bug', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, 
-    stage: 'build', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: new Date().toISOString(),
-    ready: true, epoch, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
-    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [], violations: [],
-  } as Work);
-  const effectsWith = (failure: () => Promise<never>): DaemonEffects => ({
-    agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(entry => [entry.name, { available: true, reason: null }])),
-    snapshot: async () => ({ work: [], now: new Date().toISOString() }),
-    closeSession: () => {}, dispatch: failure,
-    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: new Date().toISOString(), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
-  });
-  const cycle = async (effects: DaemonEffects, items: Work[]) => {
-    const state = emptyDaemonState(config);
-    await runCycle(config, state, { ...effects, snapshot: async () => ({ work: items, now: new Date().toISOString() }) }, () => Date.now());
-    return state;
-  };
-
-  // A workspace failure: the profile stays healthy and the record names the workspace, not the profile.
-  const workspaceBroken = effectsWith(async () => { throw new Error('Git worktree creation failed: fatal: \'graphyard/gy-860-3\' is already used by worktree at .graphyard/worktrees/GY-860-2. The workspace reservation remains for safety'); });
-  const spared = await cycle(workspaceBroken, [item(3)]);
-  assert.equal(spared.profiles['builder'], undefined, 'no failure cool-off for a workspace failure');
-  const kept = spared.actions[`dispatch:${item(3).id}:3`];
-  assert.equal(kept.state, 'failed');
-  assert.match(kept.detail, /already used by worktree/, 'the git message is on the item\'s record');
-  assert.match(kept.detail, /workspace could not be prepared/, 'the record says the workspace, not the profile, failed');
-  // The epoch came back, so the next dispatch reuses the same key: it waits out a doubling backoff
-  // instead of retrying the same host git state every cycle.
-  let launches = 0;
-  const counted = effectsWith(async () => { launches++; throw new Error('Git worktree creation failed: fatal: still held'); });
-  const retried = { ...spared, cycle: spared.cycle };
-  const snapshotOf = { ...counted, snapshot: async () => ({ work: [item(3)], now: new Date().toISOString() }) };
-  await runCycle(config, retried, snapshotOf, () => Date.now());
-  assert.equal(launches, 0, 'the very next cycle does not retry a workspace failure');
-  retried.cycle += 5;
-  await runCycle(config, retried, snapshotOf, () => Date.now());
-  await new Promise(resolve => setTimeout(resolve, 50));
-  assert.equal(launches, 1, 'once the backoff has passed the item is dispatched again');
-
-  // Any other launch failure still puts the profile into its cool-off.
-  const credentialGone = effectsWith(async () => { throw new Error('Worker credential is unavailable: the token was refused'); });
-  const cooled = await cycle(credentialGone, [item(4)]);
-  assert.ok(cooled.profiles['builder']?.cooldownUntil, 'a profile-shaped failure still cools the profile off');
-  assert.match(cooled.actions[`dispatch:${item(4).id}:4`].detail, /token was refused/);
-  await rm(home, { recursive: true, force: true });
-});
-
 test('unit:workspace-failure-spares-profile — the launcher tolerates a claim the worktree command already released as a workspace failure, and wraps only a release that could not reach the server', async () => {
   const root = await temporaryDirectory('branch-lock-launch');
   const credentialDirectory = await temporaryDirectory('branch-lock-credentials');
@@ -333,7 +275,7 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
     assert.equal(calls.filter(entry => entry[1] === 'unclaim').length, 1, 'one release, tolerated as already done');
     // Through the real child runner: the worktree command runs with the options the launcher
     // passes, and its git message — written to its stderr, as the CLI reports a failure — is in the
-    // error the dispatch cycle classifies, so the failure is recognized as the workspace's.
+    // launch error.
     const real = (command: string, args: string[], options?: Parameters<typeof workerCommand>[2]) => args[1] === 'worktree'
       ? workerCommand(process.execPath, ['-e', 'process.stderr.write(process.env.WORKTREE_FAILURE); process.exit(1)'], { ...options, env: { ...options?.env, WORKTREE_FAILURE: held } })
       : run(undefined, 'Lease missing, expired, or superseded; claim the task again')(command, args);
@@ -341,20 +283,8 @@ test('unit:workspace-failure-spares-profile — the launcher tolerates a claim t
     assert.ok(failure instanceof Error);
     // The launcher names the attempt and carries the command's own stderr (GY-1078), never only its command line.
     assert.match(failure.message, /^Worker launch failed: the worktree for GY-860 epoch 9 could not be created: Git worktree creation failed: fatal: /, 'the real child stderr, not a stub');
-    assert.equal(workspaceDispatchFailure(failure.message), true, 'the git message reaches the classifier');
     // A release that genuinely could not reach the server is wrapped, not swallowed.
     await assert.rejects(prepareWorkerLaunch(root, 'GY-860', 'launch', run('checkout failed', 'connect ECONNREFUSED')), /Graphyard could not release epoch 9/);
-    // The classifier itself: workspace-shaped, and not.
-    assert.equal(workspaceDispatchFailure('Git worktree creation failed: fatal: …'), true);
-    assert.equal(workspaceDispatchFailure('Branch or host/path is already reserved or overlaps a reservation; use a fresh workspace'), true);
-    assert.equal(workspaceDispatchFailure('Rework must use the already linked PR branch in a fresh workspace'), true);
-    assert.equal(workspaceDispatchFailure('Worker credential is unavailable: the token was refused'), false);
-    assert.equal(workspaceDispatchFailure('Dispatch blocked by active owner worker-a'), false);
-    assert.equal(workspaceDispatchFailure('checkout failed'), false);
-    assert.equal(workspaceDispatchFailure('Submitted PR branch changed; wait for Graphyard to observe its current head before creating the rework workspace'), true);
-    // The launcher's own missing-path error comes after the worktree command reserved and released
-    // nothing as a failure, so it is not claimed to spare the epoch.
-    assert.equal(workspaceDispatchFailure('Worker launcher did not receive an assigned workspace'), false);
   } finally { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); }
 });
 
@@ -387,7 +317,6 @@ test('unit:workspace-failure-spares-profile — a rework whose registered start 
     const unregistered = await drive({ workspaces: [{ epoch: 1, branch: 'graphyard/gy-870-9' }] });
     assert.match(unregistered.outcome?.message ?? '', /No start object is registered for graphyard\/gy-870-9/);
     assert.deepEqual(unregistered.calls.map(([path]) => path), ['status', 'work/work-870/release']);
-    assert.ok(workspaceDispatchFailure(unregistered.outcome!.message) && workspaceDispatchFailure(missing.outcome!.message), 'both are workspace failures to the loop');
   } finally { await rm(root, { recursive: true, force: true }); await rm(origin, { recursive: true, force: true }); }
 });
 

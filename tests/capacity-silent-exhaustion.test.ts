@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import {
-  headlessTimeoutLimit, headlessTimeoutLimitCharge, runTimeoutLimit, silentPaneExhaustion, silentPaneExhaustionReason,
+  headlessTimeoutLimit, headlessTimeoutLimitCharge, runTimeoutLimit,
 } from '../src/model/capacity.js';
 import {
   holdRepeatedLimitAccount, masterConfigSchema, observedExhaustions, recordEnvironmentLog,
@@ -22,21 +22,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const limitError = '429: {"code":"1310","message":"Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-03 08:27:35"}';/** 2026-10-01T22:22:33.900Z as a millisecond epoch — handed to limit detectors as their fixed now. */
 const limitNow = 1_790_893_353_900;
 const limitReset = new Date(2026, 9, 3, 8, 27, 35).toISOString();
-
-test('unit:silent-pane-exhaustion-signal — only a listed, ended, never-working, outcomeless pane past its start bound with no notice is spent', () => {
-  const spent = silentPaneExhaustion({ listed: true, everWorking: false, hasOutcome: false, notice: null, pastStartBound: true, ended: true });
-  assert.deepEqual(spent, { reason: silentPaneExhaustionReason, resetsAt: null });
-  for (const [label, input] of [
-    ['not listed', { listed: false, everWorking: false, hasOutcome: false, notice: null, pastStartBound: true, ended: true }],
-    ['not ended', { listed: true, everWorking: false, hasOutcome: false, notice: null, pastStartBound: true, ended: false }],
-    ['worked', { listed: true, everWorking: true, hasOutcome: false, notice: null, pastStartBound: true, ended: true }],
-    ['has outcome', { listed: true, everWorking: false, hasOutcome: true, notice: null, pastStartBound: true, ended: true }],
-    ['has notice', { listed: true, everWorking: false, hasOutcome: false, notice: { reason: 'limit', resetsAt: null }, pastStartBound: true, ended: true }],
-    ['inside start bound', { listed: true, everWorking: false, hasOutcome: false, notice: null, pastStartBound: false, ended: true }],
-  ] as const) {
-    assert.equal(silentPaneExhaustion(input), null, label);
-  }
-});
 
 test('unit:run-timeout-limit-signal — a timeout round carries its provider limit from retry/stream errors; prose and tool-end booleans do not', () => {
   const retry: RunEvent = { kind: 'retry', at: new Date(limitNow).toISOString(), attempt: 1, error: limitError };

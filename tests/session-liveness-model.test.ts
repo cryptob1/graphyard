@@ -13,7 +13,6 @@ import { reconciledClosure } from '../web/workers-view.js';
 import { dispatchEffects, emptyDispatchCursor, herdrSessionListing, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { runtimeEndedStates } from '../src/harness.js';
 import { masterConfigSchema } from '../src/master.js';
-import { sessionReport } from '../src/cli/master-status.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-09-24 and 2026-10-08 fixture instants are past and handed explicitly as now to observeSessions/sessionView; Date.now()/new Date() only feed the DB-backed tests' own observations.
 
@@ -128,7 +127,6 @@ test('unit:session-liveness-model — the loop reports every session it sees on 
   assert.deepEqual([lost.state, lost.observed, lost.missedReports], ['finished', 'lost', lostAfterReports], 'absent from two consecutive reports: lost, and closed');
   assert.equal(lost.observedAt, at1, 'seen last at its last observation, not at the report that missed it');
   assert.match(lost.outcome!, new RegExp(`^vanished: the claude runtime on host-1 has not reported pane wF:p3 for \\d+s \\(absent from ${lostAfterReports} consecutive session reports, so the session is lost\\)`));
-  assert.ok(!sessionReport({ work: await store.list(), now: new Date(clock).toISOString() }).running.some(row => row.id === 'vanished'), 'master status no longer lists it running');
 
   // ---- The record is refreshed while the session keeps working, and goes stale when reports stop. -
   clock = start + sessionObservationRefreshMs + 1_000;

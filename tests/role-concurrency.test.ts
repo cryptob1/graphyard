@@ -10,25 +10,23 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { automaticProducerConcurrency, buildMasterStatus, concurrencyAttention, concurrencyStarvedMs, isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, roleConcurrency, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
-import { launchProducer, reconcileProducers, summarizeProducers } from '../src/producer.js';
+import { isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
+import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
+import { launchProducer, reconcileProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-09-21 `clock` is handed explicitly to roleConcurrency and to the requested() fixtures of that test; the other tests stamp items, verdicts and mint expiry from the real clock alone.
+// Time-bomb allowance (GY-1694): the 2026-09-21 `at` stamps the requested() fixtures; the tests stamp items, verdicts and mint expiry from the real clock alone.
 
 // GY-107: one review and one proof run at a time fleet-wide, because each role had a single fixed
 // session name. Each test is named for the proof it produces: integration:concurrent-reviews,
 // integration:concurrent-producers, integration:role-concurrency-configured,
-// unit:role-capacity-visible, and the docs check behind manual:capacity-sizing-onboarding-review.
+// and the docs check behind manual:capacity-sizing-onboarding-review.
 // GY-122 adds unit:profile-session-name-round-trip and unit:role-concurrency-deterministic-tags.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const B = sha40('b1');
 const at = '2026-09-21T10:00:00.000Z';
-const clock = Date.parse(at);
-const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 
 function observation(candidate: { sha: string; baseSha: string; pr: number; branch: string }, extra: Partial<Observation> = {}): Observation {
   // GY-883: the observed scope rides the public API path, the high lane, whose full path demands all three proof groups this file dispatches.
@@ -152,9 +150,7 @@ test('integration:concurrent-reviews — a reviewer profile with concurrency 3 r
     assert.deepEqual(freed.launched.filter(entry => entry.kind === 'review').map(entry => entry.work), ['GY-204']);
     assert.equal(starts(host.calls).at(-1), `review-claude-${tag(fourth.autoDispatch!.review!.id)}`);
     // A relaunch for the same request takes the attempt into its name, so it never collides with the pane it replaces.
-    const settled = (await readReviewLedger(host.root)).reviews;
     assert.equal(sessionAgentName(config.reviewers[0], { id: randomUUID(), requestId: requests[1].id, attempt: 2 }), `review-claude-${tag(requests[1].id)}-2`);
-    assert.equal(summarizeReviews(settled).pending.length, 3);
   } finally { await host.cleanup(); }
 });
 
@@ -313,51 +309,3 @@ test('unit:role-concurrency-deterministic-tags — this suite\'s request ids are
     assert.ok(name.endsWith(`-${tag(item.autoDispatch!.review!.id)}`) && isProfileSession(profile, name), `${profile.agentName} counts ${name}`);
   }
 });
-
-test('unit:role-capacity-visible — master status reports, per role, the sessions running against the limit and how long the longest request has waited for a slot', () => {
-  const base = { version: 1, url: 'https://graphyard.example', credentialFile: '/outside/master.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'h', masterAgentName: 'm' };
-  const config = masterConfigSchema.parse({ ...base, reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.json', boundAt: at },
-    reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', concurrency: 2 }, { name: 'cursor-reviewer', agentName: 'review-cursor', kind: 'cursor' }],
-    producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: '/outside/producer-a.token', concurrency: 2 }] });
-  const when = new Date(clock);
-  // Five items: two with reviews running, three whose reviews wait for a slot for 2, 12 and 30 minutes.
-  const running = [requested(1, {}, when), requested(2, {}, when)];
-  const waiting = [requested(3, {}, new Date(clock - 2 * 60_000)), requested(4, {}, new Date(clock - 12 * 60_000)), requested(5, {}, new Date(clock - 30 * 60_000))];
-  const review = (item: Work, index: number, state = 'pending') => ({ review: `r-${index}`, requestId: item.autoDispatch!.review!.id, attempt: 1, work: item.key, pr: item.candidate!.pr, sha: item.candidate!.sha, policyRevision: 1, profile: index === 0 ? 'claude-reviewer' : 'cursor-reviewer', agentName: index === 0 ? `review-claude-${tag(item.autoDispatch!.review!.id)}` : 'review-cursor', state, verdict: null, requestedAt: iso(-60_000), tokenExpiresAt: iso(3_600_000), closedAt: state === 'pending' ? null : iso(-1000), resolution: null, attention: null, delivery: 'request', activity: 'running', acknowledgedAt: iso(-30_000), repromptedAt: null, neverStarted: false });
-  const reviews = { pending: running.map((item, index) => review(item, index)), completed: [] as any[] };
-  const agents: HerdrAgent[] = reviews.pending.map(record => ({ name: record.agentName, agent_status: 'working' }));
-  const roles = { reviewers: config.reviewers, producers: config.producers };
-  const status = buildMasterStatus({ work: [...running, ...waiting], now: at }, [], agents, {}, reviews, 'main', undefined, { producers: { pending: [], completed: [] }, failures: [], retries: [] }, undefined, roles);
-  const reviewer = status.concurrency.find(report => report.role === 'reviewer')!;
-  assert.deepEqual({ limit: reviewer.limit, running: reviewer.running, free: reviewer.free, waiting: reviewer.waiting, longestWaitMs: reviewer.longestWaitMs, starved: reviewer.starved }, { limit: 3, running: 2, free: 1, waiting: 3, longestWaitMs: 30 * 60_000, starved: false });
-  assert.deepEqual(reviewer.profiles, [{ profile: 'claude-reviewer', agentName: 'review-claude', limit: 2, running: 1, sessions: [reviews.pending[0].agentName] }, { profile: 'cursor-reviewer', agentName: 'review-cursor', limit: 1, running: 1, sessions: ['review-cursor'] }]);
-  assert.deepEqual(reviewer.longest, { work: 'GY-205', requestId: waiting[2].autoDispatch!.review!.id, group: null, waitedMs: 30 * 60_000 });
-  // Saturated: a second session on the Claude profile fills the role, and the wait becomes attention.
-  const saturating = { ...reviews, pending: [...reviews.pending, { ...review(waiting[0], 0), review: 'r-2' }] };
-  const full = buildMasterStatus({ work: [...running, ...waiting], now: at }, [], [...agents, { name: saturating.pending[2].agentName, agent_status: 'working' }], {}, saturating, 'main', undefined, { producers: { pending: [], completed: [] }, failures: [], retries: [] }, undefined, roles);
-  const saturated = full.concurrency.find(report => report.role === 'reviewer')!;
-  assert.deepEqual({ limit: saturated.limit, running: saturated.running, waiting: saturated.waiting, longestWaitMs: saturated.longestWaitMs, starved: saturated.starved }, { limit: 3, running: 3, waiting: 2, longestWaitMs: 30 * 60_000, starved: true });
-  assert.equal(full.counts.concurrencyStarved, 1);
-  const item = full.attentionItems.find(entry => entry.subject === 'reviewer concurrency')!;
-  assert.match(item.text, /reviewer capacity is saturated: 3 sessions running against a limit of 3 \(claude-reviewer 2\/2, cursor-reviewer 1\/1\), 2 requests waiting for a slot, the longest \(GY-205\) for 30 minutes/);
-  assert.match(item.next!, /Raise concurrency on a reviewer profile in .graphyard\/master.json, or add a reviewer profile/);
-  assert.equal(full.counts.attention, status.counts.attention + 1, 'the starved role counts as one attention item');
-  assert.deepEqual(concurrencyAttention([{ ...saturated, longestWaitMs: concurrencyStarvedMs - 1 }]), [], 'a young queue at the limit is not yet attention');
-  // What is not a wait for a slot: a running session, a refused launch, a retry not yet due, an exhausted retry, and a settled session no attempt follows.
-  const held = [requested(6, {}, new Date(clock - 60 * 60_000)), requested(7, {}, new Date(clock - 60 * 60_000)), requested(8, {}, new Date(clock - 60 * 60_000)), requested(9, {}, new Date(clock - 60 * 60_000))];
-  const ids = held.map(item => item.autoDispatch!.review!.id);
-  const excluded = roleConcurrency('reviewer', config.reviewers, [...running, ...held], agents, { pending: reviews.pending, completed: [review(held[2], 0, 'failed'), review(held[3], 1, 'cancelled')] },
-    { failures: [{ requestId: ids[0], kind: 'review', attempts: 2, reason: 'observation stale', at: iso(-1000), nextAt: iso(60_000) }], retries: [{ requestId: ids[1], attempts: 1, started: 1, neverStarted: 0, limit: 4, unstartedLimit: 3, nextAt: iso(240_000), exhausted: false, last: { state: 'failed', resolution: 'x' } }, { requestId: ids[2], attempts: 4, started: 4, neverStarted: 0, limit: 4, unstartedLimit: 3, nextAt: null, exhausted: true, last: { state: 'failed', resolution: 'x' } }] }, clock);
-  assert.deepEqual({ running: excluded.running, waiting: excluded.waiting, longestWaitMs: excluded.longestWaitMs }, { running: 2, waiting: 0, longestWaitMs: null });
-  // A retry that is due waits from the moment it became due, not from the original request.
-  const due = roleConcurrency('reviewer', config.reviewers, [held[1]], [], { pending: [], completed: [review(held[1], 0, 'failed')] }, { failures: [], retries: [{ requestId: ids[1], attempts: 1, started: 1, neverStarted: 0, limit: 4, unstartedLimit: 3, nextAt: iso(-5 * 60_000), exhausted: false, last: { state: 'failed', resolution: 'x' } }] }, clock);
-  assert.deepEqual({ waiting: due.waiting, longestWaitMs: due.longestWaitMs }, { waiting: 1, longestWaitMs: 5 * 60_000 });
-  // Producers: no producer request is opened (GY-1235), so the role reports its limit and nothing waiting.
-  const producer = roleConcurrency('producer', config.producers, [waiting[0]], [], { pending: [], completed: [] }, { failures: [], retries: [] }, clock);
-  assert.deepEqual({ limit: producer.limit, running: producer.running, waiting: producer.waiting, longestWaitMs: producer.longestWaitMs, starved: producer.starved }, { limit: 2, running: 0, waiting: 0, longestWaitMs: null, starved: false });
-  // Without the role profiles the report is empty and nothing else changes; a role with no profile has a limit of zero and is never starved.
-  assert.deepEqual(buildMasterStatus({ work: running, now: at }, [], agents).concurrency, []);
-  assert.equal(roleConcurrency('producer', [], [waiting[0]], [], { pending: [], completed: [] }, { failures: [], retries: [] }, clock).starved, false);
-  assert.deepEqual(summarizeProducers([]).pending, []);
-});
-

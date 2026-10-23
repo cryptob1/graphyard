@@ -12,8 +12,10 @@ import { installIdFor } from '../install/types.js';
 import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
-import type { DeployPorts } from '../daemon/upgrade.js';
-import { pinKnownGood } from '../master/known-good.js';
+import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
+import { defaultChildRun } from '../child-runner.js';
+import { loadMasterConfig } from '../master.js';
+import { knownGoodState, pinKnownGood } from '../master/known-good.js';
 
 export type UpgradeStepId = 'checkout' | 'npm-ci' | 'backup' | 'redeploy' | 'restart' | 'refresh' | 'health';
 export interface UpgradeStep { id: UpgradeStepId; title: string; command: string }
@@ -179,47 +181,54 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
   if (body.version !== version) throw new Error(`/healthz reports ${String(body.version)}, not ${version}`);
 }
 
+/** The git half of the deploy unit's ports: fetch origin's base branch, read HEAD, check a commit out detached. */
+export function gitWatchPorts(cliRoot: string, baseBranch: string, run: ChildRun): Pick<DeployWatchPorts, 'fetch' | 'head' | 'checkout'> {
+  const git = async (...args: string[]) => String(await run('git', ['-C', cliRoot, ...args])).trim();
+  return {
+    fetch: async () => { await git('fetch', '--quiet', 'origin', baseBranch); return git('rev-parse', `refs/remotes/origin/${baseBranch}`); },
+    head: () => git('rev-parse', 'HEAD'),
+    checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); },
+  };
+}
+
 /**
- * GY-1982: the ports the loop's continuous deploy runs a commit through on this install, the checkout
- * already moved onto it: the upgrade sequence's npm ci, backup (with DATABASE_URL) and redeploy as
- * child processes, and the health step until it passes or three minutes pass; or the one line naming
- * why an install on neither compose nor local has none. `keepAlive` feeds the loop's watchdog while
- * a step runs.
+ * The ports `upgrade --watch` (graphyard-deploy.service) runs each base tip through on a compose or
+ * local install: git in the CLI checkout, npm ci as the build, the install adapter's redeploy (with a
+ * database backup when DATABASE_URL is set) as the restart, /healthz until it passes or three
+ * minutes pass, and the coordinator pin advanced when one exists; or the line naming why an install
+ * on another provider has none.
  */
-export async function deployPorts(input: { cliRoot: string; repoRoot: string; repository: string; url: string; run: ChildRun; keepAlive?: () => Promise<void> }): Promise<DeployPorts | string> {
+export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; baseBranch: string; url: string; run: ChildRun }): Promise<DeployWatchPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
   const install = await readInstallRecord(directory).catch(() => null);
-  if (install?.provider !== 'compose' && install?.provider !== 'local') return `continuous deploy needs a compose or local install; ${install ? `this one runs on ${install.provider}` : 'no install record names this repository'}, so releases reach it only through graphyard upgrade`;
-  const run = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000, ...(env ? { env } : {}) }));
-  const beating = async <T>(work: () => Promise<T>) => {
-    const timer = input.keepAlive ? setInterval(() => void input.keepAlive!().catch(() => {}), 30_000) : null;
-    try { return await work(); } finally { if (timer) clearInterval(timer); }
-  };
+  if (install?.provider !== 'compose' && install?.provider !== 'local') return `the deploy unit needs a compose or local install; ${install ? `this one runs on ${install.provider}` : 'no install record names this repository'}, so releases reach it only through graphyard upgrade`;
+  const run = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000, ...(env ? { env } : {}) })).then(String);
   const inputsFor = (commit: string): UpgradeInputs => {
     const current = checkoutRelease(cliRoot);
     return { cliRoot, repoRoot, current, target: { version: current.version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
       image: install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
   };
+  const step = (commit: string, id: UpgradeStepId) => upgradePlan(inputsFor(commit)).steps.find(entry => entry.id === id)!;
   return {
-    deploy: commit => beating(async () => {
-      const inputs = inputsFor(commit), effects = liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json'));
-      // Every redeploy builds with the stamp of the commit it deploys (GY-2167), the rollback's
-      // included: /healthz then names that commit instead of an unstamped `unreleased unknown`.
-      const stamp = releaseOfCommit(cliRoot, commit), environment = { ...process.env, GRAPHYARD_VERSION: stamp.version, GRAPHYARD_BUILD_REVISION: stamp.revision };
-      for (const step of upgradePlan(inputs).steps) {
-        if (step.id === 'backup' && process.env.DATABASE_URL) await effects.run(step);
-        else if (step.id === 'npm-ci' || step.id === 'redeploy') await run('sh', ['-c', step.command], step.id === 'npm-ci' ? cliRoot : repoRoot, environment);
-      }
-    }),
-    health: () => beating(async () => {
+    ...gitWatchPorts(cliRoot, input.baseBranch, input.run),
+    build: async commit => { await run('sh', ['-c', step(commit, 'npm-ci').command], cliRoot); },
+    restart: async commit => {
+      const inputs = inputsFor(commit);
+      if (process.env.DATABASE_URL) await liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')).run(step(commit, 'backup'));
+      // Every redeploy builds with the stamp of the commit it deploys (GY-2167), so /healthz names that commit.
+      const stamp = releaseOfCommit(cliRoot, commit);
+      await run('sh', ['-c', step(commit, 'redeploy').command], repoRoot, { ...process.env, GRAPHYARD_VERSION: stamp.version, GRAPHYARD_BUILD_REVISION: stamp.revision });
+    },
+    health: async () => {
       const version = checkoutRelease(cliRoot).version;
       for (let attempt = 1; ; attempt++) {
         try { return await healthVerdict(await fetch(`${url}/healthz?strict`, { signal: AbortSignal.timeout(10_000) }), version); }
         catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
       }
-    }),
-    schemas: async commit => ({ target: schemaAt(await run('git', ['show', `${commit}:src/release.ts`], cliRoot).catch(() => '')), database: await databaseSchemaOf(url) }),
-    pin: commit => pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run),
+    },
+    pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
+    schema: async commit => { try { return schemaAt(git(cliRoot, 'show', `${commit}:src/release.ts`)); } catch { return null; } },
+    database: () => databaseSchemaOf(url),
   };
 }
 
@@ -234,9 +243,20 @@ export const upgradeCommands = defineCommands([{
     '                                redeploy the server, restart loop and executors, refresh the',
     '                                generated files, and check /healthz, to one dated release;',
     '                                --plan prints the steps only; a failure names its step and rollback',
+    '  upgrade --watch [--once]        The deploy unit (graphyard-deploy.service): fetch origin and, for',
+    '                                each new base tip, build, restart, check /healthz, and roll back',
+    '                                to the previous tip on failure',
   ],
   async run(context) {
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
+    if (flags.includes('--watch')) {
+      const repoRoot = context.repositoryRoot(), master = await loadMasterConfig(repoRoot);
+      const ports = await watchPorts({ cliRoot: installationRoot, repoRoot, repository: master.repository, baseBranch: master.baseBranch, url: master.url, run: defaultChildRun });
+      if (typeof ports === 'string') throw new Error(ports);
+      const stopping = new AbortController();
+      for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => stopping.abort());
+      return watchMain(deployRecordPath(repoRoot), ports, { intervalMs: master.run.intervalSeconds * 1000, once: flags.includes('--once'), signal: stopping.signal });
+    }
     const toIndex = flags.indexOf('--to');
     const to = toIndex >= 0 ? flags[toIndex + 1] ?? '' : stableChannel;
     const cliRoot = installationRoot, repoRoot = context.repositoryRoot();

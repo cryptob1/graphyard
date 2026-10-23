@@ -7,10 +7,10 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, buildMasterStatus, defaultAcknowledgementSeconds, dispatchWork, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
+import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, defaultAcknowledgementSeconds, dispatchWork, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization, managedInstructions } from '../src/repository-setup.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile, summarizeReviews } from '../src/reviewer.js';
-import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
+import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile } from '../src/reviewer.js';
+import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
 import { autonomyContract } from '../src/autonomy.js';
@@ -236,7 +236,6 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     assert.match(record.resolution!, /^never started: the session took up neither its request nor the re-prompt at .* and ended without acting\. Its last words: "/);
     assert.ok(record.resolution!.includes('Still a paste; I will not act on it.'), 'the reason carries the session\'s own words');
     assert.equal(neverStarted(record), true);
-    assert.equal(summarizeProducers([record]).completed[0].neverStarted, true);
 
     // Its request is launched again after the base wait: the never-started session spent no budget.
     const unstarted = { requestId: request.id, state: record.state, requestedAt: record.requestedAt, closedAt: record.closedAt, resolution: record.resolution };
@@ -252,7 +251,6 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     retry = sessionRetry([failedAt(0), failedAt(10), { ...unstarted, closedAt: iso(20 * 60_000) }], request.id, clock);
     assert.deepEqual([retry.attempts, retry.started, retry.neverStarted, retry.nextAt], [3, 2, 1, iso(20 * 60_000 + sessionRetryBaseMs)]);
     assert.equal(sessionRetry([failedAt(0), failedAt(10), failedAt(40), failedAt(80)], request.id, clock).exhausted, true, 'four genuine failures still exhaust the request');
-    assert.equal(sessionRetries([failedAt(0), { ...unstarted, closedAt: iso(20 * 60_000) }], clock)[0].neverStarted, 1);
 
     // A session that did the work and failed: sustained activity, then done without evidence.
     const ledger = await readProducerLedger(root);
@@ -269,7 +267,6 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     record = await scenario('idle', '❯ …\n  Running npm test (42s)\n', 60_000);
     record = await scenario('idle', '❯ …\n  Running npm test (52s)\n', 70_000);
     assert.equal(record.acknowledgedAt, iso(70_000), 'a screen that keeps changing while a long command runs is activity, sustained across thirty seconds');
-    assert.equal(summarizeProducers([record]).pending[0].activity, 'running');
     record = await scenario('done', '● The integration suite failed on two cases; I did not submit evidence.\n', 200_000);
     assert.equal(record.idleSince, iso(30_000), 'the grace runs from the first finished sighting, as before'); assert.equal(prompts.length, 0, 'an acknowledged session is never re-prompted');
     record = await scenario('done', '● The integration suite failed on two cases; I did not submit evidence.\n', 30_000 + producerIdleGraceMs);
@@ -294,7 +291,6 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     let reviewRecord = await review('done', `● ${words}\n`, 10_000);
     assert.equal(reviewRecord.repromptedAt, iso(10_000)); assert.equal(reviewPrompts.length, 1);
     assert.ok(reviewPrompts[0].startsWith('You stopped before posting')); assert.match(reviewPrompts[0], /If you have not reviewed it at all, this message comes from the Graphyard launcher/); assert.match(reviewPrompts[0], /Review pull request #93 at head/);
-    assert.equal(summarizeReviews([reviewRecord]).pending[0].activity, 'awaiting acknowledgement');
     reviewRecord = await review('done', `● ${words}\n`, 10_000 + reviewIdleGraceMs);
     assert.equal(reviewRecord.state, 'failed'); assert.equal(neverStarted(reviewRecord), true);
     assert.ok(reviewRecord.resolution!.includes(words));
@@ -431,16 +427,8 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
     };
     const cursor = emptyDispatchCursor(config);
     const prompted = () => herdr.calls.filter(call => call[0] === 'agent' && call[1] === 'prompt');
-    const status = async () => {
-      const records = (await readProducerLedger(root)).producers;
-      return buildMasterStatus({ work: [item], now: new Date(now).toISOString() }, [], herdr.agents(), {}, summarizeReviews([]), 'main', undefined, { producers: summarizeProducers(records), failures: [], retries: sessionRetries(records, now) });
-    };
     now = clock + 10_000; await runDispatchTick(config, cursor, effects, () => now);
     assert.equal(prompted().length, 0, 'within the interval the loop waits');
-    let report = await status();
-    assert.equal(report.work[0].dispatch!.producers[0].session!.activity, 'awaiting acknowledgement');
-    assert.equal(report.counts.dispatchAwaiting, 1); assert.equal(report.counts.dispatchRunning, 0);
-    assert.equal(report.work[0].attention, null, 'no attention until the loop has re-prompted');
     now = clock + 100_000; await runDispatchTick(config, cursor, effects, () => now);
     assert.equal(prompted().length, 0, 'the configured interval, not the default, is what the loop waits for');
     now = clock + 121_000; const tick = await runDispatchTick(config, cursor, effects, () => now);
@@ -449,12 +437,6 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
     assert.equal(prompted()[0][2], 'produce-a'); assert.match(prompted()[0][3], /seen no activity from it for 120 seconds/);
     let pending = (await readProducerLedger(root)).producers[0];
     assert.equal(pending.repromptedAt, iso(121_000), 'the record says when');
-    report = await status();
-    const row = report.work[0];
-    assert.equal(row.dispatch!.producers[0].session!.activity, 'awaiting acknowledgement');
-    assert.equal(row.dispatch!.producers[0].session!.repromptedAt, iso(121_000));
-    assert.match(row.attention!, /Producer session for integration proofs of GY-93 \(produce-a\) is awaiting acknowledgement: no activity since its launch at .*, re-prompted once at .*never started if it stays quiet/);
-    assert.equal(report.producers.pending[0].activity, 'awaiting acknowledgement');
     now = clock + 131_000; await runDispatchTick(config, cursor, effects, () => now);
     assert.equal(prompted().length, 1, 'never a second re-prompt');
     // The re-prompt reached it: the session works on, is acknowledged, and is running.
@@ -463,9 +445,6 @@ test('integration:unacknowledged-session-recovery — the loop detects a launche
     now = clock + 141_000 + sustainedActivityMs; await runDispatchTick(config, cursor, effects, () => now);
     pending = (await readProducerLedger(root)).producers[0];
     assert.equal(pending.acknowledgedAt, iso(141_000 + sustainedActivityMs)); assert.equal(pending.state, 'pending'); assert.equal(pending.idleSince, undefined);
-    report = await status();
-    assert.equal(report.work[0].dispatch!.producers[0].session!.activity, 'running');
-    assert.equal(report.counts.dispatchRunning, 1); assert.equal(report.counts.dispatchAwaiting, 0); assert.equal(report.work[0].attention, null);
   } finally { await cleanup(); }
 });
 

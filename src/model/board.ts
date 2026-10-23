@@ -195,8 +195,6 @@ export function actorRole(work: Work, group: Group | null, who: string): ActorRo
   return Object.hasOwn(roleOf, who) ? roleOf[who]! : 'held';
 }
 
-const refusalsOf = (work: Work, gate: string) => work.gates.find(entry => entry.name === gate && !entry.passed)?.reasons ?? [];
-
 /** The exact command that takes the next step, when there is one to run: a recorded blocker `master unblock`, a review `master review`, backlog `master release`, and a human-only decision the answer its row names. Null where the next step is a session already running or a turn nobody can take early. */
 export function nextCommand(work: Work, group: Group | null, actor: ActorRole, humanRow?: HumanRequestRow): string | null {
   const key = work.key;
@@ -263,28 +261,3 @@ export const boardFromStatus = (work: Work[], now: number, status: any) => build
 
 /** True for a response shaped as a board. */
 export const isBoard = (value: any): value is Board => !!value && typeof value === 'object' && !!value.groups && groups.every(group => Array.isArray(value.groups[group]));
-
-/** True for the refusal of a server that predates `GET /api/board`: the route is not there (404). */
-export const boardRouteMissing = (error: unknown) => (error as { status?: unknown } | null)?.status === 404;
-
-/**
- * The `board` section of `master status`: every item whose next step is the master's, first and
- * with its command — a decision no approver answered, a stranded merge — then
- * every other open item, with the group counts. Read from `GET /api/board`; built from the same
- * module over the snapshot and status already in hand only when the server predates the route
- * (404). Any other failure — a 500, an auth refusal, a timeout, a body that is not a board — is
- * reported as the section's `error` rather than papered over, so a failing route is seen.
- */
-export async function masterBoard(api: (path: string) => Promise<any>, snapshot: { work: Work[]; now: string }, status: any) {
-  let board: Board;
-  try {
-    const served = await api('board');
-    if (!isBoard(served)) return { error: `GET /api/board answered something that is not a board: ${JSON.stringify(served)?.slice(0, 200)}` };
-    board = served;
-  } catch (error) {
-    if (!boardRouteMissing(error)) return { error: `GET /api/board failed: ${error instanceof Error ? error.message : String(error)}` };
-    board = boardFromStatus(snapshot.work, Date.parse(snapshot.now), status);
-  }
-  const items = groups.flatMap(group => board.groups[group]);
-  return { counts: board.counts, open: board.open, overdueAfterMs: board.overdueAfterMs, blockers: board.blockers ?? { total: items.filter(entry => entry.blocker).length }, owed: items.filter(entry => entry.actor === 'master'), others: items.filter(entry => entry.actor !== 'master') };
-}

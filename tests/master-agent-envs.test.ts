@@ -5,12 +5,12 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountLaunch, agentLaunchPlan, buildMasterStatus, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
+import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
-import { dispatchSummary, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { atomicPrivateWrite } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
@@ -179,7 +179,7 @@ test('integration:agent-env-discovery — onboarding discovers or creates one en
   } finally { await cleanup(); }
 });
 
-test('integration:agent-quota-failover — every launch checks login and quota, skips an exhausted or logged-out account with its reason in master status, and fails over to the next healthy one', async () => {
+test('integration:agent-quota-failover — every launch checks login and quota, skips an exhausted or logged-out account with its reason, and fails over to the next healthy one', async () => {
   const directory = await temporaryDirectory('quota');
   const homes = { spent: await account(directory, 'claude-a', 'claude'), out: await account(directory, 'claude-b', null), fresh: await account(directory, 'claude-c', 'claude'), codex: await account(directory, 'codex', 'codex'), codexB: await account(directory, 'codex-b', 'codex') };
   await codexUsage(homes.codex, 98);
@@ -241,12 +241,10 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     await assert.rejects(dispatchWork(root, ready(), config.workers[1], [], herdr([]), [ready()], async () => { claimed = true; return { epoch: 9, path: root, base: 'c'.repeat(40) }; }, async () => {}, 5_000, new Date().toISOString(), { probe }), /No healthy agent account for worker profile worker-spent/);
     assert.equal(claimed, false, 'a profile with no healthy account claims nothing');
 
-    // The durable loop and master status read the same health: the spent profile is unavailable, with reasons.
+    // The durable loop reads the same health: the spent profile is unavailable, with reasons.
     const health = await inspectWorkerCredentials(root, config.workers, probe);
     assert.equal(health['worker-a'].available, true); assert.equal(health['worker-spent'].available, false);
     assert.match(health['worker-spent'].reason!, /No healthy agent account: claude-a quota is exhausted.*; claude-b is not logged in/);
-    const status = buildMasterStatus({ work: [], now: new Date().toISOString() }, config.workers, [], health);
-    assert.match(status.workers.find(row => row.profile === 'worker-spent')!.credential.reason!, /claude-a quota is exhausted/);
     assert.equal((await inspectProducerCredentials(root, config.producers, probe))['producer-a'].available, true);
 
     // A reviewer launch: the configured profile has no healthy account, so it refuses before minting
@@ -301,12 +299,6 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.deepEqual(tried, ['review-spent', 'review-fresh']);
     assert.equal(tick.launched[0].profile, 'review-fresh'); assert.match(tick.launched[0].failover![0], /review-spent: .*claude-a quota is exhausted/);
 
-    // master status: every account's last observed health and each skipped launch with its reason.
-    const summary = dispatchSummary(await readDispatchCursor(root, config), Date.now(), 10_000);
-    assert.equal(summary.accounts.environments.find(entry => entry.environment === 'claude-a')!.quota, 'exhausted');
-    assert.ok(summary.accounts.skipped.some(entry => entry.role === 'worker' && entry.environment === 'codex' && entry.work === 'GY-68' && /98%/.test(entry.reason)));
-    assert.ok(summary.accounts.skipped.some(entry => entry.role === 'reviewer' && entry.environment === 'claude-a'));
-    assert.ok(summary.accounts.skipped.some(entry => entry.role === 'producer' && entry.environment === 'claude-b' && /not logged in/.test(entry.reason)));
     const log = await readEnvironmentLog(config);
     assert.equal(JSON.stringify(log).includes('oauth-token'), false, 'the log never holds a provider token');
     assert.equal((await stat(join(credentialDirectory, 'masters', (await readdir(join(credentialDirectory, 'masters'))).find(name => name.endsWith('.environments.json'))!))).mode & 0o777, 0o600);

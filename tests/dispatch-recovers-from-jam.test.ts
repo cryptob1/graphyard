@@ -60,8 +60,6 @@ function daemon(overrides: Partial<DaemonEffects> = {}) {
     snapshot: async () => ({ work: [...jamItems(), waiting()], now: observedAt }),
     closeSession: () => {},
     dispatch: async (item, chosen) => { dispatched.push({ key: item.key, profile: chosen.name }); return {}; },
-    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
     persist: async () => {},
     ...overrides,
   };

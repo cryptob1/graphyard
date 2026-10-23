@@ -80,10 +80,3 @@ export const planeWideRefusal = (error: unknown) => {
   if (structural && typeof structural.status === 'number' && structural.body !== undefined && planeUnavailableStatus(structural.status, structural.body)) return true;
   return planeWideFailure(error instanceof Error ? error.message : typeof error === 'string' ? error : null);
 };
-/**
- * Whether a failure is the deploy's own release-skew window (GY-2177): the refusal a CLI behind the
- * served release throws (src/cli/context.ts `versionSkewMessage`) until the loop realigns its held
- * CLI (GY-2169). The loop rides it out like a plane-wide failure.
- */
-export const deploySkewFailure = (failure: string | null | undefined) =>
-  !!failure && /\bCLI [^\n]* and server [^\n]* differ: run graphyard upgrade/.test(failure);

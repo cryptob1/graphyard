@@ -138,15 +138,6 @@ export function openAgentRequests(work: Work, now: Date) {
 }
 
 /**
- * Open requests that ask somebody for something now (GY-1364). A note decides nothing and names no
- * decider, so once its item is Done nothing can act on it: it stays on the record, not in attention.
- * Every other open ask keeps its named decider, on any item.
- */
-export function attentionAgentRequests(work: Work, now: Date) {
-  return openAgentRequests(work, now).filter(request => !(request.type === 'note' && work.stage === 'done'));
-}
-
-/**
  * Close every open request raised by an attempt that no longer holds the item: a fresh attempt
  * asks afresh, and a stale ask must never look like a live one.
  */

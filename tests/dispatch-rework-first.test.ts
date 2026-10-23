@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatchSort, dispatchStarvationMs } from '../src/coordination.js';
-import { dispatchSchedule } from '../src/master/status.js';
 import { recordRework, recordSubmission } from '../src/pipeline-speed.js';
 import { coordinationWork } from '../src/server/work-view.js';
 import type { Work } from '../src/model.js';
@@ -9,9 +8,8 @@ import type { Work } from '../src/model.js';
 // GY-1891: dispatch finishes before it starts — an item returning for rework is offered before a
 // never-attempted item of the same priority. A rework has already been built and reviewed once and
 // is the nearest thing to a merge; holding it while fresh work starts raises work in progress and
-// delays merges. `dispatchSort` — the order the loop's dispatch step and master status's schedule
-// both offer — ranks an item that already carries a submitted attempt (a standing submission, or
-// one its pipeline timeline still records) ahead of the starvation, hot-file and scope keys within
+// delays merges. `dispatchSort` — the order the loop's dispatch step offers — ranks an item that
+// already carries a submitted attempt (a standing submission, or one its pipeline timeline still records) ahead of the starvation, hot-file and scope keys within
 // one priority; an attempt that ended without submitting is not a rework and keeps the fresh
 // order. Priority still decides first, and within each group the existing order stands unchanged.
 const clock = Date.parse('2030-01-01T00:00:00Z');
@@ -44,8 +42,6 @@ const retried = (key: string, plannedFiles: string[], overrides: Partial<Work> =
 /** Submitted once: the pipeline still records the submission though no standing submission object remains. */
 const submittedOnce = (key: string, plannedFiles: string[], overrides: Partial<Work> = {}) =>
   work(key, { pipeline: { attempts: [{ epoch: 1, owner: `${key}-worker`, claimedAt: iso(-7_200_000), endedAt: iso(-3_600_000), end: 'submitted' }], submittedAt: iso(-3_600_000), resubmittedAt: iso(-3_600_000), reworkRounds: 1, interventions: { blocked: 0, requirements: 0 } }, ...overrides });
-const claimed = (key: string, plannedFiles: string[]) =>
-  work(key, { stage: 'build', epoch: 1, lease: { owner: `${key}-worker`, epoch: 1, expiresAt: iso(600_000) } });
 
 test('unit:dispatch-reworks-before-fresh-items — dispatchSort offers every same-priority item with a submitted attempt before every item without one, whatever their scope, heat or wait; within each group the existing order stands', () => {
   const heat = new Set([hotFile]);
@@ -77,12 +73,6 @@ test('unit:dispatch-reworks-before-fresh-items — dispatchSort offers every sam
   assert.ok(view.every(item => item.pipeline === undefined) && view[0].submission === null, 'the coordination view carries neither the timeline nor a standing submission');
   assert.deepEqual(dispatchSort(view, heat, clock).map(item => item.key), ['GY-reverted', 'GY-starvingFresh', 'GY-retryExpired'],
     'over the coordination view the loop reads, a reverted, reopened item still precedes never-submitted work, and those keep the existing order');
-  // master status's schedule offers this same order: two live attempts heat the file, the
-  // dispatchable six are offered in the loop's order.
-  const all = [claimed('GY-hotA', [hotFile]), claimed('GY-hotB', [hotFile]), ...mixed];
-  assert.deepEqual(dispatchSchedule(all, clock).order.map(entry => entry.key),
-    ['GY-submittedOnce', 'GY-reworkBroad', 'GY-starvingFresh', 'GY-retryExpired', 'GY-coldFresh', 'GY-newFresh'],
-    'the dispatch schedule reports the loop\'s order: items with a submitted attempt before never-submitted work within the priority');
 });
 
 test('unit:dispatch-rework-first-keeps-priority — a higher-priority fresh item still ranks before a lower-priority rework, and a starving fresh item still ranks before a non-starving fresh one', () => {

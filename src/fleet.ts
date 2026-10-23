@@ -1,13 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { access, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
+import { access, readFile, readdir, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
-import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, masterConfigSchema, readCredentialFile,
-  type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
-import { shellQuote } from './master/dispatch.js';
-import { sessionName } from './session-name.js';
+import { NoHealthyAccountError, agentEnvironmentRoot, atomicPrivateWrite, checkAgentEnvironment, discoverAgentEnvironments, environmentKinds, readCredentialFile, type AccountSkip, type AccountSkipCause, type AgentEnvironment, type EnvironmentHealth, type EnvironmentKind, type EnvironmentProbe, type MasterConfig } from './master.js';
 import { smokeRegistryAccount } from './runner/roles.js';
 import type { SmokeResult } from './runner/pi.js';
 import { accountIneligibility, deriveAccountPlan, exhaustedTwin, fleetRoles, liveSessions, proposedConcurrency, proposedRuntimeRoles, proposedRuntimes, rolePolicy, smokeFailureDue, type AccountKey, type AgentRegistry, type RolePolicy, type FleetAccount, type FleetAccountInput, type FleetModel, type FleetRole, type FleetRoleName, type FleetRuntime, type FleetSession, type LaunchContract, type QuotaObservation, type RunOutcome, type SessionSkip, type SmokeObservation } from './model/registry.js';
@@ -316,34 +313,6 @@ export async function fleetRoleHealth(config: FleetConfig, role: FleetRoleName, 
   const full = running >= definition.concurrency ? `role ${role} is at its concurrency limit (${running} of ${definition.concurrency} live)` : null;
   const usable = !full && accounts.some(account => account.healthy);
   return { available: usable, reason: usable ? null : full ?? `No eligible account for ${role}: ${accounts.map(account => account.reason).join('; ') || 'the role names no account'}`, accounts, running };
-}
-
-/**
- * The registry sessions of reviewer and producer launches whose ledger record has settled, each with
- * why (GY-205). The record is where those sessions' ends are observed — a verdict, evidence, an
- * expiry, a vanished pane — so a settled record's session no longer holds its role's slot.
- */
-export function settledRecordSessions(role: 'reviewer' | 'producer', records: readonly { session?: string; state: string; key: string; agentName: string }[]): [string, string][] {
-  return records.filter(record => record.session && record.state !== 'pending')
-    .map(record => [record.session!, `its ${role} session ${record.agentName} for ${record.key} is ${record.state}`]);
-}
-
-/**
- * The loop's reconciliation of the registry against what runs (GY-190): every live registry session
- * the caller names as finished is ended with the reason why. Returns what it
- * ended. A configuration that names no control plane has no registry to reconcile.
- */
-export async function reconcileFleetSessions(config: FleetConfig, runtime: RuntimeInventory, finished: ReadonlyMap<string, string>, probe: FleetProbe = {}) {
-  if (!probe.registry && (!config.url || !config.hostId)) return [];
-  const client = probe.registry ?? httpFleetClient({ url: config.url!, credentialFile: config.credentialFile }, probe.fetch ?? fetch, probe.timeoutMs ?? fleetRequestTimeoutMs);
-  const registry = await client.document(), now = probe.now?.() ?? Date.now(), ended: { session: string; role: FleetRoleName; work: string | null; account: string; reason: string }[] = [];
-  for (const session of liveSessions(registry)) {
-    const reason = finished.get(session.id);
-    if (!reason) continue;
-    await client.end(session.id, reason);
-    ended.push({ session: session.id, role: session.role, work: session.work, account: session.account, reason });
-  }
-  return ended;
 }
 
 // ---------------------------------------------------------------------------

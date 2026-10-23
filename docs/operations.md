@@ -4,11 +4,11 @@
 ## Daily checklist
 
 - `/healthz` at expected `commit` (another release refuses: `graphyard upgrade`); `/api/status`: no job errors.
-- `master status`: `daemon.liveness` `running`, attention owned; recent `graphyard db backup`.
+- `master status`: serving commit at main's tip, `loop.state` `running`; recent `graphyard db backup`.
 
 ## Incident decision tree
 
-- **Item not moving**: fix the refusal's cause; `master status` flags no progress 60min. Never weaken requirements. Expired unsubmitted: [lost worker](#lost-worker-before-submission); retry: [rework](#submitted-implementation-needs-rework). A failed producer-runnable manual proof returns to worker.
+- **Item not moving**: fix the refusal's cause. Never weaken requirements. Expired unsubmitted: [lost worker](#lost-worker-before-submission); retry: [rework](#submitted-implementation-needs-rework). A failed producer-runnable manual proof returns to worker.
 
 ## Recovery recipes
 
@@ -16,12 +16,9 @@
 graphyard rework GY-N --previous-worker-stopped "reason"
 graphyard unblock GY-N "reason"
 systemctl --user restart graphyard-master-OWNER-NAME
-graphyard master checkout-restore "reason"
 ```
 
 Never attest a stop you have not confirmed.
-
-`master checkout-restore` serves the verified snapshot under the loop's loader; an unstartable serve dies at its startup bound, never hanging.
 
 ## Safety facts that never change
 
@@ -39,7 +36,7 @@ The loop removes an assignment worktree (`git worktree remove`, never forced) on
 
 ## Master coordination loop
 
-`master status` `daemon`: health; a step that throws is one log line and runs again next cycle.
+Snapshot, close, dispatch, merge writer, persist ([loop](master-agent.md#the-loop)); a step that throws is one log line and runs again next cycle. A failed deploy is `serving.failedDeploy` in `master status`.
 
 ## Lost worker before submission
 

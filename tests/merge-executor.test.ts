@@ -293,8 +293,7 @@ function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => nu
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: await world.work(), now: iso(world.now()) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(world.now()), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: world.mergeWriter, ...(world.rework ? { rework: world.rework } : {}),
   } as unknown as DaemonEffects;
 }
@@ -411,7 +410,7 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   assert.equal(summary.mergeWriter.inFlight?.key, 'GY-1');
   assert.deepEqual(summary.mergeWriter.reworks.map(entry => [entry.key, entry.attempts, entry.lastError]), [['GY-3', 2, 'route down']], 'the reworks still owed are shown with their attempts');
   assert.deepEqual(mergeWriterSummary(undefined), { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] });
-  assert.match(readFileSync(`${root}src/cli/master/operations.ts`, 'utf8'), /mergeWriter: mergeWriterSummary\(state\?\.mergeWriter\)/, 'master status prints the section');
+  assert.match(readFileSync(`${root}src/cli/master-status.ts`, 'utf8'), /mergeWriterSummary\(state\?\.mergeWriter\)/, 'master status prints the section');
   assert.throws(() => mergeWriterStateSchema.parse({ queue: Array.from({ length: 51 }, () => state.mergeWriter.queue[0]) }), 'the queue keeps at most 50');
   assert.deepEqual(emptyDaemonState(config).mergeWriter, { lastMergeAt: null, queue: [], inFlight: null, refusals: [], reworks: [] });
   // The loop's effects: the reads over the coordinator checkout, each step posted as the coordinator under its own key.

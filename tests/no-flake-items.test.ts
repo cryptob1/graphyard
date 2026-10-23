@@ -43,8 +43,6 @@ test('unit:no-flake-items — the flake filer is gone: a day of loop cycles over
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work, now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {},
     decide: async () => { throw new Error('the soak decides nothing'); }, decisions: async () => ({ decisions: [] }),
     persist: async () => {},
     // What the old filer consumed: each passed rerun's failed log read, and the operator-agent filing route.

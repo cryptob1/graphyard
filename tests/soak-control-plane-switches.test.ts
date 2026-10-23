@@ -1,12 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { daemonStateSchema, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { advisoryIdle, advisoryKeptDue, advisoryKeptRuns, mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import type { MergeRecordEvent } from '../src/merge-writer/executor.js';
-import { systemInvariants } from '../src/model/invariants.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
@@ -19,8 +16,7 @@ import type { Work } from '../src/model.js';
  * all, one run hangs until the loop restarts, the loop restarts at other points too (its state read
  * back from JSON, every in-memory run lost), and the merger read fails for stretches. The loop must
  * run every delivered merge's advisory tests, file nothing for a failing one and never revert,
- * never request a decision, keep its state
- * bounded, and hold every system invariant docs/master-agent.md#system-invariants names.
+ * never request a decision, and keep its state bounded.
  */
 const minute = 60_000;
 const start = Date.parse('2030-05-01T00:00:00Z');
@@ -29,7 +25,6 @@ const sha = (seed: string) => createHash('sha1').update(seed).digest('hex');
 const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [], run: { mergeWriter: { deployKeyFile: '/keys/deploy', retrials: 3 } } });
 const githubDouble = new Proxy({}, { get: (_, name) => { throw new Error(`a control-plane cycle called GitHub (${String(name)})`); } });
-const docs = fileURLToPath(new URL('../docs/master-agent.md', import.meta.url));
 
 /** The day's script, by item ordinal and cycle. */
 const items = 80, submitEveryMs = 15 * minute, cycleMs = 2 * minute, cycles = (24 * 60) / 2;
@@ -97,7 +92,7 @@ class World {
   }
 }
 
-test('unit:scope-switches-control-plane — a simulated day on the real loop under the control-plane merger: every delivered merge gets its advisory run, a failing one files no work item through restarts, hung runs and unreadable merger stretches, nothing is reverted, no decision is requested, state stays bounded, and every system invariant docs/master-agent.md names holds', { timeout: 300_000 }, async () => {
+test('unit:scope-switches-control-plane — a simulated day on the real loop under the control-plane merger: every delivered merge gets its advisory run, a failing one files no work item through restarts, hung runs and unreadable merger stretches, nothing is reverted, no decision is requested, and state stays bounded', { timeout: 300_000 }, async () => {
   let now = start;
   const world = new World(() => now);
   for (let n = 1; n <= items; n++) world.submitted.set(n, start + n * submitEveryMs);
@@ -105,12 +100,10 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: world.ports(),
     decide: scopeSpy('decide') } as unknown as DaemonEffects;
   let state: DaemonState = emptyDaemonState(config);
-  const invariantNames = new Set<string>();
   let restarts = 0;
   for (let cycle = 0; cycle < cycles; cycle++) {
     now = start + cycle * cycleMs; world.cycle = cycle;
@@ -121,7 +114,6 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
     if (!world.hanging) await advisoryIdle(state);
     const advisory = state.mergeWriter.advisory;
     assert.ok(!advisory || (advisory.due.length <= advisoryKeptDue && advisory.ran.length <= advisoryKeptRuns), `cycle ${cycle}: the advisory state is bounded`);
-    for (const check of state.invariants.report) { invariantNames.add(check.invariant); assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`); }
   }
   // Settle what the last cycles left owed.
   for (let extra = 0; extra < 5; extra++) { now += cycleMs; world.cycle = cycles + extra; await runCycle(config, state, effects, () => now); await mergeWriterIdle(state); await advisoryIdle(state); }
@@ -143,9 +135,6 @@ test('unit:scope-switches-control-plane — a simulated day on the real loop und
   assert.ok(world.pushes.some(mergeSha => advisoryCannotRun(world.merges.get(mergeSha)!) && state.actions[`merge-writer-advisory:${mergeSha}`]?.state === 'failed'), 'a run that could not run is recorded, never filed or reverted');
   assert.ok(![...world.recorded.values()].flat().some(event => (event as { kind: string }).kind === 'revert'), 'nothing is reverted');
   assert.deepEqual(state.mergeWriter.advisory?.due, [], 'nothing is still owed');
-  // The state round-trips, and every invariant the guide names was judged.
+  // The state round-trips.
   assert.deepEqual(daemonStateSchema.parse(JSON.parse(JSON.stringify(state))).mergeWriter, state.mergeWriter);
-  const guide = readFileSync(docs, 'utf8');
-  const section = guide.slice(guide.indexOf('### System invariants'), guide.indexOf('## Research and diagnosis'));
-  for (const invariant of systemInvariants) { assert.ok(section.includes(`\`${invariant}\``), `docs/master-agent.md#system-invariants names ${invariant}`); assert.ok(invariantNames.has(invariant), `${invariant} was judged over the day`); }
 });

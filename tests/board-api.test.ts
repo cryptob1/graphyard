@@ -1,8 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
-import { join, posix } from 'node:path';
+import { readFile } from 'node:fs/promises';
+import { posix } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -10,8 +10,6 @@ import type { Work } from '../src/model.js';
 import { openHumanOnly } from '../src/model/human-request.js';
 import { actorRole, groups, roleOf, type Board, type OpenGroup } from '../src/model/board.js';
 import { statusRoutes } from '../src/server/routes/status.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
-import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { classify } from '../web/groups.js';
 import { releaseView } from '../src/model/release.js';
 import OverviewPage from '../web/pages/overview.js';
@@ -21,7 +19,6 @@ import { whatIsLeft } from '../web/item-page.js';
 import * as plain from '../src/model/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { NOW, boardStatus, boardWork } from '../browser-tests/ui-board.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-200: one board. The dashboard derived its groups in the browser (web/groups.ts) while master
@@ -104,57 +101,6 @@ test('unit:board-api-matches-dashboard — GET /api/board gives each open item i
   assert.deepEqual(board.counts, Object.fromEntries(groups.map(group => [group, byGroup[group].length])));
   // And the web module is the model module, not a copy that could drift.
   assert.equal(classify, (await import('../src/model/board.js')).classify);
-});
-
-async function masterFixture() {
-  const root = await temporaryDirectory('board-master');
-  const git = (...args: string[]) => execFileSync('git', ['-C', root, '-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.com', ...args], { stdio: 'ignore' });
-  git('init', '-q'); git('remote', 'add', 'origin', 'https://github.com/owner/project.git');
-  await writeFile(join(root, 'README.md'), 'board\n'); git('add', 'README.md'); git('commit', '-q', '-m', 'board');
-  const credentialFile = join(root, '.coordinator.token');
-  await writeFile(credentialFile, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
-  return { root, master, dispose: () => rm(root, { recursive: true, force: true }) };
-}
-
-test('unit:master-status-board-owed — master status lists what the master owes from the board, first and with its command: a blocked item reads master unblock GY-N', async () => {
-  const work = scenario();
-  const { root, master, dispose } = await masterFixture();
-  try {
-    const failing = (status: number) => Object.assign(new Error(JSON.stringify({ error: status === 404 ? 'Route not found' : 'Internal error' })), { status });
-    const report = async (board: 'served' | number) => masterStatusReport(root, master, async (path: string) => {
-      if (path === 'work-snapshot') return { work, now: at(0) };
-      if (path !== 'board') return { decisions: [] };
-      if (board === 'served') return served(work);
-      throw failing(board);
-    }, { actor: { id: 'coordinator-1' }, humanOnly: humanRows(work) }, { commit: null });
-    const status = await report('served');
-    const shown = status.board;
-    if ('error' in shown) assert.fail(shown.error);
-    const owed = shown.owed;
-    const stuck = owed.find(item => item.key === 'GY-172');
-    assert.ok(stuck, `the blocked item is owed by the master: ${JSON.stringify(owed.map(item => item.key))}`);
-    assert.equal(stuck.command, 'graphyard master unblock GY-172 REASON');
-    assert.equal(stuck.group, 'blocked'); assert.equal(stuck.overdue, true);
-    // Only the master's items are in the owed list; everything else follows it, and nothing is dropped.
-    assert.ok(owed.every(item => item.actor === 'master'));
-    assert.ok(!owed.some(item => item.key === 'GY-21' || item.key === 'GY-20'), 'a merge the queue is running and a human-only decision are not the master\'s');
-    assert.ok(shown.others.every(item => item.actor !== 'master'));
-    assert.ok(Object.keys(shown).indexOf('owed') < Object.keys(shown).indexOf('others'), 'the owed list comes first');
-    const board = await served(work);
-    assert.equal(owed.length + shown.others.length, board.open);
-    assert.deepEqual(shown.counts, board.counts);
-    // A server that predates the route: the same module builds the same board from the snapshot and status.
-    const fallback = await report(404);
-    assert.deepEqual(fallback.board, status.board);
-    // Any other failure of the route is reported, not rebuilt around (GY-371): a 500 or an auth refusal surfaces.
-    for (const code of [500, 401]) {
-      const failed = (await report(code)).board;
-      assert.ok('error' in failed, `a ${code} is not papered over with a locally built board`);
-      assert.match(String(failed.error), /GET \/api\/board failed/, `a ${code} is reported`);
-    }
-  } finally { await dispose(); }
 });
 
 /** The Work page rendered from a dashboard whose board is `board`. */

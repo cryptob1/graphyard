@@ -7,7 +7,6 @@ import type { CliContext } from './context.js';
 import { doctorRepositoryPolicy } from '../model/repository-policy.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
-import { coordinatorDoctor } from '../master/known-good.js';
 
 /** `graphyard doctor [--profile PROFILE]`: local discovery, live integration readiness and the readiness checklist for a completion profile. */
 export async function runDoctor(context: CliContext) {
@@ -48,7 +47,6 @@ export async function runDoctor(context: CliContext) {
     : delegationLimits?.drift?.length ? `Set ${delegationLimits.drift.map((entry: any) => `${entry.variable}=${entry.required}`).join(' ')} on the deployment: ${delegationLimits.drift[0].reason}`
     : production?.incidents?.length ? `Production has not deployed ${production.incidents.map((incident: any) => incident.key).join(', ')}: ${production.incidents[0].reason}`
     : readiness.next;
-  await coordinatorDoctor(root, discovered.repository, production);
   return context.print({ discovered, server: base, cliPath: await context.activeCliPath(), hostId: context.individualHostId(), connected: !!live, role: live?.actor?.role, release: live?.release ?? null, failure,
     setup,
     heldJobs: live?.heldJobs ?? 0,

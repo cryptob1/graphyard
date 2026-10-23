@@ -1,10 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
-import { rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { fileURLToPath } from 'node:url';
 import type { AddressInfo } from 'node:net';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -14,9 +10,6 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { isSummary } from '../src/model/work-summary.js';
-import { buildMasterStatus, masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { emptyDaemonState, writeDaemonState } from '../src/master-daemon.js';
-import { masterStatusReport } from '../src/cli/master-status.js';
 import { boardFromStatus } from '../src/model/board.js';
 import { views } from '../web/pages/index.js';
 import WorkDetails from '../web/pages/work-details.js';
@@ -190,11 +183,6 @@ test('unit:snapshot-bounded — the work snapshot sends open items whole and set
   assert.equal((await read(`work/${delivered.id}`)).body.key, delivered.key);
   assert.equal((await read('work/GY-999999')).status, 404);
 
-  // The loop polls the coordination view, which is unchanged; the bounded snapshot is what its
-  // guarded merge re-reads, and the status rows it builds from it are those of the open items.
-  const rows = buildMasterStatus({ work, now: snapshot.body.now }, [], []);
-  assert.equal(rows.work.filter((row: { stage: string }) => row.stage !== 'done').length, OPEN);
-
   // The dashboard: every page renders from the summaries, and a settled item's page renders from
   // the document read on request.
   const now = Date.parse(snapshot.body.now);
@@ -203,38 +191,7 @@ test('unit:snapshot-bounded — the work snapshot sends open items whole and set
   assert.match(page, new RegExp(delivered.key));
 });
 
-function masterConfig(credentialFile: string, worktreeRoot: string): MasterConfig {
-  return masterConfigSchema.parse({ version: 1, url: 'http://127.0.0.1:9', credentialFile, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
-    autoMerge: true, mergeMethod: 'merge', workers: [], run: { worktreeRoot } });
-}
-
-test('unit:status-degrades-per-section — master status returns every section from the bounded snapshot; a failed request is logged with its route and the SQL statement that timed out', async () => {
-  const root = await temporaryDirectory('scale-root'), secrets = await temporaryDirectory('scale-secrets');
-  try {
-    execFileSync('git', ['init', '-q', root]);
-    const credential = join(secrets, 'coordinator.token');
-    await writeFile(credential, 'coordinator-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const master = masterConfig(credential, join(secrets, 'checkouts'));
-    await writeDaemonState(master, emptyDaemonState(master));
-    // The real server over the seeded store.
-    const masterApi = async (path: string, _credential?: string, _timeoutMs?: number) => {
-      const answer = await read(path);
-      if (answer.status !== 200) throw new Error(`GET ${path} answered ${answer.status}`);
-      return answer.body;
-    };
-    const status = (await read('status')).body;
-    const started = Date.now();
-    const report = await masterStatusReport(root, master, masterApi, status, { commit: null }) as Record<string, any>;
-    assert.ok(Date.now() - started < 20_000, `master status returned in ${Date.now() - started}ms`);
-    assert.deepEqual(report.unavailable, [], 'no section is unavailable');
-    // Every section is there, built from the bounded snapshot.
-    for (const section of ['work', 'counts', 'attentionItems', 'board', 'actions', 'sessions', 'requests', 'disk', 'daemon', 'dispatch', 'setup', 'liveness', 'actionless', 'runtime'])
-      assert.ok(section in report && report[section] !== undefined, `master status returned its ${section} section`);
-    assert.ok(report.work.length >= OPEN, 'the open items are reported');
-
-  } finally { await rm(root, { recursive: true, force: true }); await rm(secrets, { recursive: true, force: true }); }
-
+test('unit:status-degrades-per-section — a failed request is logged with its route and the SQL statement that timed out', async () => {
   // The server's request error log names the route and the statement that timed out.
   const strict = new Store(databaseUrl);
   // The report runs on the report pool (GY-491), under its own statement timeout.

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { generateKeyPairSync, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -9,17 +9,14 @@ import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, reconcileProducers, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
-import { expiredRequestBoundMs, paneAlreadyGone, stuckRequests } from '../src/request-settlement.js';
-import { sessionReconcileIntervalMs } from '../src/model/sessions.js';
-import { stuckRequestReport, withStuckRequests } from '../src/cli/stuck-requests.js';
+import { paneAlreadyGone } from '../src/request-settlement.js';
 import type { Observation, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): the 2026-09-23 request instants are past and judged only against the explicit now Date.parse('2026-09-23T07:36:30.000Z') in stuckRequests; Date.now()/new Date() mint tokens and stamp DB records.
 
-// Each test is named for the proof it produces (GY-137): integration:absent-pane-resolves-request,
-// integration:expired-request-never-blocks and unit:stuck-request-surfaced. A session whose pane is
-// already gone settles its request instead of failing the close; no request outlives its own token
-// once Herdr no longer reports its session; and a request pending anyway is counted and raised.
+// Each test is named for the proof it produces (GY-137): integration:absent-pane-resolves-request
+// and integration:expired-request-never-blocks. A session whose pane is already gone settles its
+// request instead of failing the close; no request outlives its own token once Herdr no longer
+// reports its session.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -64,6 +61,8 @@ const herdrRun = (calls: string[][], close: Close) => (_command: string, args: s
   }
   return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 };
+/** One reconcile pass: a request past its expiry settles on the next one. */
+const expiredRequestBoundMs = 30_000;
 const afterExpiry = (record: { tokenExpiresAt: string }, ms = 1) => () => new Date(Date.parse(record.tokenExpiresAt) + ms);
 
 test('integration:absent-pane-resolves-request — a pane close answered with pane_not_found settles the request with a resolution naming the absent pane, records no failure, and the next launch is accepted', async () => {
@@ -111,7 +110,7 @@ test('integration:absent-pane-resolves-request — a close failing for any other
   } finally { await cleanup(); }
 });
 
-test('integration:absent-pane-resolves-request — a producer request whose pane is already gone settles the same way, and a master-daemon ended session does too', async () => {
+test('integration:absent-pane-resolves-request — a producer request whose pane is already gone settles the same way', async () => {
   const { root, cleanup } = await boundMaster();
   try {
     const now = new Date(), requested = new Date(now.getTime() - 3 * 3_600_000);
@@ -126,14 +125,10 @@ test('integration:absent-pane-resolves-request — a producer request whose pane
     assert.equal(after.closeFailure, undefined);
     assert.match(after.resolution!, /pane pane-proof was already gone/);
     assert.equal((await readProducerLedger(root)).producers[0].state, 'expired');
-    // The loop's own mid-session closure (quota failover) tolerates the absent pane the same way.
-    const daemon = await readFile(new URL('../src/daemon/effects-production.ts', import.meta.url), 'utf8');
-    assert.match(daemon, /catch \(error\) \{ if \(!paneAlreadyGone\(error\)\) throw error; paneGone = true; \}/);
   } finally { await cleanup(); }
 });
 
 test('integration:expired-request-never-blocks — a request past its token expiry whose session Herdr no longer reports settles as expired within the bound, whatever its pane state, and a new launch for the item is accepted', async () => {
-  assert.equal(expiredRequestBoundMs, sessionReconcileIntervalMs, 'the bound is one reconcile pass, which every dispatch tick runs');
   const { root, cleanup } = await boundMaster();
   try {
     const calls: string[][] = [];
@@ -159,49 +154,4 @@ test('integration:expired-request-never-blocks — a request past its token expi
     assert.equal(next.work, 'GY-127');
     assert.deepEqual((await readReviewLedger(root)).reviews.map(entry => entry.state), ['expired', 'pending']);
   } finally { await cleanup(); }
-});
-
-test('unit:stuck-request-surfaced — a request pending past its token expiry, or holding a close failure, is counted in sessionReconcile and raised as attention naming the item, the request, how long and the remedy', () => {
-  const now = Date.parse('2026-09-23T07:36:30.000Z');
-  const review = { id: '82d85911-0000-4000-8000-000000000001', key: 'GY-127', requestId: 'review-request-127', agentName: 'review-claude-1', pane: 'w1V:p1CD', state: 'pending',
-    requestedAt: '2026-09-23T04:36:34.000Z', tokenExpiresAt: '2026-09-23T05:36:30.000Z', closeFailure: 'Herdr could not close pane w1V:p1CD: herdr: connection reset' };
-  const producer = { id: '82d85911-0000-4000-8000-000000000002', key: 'GY-118', requestId: 'producer-request-118', agentName: 'proof-claude-1', pane: 'pane-proof', state: 'pending',
-    requestedAt: '2026-09-23T07:26:30.000Z', expiresAt: '2026-09-23T09:26:30.000Z', closeFailure: 'Herdr could not close pane pane-proof: herdr: timeout' };
-  const healthy = { ...producer, id: '82d85911-0000-4000-8000-000000000003', key: 'GY-99', closeFailure: undefined };
-  const settled = { ...review, id: '82d85911-0000-4000-8000-000000000004', key: 'GY-98', state: 'expired' };
-  const records = { reviews: [review, settled], producers: [producer, healthy] };
-  assert.equal(stuckRequests(records, now).length, 2, 'a healthy pending request and a settled one are not stuck');
-  const report = stuckRequestReport(records, now);
-  assert.equal(report.attentionItems.length, 2);
-  const [first, second] = report.attentionItems;
-  assert.equal(first.subject, 'GY-127');
-  assert.match(first.text, /reviewer request review-request-127 on GY-127/);
-  assert.match(first.text, /pending 2h0m past its token expiry at 2026-09-23T05:36:30.000Z/);
-  assert.match(first.text, /refuses every later reviewer launch for GY-127/);
-  assert.equal(first.role, 'master');
-  assert.match(first.next, /herdr pane close w1V:p1CD/);
-  assert.match(first.next, /graphyard master status settles the request as expired within 30s/);
-  assert.equal(second.subject, 'GY-118');
-  assert.match(second.text, /producer request producer-request-118 on GY-118 .* pending 10m since 2026-09-23T07:26:30.000Z; its pane could not be closed: Herdr could not close pane pane-proof: herdr: timeout/);
-  // The counter sits beside the sweep's own, where an operator already looks.
-  const dispatch = withStuckRequests({ running: true, sessionReconcile: { intervalMs: 30_000, closed: 0, missing: 0, failures: [] } }, report.stuck);
-  const reconcile = dispatch.sessionReconcile as unknown as { closed: number; stuck: number; stuckRequests: { work: string; request: string; stuckMs: number; expired: boolean }[] };
-  assert.equal(reconcile.stuck, 2);
-  assert.equal(reconcile.closed, 0, 'the existing counters are kept');
-  assert.deepEqual(reconcile.stuckRequests.map(entry => [entry.work, entry.request, entry.expired]), [['GY-127', 'review-request-127', true], ['GY-118', 'producer-request-118', false]]);
-  assert.equal(reconcile.stuckRequests[0].stuckMs, 2 * 3_600_000);
-  // An unreadable cursor has no sweep to count beside, and is returned as it is.
-  const unreadable = { running: false, error: 'unreadable' };
-  assert.equal(withStuckRequests(unreadable, report.stuck), unreadable);
-  // Nothing stuck: the counter reads zero and no item is raised.
-  assert.equal((withStuckRequests({ sessionReconcile: {} }, []).sessionReconcile as { stuck: number }).stuck, 0);
-  assert.equal(stuckRequestReport({ reviews: [], producers: [healthy] }, now).attentionItems.length, 0);
-});
-
-test('unit:stuck-request-surfaced — master status counts and raises stuck requests beside the dispatcher summary', async () => {
-  const report = await readFile(new URL('../src/cli/master-status.ts', import.meta.url), 'utf8');
-  assert.match(report, /stuckRequestReport\(\{ reviews: reviewRecords, producers: producerRecords \}, Date\.now\(\)\)/);
-  assert.match(report, /withStuckRequests\(dispatchSummary\(/);
-  assert.match(report, /\.\.\.stuck\.attentionItems/);
-  assert.match(report, /stuckRequests: stuck\.stuck\.length/);
 });

@@ -139,9 +139,6 @@ export const observationWaitBoundMs = 30 * 60_000;
  */
 export const workerSlotWaitBoundMs = 30 * 60_000;
 
-/** What a deployment observation's reason starts with when its containment was derived without a fresh base branch, the one reason that leaves its pending deliveries unreliable (GY-1831). */
-export const staleContainmentReasonPrefix = 'Containment was derived without a fresh base branch: ';
-
 /**
  * Whether a dispatch refusal names a wait for a worker profile to free (GY-1108).
  *

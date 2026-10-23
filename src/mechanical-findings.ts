@@ -13,7 +13,6 @@
 import { z } from 'zod';
 import type { Work } from './model.js';
 import { bindingApproval, carriedApproval } from './model/carry.js';
-import type { ChildRun } from './child-runner.js';
 
 export const mechanicalCategories = ['typo', 'docs-placement', 'formatting', 'naming'] as const;
 export const substantiveCategories = ['behavior', 'criteria', 'scope'] as const;
@@ -24,70 +23,12 @@ export type FindingClassification = 'mechanical' | 'substantive';
 
 /** One `Nit:` line of a verdict (or a legacy `Follow-up finding:` line): the file and line it names, when it names them, and its text. */
 export interface FollowUpFinding { path: string | null; line: number | null; text: string }
-/** Every `Nit:` (or legacy `Follow-up finding:`) line of a verdict, located when it starts `path[:line] — `. */
-export function parseFollowUpFindings(body: unknown): FollowUpFinding[] {
-  if (typeof body !== 'string') return [];
-  const findings: FollowUpFinding[] = [];
-  for (const entry of body.split(/\r?\n/)) {
-    const match = /^\s*(?:[-*]\s+)?(?:nit|follow-up finding):\s*(.+)$/i.exec(entry);
-    const text = match?.[1]!.replace(/\s+/g, ' ').trim();
-    if (!text || /^none\.?$/i.test(text)) continue;
-    const located = /^`?([^\s`:]+)(?::(\d+))?`?\s+[—–-]+\s+\S/.exec(text);
-    const path = located && !/^\d+$/.test(located[1]!) ? located[1]! : null;
-    // A line number the ledger's integer schema would refuse (unsafe, or Infinity) is no line at all.
-    const line = path && located![2] ? Number(located![2]) : null;
-    findings.push({ path, line: line !== null && Number.isSafeInteger(line) ? line : null, text });
-  }
-  return findings;
-}
 export interface ClassifiedFinding extends FollowUpFinding { classification: FindingClassification; category: FindingCategory }
-
-// Any sign that a finding touches behaviour, a criterion or the scope makes it substantive, whatever
-// else it says: a mechanical label never wins over one of these.
-const substantiveSignals: [SubstantiveCategory, RegExp][] = [
-  ['criteria', /\b(AC-\d+|acceptance criteri(on|a)|criterion|requirement)\b/i],
-  ['scope', /\b(plannedFiles|out of scope|outside (the )?scope|scope creep|unrelated change|reverts?)\b/i],
-  // Phrases, not bare words: a typo in a "fails" message or a rename of `returnsCount` is still mechanical.
-  ['behavior', /\b(bug|crash(es)?|throws?|exception|race|deadlock|leak|security|inject(ion)?|unbounded|overflow|wrong (result|value|output)|incorrect(ly)?|regression|broken|behaviou?r|semantics?|off[- ]by[- ]one|timeout|retr(y|ies)|silently|returns? (null|undefined|nothing|early|the wrong|a wrong|an incorrect)|fails? (to|when|on|if)|logic (error|bug)|drops? (the|a|an|every|data|events?|requests?|findings?)|(is|are|gets?) lost)\b/i],
-];
-const mechanicalSignals: [MechanicalCategory, RegExp][] = [
-  ['typo', /\b(typo|misspell(ed|ing)?|spelling|grammar|grammatical|duplicated word|stray (word|character))\b/i],
-  ['docs-placement', /\b(belongs (in|on)|should (live|go|move|be moved) (in|to|under)|move (this|the) (section|paragraph|note|sentence)|wrong (page|section|doc)|docs? placement)\b/i],
-  ['formatting', /\b(formatting|whitespace|indent(ation)?|trailing (space|comma|newline)|line length|wrap(ped)? line|blank line|semicolon|prettier|lint style|quote style)\b/i],
-  ['naming', /\b(renam(e|ed|ing)|naming|name (does not|doesn't) match|camelCase|snake_case|kebab-case|naming convention|consistent (name|naming)|align(ed)? (the )?name)\b/i],
-];
-/** A reviewer's own label at the end of a finding line: `(mechanical: typo)` or `(substantive: behavior)`. */
-const declaredLabel = /\((mechanical|substantive)(?::\s*([a-z-]+))?\)\s*\.?$/i;
-
-/**
- * Classify one finding. A substantive signal anywhere in its text makes it substantive; otherwise a
- * reviewer's declared `(mechanical: CATEGORY)` label, or a mechanical signal, makes it mechanical.
- * Anything the classifier cannot place is substantive: an unclassified finding is never auto-fixed.
- */
-export function classifyFinding(finding: FollowUpFinding): ClassifiedFinding {
-  const declared = declaredLabel.exec(finding.text);
-  const text = declared ? finding.text.slice(0, declared.index).trim() : finding.text;
-  const substantive = substantiveSignals.find(([, pattern]) => pattern.test(text));
-  if (substantive) return { ...finding, text, classification: 'substantive', category: substantive[0] };
-  if (declared?.[1]!.toLowerCase() === 'substantive') {
-    const category = substantiveCategories.find(entry => entry === declared[2]?.toLowerCase()) ?? 'behavior';
-    return { ...finding, text, classification: 'substantive', category };
-  }
-  const declaredCategory = declared?.[1]!.toLowerCase() === 'mechanical' ? mechanicalCategories.find(entry => entry === declared[2]?.toLowerCase()) : undefined;
-  const signalled = mechanicalSignals.find(([, pattern]) => pattern.test(text))?.[0];
-  const category = declaredCategory ?? signalled;
-  // A finding with no file cannot be fixed within a bounded set of paths: it stays with the reviewer.
-  if (!category || !finding.path) return { ...finding, text, classification: 'substantive', category: 'behavior' };
-  return { ...finding, text, classification: 'mechanical', category };
-}
 
 /** The review prompt's classification rule: each finding line ends with its class, so the loop can route the mechanical ones to the bot. */
 export const findingClassificationSection = () => 'Name each nit on its own "Nit: PATH:LINE — FINDING" line, and classify it as MECHANICAL — a typo, documentation in the wrong place, formatting, or a name out of line with the repository\'s existing conventions — or SUBSTANTIVE: anything about behaviour, a criterion or the scope. '
   + `End each "Nit:" line with its class, exactly "(mechanical: CATEGORY)" with CATEGORY one of ${mechanicalCategories.join(', ')}, or "(substantive: CATEGORY)" with CATEGORY one of ${substantiveCategories.join(', ')}. `
   + 'On an approval, a worker bot fixes the mechanical ones in one commit before the next independent read, and anything you mark substantive stays an ordinary nit; when unsure, mark it substantive. ';
-
-/** Every `Nit:` line of a verdict, classified. */
-export const parseClassifiedFindings = (body: unknown): ClassifiedFinding[] => parseFollowUpFindings(body).map(classifyFinding);
 
 /**
  * The fix an otherwise-approved head is owed: its mechanical findings, the files a bot commit may
@@ -100,14 +41,6 @@ export interface MechanicalFixPlan {
   mechanical: ClassifiedFinding[]; substantive: ClassifiedFinding[];
   /** The only files the bot commit may change. */
   paths: string[];
-}
-export function mechanicalFixPlan(input: { key: string; pr: number; sha: string; reviewId: number; state: string; body: unknown }): MechanicalFixPlan | null {
-  if (input.state !== 'APPROVED') return null;
-  const findings = parseClassifiedFindings(input.body);
-  const mechanical = findings.filter(finding => finding.classification === 'mechanical');
-  if (!mechanical.length) return null;
-  return { key: input.key, pr: input.pr, head: input.sha, reviewId: input.reviewId, mechanical, substantive: findings.filter(finding => finding.classification === 'substantive'),
-    paths: [...new Set(mechanical.map(finding => finding.path!))].sort() };
 }
 
 /** The instruction the worker-class bot session runs: fix exactly the mechanical findings, in exactly their files, as one commit on the head. */
@@ -233,15 +166,6 @@ export const freshReadRecordSchema = z.object({
     failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50) }).strict().optional(),
 }).strict();
 export type FreshReadRecord = z.infer<typeof freshReadRecordSchema>;
-
-/** The plan an approval of `record.sha` records: `planned` with its findings when anything on it is mechanical, `none` otherwise. */
-export function planMechanicalFix(record: { key: string; pr: number; sha: string }, reviewId: number, body: unknown, epoch: number, at: string): MechanicalFixRecord {
-  const plan = mechanicalFixPlan({ key: record.key, pr: record.pr, sha: record.sha, reviewId, state: 'APPROVED', body });
-  // A plan carries every finding it holds back from filing, so one the ledger cannot hold whole is not made.
-  if (!plan || plan.mechanical.length > ledgerFindingLimit || plan.paths.length > ledgerFindingLimit || plan.substantive.length > ledgerFindingLimit)
-    return { reviewId, head: record.sha, epoch, at, state: 'none', mechanical: [], substantive: [], paths: [], ...(plan ? { reason: `more than ${ledgerFindingLimit} findings of one class or files: left as ordinary follow-ups` } : {}) };
-  return { reviewId, head: record.sha, epoch, at, state: 'planned', mechanical: plan.mechanical.map(ledgerFinding), substantive: plan.substantive.map(ledgerFinding), paths: plan.paths };
-}
 
 /** A planned fix the loop acts on: its item, pull request, approved head, findings, and when it was planned. */
 export interface MechanicalFixRequest { key: string; pr: number; head: string; reviewId: number; epoch: number; at: string; mechanical: ClassifiedFinding[]; substantive: ClassifiedFinding[]; paths: string[] }

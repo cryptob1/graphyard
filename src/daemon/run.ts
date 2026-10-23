@@ -1,27 +1,20 @@
-// Concern: the long-running loop — cycle scheduling, config reload, the watchdog and its summary.
+// Concern: the long-running loop — cycle scheduling, config reload, the watchdog, and the restart onto a newly served commit.
 import { setTimeout as delay } from 'node:timers/promises';
-import { existsSync } from 'node:fs';
-import { resolve, sep } from 'node:path';
+import { existsSync, rmSync } from 'node:fs';
 import type { ConfigReload, MasterConfig } from '../master.js';
-import type { HerdrAgent } from '../master/herdr.js';
 import { defaultChildRun } from '../child-runner.js';
-import { allocateManagedCheckout } from '../master/worktrees.js';
-import { worktreeRoot } from '../install/worktree-root.js';
-import { checkoutGuardApplies, coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutEscalation, dirtyCheckoutLeases, dirtyCheckoutPaths, readCoordinatorCheckout, type CoordinatorCheckout } from '../master/profiles.js';
 import { carryUndeclared } from './state-cursor.js';
-import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction, touchStanding } from './state.js';
-import { boundedPersist, cycleDelay, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
+import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction } from './state.js';
+import { boundedPersist, cycleFailureCeiling, describeFailingCall, loopLiveness, namedEffects, noteCycleFailure, noteCycleSuccess, noteUnhandled, watchdogPlan } from './liveness.js';
 import type { DaemonEffects } from './effects.js';
 import { Launcher, defaultLaunchConcurrency, runCycle } from './cycle.js';
-import { detailChanged } from './text.js';
-import { awaitSupervisorRestart, describeSelfUpgrade, detectLoopSupervisorUnit, loadedHeldSnapshot, restartEndedBySupervisorStop, type SelfUpgradeOutcome } from './upgrade.js';
-import { checkoutRestoreFreezeLedgerPath, checkoutRestoreGrantPath, checkoutRestoreRequestPath, loopRestartRequestPath, serveCheckoutRestore, type CheckoutRestoreOutcome } from '../cli/master-checkout-restore.js';
-import { releasePinnedRestore } from '../cli/checkout-restore-release.js';
-import { divergedHead } from '../cli/checkout-restore-act.js';
+import { awaitSupervisorRestart, detectLoopSupervisorUnit, restartEndedBySupervisorStop } from './loop-supervisor.js';
 import { mergeWriterInFlight, mergeWriterSummary } from './cycle-merge-writer.js';
-import { deployInFlight } from './continuous-deploy.js';
 import { detachRuns } from '../runner/registry.js';
-import type { LoopWake } from './loop-wake.js';
+import { besideCursor } from './state-cursor.js';
+import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
+import { cliCommit } from '../protocol-version.js';
+import { loopCodeRoot } from './checkout-state.js';
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
 export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
@@ -30,161 +23,96 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
   const recent = Object.entries(state.actions).map(([key, action]) => ({ key, ...action })).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
   const liveness = loopLiveness(state, now, intervalMs, hostId);
   return {
-    // A loop inside a failed-cycle backoff is running: it announced when its next cycle is due.
     running: !!state.lock && lagMs !== null && (lagMs < Math.max(3 * intervalMs, 120_000) || liveness.state === 'running'),
-    // Whether the loop is cycling at all, on the two-interval bound, with the restart command.
-    liveness,
-    // Failed cycles and the process-level events the loop survived (GY-119).
-    failures: state.failures,
+    liveness, failures: state.failures,
     lock: state.lock, cycle: state.cycle, lastCycleAt: state.lastCycleAt, lagMs,
-    unresolved: recent.filter(action => action.state === 'started' || action.state === 'indeterminate'),
-    escalations: recent.filter(action => action.kind === 'attention').slice(0, 20),
     actions: recent.slice(0, 40),
     metrics: state.metrics.at(-1) ?? null,
-    deployment: state.deployment,
-    // The control-plane merge executor (GY-1524): the heads queued oldest first, the merge in flight, the last delivery and the newest refusals.
     mergeWriter: mergeWriterSummary(state.mergeWriter),
-    // The release this process loaded, and what the between-cycles self-upgrade has done (GY-437).
     release: state.release,
-    upgrade: state.upgrade,
     profiles: state.profiles,
     config: state.config,
-    // The master session the loop launches, adopts, wakes and rotates (GY-898): the live handle,
-    // its age against the configured budget, why the last one ended, and the last wake's causes.
     master: masterSummary(state.master, now),
-    // Required checks failing on the base head as well as on the candidates they hold (GY-528).
-    baseFailures: Object.values(state.baseFailures),
-    // The system invariants as the last observation judged them (GY-404): one line per invariant, with its threshold and reading.
-    invariants: { at: state.invariants.at, violated: state.invariants.report.filter(check => !check.holds).length, lines: state.invariants.report.map(check => check.line), checks: state.invariants.report },
   };
 }
 
-/**
- * Adopt a reloaded master.json into the running loop, or record why it was refused. A refusal is
- * an escalation naming the stale setting, written once per distinct reason; an adoption names what
- * changed. Either way the loop keeps cycling on the settings it holds.
- */
+/** Adopt a reloaded master.json into the running loop, or record why it was refused. */
 export async function noteConfigReload(state: DaemonState, reload: ConfigReload, persist: DaemonEffects['persist']) {
   const previous = state.config;
   state.config = carryUndeclared(previous, { at: reload.at, changed: reload.changed.slice(0, 100), refused: reload.refused?.slice(0, 1000) ?? null });
   const noted: DaemonAction[] = [];
-  if (reload.refused && previous?.refused !== state.config.refused) {
-    noted.push(storeAction(state, `attention:config:${reload.at}`, { kind: 'attention', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
-  }
-  // GY-2600: a dead Herdr workspace replaced with a live one is recorded with its reason.
-  if (reload.workspace) {
-    noted.push(storeAction(state, `config:herdr-workspace:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Switched herdrWorkspace from ${reload.workspace.from} to ${reload.workspace.to}: ${reload.workspace.reason}`, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
-  }
-  if (reload.changed.length) {
-    noted.push(storeAction(state, `config:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
-  }
+  if (reload.refused && previous?.refused !== state.config.refused) noted.push(storeAction(state, `config:refused:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'failed', detail: state.config.refused!, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
+  if (reload.workspace) noted.push(storeAction(state, `config:herdr-workspace:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Switched herdrWorkspace from ${reload.workspace.from} to ${reload.workspace.to}: ${reload.workspace.reason}`, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
+  if (reload.changed.length) noted.push(storeAction(state, `config:${reload.at}`, { kind: 'config', work: null, principal: null, state: 'done', detail: `Adopted .graphyard/master.json changes without a restart: ${reload.changed.join(', ')}`, attempts: 1, epoch: null, cycle: state.cycle, at: reload.at }));
   if (noted.length || previous?.refused !== state.config.refused) await persist(state);
   return noted;
 }
 
-/**
- * A watchdog window too short for the configured interval is recorded once, not obeyed silently:
- * once per process start at most, and not again while the same refusal stands on the cursor.
- * Once the installed unit's window covers the interval — the alignment step rewrites a drifted
- * unit before it re-executes the loop (GY-916) — the standing refusal is cleared, so a mismatch is
- * converged rather than faulted at every start.
- */
-export async function noteWatchdog(state: DaemonState, plan: ReturnType<typeof watchdogPlan>, at: string, persist: DaemonEffects['persist']) {
-  if (!plan.refusal) {
-    if (!plan.supervised || plan.windowMs === null) return [];
-    const cleared = Object.entries(state.actions).filter(([key, action]) => key.startsWith('attention:watchdog:') && action.state === 'failed')
-      .map(([key, action]) => storeAction(state, key, { ...action, state: 'done', detail: `Cleared: the supervisor's watchdog window is now ${Math.round(plan.windowMs! / 1000)}s, longer than two cycle intervals; it was: ${action.detail}`, cycle: state.cycle, at }));
-    if (cleared.length) await persist(state);
-    return cleared;
-  }
-  const key = `attention:watchdog:${plan.windowMs}`;
-  if (state.actions[key]?.state === 'failed') return [];
-  const entry = storeAction(state, key, { kind: 'attention', work: null, principal: null, state: 'failed', detail: plan.refusal, attempts: 1, epoch: null, cycle: state.cycle, at });
-  await persist(state);
-  return [entry];
-}
-
-/**
- * Take back the headless runs a restart left running (GY-453): on the loop's start, and on every
- * later cycle any run no live process watches — one an executor left running when it stopped and
- * was not started again.
- */
-export async function adoptHeadlessRuns(state: DaemonState, effects: DaemonEffects, log: (line: string) => void, when: 'start' | 'cycle' = 'start') {
+/** Take back the headless runs a restart left running (GY-453). */
+export async function adoptHeadlessRuns(effects: DaemonEffects, log: (line: string) => void) {
   if (!effects.adoptRuns) return [];
   try {
     const adopted = await effects.adoptRuns();
-    if (adopted.length) log(`[graphyard-master] adopted ${adopted.length} headless run(s) ${when === 'start' ? 'left running by a restart' : 'no live process was watching'}: ${adopted.map(run => `${run.name} (${run.role} for ${run.work}${run.live ? '' : ', ended while unwatched'})`).join(', ')}`);
+    if (adopted.length) log(`[graphyard-master] adopted ${adopted.length} headless run(s): ${adopted.map(run => `${run.name} (${run.role} for ${run.work})`).join(', ')}`);
     return adopted;
   } catch (error) { log(`[graphyard-master] could not adopt the headless runs a restart left: ${message(error)}`); return []; }
 }
 
+/** The request a confined master files with `master restart`: the loop restarts through its unit once it reads it. */
+export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFile'>) => besideCursor(config, 'loop-restart');
+
+/**
+ * Why the loop should restart now, or null: the deploy unit serves a commit other than the one this
+ * process loaded and the checkout holds it, so a restart loads it; or a confined master filed a
+ * restart request. `head` reads the commit the loop's code checkout holds.
+ */
+export function restartCause(config: Pick<MasterConfig, 'credentialFile' | 'cliPath'>, root: string, loaded: string | null, head = () => cliCommit(loopCodeRoot(config.cliPath, root))): string | null {
+  if (existsSync(loopRestartRequestPath(config))) return 'a master restart was requested';
+  const serving = readDeployRecord(deployRecordPath(root))?.tip ?? null;
+  return serving && loaded && serving !== loaded && head() === serving ? `the deploy unit serves ${serving.slice(0, 12)}, not ${loaded.slice(0, 12)} this loop loaded` : null;
+}
+
+/** `systemctl --user --no-block restart` of the unit this loop runs under, ended by the stop it causes. */
+export async function restartThroughUnit() {
+  const unit = detectLoopSupervisorUnit();
+  if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot restart itself through one');
+  try { await awaitSupervisorRestart(() => defaultChildRun('systemctl', ['--user', '--no-block', 'restart', unit])); }
+  catch (error) { if (!restartEndedBySupervisorStop(error)) throw error; }
+}
+
 /**
  * Supervised entry point. The process owns no lease and no credential beyond the coordinator token,
- * so a restart is always safe: it reconciles the cursor against Graphyard and keeps cycling.
- *
- * A cycle that throws does not end the process (GY-119). The rejection — a control-plane read that
- * timed out, a runtime call that failed, a reload that could not be parsed — fails that cycle: it is
- * recorded on the cursor with the cycle number and the call it escaped from, logged, and the next
- * cycle runs after a delay that grows with the consecutive count. An unhandled rejection or uncaught
- * exception anywhere in the process is caught here, logged with its origin, counted on the cursor,
- * and survived. Only a stop signal ends the loop; the supervisor's restart is reserved for a process
- * that hangs, which its watchdog detects.
+ * so a restart is always safe. A cycle that throws is recorded, logged and retried after a growing
+ * delay; only a stop signal ends the loop. Between cycles, with no merge trial in flight, the loop
+ * restarts through its unit when the deploy unit serves a commit it did not load.
  */
 export async function runDaemon(config: MasterConfig, state: DaemonState, raw: DaemonEffects, options: { once?: boolean; intervalMs: number | (() => number); identity: { pid: number; host: string }; signals?: NodeJS.Signals[]; now?: () => number; log?: (line: string) => void;
-  /** The process supervisor's environment, for the watchdog keep-alive; defaults to this process's. */
   environment?: Record<string, string | undefined>;
-  /** Re-reads .graphyard/master.json before each cycle, so profiles, workspace, run settings and autoMerge apply without a restart. */
   reload?: () => Promise<ConfigReload>;
-  /** The process whose unhandled rejections and uncaught exceptions the loop catches; defaults to this one. */
   process?: Pick<NodeJS.Process, 'on' | 'off'>;
-  /** Reads how the coordinator checkout stands; defaults to reading it from the configured CLI launcher's root. */
-  checkout?: () => CoordinatorCheckout | Promise<CoordinatorCheckout>;
-  /** Carries out the standing `master checkout-restore` and confined `master restart` requests (GY-1658), `settle` recording the checkout clean before the loop restarts and `unadopt` reverting an adoption whose restart failed (GY-1680); defaults to the requests beside the cursor, served by serveLoopRequests. */
-  checkoutRestore?: (settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>, unadopt?: (loaded: string) => Promise<unknown>) => Promise<unknown>;
-  /** Re-executes this loop through its supervising unit when a served request owes a restart (GY-1658); defaults to `systemctl --user --no-block restart` of the unit this process runs under. */
+  /** The checkout whose deploy record names the serving commit; absent, the loop never restarts itself. */
+  root?: string;
   restartLoop?: () => Promise<unknown>;
-  /** The commit of the held-cli snapshot this process's modules were loaded from (GY-1773), null for the checkout's; defaults to reading where this module was loaded from. */
-  loadedSnapshot?: () => string | null;
-  /** The dispatcher's wake (GY-1490, loop-wake.ts): ends the sleep after a cycle as soon as the tick sees work the loop acts on. */
-  wake?: Pick<LoopWake, 'sleep'>;
-  /** The wait after a failed cycle, never cut short by the wake; defaults to a timer. A soak on a simulated clock hands its own. */
-  delay?: (ms: number, signal: AbortSignal) => Promise<void>; } ) {
-  // Progress goes to stderr so stdout stays the machine-readable result the CLI prints.
+  delay?: (ms: number, signal: AbortSignal) => Promise<void>; }) {
   const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
   const interval = () => typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
   const host = options.process ?? process;
   let stopping = false;
-  // A supervisor's SIGTERM must land during the wait, not one whole interval later — and from the
-  // first line, not after the awaited startup below (GY-1603): a stop received while the scratch
-  // checkout opens or runs are adopted ends the loop before any cycle, rather than being missed.
   const waking = new AbortController();
   const stop = () => { stopping = true; waking.abort(); };
   const signals = options.signals ?? ['SIGTERM', 'SIGINT'];
   for (const signal of signals) host.on(signal, stop);
   const unlisten = () => { for (const signal of signals) host.off(signal, stop); };
   try {
-    // GY-1773: a loop the launcher pinned to a held snapshot (the self-upgrade from a dirty checkout)
-    // runs the snapshot's commit, whatever the checkout beside it holds: that is its release.
-    // The read tolerates a configuration without a CLI launcher (no root to read under): such a loop runs the checkout.
-    const snapshot = options.loadedSnapshot ? options.loadedSnapshot() : typeof config.cliPath === 'string' ? loadedHeldSnapshot(coordinatorCheckoutRoot(config.cliPath)) : null;
-    const loadedRelease = snapshot ? { commit: snapshot, dirty: false } : raw.loadedRelease ?? null;
     const effects = boundedPersist(namedEffects(raw));
     acquireDaemonLock(state, options.identity, now(), interval());
-    // GY-437: the release is this process's, never the cursor's: a loop re-executed onto a moved
-    // checkout must not report the release the process before it loaded. Its declared fields are
-    // this process's; fields a newer loop wrote under it ride along (GY-1960).
-    state.release = carryUndeclared(state.release, loadedRelease);
+    state.release = carryUndeclared(state.release, raw.loadedRelease ?? null);
     await effects.persist(state);
-    // Under a supervisor that watches for keep-alives, a hung cycle is a restart rather than a
-    // silent pipeline; a window that would restart a healthy loop is recorded and left to the
-    // supervisor's configuration rather than worked around.
     const watchdog = watchdogPlan(options.environment ?? process.env, interval());
-    for (const action of await noteWatchdog(state, watchdog, new Date(now()).toISOString(), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
-    if (watchdog.supervised) { try { await effects.notify?.('ready'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
-    await adoptHeadlessRuns(state, effects, log);
-    // A detached promise that rejects — in the dispatcher beside this loop, an approver watch, a
-    // Herdr read nobody awaited — would otherwise end the process. It is counted and survived; the
-    // cursor write is best-effort, since the handler runs outside any cycle's own persistence.
+    if (watchdog.refusal) log(`[graphyard-master] ${watchdog.refusal}`);
+    const notify = async (beat: 'ready' | 'alive') => { if (!watchdog.supervised) return; try { await effects.notify?.(beat); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } };
+    await notify('ready');
+    await adoptHeadlessRuns(effects, log);
     const unhandled = (origin: 'unhandledRejection' | 'uncaughtException') => (error: unknown) => {
       const entry = noteUnhandled(state, error, origin, now());
       log(`[graphyard-master] ${origin} caught at the process level during cycle ${entry.cycle} (${state.failures.unhandled} so far); the loop keeps running: ${entry.reason}`);
@@ -193,363 +121,50 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
     const onRejection = unhandled('unhandledRejection'), onException = unhandled('uncaughtException');
     host.on('unhandledRejection', onRejection); host.on('uncaughtException', onException);
     const cycles: { cycle: number; actions: number }[] = [], failed: { cycle: number; call: string | null; reason: string; delayMs: number }[] = [];
-    // Session launches run beside the cycles, never inside one (GY-616): a cycle hands a launch over
-    // and moves on, and the next cycle reports what it did. The launcher outlives every cycle.
     const launcher = new Launcher(config.run.launchConcurrency ?? defaultLaunchConcurrency);
-    // GY-857: the checkout guard. The modules this process imported were read from the coordinator
-    // checkout at startup; when it holds uncommitted work, cycling would run unreviewed code and a
-    // self-upgrade would move the checkout underneath it, so the loop refuses — at startup it never
-    // becomes live at all, and between cycles it skips the upgrade and keeps running the release it
-    // loaded. Either refusal is an escalation naming the dirty paths and which live leases' planned
-    // files they match: those matches are the checkout's writes attributed to the attempts most
-    // likely to have made them.
-    const checkoutOf = async () => options.checkout?.() ?? await readCoordinatorCheckout(coordinatorCheckoutRoot(config.cliPath));
-    const guard = coordinatorCheckoutGuard({ state: () => state, read: checkoutOf, agents: raw.agents, snapshot: raw.snapshot, persist: effects.persist, now, log, recover: effects.recoverHead, runsSnapshot: () => snapshot,
-      diverged: (checkout, loaded) => divergedHead(checkout.root, { base: `refs/remotes/origin/${config.baseBranch}`, loaded }).then(head => head === checkout.commit) });
-    // GY-1658: the installation's own remedy for a dirty checkout. A `master checkout-restore` request
-    // (any master identity files it beside the cursor) is carried out here, by
-    // the one unconfined process: every dirty path saved under a named ref and returned to HEAD, the
-    // escalation settled, and the loop restarted through its supervising unit onto the clean checkout.
-    // GY-1680: the quiesce-and-restore runs from the verified serving release's own snapshot, never
-    // this process's loaded code, under a grant signed with the coordinator credential, and a clean
-    // checkout at a HEAD the loop did not load is adopted — around the restart onto it, reverted when
-    // that restart cannot be asked, so the drift escalation stands until one lands. The act can outlast
-    // the watchdog window, so the keep-alive is fed on a quarter of it for as long as the act runs; the
-    // writers the snapshot's entry stopped are continued here should it end before its own thaw.
-    const keepAliveEveryMs = watchdog.windowMs ? Math.max(250, Math.floor(watchdog.windowMs / 4)) : undefined;
-    const restoreCheckout = options.checkoutRestore ?? ((settle: (adopt: string | null) => Promise<unknown>, keepAlive?: () => Promise<void>, unadopt?: (loaded: string) => Promise<unknown>) => serveLoopRequests(config, coordinatorCheckoutRoot(config.cliPath), {
-      settle, unadopt, report: outcome => log(`[graphyard-master] ${outcome.state === 'restart' ? 'loop-restart request' : `checkout-restore ${outcome.state}`}: ${outcome.detail}${outcome.restart ? `; restart ${outcome.restart.state}: ${outcome.restart.detail}` : ''}`),
-      restart: options.restartLoop ?? restartThroughUnit, pid: options.identity.pid, loaded: () => guard.expected(),
-      restore: releasePinnedRestore({ release: () => ({ deployment: state.deployment, baseBranch: config.baseBranch }), grant: { file: checkoutRestoreGrantPath(config), credentialFile: config.credentialFile, pid: options.identity.pid }, ledger: { file: checkoutRestoreFreezeLedgerPath(config) }, keepAlive, keepAliveEveryMs }) }));
-    const serveRestore = async (keepAlive?: () => Promise<void>) => {
-      try { await restoreCheckout(adopt => guard.settle({ adopt }), keepAlive, loaded => guard.settle({ revert: loaded })); }
-      catch (error) { log(`[graphyard-master] checkout-restore could not be served: ${message(error)}`); }
-    };
     try {
-      const startRefusal = await guard.start(loadedRelease?.commit ?? null);
-      if (startRefusal) {
-        // The refused loop keeps its process for its supervisor — a crash would only be restarted
-        // onto the same dirty checkout — and cycles nothing until it is restarted on a clean one.
-        log(`[graphyard-master] the loop cycles nothing from a dirty coordinator checkout; clean or stash the paths it names, then restart it`);
-        while (!stopping && !options.once) {
-          await serveRestore(watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch { /* the next keep-alive logs */ } } : undefined);
-          if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
-          try { await delay(interval(), undefined, { signal: waking.signal }); } catch { /* woken to stop */ }
-        }
-      // A loop stopped during startup runs no cycle (GY-1603).
-      } else while (!stopping) {
-        let phase: 'reload' | 'cycle' = 'reload', wait: number, wakeable = false;
+      while (!stopping) {
+        let phase: 'reload' | 'cycle' = 'reload', wait = interval();
         try {
-          if (options.reload) {
-            for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
-          }
+          if (options.reload) for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
           phase = 'cycle';
-          if (cycles.length + failed.length) await adoptHeadlessRuns(state, effects, log, 'cycle');
           const result = await runCycle(config, state, effects, now, launcher, log);
-          // The end of a run of failures is written at once, so `master status` stops naming it.
           const recovered = noteCycleSuccess(state);
           if (recovered) await effects.persist(state);
           cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length });
           for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
-          // Both halves of every cycle: what it could act on, and what it did about it.
-          log(`[graphyard-master] cycle ${result.metrics.cycle} complete with ${result.metrics.open} open, ${result.actionable.length} actionable, ${result.actions.length} action(s)${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
-          // The configured interval is the idle cadence; while anything is actionable the loop comes
-          // back inside the responsive window so ready work cannot sit out a long interval.
-          wait = cycleDelay(interval(), result.actionable.length);
-          wakeable = true;
+          log(`[graphyard-master] cycle ${result.metrics.cycle} complete with ${result.metrics.open} open and ${result.actions.length} action(s)${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
         } catch (error) {
-          // The cycle failed; the loop did not. The counter advances, the cause is on the cursor, and
-          // the next cycle waits longer for each consecutive failure so a fault is not hammered.
           const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });
           failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
-          log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s at ${failure.nextAt}`);
+          log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s`);
           wait = failure.delayMs;
         }
-        // GY-437: between cycles — never mid-cycle — align this checkout with the verified deployed
-        // release. An alignment that re-executes the loop through its supervisor ends this process
-        // here: the supervisor starts the next one on the code the checkout now holds.
-        // GY-857: never while the checkout is dirty — the alignment would check out over work it
-        // holds and re-execute the loop onto code no commit names.
-        // GY-866: the guard reads the checkout every cycle, not only when an alignment is due.
-        // A deploy can take minutes: the watchdog is fed while it runs so the wait is not mistaken
-        // for a hung loop (GY-916).
-        const keepAlive = watchdog.supervised ? async () => { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } } : undefined;
-        const selfUpgrade = effects.selfUpgrade;
-        if (!stopping) await serveRestore(keepAlive);
-        // An upgrade restarts the loop, which would kill a merge trial in flight: it waits for the trial to settle (a merge leaves the next cycle free).
-        await guard.betweenCycles(stopping || !selfUpgrade ? undefined : async current => mergeWriterInFlight(current) ? { outcome: 'skipped' as const, reason: 'a merge trial is in flight' } : selfUpgrade(current, keepAlive), stopping ? undefined : keepAlive, { stopping });
-        // The keep-alive says the process is alive, which a failed cycle leaves true: the watchdog
-        // is for a cycle that hangs, and a thrown one has just proved it did not.
-        if (watchdog.supervised) { try { await effects.notify?.('alive'); } catch (error) { log(`[graphyard-master] supervisor notification failed: ${message(error)}`); } }
+        await notify('alive');
+        // A restart would kill a merge trial in flight, so it waits for the trial to settle.
+        const cause = options.root && !stopping && !mergeWriterInFlight(state) ? restartCause(config, options.root, state.release?.commit ?? null) : null;
+        if (cause) {
+          log(`[graphyard-master] restarting through the supervisor unit: ${cause}`);
+          try { rmSync(loopRestartRequestPath(config), { force: true }); await (options.restartLoop ?? restartThroughUnit)(); }
+          catch (error) { log(`[graphyard-master] the restart could not be asked: ${message(error)}`); }
+        }
         if (options.once || stopping) break;
-        // GY-1490: after a cycle that ran, the dispatcher wakes the sleep for work this loop acts on;
-        // a failed cycle's backoff is never cut short, so a fault is still not hammered.
-        if (wakeable && options.wake) {
-          const sleptAt = now(), reasons = await options.wake.sleep(wait, waking.signal);
-          if (reasons.length && !stopping) log(`[graphyard-master] woken ${Math.round(Math.max(0, wait - (now() - sleptAt)) / 1000)}s before the ${Math.round(wait / 1000)}s wait ended: ${reasons.join('; ')}`);
-        } else try { await (options.delay ? options.delay(wait, waking.signal) : delay(wait, undefined, { signal: waking.signal })); } catch { /* woken to stop */ }
+        try { await (options.delay ? options.delay(wait, waking.signal) : delay(wait, undefined, { signal: waking.signal })); } catch { /* woken to stop */ }
       }
     } finally {
-      // Launches still in flight are let finish, so none is left `started` on the cursor, and what
-      // they did is logged here since no next cycle will report it.
       if (launcher.pending) log(`[graphyard-master] waiting for ${launcher.pending} launch(es) in flight before stopping`);
       await launcher.idle();
       for (const action of launcher.drain()) log(`[graphyard-master] launch ${action.kind} ${action.state}: ${action.detail}`);
       unlisten();
       host.off('unhandledRejection', onRejection); host.off('uncaughtException', onException);
-      // Headless runs are detached (GY-453): the loop stops watching them and sends none of them a
-      // signal, so a planned restart takes no run's attempt; the next loop adopts them.
-      const left = detachRuns();
-      log(`[graphyard-master] stopping: left ${left} headless run(s) running, detached, for the next loop to adopt`);
+      log(`[graphyard-master] stopping: left ${detachRuns()} headless run(s) running, detached, for the next loop to adopt`);
       state.lock = null;
       await effects.persist(state).catch(() => {});
     }
     return { cycles, failed, stopped: stopping };
   } catch (error) {
-    // A startup that failed (another loop's lock, an unwritable cursor) leaves no listener behind.
     unlisten();
     throw error;
   }
 }
 
-/** `systemctl --user --no-block restart` of the unit this loop runs under, ended by the stop it causes (GY-1658). */
-async function restartThroughUnit() {
-  const unit = detectLoopSupervisorUnit();
-  if (!unit) throw new Error('this loop runs under no graphyard-master supervisor unit, so it cannot restart itself through one');
-  try { await awaitSupervisorRestart(() => defaultChildRun('systemctl', ['--user', '--no-block', 'restart', unit])); }
-  catch (error) { if (!restartEndedBySupervisorStop(error)) throw error; }
-}
-/**
- * One pass over the host acts a confined master identity requested (GY-1658): the checkout-restore
- * request first, then the loop-restart request — skipped when the first has just asked for the
- * restart.
- * A checkout the guard does not apply to (a test runner's own) is never touched.
- */
-export async function serveLoopRequests(config: Pick<MasterConfig, 'credentialFile'>, root: string, deps: Parameters<typeof serveCheckoutRestore>[2]): Promise<CheckoutRestoreOutcome[]> {
-  if (!checkoutGuardApplies(root)) return [];
-  const served: CheckoutRestoreOutcome[] = [];
-  for (const file of [checkoutRestoreRequestPath(config), loopRestartRequestPath(config)]) {
-    const asked = served.some(outcome => outcome.restart?.state === 'requested');
-    const outcome = await serveCheckoutRestore(file, root, asked ? { ...deps, restart: async () => {} } : deps);
-    if (outcome) served.push(outcome);
-  }
-  return served;
-}
-
-const escalationKey = 'attention:dirty-checkout';
-/** The remedy a dirty-checkout escalation names (GY-1658): one the installation runs itself. */
-export const checkoutRestoreRemedy = 'Remedy the installation runs itself: graphyard master checkout-restore REASON saves every dirty path under refs/graphyard/checkout-restore/, returns them to HEAD and restarts the loop through graphyard-master.service.';
-/** The same remedy for a clean checkout whose HEAD moved (GY-1680): the request restarts the loop onto that HEAD, the adoption GY-1531 sanctions. */
-export const checkoutRestoreDriftRemedy = 'The installation runs that restart itself: graphyard master checkout-restore REASON finds no dirty path, settles this escalation and restarts the loop through graphyard-master.service onto the checkout\'s HEAD.';
-/** The remedy a diverged HEAD's escalation names (GY-1745): the installation moves the checkout itself, so no human answers it and no worker parks it. */
-export const checkoutRestoreDivergedRemedy = 'This HEAD is diverged: neither on the base branch nor a descendant of the commit the loop runs. Nothing is lost by moving it, so it needs no human answer and no worker parks it: graphyard master checkout-restore REASON saves the HEAD under refs/graphyard/checkout-restore/diverged-STAMP-COMMIT, detaches the checkout at the verified serving release (the base tip when none is verified) and restarts the loop through graphyard-master.service onto it.';
-/**
- * GY-857/GY-866: the coordinator checkout guard the loop runs at startup and after every cycle.
- * A tree holding uncommitted work, or a HEAD that moved away from the commit the loop runs, is
- * attention naming the paths, the HEAD, the live leases and
- * the sessions whose panes point at the checkout — and the loop neither self-upgrades nor restarts
- * from it until it is clean and back at that commit. The commit the loop runs is the HEAD it
- * loaded its code from; every move its own alignment makes rewrites the expectation, and anything
- * else that moves HEAD under a running loop is drift — unless it moved forward (GY-1356): a clean,
- * detached HEAD that descends from the commit the loop runs and is on the base branch is adopted through `recover`, which
- * re-executes the loop onto it, instead of pinning the loop to stale code.
- * One it cannot adopt by itself (GY-1359) is attention naming a restart onto that HEAD, never a rollback.
- */
-export function coordinatorCheckoutGuard(deps: {
-  state: () => DaemonState; read: () => Promise<CoordinatorCheckout>; agents: DaemonEffects['agents']; snapshot: DaemonEffects['snapshot'];
-  persist: DaemonEffects['persist']; now: () => number; log: (line: string) => void; applies?: (root: string) => boolean; enrichMs?: number;
-  recover?: DaemonEffects['recoverHead'];
-  /** Whether the checkout's HEAD is diverged from the base branch and the loaded commit (GY-1745); the escalation then names the restore that moves it. */
-  diverged?: (checkout: CoordinatorCheckout, loaded: string | null) => Promise<boolean>;
-  /**
-   * The commit of the held snapshot this loop's modules were loaded from (GY-1773), null when they
-   * came from the checkout. Such a loop runs no code the dirty checkout holds, so the dirty tree
-   * refuses it nothing at startup, and a HEAD moved onto that commit is the pin's lift, not drift.
-   */
-  runsSnapshot?: () => string | null;
-}) {
-  const applies = deps.applies ?? checkoutGuardApplies, enrichMs = deps.enrichMs ?? 10 * 60_000;
-  const runsSnapshot = () => deps.runsSnapshot?.() ?? null;
-  let expectedHead: string | null = null, enriched: { refusal: string; detail: string; at: number } | null = null;
-  // GY-1359: a HEAD the recovery found to be merged code moved forward, but could not adopt by itself
-  // (no verified release serves it yet, no supervisor unit to re-execute through), keyed by commit to
-  // why. Its remedy is a restart onto that HEAD; rolling the checkout back to stale code never is.
-  const forward = new Map<string, string>();
-  const headDrift = (checkout: CoordinatorCheckout) => {
-    if (!checkout.commit || !expectedHead || checkout.commit === expectedHead || checkout.commit === runsSnapshot()) return null;
-    // GY-2344: the off-cycle deploy of a base tip holds the checkout at the tip it is deploying and
-    // rolls it back from there, and until the restart onto a deployed tip lands the checkout stands
-    // where the deploy left it — positions the cursor's promotion reading names. The deploy's own
-    // moves are never the drift this refuses.
-    const flight = deployInFlight();
-    if ((flight && (checkout.commit === flight.tip || checkout.commit === flight.from)) || checkout.commit === deps.state().promotion?.promotedSha) return null;
-    const from = expectedHead.slice(0, 12), to = checkout.commit.slice(0, 12), unrecovered = forward.get(checkout.commit);
-    return unrecovered
-      ? `the master loop cannot recover onto the coordinator checkout at ${checkout.root} by itself: its HEAD moved from ${from} forward to ${to}, merged code, while the loop was running, and ${unrecovered}. It keeps running the code it loaded; leave the checkout at ${to} and restart the loop onto its own HEAD (systemctl --user restart graphyard-master). ${checkoutRestoreDriftRemedy}`
-      : `the master loop refuses to restart or self-upgrade from the coordinator checkout at ${checkout.root}: its HEAD moved from ${from} to ${to} while the loop was running, so HEAD is not the commit it runs. It keeps running the code it loaded; either remedy ends this refusal (GY-1531): restore the checkout with git -C ${checkout.root} checkout --detach ${from} and restart the loop, or leave it at ${to} and restart the loop onto that HEAD (systemctl --user restart graphyard-master), which loads it. ${checkoutRestoreDriftRemedy}`;
-  };
-  // The sessions working where they started, the ones to close first. Graphyard's own managed area
-  // under `.graphyard/` is not the checkout's working files and is never named. An inventory that
-  // cannot be read (Herdr down: `agents` answers null or throws) leaves the sessions unknown,
-  // never the refusal unrecorded.
-  const pointingSessions = async (checkoutRoot: string): Promise<string[] | null> => {
-    const base = resolve(checkoutRoot), managed = `${base}${sep}.graphyard`;
-    let agents: HerdrAgent[] | null;
-    try { agents = (await deps.agents()) as HerdrAgent[] | null; } catch { agents = null; }
-    if (!Array.isArray(agents)) return null;
-    return agents.flatMap(agent => {
-      const cwd = agent.cwd ? resolve(agent.cwd) : null;
-      if (!cwd) return [];
-      const inside = cwd === base || cwd.startsWith(`${base}${sep}`);
-      if (!inside || cwd === managed || cwd.startsWith(`${managed}${sep}`)) return [];
-      return [`${agent.name ?? agent.agent ?? 'an unnamed session'} (pane ${agent.pane_id ?? 'unknown'}, cwd ${agent.cwd})`];
-    });
-  };
-  // GY-1356: a HEAD that moved forward onto merged code is recovered onto, never stood down on. A
-  // recovery refused for a HEAD (not a descendant, not on the base branch, not detached) or failed
-  // is tried once per HEAD and verified release (GY-1359: a release verified later serves it); the
-  // drift the guard then reports stands until either moves or the loop is restarted.
-  const unrecovered = new Set<string>();
-  const recoverDrift = async (checkout: CoordinatorCheckout, keepAlive?: () => Promise<void>): Promise<SelfUpgradeOutcome | null> => {
-    const from = expectedHead, to = checkout.commit, attempt = `${to} ${deps.state().deployment?.sha ?? ''}`;
-    if (!deps.recover || !from || !to || unrecovered.has(attempt) || !applies(checkout.root) || coordinatorCheckoutRefusal(checkout, 'the master loop') || !headDrift(checkout)) return null;
-    let recovered: SelfUpgradeOutcome;
-    try { recovered = await deps.recover(deps.state(), from, to, keepAlive); }
-    catch (error) { recovered = { outcome: 'failed', reason: message(error) }; }
-    deps.log(`[graphyard-master] moved HEAD ${to.slice(0, 12)} (from ${from.slice(0, 12)}) ${recovered.outcome === 'upgraded' ? 'recovered' : 'not recovered'}: ${describeSelfUpgrade(recovered)}`);
-    if (recovered.outcome !== 'upgraded') {
-      unrecovered.add(attempt);
-      if ((recovered.outcome === 'refused' || recovered.outcome === 'failed') && recovered.forward) forward.set(to, recovered.reason); else forward.delete(to);
-      return null;
-    }
-    expectedHead = to;
-    return recovered;
-  };
-  const raise = async (checkout: CoordinatorCheckout) => {
-    if (!applies(checkout.root)) return null;
-    const refusal = coordinatorCheckoutRefusal(checkout, 'the master loop') ?? headDrift(checkout);
-    if (!refusal) {
-      enriched = null;
-      // A checkout clean again and back at the commit the loop runs settles the attention it raised.
-      const state = deps.state(), raised = state.actions[escalationKey];
-      if (raised?.state === 'failed') {
-        const detail = `the coordinator checkout at ${checkout.root} is clean again at ${(checkout.commit ?? 'an unreadable HEAD').slice(0, 12)}, the commit the loop runs`;
-        storeAction(state, escalationKey, { ...raised, state: 'done', detail, cycle: state.cycle, at: new Date(deps.now()).toISOString() });
-        await deps.persist(state);
-        // Said in the journal too (GY-1531): the remedy the refusal named ended it, visibly beside it.
-        deps.log(`[graphyard-master] attention done: ${detail}`);
-      }
-      return null;
-    }
-    // A standing refusal keeps the leases and sessions it named: the plane and the Herdr inventory
-    // are read again when what the checkout holds changes, and at most every enrichMs while it does
-    // not, never once per cycle.
-    let detail: string;
-    if (enriched && enriched.refusal === refusal && deps.now() - enriched.at < enrichMs) detail = enriched.detail;
-    else {
-      detail = refusal;
-      try {
-        const snapshot = await deps.snapshot();
-        detail = dirtyCheckoutEscalation(refusal, dirtyCheckoutLeases(snapshot.work, dirtyCheckoutPaths(checkout), Date.parse(snapshot.now) || undefined));
-      } catch { /* the refusal stands alone when the plane cannot be read */ }
-      const pointing = await pointingSessions(checkout.root);
-      if (!pointing) detail += ' The sessions whose panes point at it are unknown: the Herdr inventory could not be read.';
-      // GY-1658: a standing pane working in the checkout is the suspected writer — every launched
-      // session sees it read-only, the master's included — and the installation's own remedy is named.
-      else if (pointing.length) detail += ` Suspected ${pointing.length === 1 ? 'writer — one standing session\'s pane still points at it' : `writers — ${pointing.length} standing sessions' panes still point at it`}: ${pointing.slice(0, 8).join('; ')}${pointing.length > 8 ? `; and ${pointing.length - 8} more` : ''}.`;
-      if (coordinatorCheckoutRefusal(checkout, 'the master loop')) {
-        detail += ` ${checkoutRestoreRemedy}`;
-        // GY-1773: the dirty tree holds no upgrade back; it only names who wrote in the checkout.
-        detail += runsSnapshot() ? ` This loop runs the held snapshot of ${runsSnapshot()!.slice(0, 12)}, not the checkout, and cycles from it; master status names the checkout left behind under upgrade.` : ' The self-upgrade is not held by it: a merged release restarts the loop onto a held snapshot of it, the checkout left where it stands.';
-      } else if (headDrift(checkout)) { try { if (await deps.diverged?.(checkout, expectedHead)) detail += ` ${checkoutRestoreDivergedRemedy}`; } catch { /* the refusal stands without it */ } }
-      enriched = { refusal, detail, at: deps.now() };
-    }
-    const state = deps.state(), existing = state.actions[escalationKey];
-    if (detailChanged(existing, detail)) {
-      storeAction(state, escalationKey, { kind: 'attention', work: null, principal: null, state: 'failed', detail, attempts: (existing?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: new Date(deps.now()).toISOString() });
-      await deps.persist(state);
-      deps.log(`[graphyard-master] attention failed: ${detail}`);
-    } else touchStanding(state, escalationKey, new Date(deps.now()).toISOString());
-    return detail;
-  };
-  return {
-    /**
-     * The startup read: the HEAD found here is the commit the loop runs. The refusal, or null. A loop
-     * loaded from a held snapshot (GY-1773) is not refused by the dirty tree it was started beside:
-     * the escalation names the tree, and the loop cycles from the snapshot.
-     */
-    async start(loaded: string | null) {
-      const checkout = await deps.read();
-      expectedHead = checkout.commit ?? loaded;
-      const refusal = await raise(checkout);
-      if (refusal && runsSnapshot() && !headDrift(checkout)) {
-        deps.log(`[graphyard-master] the coordinator checkout at ${checkout.root} is dirty, but this loop runs the held snapshot of ${runsSnapshot()!.slice(0, 12)} and cycles from it`);
-        return null;
-      }
-      return refusal;
-    },
-    /**
-     * The between-cycles read, then the self-upgrade only when the checkout stands at the commit
-     * the loop runs: a dirty tree is escalated but holds no upgrade back (GY-1773: the upgrade
-     * snapshots the merged commit and leaves the tree where it stands). The loop's own alignment is
-     * the one move it sanctions.
-     * `stopping`: the loop is ending this process (its supervisor's stop or restart), so the
-     * self-upgrade is off and the next loop loads whatever HEAD the checkout holds — a HEAD that
-     * moved is what that restart adopts, not drift to refuse (GY-1531: a loop stopping for its own
-     * restart onto a forward HEAD recorded the refusal that restart was the remedy for). A dirty
-     * tree still refuses: the next loop would refuse it at startup too.
-     */
-    async betweenCycles(selfUpgrade?: (state: DaemonState) => Promise<SelfUpgradeOutcome>, keepAlive?: () => Promise<void>, options: { stopping?: boolean } = {}) {
-      const checkout = await deps.read();
-      if (options.stopping && applies(checkout.root) && !coordinatorCheckoutRefusal(checkout, 'the master loop')) {
-        const drift = headDrift(checkout);
-        if (drift) {
-          deps.log(`[graphyard-master] stopping with the coordinator checkout's HEAD at ${(checkout.commit ?? '').slice(0, 12)}, not ${(expectedHead ?? '').slice(0, 12)} the loop loaded: the next loop runs the checkout's HEAD, so no dirty-checkout refusal is recorded`);
-          return { refusal: drift, upgraded: null };
-        }
-      }
-      // A forward move adopted here settles any drift attention it raised, and is this cycle's upgrade.
-      const recovered = selfUpgrade ? await recoverDrift(checkout, keepAlive) : null;
-      if (recovered) { await raise(checkout); return { refusal: null, upgraded: recovered }; }
-      const refusal = await raise(checkout);
-      // A snapshot-loaded loop runs no checkout code, so the checkout's HEAD moving is no drift to refuse it for;
-      // a dirty tree never holds the upgrade back, however its HEAD moved (GY-1773), so only a clean moved HEAD does.
-      if (!selfUpgrade || (refusal && !runsSnapshot() && !coordinatorCheckoutRefusal(checkout, 'the master loop') && headDrift(checkout))) return { refusal, upgraded: null };
-      let upgraded: SelfUpgradeOutcome | null = null;
-      try {
-        upgraded = await selfUpgrade(deps.state());
-        if (upgraded.outcome !== 'skipped') deps.log(`[graphyard-master] upgrade ${describeSelfUpgrade(upgraded)}`);
-      } catch (error) { deps.log(`[graphyard-master] upgrade failed: ${message(error)}`); }
-      // The loop's own alignment is never foreign drift. A pending upgrade has moved the checkout too:
-      // only the restarts it owes wait (GY-916). An upgrade that failed, or threw, after its checkout
-      // (a self restart it could not make) still left HEAD at the target its cursor
-      // records, so that HEAD is adopted as well; any other HEAD stays drift for the next cycle.
-      if (upgraded?.outcome !== 'skipped') {
-        const sanctioned = upgraded?.outcome === 'upgraded' || upgraded?.outcome === 'up-to-date';
-        const cursor = deps.state().upgrade, targets = [cursor?.pending?.to, cursor?.last?.to];
-        try {
-          const aligned = await deps.read();
-          if (aligned.commit && (sanctioned || targets.includes(aligned.commit))) expectedHead = aligned.commit;
-        } catch { /* the next cycle's read reports what it finds */ }
-      }
-      // GY-1773: a dirty tree's refusal is reported even though it held the upgrade back no longer.
-      return { refusal, upgraded };
-    },
-    expected: () => expectedHead,
-    /**
-     * Reads the checkout again and records what it finds (GY-1658): a restored checkout settles the
-     * escalation at once. `adopt` (GY-1680): the HEAD a clean checkout holds that the loop is about to
-     * restart onto — the commit it runs from here, so the drift it raised settles before the restart,
-     * as the stopping loop adopts a moved HEAD (GY-1531). A dirty checkout, or one no longer at that
-     * HEAD, adopts nothing and reports what it finds. `revert` (review of GY-1680): the restart onto
-     * an adopted HEAD could not be asked, so the commit this loop still runs is the expectation again,
-     * and the drift the checkout holds against it is raised again, standing until a restart lands.
-     */
-    async settle(options: { adopt?: string | null; revert?: string | null } = {}) {
-      const checkout = await deps.read();
-      if (options.revert) expectedHead = options.revert;
-      else if (options.adopt && checkout.commit === options.adopt && applies(checkout.root) && !coordinatorCheckoutRefusal(checkout, 'the master loop')) expectedHead = checkout.commit;
-      return raise(checkout);
-    },
-  };
-}

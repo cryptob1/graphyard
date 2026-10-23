@@ -1,14 +1,9 @@
 // Concern: the daemon cursor — its schema, persistence, bounds and single-writer lock.
 import { randomUUID } from 'node:crypto';
-import { readlinkSync } from 'node:fs';
-import { readFile, writeFile, rename, chmod } from 'node:fs/promises';
-import { resolve, dirname, basename } from 'node:path';
+import { readFile, rename } from 'node:fs/promises';
 import { z } from 'zod';
-import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
-import { boundDetail } from './text.js';
-import { waitReason } from '../model/action-kinds.js';
-import { emptyInvariantRecord, invariantRecordSchema } from '../model/invariants.js';
-import { emptyProjectMemory, projectMemorySchema, type ProjectMemory } from '../model/project-memory.js';
+import { type MasterConfig } from '../master.js';
+import { emptyProjectMemory, projectMemorySchema } from '../model/project-memory.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 
 // 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
@@ -42,73 +37,17 @@ const retired = z.unknown().optional();
 export const cycleMetricsSchema = z.object({
   cycle: z.number().int().min(0), at: z.string(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
-  /**
-   * What the cycle could act on, and nothing else about them: stillness is the progress
-   * watchdog's judgement (`progressAttention` in ./liveness.ts). Absent — never zero — on a cycle
-   * recorded before the loop measured it.
-   */
-  actionable: z.number().int().min(0).optional(),
-  /** Retired (GY-2876): the cycle's durations, step costs and call timings, and the stage, lead-time and post-deploy measurements; a cursor written before still parses. */
-  durationMs: retired, childWaitMs: retired, workMs: retired, planeWaitMs: retired, steps: retired, timings: retired,
+  /** Retired (GY-2877): what the cycle could act on. */
+  actionable: retired,
+  /** The steps the cycle ran, in order: snapshot, close, dispatch, merge writer, persist. A cursor written before recorded step costs here, which read as absent. */
+  steps: z.preprocess(steps => Array.isArray(steps) && steps.every(step => typeof step === 'string') ? steps : undefined, z.array(z.string().max(40)).max(10).optional()),
+  /** Retired (GY-2876): the cycle's durations and call timings, and the stage, lead-time and post-deploy measurements; a cursor written before still parses. */
+  durationMs: retired, childWaitMs: retired, workMs: retired, planeWaitMs: retired, timings: retired,
   stages: retired, lead: retired, production: retired, postDeploy: retired, postDeployFailures: retired,
   /** Retired (GY-1992): the scope-request latency and the idle reading; nothing writes them, and a cursor written before keeps parsing. */
   idleMs: retired, scope: retired, scopeOpenMs: retired,
 }).strict();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
-
-/**
- * What one observation has established about containment, carried to the next cycle. `release` is
- * the release every retained entry has been verified against: a later release that descends from it
- * contains everything it contains, so one ancestry check revalidates the whole set. `settled` keeps,
- * per delivered item, the release its containment was first established against — the record of when
- * the delivery started serving, which is never rewritten by a later release that merely still holds it.
- */
-export const containmentRetentionSchema = z.object({
-  release: z.string().min(7).max(40),
-  settled: z.record(z.string().max(40), z.string().min(7).max(40)).default({}),
-}).strict();
-export type ContainmentRetention = z.infer<typeof containmentRetentionSchema>;
-/** Containment is retained for this many deliveries; older ones are derived again if ever asked about. */
-export const retainedContainments = 1000;
-
-export const deploymentObservationSchema = z.object({
-  source: z.enum(['endpoint', 'github-deployment', 'unavailable']),
-  sha: z.string().nullable(), at: z.string(), reason: z.string().max(500).nullable(),
-  deployed: z.array(z.string()).max(200).default([]), pending: z.array(z.string()).max(200).default([]),
-  /**
-   * What the observation cost, so the bound is a reading rather than a claim: GitHub requests made
-   * (zero since the endpoint is the only source; older records may hold more), deliveries whose
-   * containment was derived locally this pass, and deliveries answered from `containment`.
-   * Absent — never zero — on an observation recorded before the loop measured it.
-   */
-  requests: z.number().int().min(0).optional(),
-  derived: z.number().int().min(0).optional(),
-  retained: z.number().int().min(0).optional(),
-  containment: containmentRetentionSchema.nullable().optional(),
-}).strict();
-export type DeploymentObservation = z.infer<typeof deploymentObservationSchema>;
-
-/**
- * The release reading the continuous deploy records (GY-1982): `mainSha` the base tip it last
- * deployed, `promotedSha`/`promotedAt` the release the install runs, `deployFailed` the failed
- * deploy's line, `reason` why no deploy ran. The other fields are the retired promotion drive's
- * (GY-1302), kept so a cursor written before still parses; nothing sets or reads them now.
- */
-export const promotionStateSchema = z.object({
-  checkedAt: z.string(),
-  mainSha: z.string().nullable(),
-  promotedSha: z.string().nullable(),
-  promotedAt: z.string().nullable(),
-  /** First-parent merges on the base branch production does not run yet; null when unknown. */
-  behind: z.number().int().min(0).nullable(),
-  reason: z.string().max(500).nullable(),
-  /** GY-1982: the base tip whose continuous deploy failed, the step and why, and what the loop did about it. */
-  deployFailed: z.object({ sha: z.string().max(64), step: z.string().max(32), reason: z.string().max(40000), rolledBackTo: z.string().max(64).nullable(), kept: z.boolean(), attempts: z.number().int().min(1), at: z.string().max(64) }).strict().nullable().optional(),
-  /** GY-2844: the loop's verified deploys of main, oldest first: the commit, its committer date and when its deploy passed. */
-  deploys: z.array(z.object({ sha: z.string().max(64), committedAt: z.string().max(64), at: z.string().max(64) }).strict()).max(200).optional(),
-});
-export type PromotionState = z.infer<typeof promotionStateSchema>;
-
 
 /**
  * The loop's own failures (GY-119). A cycle that throws — a control-plane read that timed out, a runtime call that failed, a
@@ -138,47 +77,9 @@ export const cycleFailureSchema = z.object({
 }).strict();
 export type CycleFailures = z.infer<typeof cycleFailureSchema>;
 
-/** A base failure the loop raised (GY-528): one per failing test and base head; see model/base-failure.ts. */
-const blockedCandidateSchema = z.object({ key: z.string().max(40), id: z.string().max(100), sha: z.string().max(64), jobId: z.number().int().nullable(), url: z.string().max(500).nullable() }).strict();
-export const baseFailureSchema = z.object({
-  test: z.string().max(500), check: z.string().max(200), baseSha: z.string().max(64), jobId: z.number().int().nullable(), url: z.string().max(500).nullable(), raisedAt: z.string(),
-  blocks: z.array(blockedCandidateSchema).max(200), item: z.string().max(40).nullable(),
-  cleared: z.object({ at: z.string(), baseSha: z.string().max(64), jobId: z.number().int().nullable() }).strict().nullable(),
-}).strict();
-
 /** The release this loop's own process loaded, read once at its startup (GY-437) and overwritten by every new process: what every action it takes runs, until its supervisor replaces it. */
 export const loopReleaseSchema = z.object({ commit: z.string().regex(/^[0-9a-f]{40}$/).nullable(), dirty: z.boolean().nullable() }).strict();
 export type LoopRelease = z.infer<typeof loopReleaseSchema>;
-
-/** The causes an owed self-upgrade restart stalls on (GY-1445); `release-lagged` (GY-1585) is a held restart, not a fault; `snapshot-failed` (GY-1773): the held-cli snapshot a dirty checkout's upgrade restarts onto could not be made; `checkout-dirty` is kept for cursors written before GY-1773, and the `executors-` causes for cursors written before GY-1984. */
-export const upgradeStallCauses = ['executors-refused', 'executors-unavailable', 'supervisor-unreachable', 'checkout-dirty', 'checkout-not-detached', 'fetch-failed', 'checkout-failed', 'release-lagged', 'snapshot-failed'] as const;
-export type UpgradeStallCause = typeof upgradeStallCauses[number];
-export const upgradeStallSchema = z.object({ cause: z.enum(upgradeStallCauses), reason: z.string().max(500), since: z.string(), at: z.string() }).strict();
-export type UpgradeStall = z.infer<typeof upgradeStallSchema>;
-/**
- * The between-cycles self-upgrade (GY-437), on the cursor so a restarted loop resumes it instead
- * of repeating it: which verified release the checkout was aligned with, what restarts a previous
- * alignment still owes, what the last one did, and why a checkout was left untouched.
- */
-export const upgradeStateSchema = z.object({
-  /** The verified deployed release the checkout was last aligned with: a new sha is a new trigger. */
-  alignedRelease: z.string().regex(/^[0-9a-f]{7,40}$/).nullable().default(null),
-  /** The checkout moved to `to` and the restart it owes, the loop's own, is not done yet. */
-  pending: z.object({ from: z.string().nullable(), to: z.string(), code: z.boolean() }).strict().nullable().default(null),
-  /** The last alignment that completed: what was checked out, whether loaded code moved, and whether the loop re-executed; `executors` only on cursors written before GY-1984. */
-  last: z.object({ at: z.string(), from: z.string().nullable(), to: z.string(), code: z.boolean(), executors: z.string().max(300).nullable().optional(), self: z.boolean() }).strict().nullable().default(null),
-  /** Why the checkout was left untouched (dirty, not detached): master status names it until it clears. */
-  refused: z.object({ at: z.string(), reason: z.string().max(500), commit: z.string().nullable() }).strict().nullable().default(null),
-  /**
-   * Why the restart the self-upgrade owes cannot complete (GY-1445): one named wait, kept while its
-   * cause stands — `since` when it began, `at` the latest attempt — and removed by the next pass that
-   * aligns or upgrades. Absent while nothing stalls it.
-   */
-  stalled: upgradeStallSchema.optional(),
-  /** GY-1773: the loop runs a held-cli snapshot of `commit`, not the coordinator checkout, which stood dirty when the self-upgrade ran and was left at `checkout` with its `dirty` tracked paths; `master status` names it while the pin stands, and moving the checkout onto `commit` lifts the pin and removes this. Absent while the loop runs the checkout itself. */
-  snapshot: z.object({ at: z.string(), commit: z.string(), checkout: z.string().nullable(), dirty: z.array(z.string().max(300)).max(20) }).strict().optional(),
-}).strict().default(() => ({ alignedRelease: null, pending: null, last: null, refused: null }));
-export type UpgradeState = z.infer<typeof upgradeStateSchema>;
 
 /**
  * What the loop last saw of the master session it launches and supervises (GY-898): the handle it
@@ -241,14 +142,15 @@ export const daemonStateSchema = z.object({
   actions: z.record(z.string(), daemonActionSchema).default({}),
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
-  deployment: deploymentObservationSchema.nullable().default(null),
-  promotion: promotionStateSchema.nullable().default(null), // the continuous deploy's release reading (GY-1982)
+  /** Retired (GY-2877): the deployment observation and the in-loop deploy's release reading; graphyard-deploy.service records what it serves in .graphyard/deploy.json. */
+  deployment: retired, promotion: retired,
   /** Retired: the main watch (GY-1519) is gone; a cursor written before still carries its state, which nothing reads. */
   mainWatch: z.unknown().optional(),
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
-  upgrade: upgradeStateSchema, // the between-cycles self-upgrade's progress (GY-437)
+  /** Retired (GY-2877): the between-cycles self-upgrade. */
+  upgrade: retired,
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
   /** Retired (GY-2876): resource reclaim, host memory holds and the latency clocks; a cursor written before parses, and its next write drops them. */
@@ -263,18 +165,8 @@ export const daemonStateSchema = z.object({
   docsSyncs: z.unknown().optional(), conflicts: z.unknown().optional(),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
-  /**
-   * Per failing test and base head (`baseFailureKey`), a required check that fails on the base
-   * branch head as well as on the candidates it blocks (GY-528): no rework is requested for it, one
-   * P0 item is filed, and once the base passes again the blocked candidates are rerun and refreshed.
-   */
-  baseFailures: z.record(z.string(), baseFailureSchema).default(() => ({})),
-  /**
-   * The system invariants (GY-404): what the loop carries between cycles to judge them — base
-   * refreshes per candidate, when each merge candidate was first seen mergeable — and the last
-   * cycle's report, one line per invariant, for `master status`.
-   */
-  invariants: invariantRecordSchema.default(emptyInvariantRecord),
+  /** Retired (GY-2877): base failures and the system invariants. */
+  baseFailures: retired, invariants: retired,
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
   /** Shared project memory (GY-1125): recent decisions and merges. */
@@ -301,5 +193,5 @@ export async function archiveDaemonCursor(config: Pick<MasterConfig, 'credential
 // The cursor's persistence, bounds and single-writer lock live in ./state-cursor.ts; these
 // re-export it, so every existing import keeps working.
 import { daemonStatePath, clampCount } from './state-cursor.js';
-export { retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, retainedBaseFailures, emptyDaemonState, daemonStatePath, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, boundDaemonState, boundDeployment, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
+export { retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, emptyDaemonState, daemonStatePath, besideCursor, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, boundDaemonState, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
 

@@ -6,10 +6,10 @@ import { z } from 'zod';
 import { childRunner, type ChildRun } from './child-runner.js';
 import type { Work } from './model.js';
 import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEntry } from './model/session-state.js';
-import { runtimeSessionOf, sessionClosureBoundMs, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
+import { runtimeSessionOf, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
-import { agentOwner, assertOutsideWorktrees, closeHerdrPane, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type AttentionItem, type ConfigReload, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
 import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
@@ -22,7 +22,6 @@ import { blockingFindings, followUpFindingsOf } from './review-cap.js';
 import { readProjectMemory, recordNoteInMemory, writeProjectMemory } from './project-memory.js';
 import { agentToken } from './master/autonomy.js';
 import { answeredByPendingSession, independentProducerProfiles, launchProducer, reconcileProducers, requestAttemptLimit, sessionRetry, type ProducerRecord } from './producer.js';
-import { currentEvidence } from './model/evidence.js';
 import { unexercisedFindings } from './model/mechanical-proofs.js';
 /** The fixed wording of review launch-wait reasons (GY-1175). */
 const launchWaitWording = { busy: 'every reviewer profile is busy', settles: 'the control plane settles the request once it reads that verdict' } as const;
@@ -94,7 +93,6 @@ export const abandonedRequestSchema = z.object({
   /** Producer only (GY-496): the proof group and proofs the request stood for, which the attention and the rework name. */
   group: z.string().min(1).max(40).optional(), proofs: z.array(z.string().min(1).max(200)).max(50).optional(),
 }).strict();
-export type AbandonedRequest = z.infer<typeof abandonedRequestSchema>;
 const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), reason: z.string().max(capacityReasonLimit) }).strict();
 /**
  * A tick that failed, and — when it composed state it could not persist — the field that failed
@@ -103,7 +101,6 @@ const capacityHoldSchema = z.object({ at: z.string(), recheckAt: z.string(), rea
  */
 export const tickFailureSchema = z.object({ at: z.string(), reason: z.string().max(cursorTextLimit),
   field: z.string().max(200).optional(), kind: z.enum(['review', 'producer']).optional(), request: z.string().max(64).optional(), work: z.string().max(40).optional() }).strict();
-export type TickFailure = z.infer<typeof tickFailureSchema>;
 export const dispatchCursorSchema = z.object({
   version: z.literal(1), url: z.string(), repository: z.string(),
   ticks: z.number().int().min(0).default(0),
@@ -238,10 +235,6 @@ export function requestSpentAt(sessions: DispatchedSession[], now: number) {
   }
   return sessions.length;
 }
-/** GY-1153. The producer profiles (each one runtime and its accounts) the described attempts ran on, as the attention names them. */
-export function extractProducerAccountsOrRuntimes(attempts: readonly string[]): string[] {
-  return [...new Set(attempts.map(attempt => attempt.match(attemptLine)?.[1]?.trim()).filter((name): name is string => !!name))];
-}
 /**
  * The profiles a relaunch tries, freshest first: a profile no attempt of this request ran on, then
  * the ones earlier attempts ran on, and the profile of the session that just settled last. A
@@ -263,13 +256,6 @@ export const sessionMissLimit = 500;
  * itself is bounded so a hung request cannot hold the loop past the dispatch bound.
  */
 export const dispatchReadTimeoutMs = 8_000, tickRetryMinMs = 1_000;
-export const tickRetryDelay = (failures: number, intervalMs: number, minMs = tickRetryMinMs) => Math.min(minMs * 2 ** Math.max(0, failures - 1), Math.max(minMs, intervalMs));
-/**
- * The bound on the next snapshot read. A fixed bound below what the server needs under load would
- * leave dispatch blind for good, each retry timing out as the last did; so every consecutive failure
- * doubles it, never past the interval (or the base bound, when that is already longer).
- */
-export const tickReadTimeout = (failures: number, intervalMs: number, baseMs = dispatchReadTimeoutMs) => Math.min(baseMs * 2 ** Math.max(0, failures), Math.max(baseMs, intervalMs));
 
 export function emptyDispatchCursor(config: MasterConfig): DispatchCursor {
   return dispatchCursorSchema.parse({ version: 1, url: config.url, repository: config.repository });
@@ -375,8 +361,6 @@ export function botReviewerStates(awaited: readonly string[], activity: readonly
 }
 /** How many of the most recently updated pull requests one bot-activity read looks in for a review since a limit notice. */
 export const botReviewPullLimit = 30;
-/** The status line for one awaited bot reviewer. */
-export const botReviewerLine = (bot: { login: string; state: string; since: string | null }) => bot.state === 'exhausted' ? `${bot.login}: exhausted since ${bot.since}` : `${bot.login}: available`;
 /**
  * How long one tick waits on the bot-review reads, all started together, before treating the
  * unanswered ones as failed reads (which launch). Well inside the 30-second launch bound, so a slow
@@ -1361,63 +1345,6 @@ async function boundedRead<T>(read: () => Promise<T>, timeoutMs: number): Promis
   } finally { clearTimeout(timer); }
 }
 
-/** Tick until stopped. Runs beside the daemon in `master run`; the signal is the daemon's stop. */
-export async function runAutoDispatch(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, options: { intervalMs: number | (() => number); once?: boolean; signal?: AbortSignal; now?: () => number; log?: (line: string) => void; readTimeoutMs?: number; retryMinMs?: number;
-  /** Re-reads .graphyard/master.json before each tick, so a changed profile or run setting applies without a restart. */
-  reload?: () => Promise<ConfigReload> }) {
-  const now = options.now ?? Date.now, log = options.log ?? (line => console.error(line));
-  const ticks: DispatchTick[] = [];
-  let refused: string | null = null, waiting = '', closeFailed = '';
-  do {
-    if (options.signal?.aborted) break;
-    const interval = typeof options.intervalMs === 'function' ? options.intervalMs() : options.intervalMs;
-    let wait = interval;
-    // A tick that ran to its end and failed only to persist has already reset the streak and
-    // stamped its success; both are restored from here, so a persist that keeps failing counts
-    // as the consecutive failures it is rather than as one failure forever.
-    const streak = cursor.consecutiveFailures, lastSuccessAt = cursor.lastSuccessAt;
-    try {
-      if (options.reload) {
-        const reload = await options.reload();
-        config = reload.config;
-        if (reload.changed.length) log(`[graphyard-dispatch] adopted master.json changes: ${reload.changed.join(', ')}`);
-        if (reload.refused && reload.refused !== refused) log(`[graphyard-dispatch] ${reload.refused}`);
-        refused = reload.refused;
-      }
-      const tick = await runDispatchTick(config, cursor, effects, now, tickReadTimeout(cursor.consecutiveFailures, interval, options.readTimeoutMs));
-      ticks.push(tick);
-      for (const launch of tick.launched) log(`[graphyard-dispatch] launched ${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)} on ${launch.profile}${launch.group ? ` (${launch.group}: ${launch.proofs?.join(', ')})` : ''}${launch.failover?.length ? ` after skipping ${launch.failover.join('; ')}` : ''}${launch.relaunched ? ' (relaunched after a dropped prompt)' : ''}${launch.reason ? `; ${launch.reason}` : ''}`);
-      for (const refusal of tick.refused) log(`[graphyard-dispatch] ${refusal.kind} launch for ${refusal.work} refused (attempt ${refusal.attempts}): ${refusal.reason}`);
-      for (const closure of tick.closed) log(`[graphyard-dispatch] closed ${closure.role} session ${closure.id} on ${closure.key}: ${closure.outcome}`);
-      // A closure that cannot be written back is retried every tick, so it is logged when it
-      // starts and when it changes rather than once per tick for as long as it lasts; `master
-      // status` carries the standing list under `dispatch.sessionReconcile.failures`.
-      const failures = tick.closeFailures.map(failure => `${failure.work} session ${failure.id}: ${failure.reason}`).join(' | ');
-      if (failures && failures !== closeFailed) log(`[graphyard-dispatch] could not close ${tick.closeFailures.length} session record(s): ${failures}`);
-      closeFailed = failures;
-      // A tick that launched nothing says why, once per distinct set of reasons: a request waiting
-      // on a busy profile or a backoff is the dispatcher working, and silence would hide both.
-      const reasons = (cursor.lastTick?.reasons ?? []).join(' | ');
-      if (!tick.launched.length && !tick.refused.length && reasons && reasons !== waiting) log(`[graphyard-dispatch] ${tick.waiting.length} request(s) waiting: ${reasons}`);
-      waiting = reasons;
-    } catch (error) {
-      // A failed tick launched nothing it has not already recorded, so it is retried promptly;
-      // the cursor keeps the streak so master status can say how long dispatch has been blind,
-      // and the request, item and field a persist failure was composed for, so it can say why.
-      const failure = (error as { persistFailure?: PersistFailure })?.persistFailure;
-      cursor.consecutiveFailures = streak + 1; cursor.lastSuccessAt = lastSuccessAt;
-      cursor.lastFailure = { at: new Date(now()).toISOString(), reason: bounded(message(error), cursorTextLimit),
-        ...(failure?.field ? { field: bounded(failure.field, 200) } : {}), ...(failure?.request ? { kind: failure.kind, request: failure.request, work: failure.work } : {}) };
-      wait = tickRetryDelay(cursor.consecutiveFailures, interval, options.retryMinMs);
-      await effects.persist(cursor).catch(() => {});
-      log(`[graphyard-dispatch] tick failed (${cursor.consecutiveFailures} in a row, retrying in ${wait}ms): ${message(error)}`);
-    }
-    if (options.once || options.signal?.aborted) break;
-    try { await delay(wait, undefined, { signal: options.signal }); } catch { /* woken to stop */ }
-  } while (!options.signal?.aborted);
-  return { ticks };
-}
-
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function dispatchEffects(root: string, config: MasterConfig | (() => MasterConfig), deps: { snapshot: (timeoutMs?: number) => Promise<{ work: Work[]; now: string }>; mutate?: (path: string, body: unknown, requestId?: string) => Promise<any>; run?: ChildRun; log?: (line: string) => void; now?: () => number }): DispatchEffects {
   // The dispatcher's own bounded asynchronous runner (GY-125): a `herdr agent start` that takes
@@ -1491,34 +1418,6 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
   };
 }
 
-/** The compact dispatcher view `master status` joins onto the per-candidate requests. */
-export function dispatchSummary(cursor: DispatchCursor, now: number, intervalMs: number, awaited: readonly string[] = [], work: Work[] = [], requestNow = now) {
-  const lastTickAt = cursor.lastTickAt ? Date.parse(cursor.lastTickAt) : Number.NaN;
-  const lagMs = Number.isFinite(lastTickAt) ? now - lastTickAt : null;
-  return { running: lagMs !== null && lagMs < Math.max(3 * intervalMs, 60_000), ticks: cursor.ticks, lastTickAt: cursor.lastTickAt, lagMs, intervalMs,
-    // The liveness sweep runs on this interval too, so its bound is reported beside it.
-    sessionReconcile: { intervalMs, graceMs: sessionVanishGraceMs, boundMs: sessionClosureBoundMs, closed: cursor.lastTick?.closed ?? 0,
-      // Handles the runtime did not report on the last sweep: each is inside its grace, and closes on the sweep after it passes.
-      missing: Object.keys(cursor.sessionMisses).length, failures: cursor.lastTick?.closeFailures ?? [] },
-    lastSuccessAt: cursor.lastSuccessAt, consecutiveFailures: cursor.consecutiveFailures, lastFailure: cursor.lastFailure, lastTick: cursor.lastTick ?? null,
-    failures: Object.entries(cursor.failures).map(([requestId, failure]) => ({ requestId, ...failure })),
-    // Every launch still waiting, how long since its request and why (GY-710), aged on the control plane's clock.
-    waiting: launchWaits(work, cursor, requestNow),
-    // Requests the loop has stopped attempting because every session it launched ended unanswered.
-    abandoned: Object.entries(cursor.abandoned).map(([requestId, entry]) => ({ requestId, ...entry })),
-    // A role with no account left, as one entry per role rather than a failure per request.
-    capacity: Object.entries(cursor.capacity ?? {}).map(([kind, hold]) => ({ role: kind === 'review' ? 'reviewer' : 'producer', ...hold })),
-    // Each awaited bot reviewer, available or exhausted since its usage-limit notice (GY-349); a bot
-    // no read has judged yet is available, since nothing it said says otherwise.
-    botReviewers: awaited.map(login => cursor.botReviewers.find(bot => bot.login.toLowerCase() === login.toLowerCase()) ?? { login, state: 'available' as const, since: null, checkedAt: null })
-      .map(bot => ({ ...bot, line: botReviewerLine(bot) })),
-    // Each agent account as the last launch check saw it, and the launches that skipped one and why.
-    accounts: cursor.accounts ? {
-      environments: Object.values(cursor.accounts.environments).map((health: any) => ({ environment: health.name, kind: health.kind, loggedIn: health.loggedIn, quota: health.quota, healthy: health.healthy, reason: health.reason, usage: health.usage, login: health.login, checkedAt: health.checkedAt })),
-      skipped: cursor.accounts.skipped.slice(-20),
-    } : { environments: [], skipped: [] } };
-}
-
 /** The waits a tick keeps (GY-710): one per request, its last reason, reviews first and the longest waiting first, bounded for the cursor. */
 export function tickWaits(waiting: DispatchWait[]) {
   const byRequest = new Map<string, DispatchWait>();
@@ -1527,108 +1426,6 @@ export function tickWaits(waiting: DispatchWait[]) {
   const requested = (entry: DispatchWait) => { const at = Date.parse(entry.requestedAt ?? ''); return Number.isFinite(at) ? at : Number.MAX_SAFE_INTEGER; };
   return [...byRequest.values()].sort((a, b) => (a.kind === 'review' ? 0 : 1) - (b.kind === 'review' ? 0 : 1) || requested(a) - requested(b)).slice(0, launchWaitLimit)
     .map(({ kind, work, requestId, sha, reason, group, answeredAt }) => ({ kind, work: work.slice(0, 40), requestId: requestId.slice(0, 64), sha: sha.slice(0, 40), reason: bounded(reason, cursorTextLimit), ...(group ? { group: group.slice(0, 40) } : {}), ...(answeredAt ? { answeredAt: answeredAt.slice(0, 40) } : {}) }));
-}
-// GY-1067 follow-up 17: launchWaits reports review and producer requests managed by the dispatcher.
-/** A review request waiting longer than this without a launch raises attention (GY-710). */
-export const reviewLaunchWaitAttentionMs = 15 * 60_000;
-/** `answeredAt` is when a reviewer's verdict answered the request (GY-1429): the wait is then the verdict's settlement, aged from it. */
-export interface LaunchWait { kind: 'review' | 'producer'; work: string; requestId: string; sha: string; group: string | null; requestedAt: string; waitedMs: number; reason: string; answeredAt?: string;
-  /** GY-2176/2177: a normal-risk control-plane head's designed post-merge wait (GY-1525), whatever its tick entry reports — the attention reads this mark, not the reason's wording. */
-  postMergeWait?: true }
-/**
- * Every launch still waiting (GY-710, GY-1067), as `master status` reports it: each request the control
- * plane still holds open that has no live session, how long since the request was made, and why
- * it has not launched. A request whose last tick left it waiting reports that reason, one with a
- * standing failure reports the refusal and next attempt, and an unreached or skipped open request
- * falls back to 'waiting for dispatch' aged from requestedAt (GY-1067 follow-ups 11, 18, 21, 31, 33).
- * A request the snapshot no longer holds, or one already answered or currently running, waits for nothing
- * and is not listed.
- */
-export function launchWaits(work: Work[], cursor: Pick<DispatchCursor, 'lastTick' | 'failures'>, now: number): LaunchWait[] {
-  const waits = new Map((cursor.lastTick?.waits ?? []).map(entry => [entry.requestId, entry]));
-  const rows: LaunchWait[] = [];
-  for (const item of work.filter(entry => entry.stage !== 'done' && entry.autoDispatch)) {
-    const requests = [item.autoDispatch!.review, ...item.autoDispatch!.producers].filter((request): request is DispatchRequest => request?.state === 'requested');
-    for (const request of requests) {
-      const wait = waits.get(request.id), failure = cursor.failures[request.id];
-      const hasLiveSession = (item.sessions ?? []).some(session => session.id === request.id && session.state === 'running');
-      if (hasLiveSession) continue;
-      // GY-1067 follow-up 25: aging from request.requestedAt tracks cumulative unfulfilled time
-      // across any failed/expired sessions, maintaining a bounded clock to 15-minute attention.
-      // GY-1429: a request a reviewer already answered was launched, and the reviewer's own working
-      // time is no wait for a launch: what it waits on is its verdict's settlement, aged from the verdict.
-      const answeredAt = wait?.answeredAt && Number.isFinite(Date.parse(wait.answeredAt)) ? wait.answeredAt : undefined;
-      const since = Date.parse(answeredAt ?? request.requestedAt);
-      rows.push({ kind: request.kind === 'review' ? 'review' : 'producer', work: item.key, requestId: request.id, sha: request.sha, group: request.group ?? null, requestedAt: request.requestedAt,
-        waitedMs: Number.isFinite(since) ? Math.max(0, now - since) : 0,
-        reason: wait?.reason ?? (failure ? `launch refused ${failure.attempts} time(s): ${failure.reason}; next attempt at ${failure.nextAt}` : 'waiting for dispatch'), ...(answeredAt ? { answeredAt } : {}),
-        ...(request.kind === 'review' && reviewedAfterMerge(item) ? { postMergeWait: true as const } : {}) });
-    }
-  }
-  return rows.sort((a, b) => b.waitedMs - a.waitedMs);
-}
-const waitedFor = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)} h ${Math.floor(ms % 3_600_000 / 60_000)} min` : `${Math.floor(ms / 60_000)} min`;
-/**
- * One attention item per review request that has waited past the bound without a launch (GY-710), naming how long and why.
- * GY-1067 follow-up 1: raises attention for any review waiting over 15 minutes, intentionally including capacity
- * and bot waits so prolonged stalls are always visible to operators rather than silently hidden.
- * GY-2085: a normal-risk control-plane head's designed post-merge wait (GY-1525) launches no reviewer by design,
- * so it raises nothing: launchWaits keeps reporting it. GY-2176/2177: the drop reads the wait's mark, not its reason's wording.
- */
-export function launchWaitAttention(waits: LaunchWait[]): AttentionItem[] {
-  return waits.filter(wait => wait.kind === 'review' && !wait.postMergeWait && wait.reason !== postMergeWaitReason && wait.waitedMs > reviewLaunchWaitAttentionMs).map(wait => ({ subject: wait.work,
-    text: bounded(`${wait.work}'s review request ${wait.requestId} on ${wait.sha.slice(0, 12)} has waited ${waitedFor(wait.waitedMs)} (since ${wait.answeredAt ? `its verdict at ${wait.answeredAt}, requested ${wait.requestedAt}` : wait.requestedAt}) without a reviewer launch: ${wait.reason}`, 2000),
-    ...agentOwner('master', `Fix what the wait names, or launch it with graphyard master review ${wait.work}`) }));
-}
-
-/**
- * The dispatcher's own health, as `master status` raises it before every request it launches
- * (GY-120). A tick that fails launches nothing for any item, and a dispatcher that kept failing
- * the same tick looked like one that was running: the tick count moved, the cursor was fresh, and
- * every request simply stayed `waiting`. Three failures in a row raise one attention item that
- * says no reviewer or producer is being launched and why — the request, item and field a persist
- * failure was composed for, when that is the cause — and a cursor that cannot be read at all
- * raises the same. Addressed to the master, with what fixes each.
- */
-export const dispatchFailureAttentionThreshold = 3;
-export function dispatchFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string; abandoned?: (AbandonedRequest & { requestId: string })[]; waiting?: LaunchWait[] }): AttentionItem[] {
-  return [...tickFailureAttention(dispatch), ...(dispatch.abandoned ?? []).map(abandonedAttention), ...launchWaitAttention(dispatch.waiting ?? [])];
-}
-/**
- * One attention item per request the loop has stopped attempting (GY-193): the request, the head,
- * and every session it launched with how each ended, addressed to the master. A producer request's
- * item also names its proof group, and says the loop itself requests the rework (GY-496).
- */
-export function abandonedAttention(entry: AbandonedRequest & { requestId: string }): AttentionItem {
-  const role = entry.kind === 'review' ? 'reviewer' : 'producer';
-  const group = entry.kind === 'producer' && entry.group ? ` for the ${entry.group} proof group${entry.proofs?.length ? ` (${entry.proofs.join(', ')})` : ''}` : '';
-  const unacted = entry.kind === 'producer' && unactedProducerAttempts(entry.attempts);
-  if (unacted) {
-    const runtimesOrAccounts = extractProducerAccountsOrRuntimes(entry.attempts);
-    const target = runtimesOrAccounts.length ? runtimesOrAccounts.join(', ') : 'producer runtime or account';
-    return {
-      subject: entry.work,
-      text: bounded(`${entry.work}'s ${role} request ${entry.requestId}${group} on ${entry.sha.slice(0, 12)} stopped on a producer-runtime fault (${target}): every attempt ended without acting on the candidate (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
-      ...agentOwner('master', `The attempts name a producer-runtime fault on ${target}; the loop requests no rework and relaunches the request once an eligible producer account exists (an independent profile with an available credential that none of the attempts ran on); add or repair one`),
-    };
-  }
-  return { subject: entry.work, text: bounded(`${entry.work}'s ${role} request ${entry.requestId}${group} on ${entry.sha.slice(0, 12)} still stands after ${entry.attempts.length} automatic session${entry.attempts.length === 1 ? '' : 's'}, none of which answered it, so the loop has stopped attempting it (${entry.reason}): ${entry.attempts.join('; ')}`, 2000),
-    ...agentOwner('master', entry.kind === 'review' ? `Fix what the attempts name, then graphyard master review ${entry.work}`
-      : `The loop returns ${entry.work} to a worker on its next cycle, quoting these attempts; if the attempts name a launcher fault (a producer profile or its credential), fix that first`) };
-}
-function tickFailureAttention(dispatch: { consecutiveFailures?: number; lastSuccessAt?: string | null; lastFailure?: TickFailure | null; error?: string }): AttentionItem[] {
-  if (dispatch.error) return [{ subject: 'dispatch', text: `The dispatch cursor cannot be read, so whether any reviewer or producer is being launched is unknown: ${dispatch.error}`,
-    ...agentOwner('master', 'graphyard master restart re-reads the dispatch cursor beside the coordinator credential and repairs an over-long string in it; a cursor for another server or repository is removed by hand first') }];
-  const failures = dispatch.consecutiveFailures ?? 0, failure = dispatch.lastFailure;
-  if (failures < dispatchFailureAttentionThreshold || !failure) return [];
-  const persisted = failure.field ? ` The tick could not persist ${failure.field}${failure.request ? `, composed for the ${failure.kind} request ${failure.request} on ${failure.work}` : ''}.` : '';
-  // GY-1344: ticks failing on a control plane that does not answer are that outage, not the dispatcher's own fault.
-  // GY-1345: so are ticks failing on any plane-wide shape (a 502-504 body, a call run into its timeout): never a
-  // loop fault; the tick is retried on its backoff and the dispatcher recovers once the plane answers.
-  return [{ subject: 'dispatch', text: `The dispatcher has failed ${failures} ticks in a row (last at ${failure.at}; last successful tick ${dispatch.lastSuccessAt ?? 'none since it started'}), so no reviewer or producer session is being launched for any item: ${failure.reason}${persisted}`,
-    ...agentOwner('master', failure.field
-      ? 'graphyard master restart re-reads and repairs the dispatch cursor; a tick that still cannot persist names the field above, and the request it was composed for is the one to look at'
-      : 'Fix what the reason names — the control plane URL and coordinator credential in .graphyard/master.json, or Herdr — then graphyard master restart if the loop does not recover on its own') }];
 }
 
 /**

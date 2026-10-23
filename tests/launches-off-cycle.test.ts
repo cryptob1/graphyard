@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setTimeout as delay } from 'node:timers/promises';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
-import { daemonSummary, emptyDaemonState, loopAttention, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { Launcher, defaultLaunchConcurrency } from '../src/daemon/cycle.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -46,8 +46,7 @@ test('unit:launches-off-cycle — the cycle hands 10 five-second launches to the
     closeSession: () => {},
     // Each launch — a pane and a registered session — takes five seconds.
     dispatch: async item => { running += 1; peak = Math.max(peak, running); await delay(5_000); running -= 1; finished.push(item.key); },
- observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, persist: async () => {},
+    persist: async () => {},
   };
   const state = emptyDaemonState(master), launcher = new Launcher();
   assert.equal(launcher.concurrency, defaultLaunchConcurrency); assert.equal(defaultLaunchConcurrency, 3);

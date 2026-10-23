@@ -1,7 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -66,18 +65,6 @@ test('unit:worktree-starts-from-registered-head — the rework start resolves th
   // An interrupted attempt's commits past the registered head are partial work, never the start: the registered head still resolves.
   git(work, 'commit', '--allow-empty', '-m', 'WIP: partial');
   assert.equal(await registeredReworkHead(work, 'graphyard/gy-3-1', second, run), second);
-});
-
-test('unit:github-pages-environment-detected — a pages-deploy.yml workflow names github-pages when none is configured', async () => {
-  const { deploymentEnvironmentName } = await import('../src/daemon/deployment.js');
-  const root = await temporaryDirectory('operator-wip-pages');
-  const config = (productionEnvironment?: string) => ({ run: { productionEnvironment } }) as never;
-  assert.equal(deploymentEnvironmentName(config(), root, {}), 'production');
-  await mkdir(join(root, '.github', 'workflows'), { recursive: true });
-  await writeFile(join(root, '.github', 'workflows', 'pages-deploy.yml'), 'name: pages\n');
-  assert.equal(deploymentEnvironmentName(config(), root, {}), 'github-pages');
-  assert.equal(deploymentEnvironmentName(config('graphyard / production'), root, {}), 'graphyard / production');
-  assert.equal(deploymentEnvironmentName(config(), root, { GRAPHYARD_PRODUCTION_ENVIRONMENT: 'prod' }), 'prod');
 });
 
 test('unit:complete-refuses-failed-push — complete refuses to submit when the graphyard/ branch push fails', async () => {

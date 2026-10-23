@@ -6,7 +6,7 @@ import { resolve, dirname, basename } from 'node:path';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { forwardTolerant } from '../master/profiles.js';
 import { boundDetail } from './text.js';
-import { daemonActionSchema, daemonStateSchema, type DaemonAction, type DaemonState, type DeploymentObservation } from './state.js';
+import { daemonActionSchema, daemonStateSchema, type DaemonAction, type DaemonState } from './state.js';
 
 /**
  * The cursor schema as GY-1960 reads and writes it: declared fields strict, unknown fields kept.
@@ -22,7 +22,6 @@ const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSche
  */
 export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
 export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
-export const retainedBaseFailures = 200;
 
 export function emptyDaemonState(config: MasterConfig): DaemonState {
   return daemonStateSchema.parse({ version: 1, url: config.url, repository: config.repository });
@@ -30,9 +29,11 @@ export function emptyDaemonState(config: MasterConfig): DaemonState {
 
 /** Derived from the coordinator credential, so the cursor lives beside it and never inside a worktree. */
 export function daemonStatePath(config: MasterConfig) {
-  const file = config.credentialFile;
-  return resolve(dirname(file), `${basename(file).replace(/\.token$/, '')}.daemon.json`);
+  return besideCursor(config, 'daemon');
 }
+/** A file beside the loop's cursor, under the credential's private directory. */
+export const besideCursor = (config: Pick<MasterConfig, 'credentialFile'>, suffix: string) =>
+  resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.${suffix}.json`);
 
 export async function readDaemonState(root: string, config: MasterConfig): Promise<DaemonState> {
   const file = daemonStatePath(config);
@@ -77,10 +78,9 @@ export function pruneDaemonState(state: DaemonState) {
   delete state.orphans; delete state.approvals; delete state.absences; delete state.decisionsDeferred;
   // And those GY-2876 retired: the reclaim, memory, latency and cycle-duration readings.
   delete state.reclaim; delete state.memory; delete state.clocks; delete state.latency;
-  for (const metric of state.metrics) for (const field of ['durationMs', 'childWaitMs', 'workMs', 'planeWaitMs', 'steps', 'timings', 'stages', 'lead', 'production', 'postDeploy', 'postDeployFailures', 'idleMs', 'scope', 'scopeOpenMs'] as const) delete metric[field];
-  // A cleared base failure is retired by its step once its candidates were rerun and refreshed; this bound drops the oldest, cleared first.
-  const failures = Object.entries(state.baseFailures).sort((a, b) => Number(!a[1].cleared) - Number(!b[1].cleared) || Date.parse(a[1].raisedAt) - Date.parse(b[1].raisedAt));
-  if (failures.length > retainedBaseFailures) for (const [key] of failures.slice(0, failures.length - retainedBaseFailures)) delete state.baseFailures[key];
+  for (const metric of state.metrics) for (const field of ['durationMs', 'childWaitMs', 'workMs', 'planeWaitMs', 'actionable', 'timings', 'stages', 'lead', 'production', 'postDeploy', 'postDeployFailures', 'idleMs', 'scope', 'scopeOpenMs'] as const) delete metric[field];
+  // And those GY-2877 retired: the deployment and release readings, the self-upgrade, base failures and invariants.
+  delete state.deployment; delete state.promotion; delete state.upgrade; delete state.baseFailures; delete state.invariants;
   return state;
 }
 
@@ -116,14 +116,6 @@ export function boundDaemonState(state: DaemonState): DaemonState {
     action.attempts = clampCount(action.attempts, 1000);
   }
   for (const profile of Object.values(state.profiles)) profile.reason = cut(profile.reason, 500);
-  if (state.deployment) state.deployment = boundDeployment(state.deployment);
-  if (state.upgrade) {
-    state.upgrade.refused = state.upgrade.refused ? { ...state.upgrade.refused, reason: cut(state.upgrade.refused.reason, 500) } : null;
-    if (state.upgrade.pending) state.upgrade.pending = { ...state.upgrade.pending, from: cut(state.upgrade.pending.from, 40), to: cut(state.upgrade.pending.to, 40) };
-    if (state.upgrade.stalled) state.upgrade.stalled = { ...state.upgrade.stalled, reason: cut(state.upgrade.stalled.reason, 500) };
-    if (state.upgrade.last) state.upgrade.last = { ...state.upgrade.last, from: cut(state.upgrade.last.from, 40), to: cut(state.upgrade.last.to, 40) };
-    if (state.upgrade.snapshot) state.upgrade.snapshot = { ...state.upgrade.snapshot, commit: cut(state.upgrade.snapshot.commit, 40), checkout: cut(state.upgrade.snapshot.checkout, 40), dirty: state.upgrade.snapshot.dirty.slice(0, 20).map(path => cut(path, 300)) };
-  }
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
   if (state.master) {
     state.master.agentName = cut(state.master.agentName, 200);
@@ -143,11 +135,6 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   }
   return state;
 }
-/** A deployment observation within its schema: 200 deliveries a side (the newest kept) and a 500-character reason. */
-export function boundDeployment<T extends Pick<DeploymentObservation, 'reason' | 'deployed' | 'pending'>>(observation: T): T {
-  return { ...observation, reason: cut(observation.reason ?? null, 500), deployed: (observation.deployed ?? []).slice(-200), pending: (observation.pending ?? []).slice(-200) };
-}
-
 /**
  * This process's PID namespace (`pid:[4026531836]`), or null where /proc does not say (not Linux).
  * A pid means something only in the namespace it was taken in (GY-1370): a sandbox with its own

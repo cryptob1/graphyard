@@ -133,8 +133,7 @@ test('unit:dispatch-succeeds-on-drained-fleet — with every profile held by a f
     agents: async () => drained(), herdr: () => ({ agents: drained(), available: true }),
     credentials: async configured => available(configured), snapshot: async () => ({ work: items, now: observedAt }),
     closeSession: () => {}, dispatch: async (item, chosen) => { dispatched.push(`${item.key}:${chosen.name}`); return {}; },
- recordDeployment: async () => {}, persist: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable' as const, sha: null, at: observedAt, reason: 'not configured', deployed: [], pending: [] }),
+    persist: async () => {},
   };
   const state: DaemonState = emptyDaemonState(config(fleet));
   await runCycle(config(fleet), state, effects, () => clock);

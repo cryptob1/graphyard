@@ -1,7 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -9,16 +7,13 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import {
-  attachCommand, boundHeads, endedRuntimeStates, overlongSessions, roleSessionMaximumMs, sessionClosureBoundMs,
-  sessionLiveness, sessionReconcileIntervalMs, sessionRole, sessionVanishGraceMs, supersededSession,
+  attachCommand, boundHeads, endedRuntimeStates,
+  sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession,
   type RuntimeSession, type SessionHandle,
 } from '../src/model/sessions.js';
 import { runtimeEndedSessionStates, runtimeEndedStates } from '../src/harness.js';
 import { closureHandle, dispatchEffects, emptyDispatchCursor, launchedSessionHandle, reconcileSessionLiveness, runDispatchTick, sessionHandleKey, type DispatchEffects } from '../src/auto-dispatch.js';
-import { stoppedStates } from '../src/master-daemon.js';
 import { masterConfigSchema, profileSessions } from '../src/master.js';
-import { sessionReport } from '../src/cli/master-status.js';
-import { overlongSessionAttention } from '../src/cli/overlong-sessions.js';
 import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-state.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
@@ -32,7 +27,7 @@ import { deliverThroughLedger } from './helpers/ledger-delivery.js';
  *
  * Each test that produces a proof is named for it, so acceptance evidence maps to one executed case
  * per proof: integration:dead-session-reconciled, integration:slot-released-on-death,
- * integration:superseded-session-closed, unit:overlong-session-surfaced and
+ * integration:superseded-session-closed and
  * manual:session-liveness-docs-review.
  *
  * The dispatcher under test is the one `master run` builds; only the launchers and the runtime
@@ -210,7 +205,6 @@ test('integration:dead-session-reconciled — a session the runtime no longer re
   const missed = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => listed, () => missedAt), () => missedAt);
   assert.deepEqual(missed.closed, [], 'the sweep that first misses it closes nothing');
   const late = new Date(missedAt + sessionVanishGraceMs + 1000);
-  assert.ok(late.getTime() - missedAt <= sessionClosureBoundMs, `the closure lands inside the ${sessionClosureBoundMs}ms bound`);
   const swept = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => listed, () => late.getTime()), () => late.getTime());
   assert.equal(swept.closed.length, 1, `the sweep closed one record; it closed ${JSON.stringify(swept.closed)}`);
   assert.deepEqual([swept.closed[0].key, swept.closed[0].id, swept.closed[0].cause], [item.key, handle.id, 'vanished']);
@@ -222,17 +216,12 @@ test('integration:dead-session-reconciled — a session the runtime no longer re
   assert.match(closed.outcome!, /^vanished: the claude runtime on host-1 has not reported pane pane-77 for \d+s/, 'the outcome names that it vanished');
   assert.match(closed.outcome!, /after its last observed activity at/);
   assert.equal(attachCommand(closed), 'host-1:/home/agent/.claude/coordination.jsonl', 'and a closed session still links its transcript');
-  const report = sessionReport({ work: await store.list(), now: late.toISOString() });
-  assert.ok(!report.running.some(entry => entry.id === handle.id), 'no reader shows it running any more');
-  assert.ok(report.finished.some(entry => entry.id === handle.id));
 
-  // The sweep is idempotent and the bound is the dispatch interval it runs on, not a timer of its own.
+  // The sweep is idempotent.
   const againAt = () => late.getTime() + 60_000;
   const again = await runDispatchTick(fleetConfig, cursor, dispatcher(snapshot, () => listed, againAt), againAt);
   assert.deepEqual(again.closed, [], 'a record already closed is not closed twice');
   assert.deepEqual(cursor.sessionMisses, {}, 'and a closed handle is no longer tracked as missing');
-  assert.equal(sessionClosureBoundMs, sessionVanishGraceMs + sessionReconcileIntervalMs);
-  assert.ok(fleetConfig.run.dispatchIntervalSeconds * 1000 <= sessionReconcileIntervalMs, 'the sweep runs at least as often as the bound it declares');
 
   // The rule, directly: an unreadable runtime is never evidence that a session is gone, a handle
   // with no coordinate has nothing to be reconciled against, and neither is a handle this host's
@@ -251,7 +240,6 @@ test('integration:dead-session-reconciled — a session the runtime no longer re
   assert.deepEqual(unreadable.closures.filter(closure => closure.cause === 'vanished'), [], 'an unreadable runtime would otherwise close every session on the graph at once');
   // The terminal vocabulary is the runtime's own, none of the at-prompt states are in it, and
   // Muse's names are not Claude's.
-  for (const state of stoppedStates) assert.ok(!runtimeEndedStates('claude').includes(state), `${state} is a live session ready for input, not an ended one`);
   assert.deepEqual([...runtimeEndedStates('unknown-runtime')], [...endedRuntimeStates]);
   assert.ok(runtimeEndedStates('muse').includes('terminated') && !endedRuntimeStates.includes('terminated'));
   assert.ok(Object.keys(runtimeEndedSessionStates).includes('muse'));
@@ -459,81 +447,4 @@ test('integration:superseded-session-closed — a review or proof session for a 
     /Delivered work is immutable/, 'no new session may be recorded on a delivered item');
   await assert.rejects(engine.execute(coordinator, 'session', landed.id, { id: 'review-delivered', kind: 'review', runtime: 'claude', host: 'host-1', subject: 'reopened', state: 'running' }, randomUUID()),
     /Delivered work is immutable/, 'and a closed handle cannot be reopened to hold a slot again');
-});
-
-
-// ---- AC-4: a session that outlives its role's maximum is surfaced -----------------------------
-
-test('unit:overlong-session-surfaced — a session past its role\'s maximum is surfaced as an attention item naming the item, the role, its age and its last observed activity, whether or not it is live', () => {
-  const now = new Date('2026-09-21T12:00:00.000Z');
-  const ago = (ms: number) => new Date(now.getTime() - ms).toISOString();
-  const handle = (over: Partial<SessionHandle>): SessionHandle => ({
-    id: 'session-1', kind: 'review', principal: 'reviewer-1', epoch: null, runtime: 'claude', host: 'vishrog',
-    workspace: 'wF', tab: null, pane: 'pane-11', agentName: 'review-claude', role: 'review', head: 'a'.repeat(40),
-    attach: 'herdr pane attach pane-11 --workspace wF', transcript: null, subject: 'GY-113: review aaaaaaaaaaaa',
-    startedAt: ago(2 * 3_600_000), updatedAt: ago(41 * 60_000), endedAt: null, state: 'running', outcome: null, ...over,
-  });
-  const item = (sessions: SessionHandle[], key = 'GY-113') => ({ id: `work-${key}`, key, sessions, candidate: null, autoDispatch: null, stage: 'review', lease: null, reworkRequested: false, observation: null } as unknown as Work);
-  const listed: RuntimeSession[] = [{ name: 'review-claude', pane_id: 'pane-11', agent_status: 'working' }];
-
-  // A review session that has run two hours, past the one-hour maximum for its role, and is still
-  // reported live: the expensive case, because nothing else catches a session making no progress.
-  const live = overlongSessions([item([handle({})])], listed, now);
-  assert.equal(live.length, 1);
-  assert.deepEqual([live[0].key, live[0].role, live[0].kind, live[0].live, live[0].liveness], ['GY-113', 'review', 'review', true, 'live']);
-  assert.deepEqual([live[0].runtime, live[0].host, live[0].principal], ['claude', 'vishrog', 'reviewer-1']);
-  assert.equal(live[0].ageMs, 2 * 3_600_000);
-  assert.equal(live[0].maximumMs, roleSessionMaximumMs.review);
-  assert.equal(live[0].idleMs, 41 * 60_000);
-  assert.equal(live[0].lastActivityAt, ago(41 * 60_000));
-  assert.equal(live[0].attach, 'herdr pane attach pane-11 --workspace wF');
-
-  const attention = overlongSessionAttention({ work: [item([handle({})])], now: now.toISOString() }, { agents: listed as any, available: true });
-  assert.equal(attention.length, 1);
-  assert.equal(attention[0].subject, 'GY-113');
-  assert.match(attention[0].text, /^review session session-1 on GY-113 \(reviewer-1\) has run 2h0m, past the 1h0m maximum for its role/);
-  assert.match(attention[0].text, /last observed activity 41m ago at 2026-09-21T11:19:00.000Z/);
-  assert.match(attention[0].text, /the claude runtime on vishrog still reports it live/);
-  assert.match(attention[0].text, /holds its role slot while it stands/);
-  assert.equal(attention[0].role, 'master');
-  assert.equal(attention[0].human, false, 'nothing here is a human decision');
-  assert.match(attention[0].next, /^herdr pane attach pane-11 --workspace wF shows what it is doing/, 'the line names what shows the session, never a command that kills it');
-
-  // A session that is *not* live is surfaced just the same, because age is the subject here; the
-  // sweep is what closes it, and the line says so rather than asking anybody to close it by hand.
-  const dead = overlongSessionAttention({ work: [item([handle({})])], now: now.toISOString() }, { agents: [], available: true });
-  assert.equal(dead.length, 1);
-  assert.match(dead[0].text, /the runtime no longer reports it live \(vanished\), so the liveness sweep closes its record within 90s/);
-  assert.match(dead[0].next, /^graphyard master run --once reconciles the record; no session has to be closed by hand$/);
-  const unknown = overlongSessionAttention({ work: [item([handle({})])], now: now.toISOString() }, { agents: [], available: false });
-  assert.match(unknown[0].text, /whether it is still live is unknown, because the runtime inventory could not be read/);
-  // A session another host launched is surfaced by its age all the same, and the line says plainly
-  // that this host's inventory does not answer for it rather than calling it dead.
-  const elsewhere = overlongSessionAttention({ work: [item([handle({})])], now: now.toISOString() }, { agents: [], available: true, hostId: 'host-1' });
-  assert.equal(elsewhere.length, 1);
-  assert.match(elsewhere[0].text, /whether it is still live is unknown: it runs on vishrog, and this host's runtime inventory does not answer for it/);
-  assert.equal(overlongSessions([item([handle({})])], [], now, { hostId: 'vishrog' })[0].liveness, 'vanished', 'the host that launched it does judge it');
-
-  // Each role is judged against its own maximum, and a session inside it is not surfaced at all.
-  assert.deepEqual(overlongSessions([item([handle({ startedAt: ago(59 * 60_000) })])], listed, now), [], 'a review inside the hour is nobody\'s attention item');
-  const roles = item([
-    handle({ id: 'impl', kind: 'implementation', role: null, startedAt: ago(5 * 3_600_000), updatedAt: ago(10_000) }),
-    handle({ id: 'proof', kind: 'proof', role: 'proof:integration', startedAt: ago(3 * 3_600_000), updatedAt: ago(20_000) }),
-    handle({ id: 'coord', kind: 'coordination', role: null, startedAt: ago(6 * 3_600_000), updatedAt: ago(30_000) }),
-  ]);
-  const byRole = overlongSessions([roles], listed, now);
-  assert.deepEqual(byRole.map(session => session.id), ['impl', 'proof'], 'longest first, and a coordination session is meant to outlive the work it shepherds');
-  assert.deepEqual(byRole.map(session => session.maximumMs), [roleSessionMaximumMs.implementation, roleSessionMaximumMs.proof]);
-  assert.deepEqual(byRole.map(session => session.role), ['implementation', 'proof:integration'], 'the role the reader is given is the slot, group and all');
-  // The producer maximum follows the loop's own configured request timeout rather than a constant.
-  const configured = overlongSessions([roles], listed, now, { maximums: { proof: 30 * 60_000, implementation: 24 * 3_600_000 } });
-  assert.deepEqual(configured.map(session => [session.id, session.maximumMs]), [['proof', 30 * 60_000]]);
-  assert.equal(roleSessionMaximumMs.proof, fleetConfig.run.producerTimeoutMinutes * 60_000, 'the default matches run.producerTimeoutMinutes, which is when a producer request expires');
-
-  // A finished session is never overlong: it ran however long it ran, and nothing holds its slot.
-  assert.deepEqual(overlongSessions([item([handle({ state: 'finished', endedAt: ago(60_000), outcome: 'posted its verdict' })])], listed, now), []);
-  // And the outcome a stalled session recorded for itself is carried onto the line, since it is
-  // usually the only thing that says why it stopped making progress.
-  const stalled = overlongSessionAttention({ work: [item([handle({ outcome: 'waiting on input instead of recording a typed request' })])], now: now.toISOString() }, { agents: listed as any, available: true });
-  assert.match(stalled[0].text, /last recorded outcome: waiting on input instead of recording a typed request$/);
 });

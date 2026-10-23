@@ -18,31 +18,29 @@ test('unit:failed-step-logs-and-retries — a loop step that throws is one log l
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
     masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
   const state = emptyDaemonState(config);
-  let cycle = 0, herdrCalls = [0, 0], deploymentReads = [0, 0];
+  let cycle = 0;
+  const sweeps = [0, 0], ticks = [0, 0];
   const effects: DaemonEffects = {
     agents: () => [],
     credentials: async () => ({}),
     snapshot: async () => ({ work: [], now: new Date(clock).toISOString() }),
     closeSession: () => {},
     dispatch: async () => {},
-    recordDeployment: async () => {},
     persist: async () => {},
-    observeDeployment: async () => { deploymentReads[cycle]++; return { source: 'unavailable', sha: null, at: new Date(clock).toISOString(), reason: 'not configured', deployed: [], pending: [] }; },
-    masterSession: {} as DaemonEffects['masterSession'],
-    // The Herdr inventory: the close step reads it first, and the first read of all throws.
-    herdr: async () => { if (++herdrCalls[cycle] === 1 && cycle === 0) throw new Error('herdr socket refused'); return { agents: [], available: false }; },
+    // The close step ends with the checkout sweep, and the first sweep of all throws.
+    sweepCheckouts: async () => { if (++sweeps[cycle] === 1 && cycle === 0) throw new Error('checkout sweep refused'); },
+    dispatchTick: async () => { ticks[cycle]++; },
   };
   const lines: string[][] = [[], []];
   for (cycle = 0; cycle < 2; cycle++) await runCycle(config, state, effects, () => clock, undefined, line => lines[cycle].push(line));
 
-  assert.deepEqual(lines[0], ['[graphyard-master] cycle 0: the close step failed and runs again next cycle: herdr socket refused']);
-  assert.equal(deploymentReads[0], 1, 'the steps after the failed one still ran in its cycle');
-  assert.ok(herdrCalls[0] >= 2, 'the master-session step read Herdr after the close step failed');
-  assert.equal(herdrCalls[1], herdrCalls[0], 'the next cycle makes the same reads: the close step ran again');
+  assert.deepEqual(lines[0], ['[graphyard-master] cycle 0: the close step failed and runs again next cycle: checkout sweep refused']);
+  assert.equal(ticks[0], 1, 'the steps after the failed one still ran in its cycle');
+  assert.equal(sweeps[1], 1, 'the next cycle runs the close step again');
   assert.deepEqual(lines[1], [], 'the step that answered logs nothing');
   assert.equal(state.cycle, 2);
   // Nothing is classified, remedied, blocked, decided or escalated: no record of the failure exists beyond the log line.
-  assert.ok(!Object.values(state.actions).some(action => action.detail.includes('herdr socket refused')), 'no action row records the failure');
+  assert.ok(!Object.values(state.actions).some(action => action.detail.includes('checkout sweep refused')), 'no action row records the failure');
   assert.ok(!Object.values(state.actions).some(action => ['blocker', 'judgement', 'attention', 'fault'].includes(action.kind)));
   for (const retired of ['faults', 'doctor', 'stepStalls', 'dispatchFailures']) assert.ok(!(retired in state), `the cursor keeps no ${retired}`);
   assert.equal(state.failures.consecutive, 0, 'a failed step is no failed cycle');

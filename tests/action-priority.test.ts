@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import type { Work } from '../src/model.js';
 import { actionIdleMs, idleActionable, queueSnapshot, reconcileActions } from '../src/model/actions.js';
 import { actionJudgment, executorRunnableKinds, humanNeeded, humanNeededActions, nextAction } from '../src/model/next-action.js';
-import { humanNeededAttention, needsHumanActions } from '../src/cli/master-status.js';
 // Time-bomb allowance (GY-1694): 2026-09-21 `at` is the fixed now handed to nextAction.
 
 /**
@@ -57,19 +56,7 @@ test('unit:human-needed-actions-visible — an item whose only action is escalat
   assert.ok(owed[0].waitedMs < actionIdleMs, 'inside the idle bound, where nothing else would have reported it');
   assert.equal(idleActionable(work, now).length, 0, 'the queue itself calls nothing idle yet');
 
-  // The human-facing page names it, with the command that answers it and who answers it.
-  const page = humanNeededAttention({ work, now: now.toISOString() });
-  assert.deepEqual(page.map(entry => [entry.subject, entry.role]), [[owedItem.key, 'master']]);
-  assert.match(page[0].text, /no executor may run it/);
-  assert.equal(page[0].next, `graphyard diagnose ${owedItem.key} — ${refusal}`, 'and the command that reads out what it is waiting on');
-
-  // Counted apart from work that is merely queued: the two rows are both unclaimed, and only one
-  // of them is waiting for an executor.
+  // Both rows are unclaimed.
   const queue = queueSnapshot(work, now);
   assert.deepEqual(queue.waiting.map(row => row.kind).sort(), ['attention', 'dispatch']);
-  const report = needsHumanActions({ ...queue, idle: idleActionable(work, new Date(now.getTime() + actionIdleMs + 1000)) }, owed);
-  assert.deepEqual(report.needsHuman, owed);
-  assert.deepEqual(report.waiting.map(row => row.kind), ['dispatch'], 'the queue executors read holds only what they can take');
-  assert.deepEqual(report.idle.map(row => row.kind), ['dispatch'], 'and a row nobody may claim never ages into the idle list');
-
 });

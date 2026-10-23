@@ -8,15 +8,15 @@ import { randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { assertOutsideWorktrees, autonomousSession, buildMasterStatus, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
+import { assertOutsideWorktrees, autonomousSession, dispatchWork, herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigChanges, masterConfigSchema, masterHarness, prepareSessionHarness, removeProducerProfile, replaceProducerProfile, saveProducerProfile, sessionHarnessFile, sessionHarnessPlan, setupMaster, sustainedActivityMs, workerHarnessPlan, workerPrompt, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
 import { writeHarnessPermissions } from '../src/harness.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewerBindingHealth, reviewerRegistrationFile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, summarizeReviews, type ReviewRecord } from '../src/reviewer.js';
-import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetries, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, summarizeProducers, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
-import { emptyDispatchCursor, readDispatchCursor, runAutoDispatch, runDispatchTick, tickReadTimeout, type DispatchEffects } from '../src/auto-dispatch.js';
-import { emptyDaemonState, noteConfigReload, readDaemonState, runCycle, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
+import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
+import { emptyDispatchCursor, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
+import { emptyDaemonState, noteConfigReload, readDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 // Time-bomb allowance (GY-1694): the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, already past) and the 2026-10-09 lock start is only rendered; the launcher runs on the real clock with relative mint expiries.
@@ -100,7 +100,6 @@ function stubDispatch(items: () => Work[], log: string[], overrides: Partial<Dis
 function daemonEffects(overrides: Partial<DaemonEffects> = {}, log: string[] = []): DaemonEffects {
   return { agents: () => [], credentials: async profiles => Object.fromEntries(profiles.map(item => [item.name, { available: true, reason: null }])),
     snapshot: async () => ({ work: [], now: iso(0) }), closeSession: pane => { log.push(`close:${pane}`); }, dispatch: async item => { log.push(`dispatch:${item.key}`); },
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(0), reason: 'none', deployed: [], pending: [] }), recordDeployment: async () => ({}),
     persist: async () => {}, ...overrides };
 }
 
@@ -181,15 +180,6 @@ test('integration:producer-session-retry — a failed or expired producer sessio
     await runDispatchTick(config, cursor, effects, () => t0 + sessionRetryBaseMs + 1);
     assert.deepEqual(log.slice(3), ['review:GY-69:claude-reviewer', 'producer:unit:producer-a'], 'the same requests are launched again once due');
     assert.deepEqual(effects.producers.filter(record => record.requestId === unit.requestId).map(record => record.state), ['failed', 'pending']);
-    // Master status: the attempts and the next retry per request, and the attention line naming them.
-    const records = [{ requestId: unit.requestId, state: 'failed', requestedAt: new Date(t0 - 1000).toISOString(), closedAt: new Date(t0).toISOString(), resolution: 'the session finished (done) without trusted evidence' }];
-    const producerRecords = records.map(record => ({ ...record, producer: randomUUID(), attempt: 1, profile: 'producer-a', agentName: 'produce-a', outcome: {} }));
-    const status = buildMasterStatus({ work: [item], now: new Date(t0 + 1000).toISOString() }, [], [], {}, summarizeReviews([]), 'main', undefined, { producers: { pending: [], completed: producerRecords }, failures: [], retries: sessionRetries(records, t0 + 1000) });
-    const row = status.work[0];
-    const retried = row.dispatch!.producers.find(entry => entry.requestId === unit.requestId)!;
-    assert.deepEqual([retried.retry!.attempts, retried.retry!.limit, retried.retry!.nextAt, retried.retry!.exhausted], [1, sessionRetryLimit, new Date(t0 + sessionRetryBaseMs).toISOString(), false]);
-    assert.equal(retried.session!.attempt, 1);
-    assert.match(row.attention!, /Producer session for unit proofs of GY-69 failed after attempt 1 of 4: .*; next attempt at /);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
@@ -239,45 +229,12 @@ test('integration:master-config-reload — a running loop adopts master.json cha
     assert.equal(result.cycles.length, 4);
     const actions = Object.values(state.actions);
     assert.ok(actions.some(action => action.kind === 'config' && /Adopted .*autoMerge/.test(action.detail)));
-    assert.equal(actions.filter(action => action.kind === 'attention' && /bound to; restart master run/.test(action.detail)).length, 1, 'a standing refusal is recorded once');
+    assert.equal(actions.filter(action => action.kind === 'config' && action.state === 'failed' && /bound to; restart master run/.test(action.detail)).length, 1, 'a standing refusal is recorded once');
     assert.equal(state.config!.refused, reloads[3].refused);
     const noted = await noteConfigReload(emptyDaemonState(manual), reloads[2], async () => {});
     assert.equal(noted[0].state, 'failed');
   } finally { await rm(directory, { recursive: true, force: true }); }
 
-  // The dispatcher picks up a producer profile added to master.json: the request that waited for one launches.
-  const dispatchDirectory = await temporaryDirectory('resilience-dispatch');
-  try {
-    const coordinator = join(dispatchDirectory, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });
-    const bare = masterConfig(coordinator, { producers: [] }), equipped = masterConfig(coordinator);
-    const item = requested();
-    const log: string[] = [];
-    let tick = 0;
-    const stopping = new AbortController();
-    const effects = stubDispatch(() => [item], log, { persist: async () => { if (log.length) stopping.abort(); } });
-    const result = await runAutoDispatch(bare, emptyDispatchCursor(bare), effects, { intervalMs: () => 5, signal: stopping.signal, log: () => {}, reload: async () => ({ config: tick++ < 1 ? bare : equipped, changed: tick > 1 ? ['producers'] : [], refused: null, at: iso(0) }) });
-    assert.match(result.ticks[0].waiting.find(entry => entry.kind === 'producer')!.reason, /no producer profile is configured/);
-    assert.ok(log.includes('producer:unit:producer-a'), 'the reloaded profile launched without a restart');
-  } finally { await rm(dispatchDirectory, { recursive: true, force: true }); }
-});
-
-test('integration:loop-read-bound-widens — a snapshot read slower than the dispatcher bound is not retried at that bound forever: each failure doubles it, capped at the interval', async () => {
-  const config = masterConfig('/nonexistent/coordinator.token');
-  const stopping = new AbortController(), log: string[] = [];
-  let reads = 0;
-  // A server that always needs 60ms, against a 20ms bound: a fixed bound would never read it.
-  const effects = stubDispatch(() => [], [], {
-    snapshot: async () => { reads++; await new Promise(resolve => setTimeout(resolve, 60)); return { work: [], now: new Date().toISOString() }; },
-    persist: async state => { if (state.lastSuccessAt) stopping.abort(); },
-  });
-  const guard = setTimeout(() => stopping.abort(), 10_000);
-  try {
-    const run = await runAutoDispatch(config, emptyDispatchCursor(config), effects, { intervalMs: 60_000, signal: stopping.signal, log: line => log.push(line), readTimeoutMs: 20, retryMinMs: 1 });
-    assert.equal(run.ticks.length, 1, `recovered after ${reads} reads: ${log.join(' | ')}`);
-    assert.deepEqual(log.map(line => line.match(/timed out after (\d+)ms/)?.[1]), ['20', '40']);
-  } finally { clearTimeout(guard); }
-  assert.deepEqual([0, 1, 2, 3, 10].map(failures => tickReadTimeout(failures, 30_000)), [8_000, 16_000, 30_000, 30_000, 30_000]);
-  assert.equal(tickReadTimeout(4, 1_000), 8_000, 'a short interval never shrinks the base bound');
 });
 
 test('integration:master-profile-management — producer profiles can be replaced and removed, reviewer profiles removed, and status flags an unbound reviewer App and a Herdr workspace that no longer exists', async () => {
@@ -307,22 +264,7 @@ test('integration:master-profile-management — producer profiles can be replace
     assert.equal((await loadMasterConfig(root)).run.reviewerProfile, undefined);
     await assert.rejects(removeReviewerProfile(root, 'claude-reviewer'), /Unknown reviewer profile/);
 
-    // A reviewer App registered by master reviewer setup but never bound is flagged; binding it clears the flag.
-    let master = await loadMasterConfig(root);
-    assert.deepEqual((await reviewerBindingHealth(master)).attention, []);
-    await mkdir(join(credentials, 'reviewers'), { recursive: true });
-    const registration = reviewerRegistrationFile(master);
-    assert.equal(registration, join(credentials, 'reviewers', 'owner-project-registration.json'));
-    await writeFile(registration, JSON.stringify({ appId: 5678, slug: 'graphyard-reviewer', installationId: 91011, privateKey, repository: 'owner/project', reviewer: 'reviewer' }), { mode: 0o600 });
-    const unbound = await reviewerBindingHealth(master);
-    assert.equal(unbound.attention.length, 1);
-    assert.match(unbound.attention[0], /Reviewer App graphyard-reviewer \(App 5678\) is registered for owner\/project but not bound\. Its installation is recorded: rerun master reviewer setup to bind it/);
-    assert.equal(unbound.attention[0].includes('PRIVATE KEY'), false, 'only the public facts of the registration are read');
-    await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
-    master = await loadMasterConfig(root);
-    assert.deepEqual((await reviewerBindingHealth(master)).attention, []);
-    await rm(master.reviewer!.credentialFile);
-    assert.match((await reviewerBindingHealth(master)).attention[0], /bound reviewer App graphyard-reviewer has no usable credential .*rerun master reviewer bind/);
+    const master = await loadMasterConfig(root);
 
     // The configured Herdr workspace is checked against Herdr's own inventory.
     const workspaces = (ids: string[]) => (_command: string, args: string[]) => { assert.deepEqual(args, ['workspace', 'list']); return JSON.stringify({ result: { workspaces: ids.map(id => ({ workspace_id: id })) } }); };
@@ -494,7 +436,6 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
     const producer: ProducerRecord = (await reconcileProducers(root, master, [item], blocked, { run: herdr([]), now: () => new Date(started + 1000 + producerIdleGraceMs) })).producers[0];
     assert.equal(producer.state, 'failed');
     assert.match(producer.resolution!, /ended waiting on input \(Herdr reports it blocked\) instead of deciding on its own/);
-    assert.equal(summarizeProducers([producer]).completed[0].resolution, producer.resolution);
 
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
     await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr([]), mint, requestId: 'review-request' });
@@ -505,34 +446,16 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
     const review: ReviewRecord = (await reconcileReviews(root, master, { run: herdr([]), observe: () => null, work: [work()], agents: reviewAgents, now: () => new Date(reviewStart + 1000 + reviewIdleGraceMs) })).reviews[0];
     assert.equal(review.state, 'failed'); assert.equal(review.attempt, 1);
     assert.match(review.resolution!, /the reviewer session ended waiting on input \(Herdr reports it blocked\) instead of deciding on its own, without a verdict/);
-    assert.equal(summarizeReviews([review]).completed[0].resolution, review.resolution);
     // A session Herdr cannot read is never judged finished.
     const reviewLedger = await readReviewLedger(root); reviewLedger.reviews[0] = { ...reviewLedger.reviews[0], state: 'pending', idleSince: undefined, closedAt: undefined, resolution: undefined };
     await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(reviewLedger), { mode: 0o600 });
     const blind = await reconcileReviews(root, master, { run: herdr([]), observe: () => null, work: [work()], agents: null, now: () => new Date(reviewStart + 10 * 60_000) });
     assert.equal(blind.reviews[0].state, 'pending'); assert.equal(blind.reviews[0].idleSince, undefined);
   } finally { await cleanup(); }
-
-  // A worker blocked on a prompt while it holds its assignment is recorded as a failed session, once.
-  const directory = await temporaryDirectory('resilience-worker');
-  try {
-    const coordinator = join(directory, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });
-    const workerCredential = join(directory, 'worker.token'); await writeFile(workerCredential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
-    const profile = { name: 'claude-worker', principal: 'graphyard-claude-1', agentName: 'engineering-claude-1', mode: 'launch', kind: 'claude', credentialFile: workerCredential } as WorkerProfile;
-    const master = masterConfig(coordinator, { workers: [profile], producers: [] });
-    const held = work({ stage: 'build', submission: null, candidate: null, epoch: 4, lease: { owner: 'graphyard-claude-1', epoch: 4, expiresAt: iso(60_000) } as any });
-    const state = emptyDaemonState(master);
-    const effects = daemonEffects({ snapshot: async () => ({ work: [held], now: iso(0) }), agents: () => [{ name: 'engineering-claude-1', pane_id: 'pane-w', agent_status: 'blocked' }] });
-    const first = await runCycle(master, state, effects, () => clock);
-    const failed = first.actions.find(action => action.kind === 'session')!;
-    assert.equal(failed.state, 'failed'); assert.equal(failed.work, 'GY-69');
-    assert.match(failed.detail, /Worker session engineering-claude-1 on GY-69 \(epoch 4\) is waiting on input \(Herdr reports it blocked\) instead of deciding on its own/);
-    assert.equal((await runCycle(master, state, effects, () => clock + 1000)).actions.filter(action => action.kind === 'session').length, 0, 'recorded once per pane and epoch');
-  } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
 test('unit:master-restart-supervised — master restart goes through this install\'s active unit and reports its new MainPID, a stopped loop\'s process exits within its bound, and a holder outside the unit is named in status', async () => {
-  const { restartMasterLoop, supervisingUnit, recordLockRefusal, readLockRefusal, unsupervisedHolderAttention } = await import('../src/master/loop-restart.js');
+  const { restartMasterLoop, supervisingUnit, recordLockRefusal, readLockRefusal } = await import('../src/master/loop-restart.js');
   const { spawn } = await import('node:child_process');
   const root = await temporaryDirectory('restart-supervised'), home = await temporaryDirectory('restart-home');
   execFileSync('git', ['init', '-q', root]);
@@ -622,17 +545,10 @@ test('unit:master-restart-supervised — master restart goes through this instal
   await ready(summarised);
   assert.equal(await exited(summarised), 0);
 
-  // AC-3: a refused run records the holder; status names a live holder outside the unit, never the unit's own MainPID.
+  // AC-3: a refused run records the holder.
   const lock = { pid: process.pid, host: 'this-host', heartbeatAt: new Date().toISOString(), startedAt: '2026-10-09T18:40:00.000Z' };
   await recordLockRefusal(root, lock); const refusal = await recordLockRefusal(root, lock);
   assert.equal(refusal.count, 2); assert.deepEqual(await readLockRefusal(root), refusal);
-  const item = unsupervisedHolderAttention({ refusal, lock, hostId: 'this-host', unit: { unit, mainPid: 0 } });
-  assert.ok(item); assert.equal(item.subject, 'loop'); assert.equal(item.role, 'master');
-  assert.match(item.text, new RegExp(`pid ${process.pid} on this-host, started 2026-10-09T18:40:00.000Z.*outside graphyard-master\\.service.*refused on it 2 time`));
-  assert.match(item.next, new RegExp(`kill -TERM ${process.pid} && systemctl --user restart graphyard-master\\.service`));
-  assert.equal(unsupervisedHolderAttention({ refusal, lock, hostId: 'this-host', unit: { unit, mainPid: process.pid } }), null, 'the unit\'s own loop is not an unsupervised holder');
-  assert.equal(unsupervisedHolderAttention({ refusal, lock, hostId: 'this-host', unit: null }), null, 'no unit, no supervisor crash-loop');
-  assert.equal(unsupervisedHolderAttention({ refusal, lock, hostId: 'this-host', unit: { unit, mainPid: 0 }, alive: () => false }), null, 'a holder that is gone raises nothing');
 });
 
 test('unit:master-early-stop — a stop signal received during the loop\'s startup ends it before any cycle, and a startup that fails leaves no listener', async () => {

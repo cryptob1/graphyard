@@ -77,16 +77,3 @@ export function planeVerdict(writeError: string | null, resources: { database: P
   if (exhausted(resources.database) && !resources.database!.advisory) causes.push(`Control-plane database is at its bound: ${resources.database!.used} of ${resources.database!.bound} bytes (${resources.database!.detail ?? 'pg_database_size'}); grow the volume and raise GRAPHYARD_DATABASE_MAX_BYTES`);
   return { healthy: causes.length === 0, writable: !writeError, causes };
 }
-
-/**
- * The loop's gate before it dispatches: the plane must be able to record what a launch produces.
- * Returns the reason not to dispatch, or null. An unreachable plane is a reason too.
- */
-export async function dispatchRefusal(url: string, fetcher: typeof fetch = fetch): Promise<string | null> {
-  try {
-    const response = await fetcher(`${url.replace(/\/$/, '')}/healthz`, { signal: AbortSignal.timeout(10_000) });
-    const body = await response.json().catch(() => ({})) as { healthy?: boolean; causes?: string[] };
-    if (response.ok && body.healthy !== false) return null;
-    return `the control plane reports itself unhealthy (${(body.causes ?? [`HTTP ${response.status}`]).join('; ')}), so nothing is dispatched into a plane that cannot record the result`;
-  } catch (error) { return `the control plane's /healthz could not be read (${error instanceof Error ? error.message : String(error)}), so nothing is dispatched into a plane that may not record the result`; }
-}

@@ -28,7 +28,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  * hangs past the budget (its process group killed, the head previewed again), some pushes are rejected on a moved tip
  * (re-trialled and previewed again on the new tip), and some merges change only docs (never
  * previewed). Every item must be delivered exactly once, no preview checkout, slot or late build
- * may outlive its preview, the writer's state stays bounded and every system invariant holds.
+ * may outlive its preview, and the writer's state stays bounded.
  */
 const minute = 60_000;
 const start = Date.parse('2030-06-01T00:00:00Z');
@@ -180,7 +180,7 @@ class World {
   };
 }
 
-test('unit:soak-merge-preview — a simulated day on the real loop with the real preview: passing previews land, failing required cases are refused and reworked once, timed-out previews are cancelled and retried, moved tips are re-trialled and previewed again, docs-only merges skip it, every item lands exactly once, and no preview checkout, slot or late build outlives its preview while the state stays bounded and every invariant holds', { timeout: 300_000 }, async () => {
+test('unit:soak-merge-preview — a simulated day on the real loop with the real preview: passing previews land, failing required cases are refused and reworked once, timed-out previews are cancelled and retried, moved tips are re-trialled and previewed again, docs-only merges skip it, every item lands exactly once, and no preview checkout, slot or late build outlives its preview while the state stays bounded', { timeout: 300_000 }, async () => {
   const root = await realpath(await temporaryDirectory('soak-merge-preview')); made.push(root);
   const base = join(root, 'worktrees'), marks = join(root, 'marks'); await mkdir(base); await mkdir(marks);
   let now = start;
@@ -190,8 +190,7 @@ test('unit:soak-merge-preview — a simulated day on the real loop with the real
   const effects = { agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),
     snapshot: async () => ({ work: world.snapshot(), now: iso(now) }),
     closeSession: () => {}, dispatch: async () => {},
-    observeDeployment: async () => ({ source: 'unavailable', sha: null, at: iso(now), reason: 'not configured', deployed: [], pending: [] }),
-    recordDeployment: async () => {}, decisions: async () => ({ decisions: [] }), persist: async () => {},
+    decisions: async () => ({ decisions: [] }), persist: async () => {},
     github: githubDouble, merge: githubDouble, mergeWriter: world.ports(), rework: world.rework } as unknown as DaemonEffects;
   const state = emptyDaemonState(config);
   for (let cycle = 0; cycle < cycles; cycle++) {
@@ -206,7 +205,6 @@ test('unit:soak-merge-preview — a simulated day on the real loop with the real
     assert.deepEqual(await readdir(base), [], `cycle ${cycle}: every preview checkout and its owner marker removed`);
     for (const n of world.commandHung) assert.equal(running(n), '', `cycle ${cycle}: GY-${n}'s hanging command step outlived its preview`);
     assert.ok(state.mergeWriter.queue.length <= mergeWriterKeptQueue && state.mergeWriter.refusals.length <= mergeWriterKeptRefusals && state.mergeWriter.reworks.length <= mergeWriterKeptReworks, `cycle ${cycle}: the state is bounded`);
-    for (const check of state.invariants.report) assert.ok(check.holds, `cycle ${cycle}: invariant ${check.invariant} is violated: ${check.line}`);
   }
   const final = world.snapshot();
   assert.deepEqual(final.filter(item => item.stage !== 'done').map(item => item.key), [], 'every item is delivered by the end of the day');
