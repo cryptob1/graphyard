@@ -7,7 +7,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPlan, prepareInstall } from '../src/install/index.js';
 import type { LocalSupervisor } from '../src/install/local.js';
-import { gitWatchPorts } from '../src/cli/upgrade.js';
+import { gitWatchPorts, pruneImages } from '../src/cli/upgrade.js';
 import { deployRecordPath, readDeployRecord, watchMain, type DeployWatchPorts } from '../src/deploy-watch.js';
 import { cycleSteps } from '../src/master-daemon.js';
 import { restartCause } from '../src/daemon/run.js';
@@ -73,6 +73,7 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
       if (!response.ok || !body.ok || body.commit !== sha) throw new Error(`/healthz answered ${response.status} for ${body.commit.slice(0, 7)}`);
     },
     pin: async sha => { steps.push(`pin ${sha.slice(0, 7)}`); },
+    prune: async () => {},
     schema: async sha => migrates[sha] ?? 7,
     database: async () => schema,
   };
@@ -143,4 +144,39 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
   } finally { server.close(); }
 
   assert.ok(!cycleSteps.some(step => /deploy|upgrade/.test(step)), 'the master loop\'s cycle holds no deploy step');
+});
+
+test('unit:deploy-prunes-old-images — one upgrade --watch pass whose health check passes removes the two old per-commit images and keeps the previous and serving ones; a failing health check removes nothing', async () => {
+  const { checkout, commit, a } = await repositories();
+  const old = ['0123456789ab', 'ba9876543210'];
+  const serving = await commit('B');
+  const images = new Set([...old, a, serving].map(sha => `graphyard-local:${sha.slice(0, 12)}`).concat('graphyard-local:owner-project'));
+  const removed: string[] = [];
+  const docker = async (command: string, args: string[]) => {
+    assert.equal(command, 'docker');
+    if (args[1] === 'ls') return [...images].map(image => image.split(':')[1]).join('\n');
+    removed.push(args[2]); images.delete(args[2]); return '';
+  };
+  let healthy = true;
+  const ports: DeployWatchPorts = {
+    ...gitWatchPorts(checkout, 'main', defaultChildRun),
+    build: async () => {}, restart: async () => {}, pin: async () => {},
+    health: async () => { if (!healthy) throw new Error('/healthz answered 503'); },
+    prune: keep => pruneImages(docker, keep, () => {}),
+    schema: async () => 7, database: async () => 7,
+  };
+  const file = deployRecordPath(await temporaryDirectory('deploy-prune'));
+  await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+  assert.equal(readDeployRecord(file)?.tip, serving);
+  assert.deepEqual(removed, old.map(sha => `graphyard-local:${sha}`), 'exactly the two old per-commit images are removed');
+  assert.deepEqual([...images].sort(), [a, serving].map(sha => `graphyard-local:${sha.slice(0, 12)}`).concat('graphyard-local:owner-project').sort(), 'the previous and serving images, and the install-named one, are kept');
+
+  // A tip whose health check fails removes nothing, its own image included.
+  images.add(`graphyard-local:${old[0]}`);
+  const failing = await commit('C');
+  images.add(`graphyard-local:${failing.slice(0, 12)}`);
+  healthy = false; removed.length = 0;
+  await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+  assert.equal(readDeployRecord(file)?.failed, failing);
+  assert.deepEqual(removed, [], 'nothing is removed when the health check fails');
 });

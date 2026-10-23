@@ -192,10 +192,25 @@ export function gitWatchPorts(cliRoot: string, baseBranch: string, run: ChildRun
 }
 
 /**
+ * Removes every per-commit image `graphyard-local:<sha12>` (or the older `previous-<sha12>`) but the kept
+ * commits', one `docker image rm` each; docker refuses one a container uses, and each failure is one
+ * logged line, never the deploy's.
+ */
+export async function pruneImages(run: ChildRun, keep: string[], log: (line: string) => void = line => console.error(line)) {
+  const kept = new Set(keep.map(sha => sha.slice(0, 12)));
+  const failed = (what: string) => (error: unknown) => log(`[graphyard-deploy] ${what}: ${error instanceof Error ? error.message : String(error)}`);
+  const tags = await Promise.resolve(run('docker', ['image', 'ls', 'graphyard-local', '--format', '{{.Tag}}'])).then(String, failed('could not list the per-commit images'));
+  for (const tag of (tags ?? '').split('\n').map(line => line.trim())) {
+    const sha = /^(?:previous-)?([0-9a-f]{12})$/.exec(tag)?.[1];
+    if (sha && !kept.has(sha)) await Promise.resolve(run('docker', ['image', 'rm', `graphyard-local:${tag}`])).catch(failed(`could not remove graphyard-local:${tag}`));
+  }
+}
+
+/**
  * The ports `upgrade --watch` (graphyard-deploy.service) runs each base tip through on a compose or
  * local install: git in the CLI checkout, npm ci as the build, the install adapter's redeploy (with a
  * database backup when DATABASE_URL is set) as the restart, /healthz until it passes or three
- * minutes pass, and the coordinator pin advanced when one exists; or the line naming why an install
+ * minutes pass, the coordinator pin advanced when one exists, and older per-commit images pruned; or the line naming why an install
  * on another provider has none.
  */
 export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; baseBranch: string; url: string; run: ChildRun }): Promise<DeployWatchPorts | string> {
@@ -206,7 +221,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
   const inputsFor = (commit: string): UpgradeInputs => {
     const current = checkoutRelease(cliRoot);
     return { cliRoot, repoRoot, current, target: { version: current.version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
-      image: install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
+      image: install.provider === 'compose' ? `graphyard-local:${commit.slice(0, 12)}` : install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
   };
   const step = (commit: string, id: UpgradeStepId) => upgradePlan(inputsFor(commit)).steps.find(entry => entry.id === id)!;
   return {
@@ -226,6 +241,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
         catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
       }
     },
+    prune: keep => pruneImages(input.run, keep),
     pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
     schema: async commit => { try { return schemaAt(git(cliRoot, 'show', `${commit}:src/release.ts`)); } catch { return null; } },
     database: () => databaseSchemaOf(url),

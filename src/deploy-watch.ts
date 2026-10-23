@@ -37,6 +37,8 @@ export interface DeployWatchPorts {
   health(commit: string): Promise<void>;
   /** Advances the known-good coordinator pin the loop's unit loads, so the loop's restart loads the commit. */
   pin(commit: string): Promise<void>;
+  /** After a verified deploy, removes the per-commit images of every commit but these (the serving tip and the previous one). */
+  prune(keep: string[]): Promise<void>;
   /** The schema generation a commit's code migrates to, read from its source; null when it names none. */
   schema(commit: string): Promise<number | null>;
   /** The database's schema generation, or null when it cannot be read. */
@@ -82,6 +84,7 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
     await run(tip);
     await writeDeployRecord(file, { tip, failed: null, reason: null });
     log(`[graphyard-deploy] serving ${tip.slice(0, 12)}`);
+    await ports.prune(previous ? [tip, previous] : [tip]);
     return 'deployed';
   } catch (error) {
     const reason = message(error), step = (error as { step?: string }).step;
