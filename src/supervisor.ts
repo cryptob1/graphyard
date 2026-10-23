@@ -1024,7 +1024,8 @@ export async function installLoopSupervisor(given: LoopUnitInput, host: LoopSupe
  * whose text no longer matches `loopUnitText` for the running configuration is rewritten through
  * `installLoopSupervisor`'s idempotent path — with all of its refusals, and without its blocking
  * restart — so the next process starts under the window `loopWatchdogSeconds` computes. A unit
- * that is not installed is left to `master init`; one that already matches is not touched.
+ * that is not installed is left to `master init`; one that already matches is not touched unless
+ * the deploy unit beside it is missing (GY-2936), which the same path writes and enables.
  */
 export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHost = {}): Promise<{ wrote: LoopSupervisorInstallation['wrote']; reason: string | null; unitPath: string; launcherStale?: boolean }> {
   const unitPath = join(loopUnitDirectory(host), input.unit ?? loopUnitOf(input.root, loopUnitDirectory(host), host.home));
@@ -1032,8 +1033,12 @@ export async function alignLoopUnit(input: LoopUnitInput, host: LoopSupervisorHo
   try { existing = await readFile(unitPath, 'utf8'); } catch { existing = null; }
   if (existing === null) return { wrote: 'none', reason: `${unitPath} is not installed; graphyard master init installs it`, unitPath };
   const wanted = loopUnitText(input);
-  if (existing === wanted) return { wrote: 'unchanged', reason: null, unitPath };
+  // An install upgraded past GY-2877 has a matching loop unit and no deploy unit: install it too.
+  const deployPath = join(loopUnitDirectory(host), deployUnitOf({ master: basename(unitPath) }));
+  const deployMissing = !existsSync(deployPath);
+  if (existing === wanted && !deployMissing) return { wrote: 'unchanged', reason: null, unitPath };
   const installed = await installLoopSupervisor(input, host, { restart: false });
+  if (deployMissing && installed.wrote === 'unchanged') return { wrote: 'created', reason: `wrote ${deployPath}`, unitPath };
   // GY-1790: a refused rewrite says whether the installed unit still starts a launcher other than
   // the one it must — the checkout's under a snapshot's pin, a snapshot's once the pin is lifted —
   // which withholds the restart that would go through it; a refusal over any other setting does not.

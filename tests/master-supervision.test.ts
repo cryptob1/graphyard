@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { agentRuntimeRun, agentRuntimeTimeoutMs, listHerdrAgents, masterConfigSchema, observeHerdrAgents, setupMaster, type MasterConfig } from '../src/master.js';
 import { daemonEffects, emptyDaemonState, runDaemon } from '../src/master-daemon.js';
 import { ChildProcessError, defaultChildTimeoutMs } from '../src/child-runner.js';
-import { installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
+import { alignLoopUnit, installLoopSupervisor, LoopSupervisorRefusal, loopStopTimeoutSeconds, loopSupervision, loopSupervisionAttention, loopUnitDirectory, loopUnitName, loopUnitText, loopWatchdogSeconds, supervisorSupport, temporaryDirectories, testSuiteHomeGuard, underTestRunner, unsupervisedInstruction } from '../src/supervisor.js';
 import { deployUnitOf, perInstallUnits } from '../src/install/units.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): Date.now() only measures how long the bounded runs took.
@@ -429,4 +429,32 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     if (previous.XDG_CONFIG_HOME === undefined) delete process.env.XDG_CONFIG_HOME;
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); await rm(scratch, { recursive: true, force: true });
   }
+});
+
+test('unit:alignment-installs-missing-deploy-unit — the loop\'s alignment writes and enables a missing deploy unit beside a matching loop unit, then does nothing', async () => {
+  const home = await temporaryDirectory('supervision-home');
+  const root = join(home, 'coordinator');
+  try {
+    await mkdir(join(root, '.graphyard'), { recursive: true });
+    await writeFile(join(root, '.graphyard/master.json'), '{}\n');
+    const input = { root, cliPath: launcher, repository: 'owner/project', intervalSeconds: 20 };
+    const stub = () => { const host = hostStub(); return { calls: host.calls, host: { ...host.host, home } }; };
+    // An install from before GY-2877: the loop unit as the running configuration wants it, no deploy unit.
+    await installLoopSupervisor(input, stub().host);
+    const unitDirectory = join(home, '.config/systemd/user'), deployPath = join(unitDirectory, deployUnit);
+    await rm(deployPath);
+    assert.equal(await readFile(join(unitDirectory, loopUnit), 'utf8'), loopUnitText(input));
+
+    const first = stub();
+    const aligned = await alignLoopUnit(input, first.host);
+    assert.equal(aligned.wrote, 'created');
+    assert.match(aligned.reason!, new RegExp(deployPath));
+    assert.ok(await fileState(deployPath), 'the deploy unit is written beside the loop unit');
+    assert.ok(first.calls.some(call => call.join(' ') === `systemctl --user enable --now ${deployUnit}`), 'and enabled and started through the host');
+    assert.equal(first.calls.some(call => call[2] === 'restart'), false, 'the running loop is not restarted');
+
+    const second = stub();
+    assert.deepEqual(await alignLoopUnit(input, second.host), { wrote: 'unchanged', reason: null, unitPath: join(unitDirectory, loopUnit) });
+    assert.deepEqual(second.calls, [], 'with both units present nothing is performed');
+  } finally { await rm(home, { recursive: true, force: true }); }
 });
