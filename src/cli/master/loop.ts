@@ -8,6 +8,9 @@ import { herdrServerSeen, herdrTarget } from '../../master/herdr.js';
 import { unhandled, type MasterSession } from './session.js';
 import { exitWhenStopped, recordingLockRefusal } from '../../master/loop-restart.js';
 import { processConnectAccounts } from '../../master/environments.js';
+import { recordRunningPin } from '../../master/known-good.js';
+import { installDirectory } from '../../install/secrets.js';
+import { installIdFor } from '../../install/types.js';
 
 /** The Herdr server the loop names on each read (GY-1511): the instance its herdr calls target, its host, and whether it last answered. */
 export const loopHerdrReport = (host: string | null) => encodeLoopPanes({ configHome: herdrTarget()?.configHome ?? null, session: herdrTarget()?.session ?? null, host, running: herdrServerSeen() });
@@ -23,6 +26,8 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
     assertProtocol(coordinator);
     const state = await readDaemonState(root, master);
+    // The deploy unit pins new tips while this loop still runs from its own pin; it keeps the one recorded here.
+    try { recordRunningPin(installDirectory(installIdFor(master.repository))); } catch { /* no install directory: no pin to keep */ }
     // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
     // server answers with whole documents). GitHub merges; the loop runs no merge of its own.
     const live = liveMasterConfig(root, master), current = () => live.current;

@@ -3,8 +3,9 @@
 // The loop used to run from the checkout that is also the repository under change, so when Graphyard
 // merged its own broken change the loop that had to act was the broken one. The pin is a detached
 // linked worktree under `<installDir>/coordinator/<sha12>`, built there, and `coordinator/current` is a
-// symlink moved by rename. Only the last good pin is kept, and the one this process (the running
-// loop) loaded its modules from (GY-2760); `graphyard master recover` rebuilds an older one.
+// symlink moved by rename. Only the last good pin is kept, the one this process loaded its modules
+// from (GY-2760), and the one the running loop recorded it loaded from, since the deploy unit pins from
+// its own process; `graphyard master recover` rebuilds an older one.
 import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,6 +23,14 @@ export interface KnownGoodState { sha: string; pinnedAt: string; previous: strin
 export interface KnownGoodGit { installDir: string; repository: string; now?: () => Date; loadedFrom?: string }
 /** This module's file: a loop running from a pin loaded it from inside that pin's directory. */
 const loadedModule = fileURLToPath(import.meta.url);
+const runningFile = (installDir: string) => join(knownGoodDirectory(installDir), 'running');
+
+/** The loop records the pin it loaded from, so a deploy pinning from another process never removes it. */
+export function recordRunningPin(installDir: string, loadedFrom = loadedModule) {
+  const directory = knownGoodDirectory(installDir);
+  const entry = existsSync(directory) ? readdirSync(directory).find(name => /^[0-9a-f]{12}$/.test(name) && loadedFrom.startsWith(realpathSync(join(directory, name)) + sep)) : undefined;
+  if (entry) writeFileSync(runningFile(installDir), `${entry}\n`);
+}
 
 /** The pin, or null when none was ever made (the unit then runs the checkout path). */
 export function knownGoodState(installDir: string): KnownGoodState | null {
@@ -66,8 +75,9 @@ export async function pinKnownGood(git: KnownGoodGit, sha: string, run: ChildRun
   renameSync(staging, join(directory, 'current'));
   writeFileSync(`${stateFile(git.installDir)}.tmp`, `${JSON.stringify(next, null, 2)}\n`);
   renameSync(`${stateFile(git.installDir)}.tmp`, stateFile(git.installDir));
-  // Everything but the new pin and the one this process runs from goes.
-  const keep = new Set([short(sha)]);
+  // Everything but the new pin, the one the running loop recorded and the one this process runs from goes.
+  const running = (() => { try { return readFileSync(runningFile(git.installDir), 'utf8').trim(); } catch { return ''; } })();
+  const keep = new Set([short(sha), running]);
   const loaded = git.loadedFrom ?? loadedModule;
   for (const entry of readdirSync(directory)) {
     const path = join(directory, entry);
