@@ -18,9 +18,9 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const { values } = parseArgs({ args, options: { once: { type: 'boolean' }, interval: { type: 'string' } }, allowPositionals: false });
     const intervalSeconds = values.interval ? Number(values.interval) : master.run.intervalSeconds;
     if (!Number.isInteger(intervalSeconds) || intervalSeconds < 5 || intervalSeconds > 900) throw new Error('Use master run --interval with whole seconds between 5 and 900');
-    // A coordinator credential is the daemon's entire authority; anything broader could satisfy a gate the loop must wait on.
+    // A coordinator credential is the daemon's entire authority; its roster --proof patterns cover only the loop's readings,
+    // since evidence submission refuses every coordinator (GY-2934).
     if (coordinator.actor.role !== 'coordinator') throw new Error('The durable master loop requires a coordinator credential; operator, producer, and worker credentials are refused');
-    if (coordinator.actor.proofs?.length) throw new Error('The durable master loop refuses a credential that is also allowed to produce evidence');
     assertProtocol(coordinator);
     const state = await readDaemonState(root, master);
     // The cycle and the dispatcher poll the bounded coordination view (by header, so an older
