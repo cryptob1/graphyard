@@ -227,6 +227,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
       }
     },
     pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
+    schema: async commit => { try { return schemaAt(git(cliRoot, 'show', `${commit}:src/release.ts`)); } catch { return null; } },
     database: () => databaseSchemaOf(url),
   };
 }

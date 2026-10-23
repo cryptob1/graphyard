@@ -27,7 +27,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null })));
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   return {
-    serving: { commit: short(serving), main: short(main), atMain: !!serving && serving === main, failedDeploy: deploy?.failed ? { tip: short(deploy.failed), reason: deploy.reason } : null },
+    serving: { commit: short(serving), main: short(main), atMain: !!serving && serving === main, failedDeploy: deploy?.failed ? { tip: short(deploy.failed), reason: deploy.reason, restoring: short(deploy.restore ?? null) } : null },
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     items: snapshot.work.filter(item => item.stage !== 'done').map(item => itemLine(item, now)),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter)),

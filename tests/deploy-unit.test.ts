@@ -61,7 +61,8 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const steps: string[] = [];
-  let schema = 7;
+  let schema: number | null = 7;
+  const migrates: Record<string, number> = {};
   const ports: DeployWatchPorts = {
     ...gitWatchPorts(checkout, 'main', defaultChildRun),
     build: async sha => { steps.push(`build ${sha.slice(0, 7)}`); },
@@ -72,6 +73,7 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
       if (!response.ok || !body.ok || body.commit !== sha) throw new Error(`/healthz answered ${response.status} for ${body.commit.slice(0, 7)}`);
     },
     pin: async sha => { steps.push(`pin ${sha.slice(0, 7)}`); },
+    schema: async sha => migrates[sha] ?? 7,
     database: async () => schema,
   };
   const root = await temporaryDirectory('deploy-record'), file = deployRecordPath(root);
@@ -110,6 +112,34 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
     assert.equal(git(checkout, 'rev-parse', 'HEAD'), d);
     assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed], [d, null]);
     assert.match(readDeployRecord(file)?.reason ?? '', /kept because it migrated the database from generation 7 to 8/);
+
+    // A tip whose code migrates past the previous tip's, failing while the database cannot be read, is kept too: no downgrade on an unknown schema.
+    const e = await commit('E');
+    healthy = sha => sha !== e;
+    migrates[d] = 8; migrates[e] = 9; schema = null;
+    ports.restart = restart;
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [`build ${e.slice(0, 7)}`, `restart ${e.slice(0, 7)}`, `healthz ${e.slice(0, 7)}`, `pin ${e.slice(0, 7)}`], 'no rollback when the migration cannot be ruled out');
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed], [e, null]);
+    assert.match(readDeployRecord(file)?.reason ?? '', /kept because the database may be at generation 9, past the 8 the previous tip supports/);
+
+    // A rollback that fails is not recorded as served: later passes retry it until the previous tip is restored.
+    const f = await commit('F');
+    healthy = sha => sha !== f;
+    let flaky = true;
+    const build = ports.build;
+    ports.build = async sha => { await build(sha); if (sha === e && flaky) throw new Error('npm ci timed out'); };
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed, readDeployRecord(file)?.restore], [null, f, e], 'the unfinished rollback is recorded, not served');
+    assert.match(readDeployRecord(file)?.reason ?? '', /the rollback to .* failed \(attempt 1 of 5\): build failed: npm ci timed out/);
+    flaky = false;
+    steps.length = 0;
+    await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
+    assert.deepEqual(steps, [`build ${e.slice(0, 7)}`, `restart ${e.slice(0, 7)}`, `healthz ${e.slice(0, 7)}`, `pin ${e.slice(0, 7)}`], 'the next pass completes the rollback');
+    assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed, readDeployRecord(file)?.restore], [e, f, undefined]);
+    assert.equal(git(checkout, 'rev-parse', 'HEAD'), e);
   } finally { server.close(); }
 
   assert.ok(!cycleSteps.some(step => /deploy|upgrade/.test(step)), 'the master loop\'s cycle holds no deploy step');
