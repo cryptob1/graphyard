@@ -35,8 +35,8 @@ import { workerBeforePushSection, workerFastGatesPresent } from './worker-fast-g
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
-/** `reclaimed` names each abandoned worktree the `worktree` command freed the branch from (GY-1078). */
-export type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies; reclaimed?: string[] };
+/** `reclaimed` names each abandoned worktree the `worktree` command freed the branch from (GY-1078). `work` is the document the claim itself returned (GY-2956): the item as the attempt begins, fresher than the snapshot the dispatch chose from — the handoff reads the partial work a cycle's close step recorded on it. */
+export type PreparedWorker = { epoch: number; path: string; base: string; branch?: string; dependencies?: SharedDependencies; reclaimed?: string[]; work?: Work };
 /** Claims the item and builds its worktree; `claimBy` is a hand dispatch's claim deadline (prepareWorkerLaunch). */
 /** `onClaimed` is called with the epoch the moment the claim is held, before the worktree is built (GY-1373); what it returns stops the keep-alive it started. */
 /** `cycle` is the dispatch snapshot instant whose one fetch of the base branch the preparation shares (GY-1836); absent, a hand dispatch fetches for itself. */
@@ -384,7 +384,10 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // The area maps the plan touches (GY-1495), read from the base before the session starts.
     const maps = await verificationMaps(root, config.baseBranch).catch(() => []);
     // GY-1797: whether this checkout carries the fast gates is read here, once, and handed to the prompt as an input.
-    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps, rework);
+    // GY-2956: the prompt reads the claimed document when the preparer returned it, not the
+    // snapshot the dispatch chose from — an attempt preserved in the same cycle is in the claim's
+    // record, and a handoff built from the older copy would send the worker back to the shared base.
+    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps, rework);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
     const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
@@ -597,7 +600,10 @@ export async function prepareWorkerLaunch(root: string, key: string, profileName
     // What the command reclaimed to free the branch is carried to the dispatch record, never only
     // to its stderr, which a launch that succeeds discards (GY-1078).
     const reclaimed = Array.isArray(workspace.reclaimed) ? (workspace.reclaimed as { path?: unknown; action?: unknown }[]).map(entry => `${String(entry.path)}: ${String(entry.action)}`) : [];
-    return { epoch: claimedEpoch, path: workspace.path, base, dependencies, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}), ...(reclaimed.length ? { reclaimed } : {}) };
+    // The claim's own response is the item's document as the new attempt begins (GY-2956): the
+    // prompt built from it carries the recovery details the close step recorded this same cycle,
+    // which the dispatch's older snapshot copy cannot show.
+    return { epoch: claimedEpoch, path: workspace.path, base, dependencies, work: claim as Work, ...(typeof workspace.branch === 'string' && workspace.branch ? { branch: workspace.branch } : {}), ...(reclaimed.length ? { reclaimed } : {}) };
   } catch (error) {
     if (claimedEpoch !== null) {
       // The keep-alive stops before the release, so no renewal races the claim being handed back.

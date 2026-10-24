@@ -22,10 +22,12 @@ import { evidenceBindsCandidate, type Work } from '../model.js';
  *   tally, because the omission is structural rather than a count of entries. It is a report of
  *   what already happened — one entry per attempt, growing for the life of the item — and every
  *   reader of it (master status, the speed summary) derives that report from the full documents.
- *   Its one decision input, the rework-round count the review-round cap (GY-1118) and the
- *   bot-thread rule read, is kept beside it as `reworkRounds` (`CoordinationRounds`): a view
- *   without it showed the loop every head in its first round (GY-1389). A settled delivery, which
- *   no cap judges, keeps none;
+ *   Its decision inputs are kept beside it: the rework-round count the review-round cap (GY-1118)
+ *   and the bot-thread rule read, as `reworkRounds` (`CoordinationRounds`) — a view without it
+ *   showed the loop every head in its first round (GY-1389) — and the last attempt's end as
+ *   `attemptEnd` (GY-2956): how the current attempt ended is what tells the loop a lapsed lease
+ *   the control plane already reconciled apart from one the worker released. A settled delivery,
+ *   which no cap judges and no attempt of which can be resumed, keeps none;
  *
  * - sessions: the running ones and the last few finished; each kept resolved action row, its last
  *   few attempt records;
@@ -46,8 +48,8 @@ export const coordinationRecordLimit = 3, coordinationSessionLimit = 5;
 /** The view is chosen by `?view=coordination` or this header; a server without the view ignores both. */
 export const coordinationViewHeader = 'X-Graphyard-View';
 
-/** The rework-round count the coordination view keeps of an open item's dropped pipeline timeline (GY-1389). */
-export type CoordinationRounds = { reworkRounds?: number; attemptCount?: number };
+/** What the coordination view keeps of an open item's dropped pipeline timeline: the rework-round count (GY-1389) and the last attempt's end (GY-2956). */
+export type CoordinationRounds = { reworkRounds?: number; attemptCount?: number; attemptEnd?: { epoch: number | null; end: string | null } };
 
 export interface CoordinationOmissions { evidence: number; dispatchHistory: number; queueHistory: number; actionHistory: number; sessions: number }
 
@@ -96,11 +98,17 @@ export function coordinationWork(work: Work, omitted: CoordinationOmissions): Wo
   const sessions = Array.isArray(work.sessions) ? work.sessions.filter((handle, index, all) => handle?.state === 'running' || index >= all.length - sessionsKept) : undefined;
   if (sessions) omitted.sessions += work.sessions!.length - sessions.length;
   const { pipeline, ...decisions } = work;
+  // The last attempt's end (GY-2956): how the item's newest attempt ended, kept beside the dropped
+  // timeline because the loop preserves an attempt ended by a lapsed lease on exactly this reading.
+  const attempts = !settled && pipeline && typeof pipeline === 'object' && Array.isArray((pipeline as any).attempts)
+    ? (pipeline as any).attempts as { epoch?: number; end?: string | null }[] : [];
+  const lastAttempt = attempts.at(-1);
   return {
     ...decisions, evidence, observation,
     ...(!settled && pipeline && typeof pipeline === 'object' && 'reworkRounds' in pipeline ? { reworkRounds: pipeline.reworkRounds } : {}),
     // The attempts already made (GY-1746): worker dispatch counts every ended epoch, not only rework rounds.
     ...(!settled && pipeline && typeof pipeline === 'object' && Array.isArray((pipeline as any).attempts) ? { attemptCount: (pipeline as any).attempts.length } : {}),
+    ...(lastAttempt ? { attemptEnd: { epoch: lastAttempt.epoch ?? null, end: lastAttempt.end ?? null } } : {}),
     ...(dispatch ? { autoDispatch: { ...dispatch, history: recentHistory } } : {}),
     ...(queueHistory ? { queueHistory } : {}),
     ...(actions ? { actionQueue: { ...actions, history: actionHistory! } } : {}),

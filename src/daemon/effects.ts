@@ -58,9 +58,10 @@ export interface DaemonEffects {
    * the capacity exhaustion that ends the lease with that partial work on the item — before any
    * cleanup — so the redispatch's handoff names the commit instead of silently starting from the
    * shared base. Returns the partial work recorded, or null when this host holds nothing of the
-   * attempt. Absent, the lease is only reconciled.
+   * attempt. Absent, the lease is only reconciled. The lease is named by its epoch and owner
+   * alone: a lease the control plane already reconciled (GY-2956) carries no expiry on the record.
    */
-  endExpiredLease?: (work: Work, lease: NonNullable<Work['lease']>) => Promise<PartialWork | null>;
+  endExpiredLease?: (work: Work, lease: Pick<NonNullable<Work['lease']>, 'epoch' | 'owner'>) => Promise<PartialWork | null>;
   /** Ends the agent-registry session a review or proof session was launched under (GY-2944): the ledgers name it; absent, nothing is released. */
   releaseRegistrySession?: (session: RegistrySlot, reason: string) => Promise<unknown>;
   /** The control plane's reconciliation of an item whose lease lapsed with nothing submitted (`POST work/:id/resync`). */

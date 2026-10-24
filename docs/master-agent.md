@@ -12,7 +12,7 @@ Cycle until every in-scope item is Done or carries a recorded blocker and the re
 `master run` runs one cycle every `run.intervalSeconds`: five steps in order, each under one timeout; a failed step is one log line and runs again next cycle.
 
 1. **snapshot**: the work snapshot and Herdr's session list.
-2. **close**: end sessions whose item left the stage they were launched for; keep what an attempt ended by its lapsed lease had not committed and record it for the redispatch's handoff; reconcile leases that lapsed unsubmitted; remove ended attempts' worktrees.
+2. **close**: end sessions whose item left the stage they were launched for; keep what an attempt ended by its lapsed lease had not committed and record it for the redispatch's handoff — whether the lapsed lease is still on the record or the control plane's reconciliation already cleared it (GY-2956); reconcile leases that lapsed unsubmitted; remove ended attempts' worktrees.
 3. **dispatch**: claimable items to free worker profiles; unmergeable heads back to a worker; reviewer and producer requests; the master session, launched when absent.
 4. **merge writer**: trial and merge each submitted head in order ([delivery](delivery.md)).
 5. **persist**: the loop cursor.
