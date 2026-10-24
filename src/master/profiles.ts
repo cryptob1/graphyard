@@ -317,6 +317,13 @@ export const masterRunSchema = z.object({
   // once with its own work, and how long after that re-prompt a still-idle session is ended as
   // stalled — the attempt released and the item dispatched again. Unset: 10 minutes.
   inactivityMinutes: z.number().int().min(1).max(240).optional(),
+  // GY-2961: the attempt bound is a progress bound. `attemptBoundMinutes` ends an attempt whose
+  // worktree has shown neither a commit nor a changed file for the progress window (20 minutes)
+  // past this many minutes since its claim — the no-submission bound, per install. Unset: 130.
+  // `attemptCeilingMinutes` ends even a still-progressing attempt this long after its claim.
+  // Unset: 8 hours.
+  attemptBoundMinutes: z.number().int().min(10).max(1440).optional(),
+  attemptCeilingMinutes: z.number().int().min(30).max(2880).optional(),
   // Managed worktree root for proof and review checkouts: absolute path outside worktrees,
   // required free space, and max size before master status warns.
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),

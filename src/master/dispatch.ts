@@ -32,6 +32,8 @@ import { readVerificationMaps, verificationMapDigest, type VerificationMap } fro
 import { namedPaths } from '../model/documentation-glob.js';
 import { appliedReworkBrief, reworkBriefSection, type AppliedRework } from './rework-brief.js';
 import { workerBeforePushSection, workerFastGatesPresent } from './worker-fast-gates.js';
+import { attemptBoundMs, attemptCeilingMs } from './attempt-bound.js';
+import { attemptProgressWindowMs } from '../model/attempt-bound.js';
 
 /** The launcher's own runner: the CLI as a child, and git. `stdio` is honoured for the streams a child may inherit; the rest is captured. */
 type WorkerCommand = (command: string, args: string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; stdio?: ('ignore' | 'pipe' | 'inherit')[] }) => string | Buffer | Promise<string | Buffer>;
@@ -471,8 +473,8 @@ export const externalDirectoryPromptGuidance = 'Your launch has already granted 
  */
 export const branchRewriteGuidance = 'Never rewrite the assigned branch: fix a wrong commit forward with a new commit. ';
 export function workerPrompt(
-  config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'candidate' | 'submission' | 'pipeline'>>,
+  config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -505,7 +507,9 @@ export function workerPrompt(
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha });
-  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, commit on the assigned branch, and submit the commit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action (nothing is pushed and no pull request is opened): complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. Do not submit trusted evidence or merge; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
+  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, commit on the assigned branch, and submit the commit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action (nothing is pushed and no pull request is opened): complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. `
+    + attemptBoundSection(config.run, work, epoch)
+    + `Do not submit trusted evidence or merge; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
     + installed
     + (memoryDigest || '')
     // The maps for the areas the item's description and criteria name.
@@ -525,6 +529,18 @@ export function workerPrompt(
     // GY-1987: the worker judges its own diff by the reviewer's standard (graphyard review self) before it submits, so a blocking finding costs a push, not a review round.
     + `Before complete, run node ${config.cliPath} review self ${work.key}, judge your diff by what it prints and fix each BLOCKING finding first. `
     + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
+}
+
+/**
+ * The attempt bound, named plainly so the agent plans around it (GY-2961): when its session ends,
+ * that the bound extends while the worktree commits or changes files, the hard ceiling, and the
+ * handoff rule. Without a claim time on the record there is no instant to name, so no section.
+ */
+function attemptBoundSection(run: MasterConfig['run'] | undefined, work: Partial<Pick<Work, 'lastAssignment' | 'pipeline'>>, epoch: number) {
+  const claimedAt = (work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : null) ?? work.pipeline?.attempts?.find(attempt => attempt.epoch === epoch)?.claimedAt ?? null;
+  if (!claimedAt || !Number.isFinite(Date.parse(claimedAt))) return '';
+  const claimed = Date.parse(claimedAt);
+  return `Your session ends at ${new Date(claimed + attemptBoundMs(run)).toISOString()} unless it keeps making progress: the bound extends while your worktree commits or changes files (a stop needs ${Math.round(attemptProgressWindowMs / 60_000)} minutes without either past the bound), and nothing runs past ${new Date(claimed + attemptCeilingMs(run)).toISOString()}; commit forward often, and a successor receives your diff. `;
 }
 
 /** What the previous attempt left for this one: the work an exhausted session had not committed, and a human's answer. */

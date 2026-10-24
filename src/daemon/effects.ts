@@ -64,6 +64,20 @@ export interface DaemonEffects {
    * alone: a lease the control plane already reconciled (GY-2956) carries no expiry on the record.
    */
   endExpiredLease?: (work: Work, lease: Pick<NonNullable<Work['lease']>, 'epoch' | 'owner'>) => Promise<PartialWork | null>;
+  /**
+   * Reads how the attempt's assigned worktree stands (GY-2961): its HEAD commit and a fingerprint
+   * of its uncommitted changes — the reading whose change is the worktree progress that extends
+   * the attempt bound. Null when the worktree cannot be read. Absent, no progress is recorded.
+   */
+  worktreeState?: (space: { path: string; epoch: number }) => { head: string | null; dirty: string | null } | null | Promise<{ head: string | null; dirty: string | null } | null>;
+  /**
+   * Ends a worker attempt the attempt bound stopped (GY-2961): keeps what the attempt had not
+   * committed as one WIP commit on its own branch (a successor receives the diff), and records the
+   * capacity exhaustion that releases its lease with that partial work on the item. Returns the
+   * partial work recorded, or null when this host holds nothing of the attempt. Absent, no
+   * attempt is stopped at its bound.
+   */
+  endAttemptBound?: (work: Work, session: SessionHandle, why: string) => Promise<PartialWork | null>;
   /** Ends the agent-registry session a review or proof session was launched under (GY-2944): the ledgers name it; absent, nothing is released. */
   releaseRegistrySession?: (session: RegistrySlot, reason: string) => Promise<unknown>;
   /** The control plane's reconciliation of an item whose lease lapsed with nothing submitted (`POST work/:id/resync`). */

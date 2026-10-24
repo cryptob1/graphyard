@@ -3,6 +3,7 @@ import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents } from 
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary, emptyMasterSession, masterSummary, profileHealth, readDaemonState } from '../master-daemon.js';
+import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
@@ -35,7 +36,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const masterAgent = state?.master.agentName ? runtime.agents.find(agent => agent.name === state.master.agentName || (!!state.master.pane && agent.pane_id === state.master.pane)) : undefined;
   const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;
   const sessions = snapshot.work.flatMap(item => (item.sessions ?? []).filter(session => session.state === 'running')
-    .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null })));
+    .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null,
+      // A live worker attempt names its bound (GY-2961): how long is left, what extends it, and the ceiling.
+      ...(session.kind === 'implementation' ? { attempt: attemptBoundSummary(item, session, master.run, now) } : {}) })));
   // GY-2958: the trial's test gate for this checkout — ci-tests, repository checks, or an explicit
   // "no test check configured" so a managed repository never looks like it trials with zero tests.
   const trialTests = trialTestGateStatus(root);

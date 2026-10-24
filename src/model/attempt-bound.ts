@@ -13,6 +13,8 @@ export const workerSubmissionBoundMs = 60 * 60_000;
 export const workerReclaimBoundMs = 2 * workerSubmissionBoundMs;
 /** Submission progress counts while it is no older than the session's reporting cadence (sessionObservationFreshMs). */
 export const submissionProgressCadenceMs = 15 * 60_000;
+/** How fresh worktree progress must be to extend the attempt past its bound (GY-2961): the loop records the attempt worktree's new commit or changed files on the session handle, and a stop needs this many minutes without either. */
+export const attemptProgressWindowMs = 20 * 60_000;
 
 export interface UnsubmittedAttempt {
   key: string; epoch: number; owner: string; claimedAt: string;
@@ -30,7 +32,7 @@ export interface UnsubmittedAttempt {
   reclaim: boolean;
 }
 /** When the attempt holding `epoch` was claimed, from the assignment or the pipeline timeline. */
-function attemptClaimedAt(work: Work, epoch: number): string | null {
+export function attemptClaimedAt(work: Work, epoch: number): string | null {
   const attempts = work.pipeline?.attempts ?? [];
   const claimed = (work.lastAssignment?.epoch === epoch ? work.lastAssignment.claimedAt : null) ?? attempts.find(attempt => attempt.epoch === epoch)?.claimedAt ?? null;
   return claimed && Number.isFinite(Date.parse(claimed)) ? claimed : null;
@@ -63,9 +65,33 @@ export function submissionProgressAt(work: Work, epoch: number, owner: string, c
   return readings.sort().at(-1) ?? null;
 }
 /**
+ * The attempt's worktree progress (GY-2961): the newest reading the loop recorded on one of the
+ * attempt's session handles since it was claimed — a new commit or changed files in the assigned
+ * worktree, observed by the loop that supervises the session.
+ */
+export function worktreeProgressAt(work: Work, epoch: number, owner: string, claimedAt: string): string | null {
+  return (work.sessions ?? [])
+    .filter(handle => handle.kind === 'implementation' && handle.principal === owner && (handle.epoch === epoch || handle.id === `${owner}:${epoch}`))
+    .map(handle => handle.workTree?.at)
+    .filter((at): at is string => !!at && Number.isFinite(Date.parse(at)) && Date.parse(at) >= Date.parse(claimedAt))
+    .sort().at(-1) ?? null;
+}
+/**
+ * Whether the attempt shows fresh progress of either kind (GY-2961): a submission observation
+ * inside its cadence, or worktree progress inside the window. Either extends the attempt past
+ * its no-submission bound; the ceiling still ends it.
+ */
+export function attemptProgressFresh(work: Work, epoch: number, owner: string, claimedAt: string, now: number): boolean {
+  const submitted = submissionProgressAt(work, epoch, owner, claimedAt);
+  if (submitted && now - Date.parse(submitted) <= submissionProgressCadenceMs) return true;
+  const tree = worktreeProgressAt(work, epoch, owner, claimedAt);
+  return !!tree && now - Date.parse(tree) <= attemptProgressWindowMs;
+}
+
+/**
  * The attempt holding `work`'s lease past the worker bound with no submission, or null (GY-1460).
- * Null inside the bound, once the attempt has submitted (or resubmitted) under its epoch, and while
- * a submission-progress observation is inside the cadence.
+ * Null inside the bound, once the attempt has submitted (or resubmitted) under its epoch, and
+ * while progress of either kind is fresh (GY-2961).
  */
 export function unsubmittedAttempt(work: Work, now: number): UnsubmittedAttempt | null {
   const lease = work.lease;
@@ -77,8 +103,9 @@ export function unsubmittedAttempt(work: Work, now: number): UnsubmittedAttempt 
   if (pastBoundMs <= 0) return null;
   // A lease that lapsed inside the bound was never held past it: the lapse and containment path owns that attempt.
   if (Date.parse(lease.expiresAt) - Date.parse(boundFrom) <= workerSubmissionBoundMs) return null;
-  const progressAt = submissionProgressAt(work, lease.epoch, lease.owner, claimedAt);
-  if (progressAt && now - Date.parse(progressAt) <= submissionProgressCadenceMs) return null;
+  const progressAt = [submissionProgressAt(work, lease.epoch, lease.owner, claimedAt), worktreeProgressAt(work, lease.epoch, lease.owner, claimedAt)]
+    .filter((at): at is string => !!at).sort().at(-1) ?? null;
+  if (attemptProgressFresh(work, lease.epoch, lease.owner, claimedAt, now)) return null;
   const handle = (work.sessions ?? []).find(entry => entry.kind === 'implementation' && entry.id === `${lease.owner}:${lease.epoch}`);
   const observed = handle?.observed && handle.observedAt ? { state: handle.observed, at: handle.observedAt } : handle ? { state: handle.state, at: handle.updatedAt } : null;
   return { key: work.key, epoch: lease.epoch, owner: lease.owner, claimedAt, boundFrom, pastBoundMs, leaseExpiresAt: lease.expiresAt, live: Date.parse(lease.expiresAt) > now,
@@ -109,6 +136,5 @@ export function lapsedAtNoSubmissionBound(work: Pick<Work, 'submission'> & Parti
   const expiresAt = Date.parse(lease.expiresAt);
   const boundFrom = claimedAt && Number.isFinite(Date.parse(claimedAt)) ? claimedAt : null;
   if (!claimedAt || !boundFrom || expiresAt - Date.parse(boundFrom) < workerNoSubmissionRefusalMs) return false;
-  const progressAt = submissionProgressAt(work as Work, lease.epoch, lease.owner ?? '', claimedAt);
-  return !progressAt || expiresAt - Date.parse(progressAt) > submissionProgressCadenceMs;
+  return !attemptProgressFresh(work as Work, lease.epoch, lease.owner ?? '', claimedAt, expiresAt);
 }

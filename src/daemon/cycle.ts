@@ -14,6 +14,8 @@ import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
 import { hotspots } from './hotspots.js';
 import { settledPurpose } from '../model/session-state.js';
+import { attemptClaimedAt, attemptProgressFresh, attemptProgressWindowMs } from '../model/attempt-bound.js';
+import { attemptBoundMs, attemptCeilingMs, boundMinutes } from '../master/attempt-bound.js';
 import { profileHealth, clearProfileFailure, recordProfileFailure } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
@@ -199,6 +201,7 @@ async function closeStep(cycle: Cycle) {
       } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not close ${session.id}: ${message(error)}`, session.principal); }
       continue;
     }
+    if (await attemptBoundStep(cycle, item, session)) continue;
     await stallStep(cycle, item, session);
   }
   if (effects.reclaimLease) for (const item of snapshot.work) {
@@ -249,6 +252,56 @@ async function closeStep(cycle: Cycle) {
     } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not release ${session.id}'s agent-registry session: ${message(error)}`, session.principal ?? null); }
   }
   await effects.sweepCheckouts?.();
+}
+
+/**
+ * The attempt bound (GY-2961): an attempt is a progress bound. Each cycle the loop reads the
+ * attempt's worktree and records on the session handle what changed there — a new commit or
+ * changed files — so the bound extends while the attempt progresses and every reader sees the
+ * same progress: the server's renewal refusal counts it, master status names the remaining time,
+ * and the launch brief states the stop it names. An attempt still progressing is stopped only at
+ * its ceiling; one with neither a commit nor a changed file for the progress window past its
+ * bound is stopped here: the pane closes, the uncommitted rest is kept for the successor (the
+ * handoff a lapsed lease gets), and the capacity record releases the lease. True when the attempt
+ * was ended here, so the stall step leaves it alone.
+ */
+async function attemptBoundStep(cycle: Cycle, item: Work, session: NonNullable<Work['sessions']>[number]): Promise<boolean> {
+  const { config, effects, clock } = cycle;
+  if (session.kind !== 'implementation' || !effects.endAttemptBound) return false;
+  const epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
+  const lease = item.lease;
+  if (!lease || lease.owner !== session.principal || lease.epoch !== epoch || Date.parse(lease.expiresAt) <= clock) return false;
+  const claimedAt = attemptClaimedAt(item, epoch);
+  if (!claimedAt || !Number.isFinite(Date.parse(claimedAt))) return false;
+  // The worktree reading, recorded when it changed: the progress the bound extends by, on the item
+  // for every reader. A write that fails is next cycle's reading again.
+  const space = item.workspaces?.find(entry => entry.epoch === epoch && entry.host === config.hostId);
+  const reading = space ? await Promise.resolve(effects.worktreeState?.(space)).catch(() => null) ?? null : null;
+  const changed = !!reading && (!session.workTree || session.workTree.head !== reading.head || session.workTree.dirty !== reading.dirty);
+  if (reading && changed) {
+    try {
+      // The write names no epoch: a session write under the live lease is the holder's alone (engine.ts), and the handle's id already carries it.
+      await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'running',
+        workTree: { ...reading, at: new Date(clock).toISOString() } });
+    } catch { /* the reading stands for the next cycle */ }
+  }
+  const age = clock - Date.parse(claimedAt), bound = attemptBoundMs(config.run), ceiling = attemptCeilingMs(config.run);
+  if (age < bound) return false;
+  // Progress recorded this very cycle counts: the snapshot's handle may still be a cycle behind.
+  if (age < ceiling && (changed || attemptProgressFresh(item, epoch, session.principal, claimedAt, clock))) return false;
+  const why = age >= ceiling
+    ? `it ran past the ${boundMinutes(ceiling)} ceiling with no submission, however steadily it progressed`
+    : `it made no commit and no file change for ${boundMinutes(attemptProgressWindowMs)} past the ${boundMinutes(bound)} bound`;
+  const key = `close:${item.id}:${session.id}`;
+  try {
+    if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
+    const kept = await effects.endAttemptBound(item, session, why);
+    await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished',
+      outcome: `stopped by the attempt bound: ${why}`.slice(0, 500) });
+    await note(cycle, key, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: the attempt ${why}${kept?.commit ? `; its uncommitted work is kept as ${kept.commit.slice(0, 12)}` : ', and a successor receives its diff'}`, session.principal);
+  }
+  catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not end ${session.id} at its attempt bound: ${message(error)}`, session.principal); }
+  return true;
 }
 
 /**

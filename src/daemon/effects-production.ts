@@ -1,5 +1,5 @@
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -90,6 +90,32 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         event: 'exhausted', role: 'worker', epoch: lease.epoch, cause: 'interrupted',
         profile: lease.owner.slice(0, 80), account: null, runtime: null,
         reason: 'was ended by its lapsed lease: nothing was submitted, and its uncommitted work was kept before the worktree cleanup',
+        resetsAt: null, partialWork,
+      }, randomUUID());
+      return partialWork;
+    },
+    // GY-2961: the attempt bound's reading of the attempt's worktree — the HEAD commit and a
+    // fingerprint of the uncommitted changes, so a change of either is the progress the bound
+    // extends by. A worktree that cannot be read shows no progress, as a gone worktree should.
+    worktreeState: async space => {
+      const git = async (...args: string[]) => String(await run('git', ['-C', space.path, ...args], { timeoutMs: 30_000 })).trim();
+      let head: string | null;
+      try { head = (await git('rev-parse', 'HEAD')) || null; } catch { return null; }
+      const dirty = await git('status', '--porcelain').then(out => out ? createHash('sha256').update(out).digest('hex').slice(0, 16) : null, () => null);
+      return { head, dirty };
+    },
+    // GY-2961: the attempt bound's stop — the same preservation a lapsed lease gets (a successor
+    // receives the diff), with the bound named on the capacity record that releases the lease.
+    endAttemptBound: async (item, session, why) => {
+      const config = current();
+      const epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
+      const space = item.workspaces?.find(entry => entry.epoch === epoch);
+      if (!Number.isSafeInteger(epoch) || !space || space.host !== config.hostId) return null;
+      const partialWork = await preservePartialWork(space.path, `${item.key} attempt ${epoch} stopped at its attempt bound`, run);
+      await mutate(`work/${item.id}/capacity`, {
+        event: 'exhausted', role: 'worker', epoch, cause: 'interrupted',
+        profile: session.principal.slice(0, 80), account: null, runtime: session.runtime?.slice(0, 40) ?? null,
+        reason: `stopped by the attempt bound: ${why}`.slice(0, 500),
         resetsAt: null, partialWork,
       }, randomUUID());
       return partialWork;

@@ -39,6 +39,8 @@ export interface SessionHandle {
   role: string | null;
   /** The exact commit this session is bound to, when it is bound to one; a session for a head the item has moved past is superseded. */
   head: string | null; /** When `head` was last recorded as a different commit (GY-1460): a push, which a rewrite of the same head never moves. */ headAt?: string;
+  /** The loop's reading of the attempt's worktree (GY-2961): its HEAD commit and a fingerprint of its uncommitted changes, stamped when this reading was first seen — the worktree progress that extends the attempt bound. */
+  workTree?: { head: string | null; dirty: string | null; at: string } | null;
   /** The command or link the launcher says attaches to this session while it runs. */
   attach: string | null;
   /** Where the session writes its transcript, so a finished session is still readable. */
@@ -65,6 +67,7 @@ export const sessionHandleSchema = z.object({
   runtime: line(80), host: line(200),
   agentName: line(120).optional(), role: line(120).optional(),
   head: z.string().trim().regex(/^[0-9a-f]{7,64}$/, 'A session is bound to a commit by its full or abbreviated SHA').optional(),
+  workTree: z.object({ head: z.string().regex(/^[0-9a-f]{7,64}$/).nullable(), dirty: z.string().max(64).nullable(), at: z.string().datetime() }).optional(),
   workspace: line(120).optional(), tab: line(120).optional(), pane: line(120).optional(),
   attach: z.string().trim().min(1).max(500).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
   transcript: z.string().trim().min(1).max(1000).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
@@ -142,6 +145,7 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     // A reopened handle is another runtime session: the previous attempt's name, pane, attach
     // command and transcript say nothing about it, so only what this registration supplies stands.
     agentName: input.agentName ?? runtimeFacts?.agentName ?? null, role: input.role ?? existing?.role ?? null, head: input.head ?? existing?.head ?? null,
+    workTree: reopened ? null : input.workTree ?? runtimeFacts?.workTree ?? null,
     workspace: input.workspace ?? runtimeFacts?.workspace ?? null, tab: input.tab ?? runtimeFacts?.tab ?? null, pane: input.pane ?? runtimeFacts?.pane ?? null,
     attach: input.attach ?? runtimeFacts?.attach ?? null,
     transcript: input.transcript ?? runtimeFacts?.transcript ?? null,
