@@ -15,6 +15,8 @@ Non-master launches get own checkouts, the coordinator's unwritable (Codex sandb
 
 Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`.
 
+A concluded cherry-pick can still leave `CHERRY_PICK_HEAD`: removing it takes the common `packed-refs` lock the sandbox keeps read-only, and git exits 0 with the state in place. `graphyard sync` removes the pick's state from the worktree's own git dir — exactly the files its quit removes — and merges.
+
 Launches take the first account under `run.quotaCeilingPercent`, else fail over; limit notices hold the account (`capacity.exhausted`), among them Z.AI's 429 `Rate limit reached` envelope (`{"code":"1302",…}`), which names no reset and holds its account 15 minutes. Concurrent launches spread across provider plans before any plan takes a second live session, so one plan's limit cannot take the fleet down. Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
 
 ## The loop's own master session
