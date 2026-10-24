@@ -10,7 +10,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { daemonEffects } from '../src/daemon/effects.js';
 import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstParentHolds, mergeOne, mergeQueue, nextToMerge, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { attributeFailures, baseFailureReason, baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstFailingAssertion, crashedProcessLine, firstParentHolds, mergeOne, mergeQueue, nextToMerge, parseBaseFailureReason, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { defaultDeployKeyFile, defaultMergeWriterRetrials, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { deliveredReason, otherHeadRefusal, unheldShaRefusal, unintendedShaRefusal } from '../src/server/merge-record.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
@@ -282,6 +282,57 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
   const phases = runner.calls.map(call => `${call.command} ${call.args.slice(0, 2).join(' ')}`);
   assert.ok(phases.some(phase => phase.startsWith('npm run')) && phases.some(phase => phase.startsWith('git -C')), `build and checkout ran: ${phases.join('; ')}`);
   await rm(base, { recursive: true, force: true });
+});
+
+test('unit:base-failure-reason-carries-crash-detail — a trial whose base run exits with a crashed test database is attributed to the base with the refusal naming the crashed process line and the first failing case\'s assertion text, so the next operator reads the reason instead of the journal; the detail parses back out of the reason and the file and test lists make room for it (GY-2954)', async () => {
+  const head = sha('head-crash'), baseTip = sha('base-crash');
+  const file = 'tests/registry.test.ts', caseTitle = 'integration:registry-model — the control plane stores runtimes with launch contracts';
+  const crashLine = 'Process 672520 (postgres) of user 1000 dumped core.';
+  const assertion = 'Error: listen EINVAL: invalid argument /var/tmp/gy-t/graphyard-keyring-probe-backoff-x/graphyard-secrets-bus';
+  const refused = (error: string) => `TAP version 13\n# Subtest: ${file}\n    not ok 1 - ${caseTitle}\n      ---\n      failureType: \'testCodeFailure\'\n      error: \'${error}\'\n      ...\n    1..1\nnot ok 2 - ${file}\n  ---\n  error: \'1 test failed\'\n  ...\n1..2\n`;
+  const first: MergeTrialRun = { build: 'pass', tests: { passed: 0, failed: [file], files: 1 }, durationMs: 1, logTail: '', files: [file], proofs: {} };
+  const runs: string[] = [];
+  const attributed = await attributeFailures(first, refused('Error: connect ECONNREFUSED 127.0.0.1:15438'),
+    { root: '/coordinator', base: '/coordinator', mergeSha: head, changedFiles: ['src/a.ts'], proofs: [], proofFiles: [], baseTip, timeoutMs: 60_000 },
+    async () => '',
+    async (commit, files) => {
+      runs.push(`${commit.slice(0, 8)}:${files.join(',')}`);
+      return commit === baseTip
+        ? { run: { build: 'pass', tests: { passed: 0, failed: [file], files: 1 }, durationMs: 1, logTail: `Oct 24 09:46:58 vishrog systemd-coredump[673273]: ${crashLine}`, runnerExit: 1 }, tap: refused(assertion) }
+        : { run: { build: 'pass', tests: { passed: 0, failed: [file], files: 1 }, durationMs: 1, logTail: '' }, tap: refused('Error: connect ECONNREFUSED 127.0.0.1:15438') };
+    });
+  assert.deepEqual(runs, [`${head.slice(0, 8)}:${file}`, `${baseTip.slice(0, 8)}:${file}`], 'the failing file reran on the head, then ran on the base tip');
+  assert.ok(attributed.base, 'the failure is the base\'s');
+  assert.equal(attributed.base!.crash, crashLine, 'the base run\'s crashed process line rides on the verdict');
+  assert.equal(attributed.base!.assertion, assertion, 'so does the first failing case\'s assertion text');
+  const reason = baseFailureReason(attributed.base!);
+  assert.match(reason, /^base failure: tests tests\/registry\.test\.ts fail on the base tip /);
+  assert.ok(reason.includes(crashLine), `the reason names the crashed process: ${reason}`);
+  assert.ok(reason.includes(assertion), `the reason names the first failing case\'s assertion: ${reason}`);
+  const parsed = parseBaseFailureReason(reason);
+  assert.ok(parsed, 'the reason parses back');
+  assert.deepEqual([parsed!.tip, parsed!.files, parsed!.tests], [baseTip, [file], [caseTitle]], 'the tests list parses back without the detail riding in it');
+  assert.deepEqual([parsed!.crash, parsed!.assertion], [crashLine, assertion]);
+  // A base run that named no crash keeps the reason as it was: files, tip, tests.
+  const plain = baseFailureReason({ tip: baseTip, files: [file], tests: [caseTitle] });
+  assert.equal(plain, `base failure: tests ${file} fail on the base tip ${baseTip} too: ${caseTitle}`);
+  assert.deepEqual(parseBaseFailureReason(plain)!.tests, [caseTitle]);
+  // The ordinary base failure — a plain assertion, no crash anywhere in the output — never claims a
+  // crashed process: the detail is labeled for what it is, and an assertion-only detail parses back
+  // as the assertion, never as a crash.
+  const ordinary = baseFailureReason({ tip: baseTip, files: [file], tests: [caseTitle], assertion });
+  assert.ok(!ordinary.includes('crashed process'), `the ordinary base failure names no crash: ${ordinary}`);
+  assert.ok(ordinary.includes(assertion), `it still names the first failing case's assertion: ${ordinary}`);
+  const ordinaryParsed = parseBaseFailureReason(ordinary)!;
+  assert.deepEqual([ordinaryParsed.tip, ordinaryParsed.files, ordinaryParsed.tests], [baseTip, [file], [caseTitle]]);
+  assert.deepEqual([ordinaryParsed.crash, ordinaryParsed.assertion], [undefined, assertion], 'an assertion-only detail is the assertion, not a crash');
+  assert.equal(crashedProcessLine('no crash named here\n'), null, 'no crashed process line, no detail');
+  assert.equal(crashedProcessLine('Process 672520 of user 1000 has finished\n'), null, 'a line that merely starts "Process 123" names no crash');
+  assert.equal(crashedProcessLine('2026-10-24T09:46:58Z PANIC:  could not write to file "x"\n'), 'PANIC:  could not write to file "x"', 'the database\'s own PANIC still rides');
+  assert.equal(firstFailingAssertion('TAP version 13\nok 1 - the only case\n1..1\n'), null, 'no failing case, no assertion');
+  // node's TAP reporter writes multi-line assertion messages as `error: |-` over indented lines: the first such line is the text.
+  const multiline = firstFailingAssertion(['TAP version 13', `# Subtest: ${file}`, `    not ok 1 - ${caseTitle}`, '      ---', '      error: |-', '        Expected values to be strictly equal:', '          \'one\' !== \'two\'', '      ...', '    1..1', '1..1', ''].join('\n'));
+  assert.equal(multiline, 'Expected values to be strictly equal:', 'a block scalar carries its first non-empty indented line');
 });
 
 // ——— The step in a cycle, over injected reads ———

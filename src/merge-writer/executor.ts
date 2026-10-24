@@ -7,7 +7,7 @@ import { parseFailedTests } from '../model/base-failure.js';
 import { leadingProof } from '../model/flake-ledger.js';
 import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
-import { runTrial, trialAttempts, TrialCleanupError, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
+import { runTrial, trialAttempts, TrialCleanupError, ansiEscape, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
@@ -127,7 +127,9 @@ export interface MergeTrialRun extends TrialRun {
    * with the test names the base run reported and the cases that failed the rerun: the failure is the base's
    * only when every such case fails on the base too (`failureIsBase`), not merely its file.
    */
-  base?: { tip: string; files: string[]; tests: string[]; cases: string[] };
+  base?: { tip: string; files: string[]; tests: string[]; cases: string[];
+    /** GY-2954: the crashed process the base run's output names — the run's database died under it — bounded. */ crash?: string;
+    /** GY-2954: the first failing case's assertion text in the base run's TAP, bounded. */ assertion?: string };
 }
 /** GY-1834: the flake a trial record carries, bounded as the record's schema bounds it: every name `parseFailedTests` keeps (≤ 500 characters) fits. */
 export const trialFlaked = (flaked: { files: readonly string[]; tests: readonly string[] }, at: string): TrialFlaked =>
@@ -210,17 +212,86 @@ function boundedList(entries: readonly string[], separator: string, budget: numb
   return kept.length || !entries.length ? kept.join(separator) : entries[0]!.slice(0, budget);
 }
 /**
- * The reason stays within 2,000 characters by bounding its file and test lists, never by cutting the
- * whole string: the base tip and the `too` that `parseBaseFailureReason` reads always survive.
+ * How much of the crashed-process line and the assertion text the reason carries: enough to read
+ * the cause, small enough that the files and tests keep their share of the 2,000 characters.
  */
-export const baseFailureReason = (base: { tip: string; files: readonly string[]; tests: readonly string[] }) => {
-  const files = boundedList(base.files, ', ', 900), tests = boundedList(base.tests, '; ', 900);
-  return `${baseFailurePrefix}: tests ${files} fail on the base tip ${base.tip} too${tests ? `: ${tests}` : ''}`;
+const crashDetailBound = 240;
+/**
+ * The line in a base run's output that names the process whose crash took the run's database down
+ * (GY-2954): systemd-coredump's `Process <pid> (postgres) of user 1000 dumped core` as the journal
+ * words it, or the database's own PANIC — a journal or log timestamp ahead of it does not ride,
+ * nor any line that merely starts `Process 123`. Null when the output names none: the base failed
+ * its cases some other way.
+ */
+export function crashedProcessLine(output: string | null | undefined): string | null {
+  for (const raw of (output ?? '').split('\n')) {
+    const line = raw.replace(ansiEscape, '').replace(/^\S+\s+\d+\s+\d+:\d+:\d+\s+\S+\s+/, '').replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*/, '').trim();
+    const at = line.search(/\bProcess \d+ \([^)]*\) of user \d+ dumped core\b|\bPANIC:/);
+    if (at >= 0) return line.slice(at).slice(0, crashDetailBound);
+  }
+  return null;
+}
+/**
+ * The first failing case's assertion text in a base run's TAP: the `error:` or `message:` field of
+ * the first `not ok` entry that is no file-level failure, bounded (GY-2954). Null when the TAP
+ * names none.
+ */
+export function firstFailingAssertion(tap: string): string | null {
+  const lines = tap.split('\n');
+  for (let index = 0; index < lines.length; index++) {
+    const entry = /^not ok \d+ - (.+?)(?:\s+#\s+(?:TODO|SKIP)\b.*)?$/i.exec(lines[index]!.replace(ansiEscape, '').trim());
+    if (!entry || /^tests\/[\w./-]+\.test\.ts$/.test(entry[1]!)) continue;
+    for (let next = index + 1; next < lines.length && lines[next]!.trim() !== '...'; next++) {
+      const raw = lines[next]!.replace(ansiEscape, '');
+      const field = /^\s*(?:error|message): (.*?)\s*$/.exec(raw);
+      if (!field) continue;
+      const inline = field[1]!.replace(/^'(.*)'$/, '$1');
+      if (inline && inline !== '|-' && inline !== '|') return inline.replace(/\\'/g, "'").slice(0, crashDetailBound);
+      // A block scalar (`error: |-` or `|`): node's TAP reporter writes multi-line assertion messages
+      // that way, the text on the lines indented past the field's own — the first non-empty is it.
+      const indent = raw.length - raw.trimStart().length;
+      for (let block = next + 1; block < lines.length; block++) {
+        const line = lines[block]!.replace(ansiEscape, '');
+        if (!line.trim()) continue;
+        if (line.length - line.trimStart().length <= indent) break;
+        return line.trim().slice(0, crashDetailBound);
+      }
+    }
+  }
+  return null;
+}
+/** The reason's segment introducing the base run's own report (GY-2954), which `parseBaseFailureReason` cuts the tests at. */
+const baseFailureDetailLead = ' — base run: ';
+const crashDetailLead = 'crashed process: ';
+const assertionDetailLead = 'first failing case: ';
+/**
+ * The reason stays within 2,000 characters by bounding its file and test lists, never by cutting
+ * the whole string: the base tip and the `too` that `parseBaseFailureReason` reads always survive.
+ * The base run's own report rides after the tests, each part labeled for what it is — the crashed
+ * process line only when the run's output names a crash, the first failing case's assertion only
+ * when the TAP names one (GY-2954) — and the lists make room for them.
+ */
+export const baseFailureReason = (base: { tip: string; files: readonly string[]; tests: readonly string[]; crash?: string | null; assertion?: string | null }) => {
+  const detail = [base.crash ? `${crashDetailLead}${base.crash}` : null, base.assertion ? `${assertionDetailLead}${base.assertion}` : null].filter(Boolean).join('; ');
+  const budget = detail ? 550 : 900;
+  const files = boundedList(base.files, ', ', budget), tests = boundedList(base.tests, '; ', budget);
+  return `${baseFailurePrefix}: tests ${files} fail on the base tip ${base.tip} too${tests ? `: ${tests}` : ''}${detail ? `${baseFailureDetailLead}${detail}` : ''}`;
 };
-/** The base tip, failing files and test names a `baseFailureReason` names, or null for any other reason. */
-export function parseBaseFailureReason(reason: string): { tip: string; files: string[]; tests: string[] } | null {
+/** The base tip, failing files and test names a `baseFailureReason` names, with the labeled crash and assertion detail when it rides, or null for any other reason. */
+export function parseBaseFailureReason(reason: string): { tip: string; files: string[]; tests: string[]; crash?: string; assertion?: string } | null {
   const match = /^base failure: tests (.+?) fail on the base tip ([0-9a-f]{40}) too(?:: (.*))?$/s.exec(reason);
-  return match ? { tip: match[2]!, files: match[1]!.split(', '), tests: match[3] ? match[3].split('; ') : [] } : null;
+  if (!match) return null;
+  const all = match[3] ?? '', at = all.indexOf(baseFailureDetailLead);
+  const tests = at < 0 ? all : all.slice(0, at);
+  const detail = at < 0 ? '' : all.slice(at + baseFailureDetailLead.length);
+  const atAssertion = detail.indexOf(`; ${assertionDetailLead}`);
+  const crash = detail.startsWith(crashDetailLead)
+    ? atAssertion < 0 ? detail.slice(crashDetailLead.length) : detail.slice(crashDetailLead.length, atAssertion)
+    : undefined;
+  const assertion = atAssertion < 0
+    ? detail.startsWith(assertionDetailLead) ? detail.slice(assertionDetailLead.length) : undefined
+    : detail.slice(atAssertion + `; ${assertionDetailLead}`.length);
+  return { tip: match[2]!, files: match[1]!.split(', '), tests: tests ? tests.split('; ') : [], ...(crash ? { crash } : {}), ...(assertion ? { assertion } : {}) };
 }
 /**
  * GY-1834: whether a trial's failure is the base's: build and merge passed, every failing test file
@@ -442,7 +513,10 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   // Attributed by case, not by file: every case the rerun failed must fail on the base tip too, and a rerun that named no case attributes nothing.
   const cases = [...again], onBaseTests = casesOf(onBase.tap).filter(test => !own(test));
   if (!files.length || !cases.length || !cases.every(test => onBaseTests.includes(test))) return result;
-  return { ...result, base: { tip, files, tests: onBaseTests, cases } };
+  // GY-2954: the refusal carries the base run's own report, so the next operator reads the reason instead of the journal.
+  const crash = crashedProcessLine(onBase.run.logTail) ?? crashedProcessLine(onBase.tap);
+  const assertion = firstFailingAssertion(onBase.tap);
+  return { ...result, base: { tip, files, tests: onBaseTests, cases, ...(crash ? { crash } : {}), ...(assertion ? { assertion } : {}) } };
 }
 
 /**
