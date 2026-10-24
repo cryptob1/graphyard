@@ -100,7 +100,7 @@ test('unit:up-sets-ssh-origin — install preflight passes an https url whose pu
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:up-sets-ssh-origin — install preflight refuses an SSH pushurl naming another repository, with the same fix', async () => {
+test('unit:up-sets-ssh-origin — install preflight refuses an SSH pushurl naming another repository, with a set-url --push fix', async () => {
   const fixture = await harness({ provider: 'compose', serverUrl: SERVER });
   try {
     execFileSync('git', ['remote', 'set-url', '--push', 'origin', 'ssh://git@github.com/other/project.git'], { cwd: fixture.root });
@@ -108,7 +108,7 @@ test('unit:up-sets-ssh-origin — install preflight refuses an SSH pushurl namin
     const plan = await buildPlan(await prepareInstall(fixture.root, request, fixture.deps, 'plan'));
     const check = plan.preflight.find(item => item.name === 'Repository');
     assert.equal(check?.ok, false);
-    assert.equal(check!.fix, 'git remote set-url origin git@github.com:owner/project.git');
+    assert.equal(check!.fix, 'git remote set-url --push origin git@github.com:owner/project.git');
   } finally { await fixture.cleanup(); }
 });
 

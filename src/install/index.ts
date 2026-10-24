@@ -576,11 +576,13 @@ export function githubCliPreflight(provider: Provider, status: { code: number; s
  */
 export function repositoryOriginPreflight(root: string, repository: string): PreflightItem {
   const ssh = sshOrigin(repository);
-  let origin = '';
-  try { origin = execFileSync('git', ['-C', root, 'remote', 'get-url', '--push', 'origin'], { encoding: 'utf8' }).trim(); } catch { origin = ''; }
+  const url = (...args: string[]) => { try { return execFileSync('git', ['-C', root, 'remote', 'get-url', ...args, 'origin'], { encoding: 'utf8' }).trim(); } catch { return ''; } };
+  const origin = url('--push');
   const pushed = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)(.+?)(?:\.git)?$/.exec(origin)?.[1];
   if (pushed?.toLowerCase() === repository.toLowerCase()) return { name: 'Repository', ok: true, detail: `origin pushes to ${origin}, which the merge writer's deploy key pushes over SSH` };
-  return { name: 'Repository', ok: false, detail: origin ? `origin pushes to ${origin}, and the merge writer pushes ${repository} with the SSH deploy key alone` : `the checkout names no origin, and the merge writer pushes ${repository} with the SSH deploy key alone`, fix: `git remote set-url origin ${ssh}` };
+  // A separate pushurl is what set-url --push changes; set-url alone changes the url it would keep overriding.
+  const flag = origin && origin !== url() ? ' --push' : '';
+  return { name: 'Repository', ok: false, detail: origin ? `origin pushes to ${origin}, and the merge writer pushes ${repository} with the SSH deploy key alone` : `the checkout names no origin, and the merge writer pushes ${repository} with the SSH deploy key alone`, fix: `git remote set-url${flag} origin ${ssh}` };
 }
 
 /**
