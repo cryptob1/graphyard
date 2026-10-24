@@ -98,6 +98,22 @@ function wallOffset(instant: number, zone: string): number {
   return Date.UTC(fields.year, fields.month - 1, fields.day, fields.hour, fields.minute, fields.second) - Math.floor(instant / 1000) * 1000;
 }
 
+/**
+ * Z.AI's 429 rate-limit envelope (`{"code":"1302","message":"Rate limit reached for requests"}`),
+ * as the runtimes that speak to it print it behind their own `Error: 429:` label (GY-2943). The bare
+ * phrase an agent may write about a rate limit is prose; the envelope is the provider speaking.
+ */
+export const zaiRateLimitEnvelope = /"code"\s*:\s*"?\d+"?\s*,\s*"message"\s*:\s*"Rate limit reached\b/i;
+/** The envelope names no reset: the account it spends is held this long (GY-2943). */
+export const zaiRateLimitHoldMs = 15 * 60_000;
+/**
+ * The reset a limit signal carries: the one its notice names, else the 429 envelope's default
+ * 15 minutes ahead. Every other notice that names no reset stays unknown, so its account is held
+ * by the bounded unknown-reset window instead of a guess this parser did not read (GY-2943).
+ */
+export const limitSignalReset = (notice: string, resetsAt: string | null, now: number): string | null =>
+  resetsAt ?? (zaiRateLimitEnvelope.test(notice) ? new Date(now + zaiRateLimitHoldMs).toISOString() : null);
+
 /** Runtime retry marker beside a limit notice (GY-973); agent prose never carries this. */
 const retryMarker = /\[\s*retrying\b[^\]]*\]|\bretrying in \d+(?:\.\d+)?\s*(?:ms|s|m|h)?\b[^\n]*?\battempt\s*#?\d+/i;
 
@@ -128,7 +144,7 @@ const providerStatus429 = /^(?:(?:\w+\s+)?error:?\s*)?429\b(?![\d.])|\b(?:http(?
 export function providerLimit(error: string, now: number): ExhaustionSignal | null {
   const text = error.replace(/\s+/g, ' ').trim();
   if (!text || !(providerStatus429.test(text) || /\btoo many requests\b/i.test(text) || exhaustionNotices.some(notice => notice.test(text)))) return null;
-  return { reason: text.slice(0, 300), resetsAt: parseResetTime(text, now) };
+  return { reason: text.slice(0, 300), resetsAt: limitSignalReset(text, parseResetTime(text, now), now) };
 }
 
 /** Headless run event for limit detection (GY-1705); only string errors are limit text. */

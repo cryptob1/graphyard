@@ -15,7 +15,7 @@ Non-master launches get own checkouts, the coordinator's unwritable (Codex sandb
 
 Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`.
 
-Launches take the first account under `run.quotaCeilingPercent`, else fail over; limit notices hold the account (`capacity.exhausted`). Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
+Launches take the first account under `run.quotaCeilingPercent`, else fail over; limit notices hold the account (`capacity.exhausted`), among them Z.AI's 429 `Rate limit reached` envelope (`{"code":"1302",…}`), which names no reset and holds its account 15 minutes. Concurrent launches spread across provider plans before any plan takes a second live session, so one plan's limit cannot take the fleet down. Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
 
 ## The loop's own master session
 
@@ -46,6 +46,8 @@ claude … --settings …/.graphyard/harness/ROLE.json --append-system-prompt-fi
 **`awaiting consent`**: answers only `hooks-continue-untrusted` (**Continue without trusting**), `telemetry-decline`, never one that grants hook execution or a sandbox escape; others (**credential**, **payment**) wait for the human. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing; the item dispatches.
 
 Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted once quiet past `run.acknowledgementSeconds` (90); resultless is **`never started`**: relaunched ≤3 times (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
+
+**Worker stall** (`run.inactivityMinutes`, 10): a worker session Herdr reports idle with no recorded activity for the window is re-prompted once with its own work; still idle a whole window after that re-prompt, the close step ends it as **`stalled`**: the pane closes, the attempt releases with its lease (a provider limit notice on the pane holds its account — Z.AI's 429 envelope for 15 minutes), and the item dispatches again next cycle.
 
 **Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
 

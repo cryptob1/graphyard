@@ -323,6 +323,10 @@ export const masterRunSchema = z.object({
   // How long a launched runtime has to come up in its pane before the launch fails and closes it
   // (GY-413); default 60. A loaded host echoes the launch command slowly, which is a slow start.
   launchStartSeconds: z.number().int().min(10).max(600).optional(),
+  // GY-2943: how long a worker session may show no recorded activity before the loop re-prompts it
+  // once with its own work, and how long after that re-prompt a still-idle session is ended as
+  // stalled — the attempt released and the item dispatched again. Unset: 10 minutes.
+  inactivityMinutes: z.number().int().min(1).max(240).optional(),
   // Managed worktree root for proof and review checkouts: absolute path outside worktrees,
   // required free space, and max size before master status warns.
   worktreeRoot: z.string().trim().min(1).max(1000).refine(isAbsolute, 'worktreeRoot must be an absolute path').optional(),
