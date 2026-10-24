@@ -25,7 +25,7 @@ Settings › **Agents** › **Connect an account** writes and smoke-tests the 06
 
 ### Configure the fleet
 
-Propose **Agent registry** from login homes: `master registry propose`, then `--apply`.
+Propose **Agent registry** from login homes: `master registry propose`, then `--apply`. The proposal names every role, master included — the reviewer's accounts at concurrency 1, so the loop launches its own session.
 
 `master registry account set NAME --runtime claude --model opus --home ~/.coding_agents/NAME --reason "Plan"`; `--plan NAME` groups accounts under one provider quota.
 

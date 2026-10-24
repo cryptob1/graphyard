@@ -114,7 +114,7 @@ export const accountSchema = z.object({
 export type FleetAccountInput = z.infer<typeof accountSchema>;
 export interface FleetAccount extends FleetAccountInput { quota: ObservedQuota; smoke?: AccountSmoke | null; unjudged?: Partial<Record<FleetRoleName, UnjudgedRuns>> }
 
-/** The roles a configured registry is expected to name. The master role (GY-898) is never proposed by setup: the operator names its accounts. */
+/** The roles a configured registry is expected to name. Setup proposes every one of them, master included (GY-2939); an operator re-names any role's accounts. */
 export const fleetRoles = ['worker', 'reviewer', 'producer', 'master'] as const;
 /**
  * Every role the registry may define: the proposed ones, and the retired diagnostician (GY-439),
