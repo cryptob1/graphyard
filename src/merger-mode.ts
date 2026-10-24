@@ -10,6 +10,8 @@ import type { Store } from './store.js';
  * control plane all the same, and nothing can set the merger.
  */
 export type MergerMode = 'control-plane';
+/** GY-2940: the origin form the merge writer's deploy key pushes OWNER/REPO through: SSH. */
+export const sshOrigin = (repository: string) => `git@github.com:${repository}.git`;
 type Queryable = Pick<pg.PoolClient, 'query'>;
 /** What /api/status shows as `mergeWriter`. */
 export const mergeWriterStatus = { merger: 'control-plane' as MergerMode, line: 'The control plane is the merge writer' };

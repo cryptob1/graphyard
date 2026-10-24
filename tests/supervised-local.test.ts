@@ -50,7 +50,7 @@ function dependencies(w: World, root: string, events: UpEvent[]): UpDependencies
     publishOnboarding: async () => null, onboardingMerged: async () => true,
     supervise: async () => { w.supervised++; return { operatorLogin: OPERATOR }; },
     // The control plane is the only merge writer (GY-1978): the repository exists and the deploy key is registered.
-    gh: async () => ({ code: 0, stdout: '{}' }), ensureDeployKey: async () => { w.deployKeys = (w.deployKeys ?? 0) + 1; return 'registered'; },
+    gh: async () => ({ code: 0, stdout: '{}' }), git: async () => ({ code: 0, stdout: '', stderr: '' }), ensureDeployKey: async () => { w.deployKeys = (w.deployKeys ?? 0) + 1; return 'registered'; },
     async cli(args, options = {}) {
       w.calls.push({ args, ...(options.stdin ? { stdin: options.stdin } : {}), ...(options.env ? { env: options.env } : {}) });
       if (args[0] === 'install' && args.includes('--plan')) return { code: 0, stdout: JSON.stringify({ preflight: [{ name: 'GitHub CLI', ok: true }] }) };

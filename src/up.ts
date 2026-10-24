@@ -9,6 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
+import { sshOrigin } from './merger-mode.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
@@ -220,6 +221,8 @@ export interface UpDependencies {
    * the github-mode path, which never creates a repository or deploy key here.
    */
   gh?(args: string[], input?: string): Promise<{ code: number; stdout: string; stderr?: string }>;
+  /** GY-2940: run git with ARGS in the checkout, so the origin `gh repo create` leaves at https is set to the SSH form. Present beside gh. */
+  git?(args: string[]): Promise<{ code: number; stdout: string; stderr?: string }>;
   /** GY-1552: the install directory that holds the deploy key; defaults to `~/.config/graphyard/<installId>`. */
   installDirectory?(): string;
   /** GY-1552: ensure the install's deploy key on REPOSITORY; defaults to ensureDeployKey. */
@@ -613,12 +616,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   const rerun = () => `graphyard up --repo ${request.repository} --provider ${request.provider}${request.agent ? ' --agent' : ''}`;
   /** GY-1552: create OWNER/NAME with the operator's gh login when it does not exist yet. */
   const ensureRepository = async () => {
-    if (!deps.gh) throw new UpStop('preflight: control-plane merger needs gh on this machine to create the repository when it is missing', upExitCodes.prerequisite);
+    if (!deps.gh || !deps.git) throw new UpStop('preflight: control-plane merger needs gh and git on this machine to create the repository when it is missing', upExitCodes.prerequisite);
     const view = await deps.gh(['repo', 'view', request.repository, '--json', 'name']);
     if (view.code === 0) return;
     const created = await deps.gh(['repo', 'create', request.repository, '--private', '--source', '.', '--push']);
     if (created.code !== 0) throw new UpStop(`preflight: gh repo create ${request.repository} --source . --push exited ${created.code}${created.stderr ? `: ${created.stderr.split('\n')[0].slice(0, 300)}` : ''}; create it under the operator's gh login, then rerun ${rerun()}`, upExitCodes.prerequisite);
-    deps.emit({ kind: 'note', text: `Created private repository ${request.repository} with gh repo create (operator's gh login).` });
+    // GY-2940: gh leaves origin at its https url, which the merge writer's SSH deploy key cannot push with; origin is the SSH form.
+    const ssh = sshOrigin(request.repository);
+    const set = await deps.git(['remote', 'set-url', 'origin', ssh]);
+    if (set.code !== 0) throw new UpStop(`preflight: setting origin to ${ssh} failed: ${(set.stderr || set.stdout || 'no output').split('\n')[0].slice(0, 300)}; run git remote set-url origin ${ssh} in ${deps.root}, then rerun ${rerun()}`, upExitCodes.failed);
+    deps.emit({ kind: 'note', text: `Created private repository ${request.repository} with gh repo create (operator's gh login); origin is ${ssh} for the merge writer's deploy key.` });
   };
   const step = async (name: UpStep, body: () => Promise<string | void>) => {
     if (state.completed.includes(name)) { deps.emit({ kind: 'step', step: name, state: 'skipped', detail: 'done by an earlier run' }); return; }
@@ -1662,6 +1669,21 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
   const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
   const browser = request.agent ? upBrowserProfile(root, request, hostInstallRoots(), githubLogin, discoverLogin) : null;
   if (browser?.from) emit({ kind: 'note', text: `No --browser-profile given: the App pages are driven in Chrome profile ${browser.profile}, which the Graphyard install at ${browser.from} uses, signed in to GitHub as ${browser.login}, the login gh uses here; pass --browser-profile to use another.` });
+  // GY-1552: a control-plane merger's children run in the checkout itself: gh (repository view/create, deploy key) and git (origin set to the SSH form, GY-2940).
+  const childIn = (command: string, args: string[], input?: string) => new Promise<{ code: number; stdout: string; stderr?: string }>(accept => {
+    const child = spawn(command, args, { cwd: root, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
+    if (input !== undefined) child.stdin!.end(input);
+    let stdout = '', stderr = '';
+    child.stdout!.on('data', chunk => { stdout += chunk; });
+    child.stderr!.on('data', chunk => { stderr += chunk; });
+    child.on('error', error => accept({ code: 1, stdout, stderr: String(error.message ?? error) }));
+    child.on('close', code => accept({ code: code ?? 1, stdout, stderr }));
+  });
+  const controlPlaneChildren = upMergerControlPlane(request) ? {
+    gh: (args: string[], input?: string) => childIn('gh', args, input),
+    git: (args: string[]) => childIn('git', args),
+    installDirectory: () => installDirectory(installIdFor(request.repository)),
+  } : {};
   // The loop runs from the checkout of the CLI master init recorded, which is this CLI until it has.
   const loopCheckout = async () => {
     let recorded: unknown = null;
@@ -1751,18 +1773,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       return { operatorLogin: recorded.operatorLogin };
     },
     // GY-1552: control-plane merger creates the repository and registers the deploy key through gh.
-    ...(upMergerControlPlane(request) ? {
-      gh: (args: string[], input?: string) => new Promise<{ code: number; stdout: string; stderr?: string }>(accept => {
-        const child = spawn('gh', args, { cwd: root, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
-        if (input !== undefined) child.stdin!.end(input);
-        let stdout = '', stderr = '';
-        child.stdout!.on('data', chunk => { stdout += chunk; });
-        child.stderr!.on('data', chunk => { stderr += chunk; });
-        child.on('error', error => accept({ code: 1, stdout, stderr: String(error.message ?? error) }));
-        child.on('close', code => accept({ code: code ?? 1, stdout, stderr }));
-      }),
-      installDirectory: () => installDirectory(installIdFor(request.repository)),
-    } : {}),
+    ...controlPlaneChildren,
     // Each App page gets its own recorded drive, so each has its own record directory.
     // Control-plane merger needs no App browser drive.
     ...(!upMergerControlPlane(request) && browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, { profile: browser.profile, ...(browser.executable ? { executable: browser.executable } : {}) }, undefined, { emit }).drive(url, handoff) } : {}),
