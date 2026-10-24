@@ -15,11 +15,17 @@ Non-master launches get own checkouts, the coordinator's unwritable (Codex sandb
 
 Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`.
 
+A concluded cherry-pick can still leave `CHERRY_PICK_HEAD`: removing it takes the common `packed-refs` lock the sandbox keeps read-only, and git exits 0 with the state in place. `graphyard sync` removes the pick's state from the worktree's own git dir — exactly the files its quit removes — and merges.
+
 Launches take the first account under `run.quotaCeilingPercent`, else fail over; limit notices hold the account (`capacity.exhausted`), among them Z.AI's 429 `Rate limit reached` envelope (`{"code":"1302",…}`), which names no reset and holds its account 15 minutes. Concurrent launches spread across provider plans before any plan takes a second live session, so one plan's limit cannot take the fleet down. Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
 
 ## The loop's own master session
 
 `master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr. `master registry propose` proposes the master role beside the others — the reviewer's accounts, concurrency 1 — so a fresh install's loop launches its own session; renaming the role's accounts replaces that proposal.
+
+### A pane stopped on its provider's limit is absent (GY-2949)
+
+Each cycle reads the master pane's recent output with the same limit-notice judge workers use. A usage or session limit notice (`You've hit your session limit · resets 1:30am`) is treated as absent: the account is held until the parsed reset (the hold rides every selection, so the spent plan is not asked again), the pane closes, and the role's next account launches the master in the same cycle. A pane whose runtime reports exited is closed and relaunched the same way, with no hold. `master status` shows the session's state on its one page: `working`, `idle` (Herdr reports the pane idle), `limited until T` while the hold stands, and `absent` once the pane is closed with no hold standing.
 
 ### A closed Herdr workspace is replaced
 

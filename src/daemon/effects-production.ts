@@ -4,9 +4,9 @@ import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { sweepManagedCheckouts } from '../producer.js';
-import { endRegistrySlot } from '../master/registry-slot.js';
+import { endRegistrySlot, endRegistrySessionById } from '../master/registry-slot.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
-import { masterSessionEffects } from '../master/master-session.js';
+import { masterProfile, masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson, readSessionScreen, inspectWorkerCredentials, dispatchWork, removeAttemptWorktree, profileAccount, recordObservedExhaustion, sessionAccount } from '../master.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
@@ -88,7 +88,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       cursor ??= await readDispatchCursor(root, current());
       return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run }));
     })().finally(() => { ticking = null; }),
-    masterSession: masterSessionEffects(root, current, run),
+    masterSession: {
+      ...masterSessionEffects(root, current, run),
+      // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,
+      // so the role's next selection — the launch the same cycle makes — passes the spent account by.
+      exhaust: async (account, notice) => {
+        await recordObservedExhaustion(current(), account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null });
+      },
+      // The registry session the closed or vanished pane ran under is ended, so the role's one slot frees for the next account; the registry's end is idempotent.
+      end: (session, reason) => endRegistrySessionById(current(), session, reason),
+    },
     // The executor merges in this checkout's object store, pushes with the install's deploy key alone and records each step as the coordinator under one key per (step, commits).
     get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const }); },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),

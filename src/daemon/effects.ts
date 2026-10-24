@@ -43,8 +43,8 @@ export interface DaemonEffects {
    * work, sent again by the loop that supervises it. Absent, no quiet session is re-prompted.
    */
   promptSession?: (session: SessionHandle, text: string) => Promise<unknown>;
-  /** The session's terminal, as text; null when the runtime cannot be read (the limit-notice judge reads it). */
-  sessionScreen?: (session: SessionHandle) => string | null | Promise<string | null>;
+  /** The session's terminal, as text; null when the runtime cannot be read (the limit-notice judge reads it). A master pane is judged by pane and name alone. */
+  sessionScreen?: (session: Pick<SessionHandle, 'pane' | 'agentName'>) => string | null | Promise<string | null>;
   /**
    * Ends a stalled worker attempt (GY-2943): records the capacity event that releases its lease —
    * `interrupted` when the pane showed no provider limit notice, `quota` with the notice's reset

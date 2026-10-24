@@ -8,6 +8,7 @@ import { type FleetProbe, selectFleetSession } from '../fleet.js';
 import { accountLaunch, heldAwareProbe } from './environments.js';
 import { closeFailedLaunch, launchStartMs, type RequestDelivery, startAgentSession, withLaunchClose } from './launch.js';
 import { createdHerdrTab, type HerdrAgent, herdrJson, observeHerdrAgents } from './herdr.js';
+import type { ExhaustionSignal } from '../model/capacity.js';
 import { failureText } from './worktrees.js';
 import type { MasterConfig } from './profiles.js';
 import type { Work } from '../model.js';
@@ -85,6 +86,10 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
 /** The loop's master-session effect (GY-898): `launch` starts the session with the handover folded into its first request, on the registry's `master` role. */
 export interface MasterSessionEffects {
   launch: (handover: string) => Promise<{ agentName: string; pane: string; runtime: string; account: string | null; session: string | null }>;
+  /** Holds the session's account until a limit notice's reset (GY-2949), the way a worker's notice holds its account. */
+  exhaust?: (account: string, notice: ExhaustionSignal) => Promise<unknown>;
+  /** Ends the agent-registry session a closed or vanished pane ran under, so the role's next account can be selected (GY-2949). */
+  end?: (session: string, reason: string) => Promise<unknown>;
 }
 export const masterSessionEffects = (root: string, config: () => MasterConfig, run?: ChildRun): MasterSessionEffects => ({
   launch: async handover => {

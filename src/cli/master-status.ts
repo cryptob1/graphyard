@@ -2,7 +2,7 @@
 import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents } from '../master.js';
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
-import { daemonSummary, profileHealth, readDaemonState } from '../master-daemon.js';
+import { daemonSummary, emptyMasterSession, masterSummary, profileHealth, readDaemonState } from '../master-daemon.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 
@@ -28,13 +28,16 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const serving = deploy
     ? { unconfigured: false, commit: short(deploy.tip), main: short(main), atMain: !!deploy.tip && deploy.tip === main, failedDeploy: deploy.failed ? { tip: short(deploy.failed), reason: deploy.reason, restoring: short(deploy.restore ?? null) } : null }
     : { unconfigured: true, commit: null, main: short(main), atMain: null, failedDeploy: null };
-  const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId) : null;
+  const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
+  const masterAgent = state?.master.agentName ? runtime.agents.find(agent => agent.name === state.master.agentName || (!!state.master.pane && agent.pane_id === state.master.pane)) : undefined;
+  const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;
   const sessions = snapshot.work.flatMap(item => (item.sessions ?? []).filter(session => session.state === 'running')
     .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null })));
-  const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   return {
     serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
+    // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
+    masterSession: masterSummary(state?.master ?? emptyMasterSession(), now, masterAgent),
     items: snapshot.work.filter(item => item.stage !== 'done').map(item => itemLine(item, now)),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter)),
     sessions,
