@@ -4,8 +4,18 @@ import { baseRefreshConflict, pendingBaseRefresh } from '../model/base-refresh.j
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
+import { reworkBriefMax } from '../master/rework-brief.js';
 
 export interface StandingVerdict { reviewer: string; at: string; reason: string }
+/**
+ * What a control-plane CHANGES_REQUESTED entry tells the next worker: its BLOCKING findings, or the
+ * body when it named none, cut so the rework brief still fits reworkBriefMax (GY-2946).
+ */
+function controlPlaneReworkDetail(review: { blocking?: string[]; body?: string }): string {
+  const text = (review.blocking?.length ? review.blocking.map(finding => `BLOCKING: ${finding}`).join('\n') : review.body?.trim()) ?? '';
+  if (!text) return '';
+  return text.length > reworkBriefMax ? `${text.slice(0, reworkBriefMax)}…` : text;
+}
 /**
  * The binding `exactApproval` demands of an approval, demanded of a change request too: the verdict
  * answers the request Graphyard recorded for this candidate, base and policy revision, under the
@@ -27,7 +37,10 @@ export function standingVerdict(work: Work): StandingVerdict | null {
   if (!work.submission || work.reworkRequested || !candidate || !observation) return null;
   if (observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const review = observation.reviews.find(entry => entry.sha === candidate.sha && entry.state === 'CHANGES_REQUESTED');
-  if (review) return { reviewer: review.reviewer, at: review.submittedAt ?? observation.at, reason: `${review.reviewer} requested changes on ${review.sha.slice(0, 12)}` };
+  if (review) {
+    const detail = controlPlaneReworkDetail(review);
+    return { reviewer: review.reviewer, at: review.submittedAt ?? observation.at, reason: `${review.reviewer} requested changes on ${review.sha.slice(0, 12)}${detail ? `: ${detail}` : ''}` };
+  }
   const agent = observation.agentReview;
   if (agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && agentVerdictBindsRequest(work, agent))
     return { reviewer: agent.profile ?? agent.provider, at: agent.completedAt ?? observation.at, reason: `${agent.profile ?? agent.provider} requested changes on ${agent.sha.slice(0, 12)}: ${agent.reason}` };
