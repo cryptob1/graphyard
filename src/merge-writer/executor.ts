@@ -219,13 +219,14 @@ const crashDetailBound = 240;
 /**
  * The line in a base run's output that names the process whose crash took the run's database down
  * (GY-2954): systemd-coredump's `Process <pid> (postgres) of user 1000 dumped core` as the journal
- * words it, or the database's own PANIC — a journal or log timestamp ahead of it does not ride.
- * Null when the output names none: the base failed its cases some other way.
+ * words it, or the database's own PANIC — a journal or log timestamp ahead of it does not ride,
+ * nor any line that merely starts `Process 123`. Null when the output names none: the base failed
+ * its cases some other way.
  */
 export function crashedProcessLine(output: string | null | undefined): string | null {
   for (const raw of (output ?? '').split('\n')) {
     const line = raw.replace(ansiEscape, '').replace(/^\S+\s+\d+\s+\d+:\d+:\d+\s+\S+\s+/, '').replace(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z\s*/, '').trim();
-    const at = line.search(/\bProcess \d|\bPANIC:/);
+    const at = line.search(/\bProcess \d+ \([^)]*\) of user \d+ dumped core\b|\bPANIC:/);
     if (at >= 0) return line.slice(at).slice(0, crashDetailBound);
   }
   return null;
@@ -241,34 +242,55 @@ export function firstFailingAssertion(tap: string): string | null {
     const entry = /^not ok \d+ - (.+?)(?:\s+#\s+(?:TODO|SKIP)\b.*)?$/i.exec(lines[index]!.replace(ansiEscape, '').trim());
     if (!entry || /^tests\/[\w./-]+\.test\.ts$/.test(entry[1]!)) continue;
     for (let next = index + 1; next < lines.length && lines[next]!.trim() !== '...'; next++) {
-      const field = /^\s*(?:error|message): '?(.*?)'?\s*$/.exec(lines[next]!.replace(ansiEscape, ''));
-      if (field && field[1]) return field[1].replace(/\\'/g, "'").slice(0, crashDetailBound);
+      const raw = lines[next]!.replace(ansiEscape, '');
+      const field = /^\s*(?:error|message): (.*?)\s*$/.exec(raw);
+      if (!field) continue;
+      const inline = field[1]!.replace(/^'(.*)'$/, '$1');
+      if (inline && inline !== '|-' && inline !== '|') return inline.replace(/\\'/g, "'").slice(0, crashDetailBound);
+      // A block scalar (`error: |-` or `|`): node's TAP reporter writes multi-line assertion messages
+      // that way, the text on the lines indented past the field's own — the first non-empty is it.
+      const indent = raw.length - raw.trimStart().length;
+      for (let block = next + 1; block < lines.length; block++) {
+        const line = lines[block]!.replace(ansiEscape, '');
+        if (!line.trim()) continue;
+        if (line.length - line.trimStart().length <= indent) break;
+        return line.trim().slice(0, crashDetailBound);
+      }
     }
   }
   return null;
 }
 /** The reason's segment introducing the base run's own report (GY-2954), which `parseBaseFailureReason` cuts the tests at. */
-const baseFailureDetailLead = ' — crashed process: ';
+const baseFailureDetailLead = ' — base run: ';
+const crashDetailLead = 'crashed process: ';
+const assertionDetailLead = 'first failing case: ';
 /**
  * The reason stays within 2,000 characters by bounding its file and test lists, never by cutting
  * the whole string: the base tip and the `too` that `parseBaseFailureReason` reads always survive.
- * When the base run's output names why it failed — the crashed process line and the first failing
- * case's assertion (GY-2954) — they ride after the tests, and the lists make room for them.
+ * The base run's own report rides after the tests, each part labeled for what it is — the crashed
+ * process line only when the run's output names a crash, the first failing case's assertion only
+ * when the TAP names one (GY-2954) — and the lists make room for them.
  */
 export const baseFailureReason = (base: { tip: string; files: readonly string[]; tests: readonly string[]; crash?: string | null; assertion?: string | null }) => {
-  const detail = [base.crash, base.assertion ? `first failing case: ${base.assertion}` : null].filter(Boolean).join('; ');
+  const detail = [base.crash ? `${crashDetailLead}${base.crash}` : null, base.assertion ? `${assertionDetailLead}${base.assertion}` : null].filter(Boolean).join('; ');
   const budget = detail ? 550 : 900;
   const files = boundedList(base.files, ', ', budget), tests = boundedList(base.tests, '; ', budget);
   return `${baseFailurePrefix}: tests ${files} fail on the base tip ${base.tip} too${tests ? `: ${tests}` : ''}${detail ? `${baseFailureDetailLead}${detail}` : ''}`;
 };
-/** The base tip, failing files and test names a `baseFailureReason` names, with the crash detail when it rides, or null for any other reason. */
+/** The base tip, failing files and test names a `baseFailureReason` names, with the labeled crash and assertion detail when it rides, or null for any other reason. */
 export function parseBaseFailureReason(reason: string): { tip: string; files: string[]; tests: string[]; crash?: string; assertion?: string } | null {
   const match = /^base failure: tests (.+?) fail on the base tip ([0-9a-f]{40}) too(?:: (.*))?$/s.exec(reason);
   if (!match) return null;
   const all = match[3] ?? '', at = all.indexOf(baseFailureDetailLead);
   const tests = at < 0 ? all : all.slice(0, at);
-  const [crash = '', assertionPart = ''] = at < 0 ? [] : all.slice(at + baseFailureDetailLead.length).split('; first failing case: ');
-  const assertion = assertionPart.replace(/^first failing case: /, '');
+  const detail = at < 0 ? '' : all.slice(at + baseFailureDetailLead.length);
+  const atAssertion = detail.indexOf(`; ${assertionDetailLead}`);
+  const crash = detail.startsWith(crashDetailLead)
+    ? atAssertion < 0 ? detail.slice(crashDetailLead.length) : detail.slice(crashDetailLead.length, atAssertion)
+    : undefined;
+  const assertion = atAssertion < 0
+    ? detail.startsWith(assertionDetailLead) ? detail.slice(assertionDetailLead.length) : undefined
+    : detail.slice(atAssertion + `; ${assertionDetailLead}`.length);
   return { tip: match[2]!, files: match[1]!.split(', '), tests: tests ? tests.split('; ') : [], ...(crash ? { crash } : {}), ...(assertion ? { assertion } : {}) };
 }
 /**

@@ -317,8 +317,22 @@ test('unit:base-failure-reason-carries-crash-detail — a trial whose base run e
   const plain = baseFailureReason({ tip: baseTip, files: [file], tests: [caseTitle] });
   assert.equal(plain, `base failure: tests ${file} fail on the base tip ${baseTip} too: ${caseTitle}`);
   assert.deepEqual(parseBaseFailureReason(plain)!.tests, [caseTitle]);
+  // The ordinary base failure — a plain assertion, no crash anywhere in the output — never claims a
+  // crashed process: the detail is labeled for what it is, and an assertion-only detail parses back
+  // as the assertion, never as a crash.
+  const ordinary = baseFailureReason({ tip: baseTip, files: [file], tests: [caseTitle], assertion });
+  assert.ok(!ordinary.includes('crashed process'), `the ordinary base failure names no crash: ${ordinary}`);
+  assert.ok(ordinary.includes(assertion), `it still names the first failing case's assertion: ${ordinary}`);
+  const ordinaryParsed = parseBaseFailureReason(ordinary)!;
+  assert.deepEqual([ordinaryParsed.tip, ordinaryParsed.files, ordinaryParsed.tests], [baseTip, [file], [caseTitle]]);
+  assert.deepEqual([ordinaryParsed.crash, ordinaryParsed.assertion], [undefined, assertion], 'an assertion-only detail is the assertion, not a crash');
   assert.equal(crashedProcessLine('no crash named here\n'), null, 'no crashed process line, no detail');
+  assert.equal(crashedProcessLine('Process 672520 of user 1000 has finished\n'), null, 'a line that merely starts "Process 123" names no crash');
+  assert.equal(crashedProcessLine('2026-10-24T09:46:58Z PANIC:  could not write to file "x"\n'), 'PANIC:  could not write to file "x"', 'the database\'s own PANIC still rides');
   assert.equal(firstFailingAssertion('TAP version 13\nok 1 - the only case\n1..1\n'), null, 'no failing case, no assertion');
+  // node's TAP reporter writes multi-line assertion messages as `error: |-` over indented lines: the first such line is the text.
+  const multiline = firstFailingAssertion(['TAP version 13', `# Subtest: ${file}`, `    not ok 1 - ${caseTitle}`, '      ---', '      error: |-', '        Expected values to be strictly equal:', '          \'one\' !== \'two\'', '      ...', '    1..1', '1..1', ''].join('\n'));
+  assert.equal(multiline, 'Expected values to be strictly equal:', 'a block scalar carries its first non-empty indented line');
 });
 
 // ——— The step in a cycle, over injected reads ———

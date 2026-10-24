@@ -281,6 +281,7 @@ test('unit:trial-base-run-registry-files-pass — with a stray .git in each shar
   const sharedTmp = await temporaryDirectory('trial-base-run-shared', tmpdir()), sharedVar = await temporaryDirectory('trial-base-run-var', tmpdir());
   mkdirSync(join(sharedTmp, '.git')); mkdirSync(join(sharedVar, '.git'));
   const durable = durableTemporaryRoot(homedir());
+  mkdirSync(durable, { recursive: true });
   assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable]), durable, 'a poisoned shared pair falls through to the durable root');
   assert.equal(trialTemporaryRoot(durable, [sharedTmp, sharedVar, durable]), durable, 'never the session directory while the durable root is clean');
   // And the confinement files' fixture shape binds under it: the secrets-bus socket of tests/keyring-probe-backoff.test.ts
