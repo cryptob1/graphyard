@@ -227,7 +227,8 @@ function namesZone(text: string): boolean {
 export function detectRuntimeExhaustion(output: string, runtime: string | null | undefined, now: number): ExhaustionSignal | null {
   // A session blocked on Claude's usage-limit menu is spent, whatever stands around the notice (GY-1566).
   const menu = classifyRuntimePrompt(output.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').split('\n').slice(-exhaustionTailLines).join('\n'), now);
-  if (menu?.kind === 'usage-limit' && menu.exhaustion) return menu.exhaustion;
+  // A menu whose notice names no readable reset takes the wording's default hold, as the scan's notices do (GY-2962).
+  if (menu?.kind === 'usage-limit' && menu.exhaustion) return { ...menu.exhaustion, resetsAt: limitSignalReset(menu.exhaustion.reason, menu.exhaustion.resetsAt, now) };
   // So is one stopped on Claude Code's out-of-usage-credits screen (GY-1889): the runtime's own pair,
   // held for the bounded unknown-reset window, since the screen names no reset to wait for.
   const credits = outOfCreditsScreen(output);

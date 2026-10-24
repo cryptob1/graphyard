@@ -311,7 +311,9 @@ async function attemptBoundStep(cycle: Cycle, item: Work, session: NonNullable<W
  * the item dispatchable again, instead of idling under a live lease. A session that showed activity
  * after its re-prompt began a new quiet spell, and is re-prompted once again. The pane's screen is
  * judged against the session runtime's provider limit notices: one found goes on the attempt's end,
- * so the account it spent is held for the fleet's next selection (GY-2943 AC-1).
+ * so the account it spent is held for the fleet's next selection (GY-2943 AC-1). A session that has
+ * stopped, whose pane already carries a recognised limit notice, ends at once on it — no window is
+ * waited (GY-2962).
  *
  * A session Herdr reports `blocked` is not idle but stopped on its runtime's own prompt (GY-2959):
  * the loop reads it off the pane, answers it once with the reject key — the decline that leaves the
@@ -327,6 +329,25 @@ async function stallStep(cycle: Cycle, item: Work, session: NonNullable<Work['se
   if (agent?.agent_status === 'blocked') return blockedPromptStep(cycle, item, session, reject, effects.endStall);
   // The prompt the last key answered is gone, so a new one gets its own answer.
   delete state.actions[reject];
+  // GY-2962: a session that has stopped, whose pane's last lines carry a recognised provider limit
+  // notice, ends at once — the notice is its provider saying the account is spent, so no inactivity
+  // window is waited: the pane closes, the attempt ends on the notice with the account held for its
+  // reset, and the item dispatches again. One still working is left to the windows below.
+  if (agent?.agent_status !== 'working') {
+    const screen = session.pane || session.agentName ? await Promise.resolve(effects.sessionScreen?.(session)).catch(() => null) ?? null : null;
+    const notice = screen !== null ? detectRuntimeExhaustion(screen, session.runtime, clock) : null;
+    if (notice) {
+      const key2 = `close:${item.id}:${session.id}`;
+      try {
+        if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
+        await effects.endStall(item, session, { reason: 'the session stopped', notice });
+        await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished',
+          outcome: `the session stopped on its provider's limit notice: ${notice.reason}`.slice(0, 500) });
+        await note(cycle, key2, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: stopped on its provider's limit notice, the account held until its reset (${notice.reason})`, session.principal);
+      } catch (error) { await note(cycle, key2, 'close', item.key, 'failed', `Could not end ${session.id} on its limit notice: ${message(error)}`, session.principal); }
+      return;
+    }
+  }
   if (agent?.agent_status !== 'idle' || !(clock - Date.parse(session.updatedAt) >= inactivityMs(config))) return;
   const key = repromptKey(item, session), quiet = Math.round(inactivityMs(config) / 60_000);
   const reprompted = state.actions[key]?.state === 'done' ? Date.parse(state.actions[key].at) : null;

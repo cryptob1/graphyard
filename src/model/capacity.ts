@@ -107,12 +107,33 @@ export const zaiRateLimitEnvelope = /"code"\s*:\s*"?\d+"?\s*,\s*"message"\s*:\s*
 /** The envelope names no reset: the account it spends is held this long (GY-2943). */
 export const zaiRateLimitHoldMs = 15 * 60_000;
 /**
- * The reset a limit signal carries: the one its notice names, else the 429 envelope's default
- * 15 minutes ahead. Every other notice that names no reset stays unknown, so its account is held
- * by the bounded unknown-reset window instead of a guess this parser did not read (GY-2943).
+ * Claude's own limit banners (GY-2962): `You've hit your session limit · resets 1:30am (America/Los_Angeles)`,
+ * `You've reached your Fable limit. Run /usage-credits to continue or switch models with /model.` —
+ * the provider speaking, judged by the same lead-of-line rules as every other notice.
  */
-export const limitSignalReset = (notice: string, resetsAt: string | null, now: number): string | null =>
-  resetsAt ?? (zaiRateLimitEnvelope.test(notice) ? new Date(now + zaiRateLimitHoldMs).toISOString() : null);
+const claudeLimitNotice = /\bYou.ve (?:hit|reached) your (session|Fable|usage) limit\b/i;
+/** A session or usage limit whose notice names no readable reset holds its account one window past the 5-hour one (GY-2962). */
+export const claudeSessionLimitHoldMs = 6 * 3_600_000;
+/** The next 08:00 local: when a Fable limit that names no reset is held until (GY-2962). */
+const nextEightLocal = (now: number): string => {
+  const local = new Date(now);
+  const at = (day: number) => new Date(local.getFullYear(), local.getMonth(), day, 8).getTime();
+  const today = at(local.getDate());
+  return new Date(today > now ? today : at(local.getDate() + 1)).toISOString();
+};
+/**
+ * The reset a limit signal carries: the one its notice names, else the wording's own default —
+ * the 429 envelope's 15 minutes (GY-2943), Claude's session and usage wordings' 6 hours and the
+ * Fable wording's next 08:00 local (GY-2962). Every other notice that names no reset stays
+ * unknown, so its account is held by the bounded unknown-reset window instead of a guess this
+ * parser did not read (GY-2943).
+ */
+export const limitSignalReset = (notice: string, resetsAt: string | null, now: number): string | null => {
+  if (resetsAt) return resetsAt;
+  if (zaiRateLimitEnvelope.test(notice)) return new Date(now + zaiRateLimitHoldMs).toISOString();
+  const claude = claudeLimitNotice.exec(notice);
+  return claude ? (claude[1].toLowerCase() === 'fable' ? nextEightLocal(now) : new Date(now + claudeSessionLimitHoldMs).toISOString()) : null;
+};
 
 /** Runtime retry marker beside a limit notice (GY-973); agent prose never carries this. */
 const retryMarker = /\[\s*retrying\b[^\]]*\]|\bretrying in \d+(?:\.\d+)?\s*(?:ms|s|m|h)?\b[^\n]*?\battempt\s*#?\d+/i;

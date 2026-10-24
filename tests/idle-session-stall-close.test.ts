@@ -1,12 +1,15 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
+import { mkdir, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { assertDispatchable, masterConfigSchema, type MasterConfig } from '../src/master.js';
+import { accountHeldForRole } from '../src/model/capacity.js';
+import { assertDispatchable, masterConfigSchema, observedExhaustions, recordObservedExhaustion, selectAccount, type MasterConfig } from '../src/master.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -161,4 +164,103 @@ test('unit:idle-session-after-reprompt-is-ended — the close step ends a sessio
   assert.ok(!prompts.some(prompt => prompt.pane === 'pane-gy-35'));
   assert.ok(!stalls.some(stall => stall.key === busy.filed.key));
   assert.ok(!closed.includes('pane-gy-35'));
+});
+
+test('unit:limit-notice-ends-attempt-at-once — the close step ends a stopped session whose pane carries \'You\'ve reached your Fable limit\' at once as a limit, with the lease released, the item dispatchable, and the account excluded from the dispatch', async () => {
+  await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
+  const now = Date.now(), clock = now + 60_000, iso = (at: number) => new Date(at).toISOString();
+  // Inside the inactivity window with no re-prompt on record: only the notice can end it, and it does, this same cycle.
+  const limited = await item('GY-48', 'Stopped on its Fable limit');
+  const busy = await item('GY-49', 'Working with a notice behind it');
+  for (const { filed, session } of [limited, busy]) await ok(workerA, 'POST', `work/${filed.id}/session`, session);
+
+  const root = await temporaryDirectory('fable-limit-hold');
+  const credentialFile = join(root, 'coordinator.token');
+  await writeFile(credentialFile, 't'.repeat(40), { mode: 0o600 });
+  for (const name of ['claude-c', 'claude-d']) {
+    await mkdir(join(root, name), { recursive: true });
+    await writeFile(join(root, name, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'x', refreshToken: 'x' } }));
+  }
+  const config = masterConfigSchema.parse({
+    version: 1, url: 'https://graphyard.example', credentialFile, cliPath: '/bin/graphyard',
+    repository, baseBranch: 'main', githubAppId: 1234, hostId: 'loop-host', masterAgentName: 'graphyard-master-fable', workers: [],
+    environments: [{ name: 'claude-c', kind: 'claude', home: join(root, 'claude-c') }, { name: 'claude-d', kind: 'claude', home: join(root, 'claude-d') }],
+  }) as MasterConfig;
+  const fable = 'You\'ve reached your Fable limit. Run /usage-credits to continue or switch models with /model.';
+  const herdr = [
+    { name: 'agent-gy-48', pane_id: 'pane-gy-48', agent_status: 'idle' },
+    { name: 'agent-gy-49', pane_id: 'pane-gy-49', agent_status: 'working' },
+  ];
+  const state: DaemonState = emptyDaemonState(config);
+  const screens: Record<string, string> = {
+    'pane-gy-48': `● Editing tests/parser.test.ts\n  ⎿ Edited 2 lines\n\n${fable}\n`,
+    'pane-gy-49': `${fable}\n`,
+  };
+  const closed: string[] = [], prompts: string[] = [], reads: string[] = [], stalls: { key: string; reason: string; resetsAt: string | null }[] = [];
+  const effects: DaemonEffects = {
+    snapshot: async () => {
+      const response = await fetch(`${url}/api/work-snapshot`, { headers: { Authorization: `Bearer ${token(coordinator)}`, 'X-Graphyard-View': 'coordination' } });
+      assert.equal(response.status, 200);
+      const snap = await response.json() as { work: Work[] };
+      return { work: snap.work, now: iso(clock) };
+    },
+    agents: () => herdr as any, herdr: async () => ({ agents: herdr as any[], available: true }),
+    credentials: async () => ({}),
+    dispatch: async () => { throw new Error('the fixture launches nothing'); },
+    closeSession: pane => { closed.push(pane); },
+    recordSession: async (target, handle) => { await ok(coordinator, 'POST', `work/${target.id}/session`, handle); },
+    promptSession: async session => { prompts.push(session.pane ?? ''); },
+    sessionScreen: session => { reads.push(session.pane ?? ''); return screens[session.pane ?? ''] ?? null; },
+    // The production end holds the account the notice spent and records the limit on the item.
+    endStall: async (target, session, stall) => {
+      const reason = `${stall.reason} on its provider's limit notice: ${stall.notice?.reason ?? ''}`.slice(0, 500);
+      stalls.push({ key: target.key, reason, resetsAt: stall.notice?.resetsAt ?? null });
+      await recordObservedExhaustion(config, 'claude-c', { at: iso(clock), resetsAt: stall.notice?.resetsAt ?? null, reason, role: 'worker', profile: 'builder', work: target.key }, clock);
+      await ok(coordinator, 'POST', `work/${target.id}/capacity`, {
+        event: 'exhausted', role: 'worker', epoch: session.epoch, profile: 'builder', account: 'claude-c', runtime: session.runtime,
+        reason, resetsAt: stall.notice?.resetsAt ?? null,
+        partialWork: { state: 'not-applicable', detail: 'the stalled attempt left its worktree as it stood; the redispatch starts from the shared base' },
+      });
+    },
+    persist: async () => {},
+  };
+
+  await runCycle(config, state, effects, () => clock, undefined, line => console.error(`[cycle] ${line}`));
+
+  // Ended at once: one cycle, no re-prompt, no window waited, the pane closed.
+  assert.ok(!prompts.includes('pane-gy-48'), 'no re-prompt is sent — the notice ends the attempt at once');
+  assert.ok(closed.includes('pane-gy-48'), 'the pane is closed');
+  const after = await reload(limited.filed.id);
+  assert.equal(after.lease, null, 'the lease is released');
+  assert.equal(after.pipeline?.attempts?.[0]?.end, 'released', 'the attempt ended, not left open');
+  const limit = after.capacity?.exhaustions?.[0];
+  assert.equal(limit?.cause ?? 'quota', 'quota', 'the end is a limit end, not an interruption');
+  assert.match(limit?.reason ?? '', /stopped on its provider's limit notice: You've reached your Fable limit/, 'the notice is the reason');
+  // The hold is the Fable wording's default: the next 08:00 local after the notice.
+  const local = new Date(clock);
+  const at = (day: number) => new Date(local.getFullYear(), local.getMonth(), day, 8).getTime();
+  const nextEight = new Date(at(local.getDate()) > clock ? at(local.getDate()) : at(local.getDate() + 1)).toISOString();
+  assert.equal(stalls.find(stall => stall.key === limited.filed.key)?.resetsAt, nextEight);
+  assert.equal(limit?.resetsAt, nextEight, "the notice's reset is on the record");
+  assert.equal(after.sessions?.at(-1)?.state, 'finished');
+  assert.match(after.sessions?.at(-1)?.outcome ?? '', /Fable limit/);
+  const allAfter = await store.list();
+  assert.doesNotThrow(() => assertDispatchable(after, allAfter, iso(clock)), 'the item is dispatchable again');
+
+  // The account the notice spent is excluded from that dispatch: held for its reset, the profile's
+  // next selection fails over to the healthy account and refuses the held one outright.
+  const held = await observedExhaustions(config, clock);
+  assert.equal(accountHeldForRole(held, 'claude-c', clock), true, 'the account is held');
+  assert.equal(accountHeldForRole(held, 'claude-d', clock), false);
+  const profile = { name: 'builder', principal: 'worker-a', agentName: 'agent-builder', mode: 'launch', kind: 'claude', accounts: ['claude-c', 'claude-d'] } as any;
+  const chosen = await selectAccount(config, 'worker', profile, { quota: false, now: () => clock, cacheMs: 0, work: 'GY-48' });
+  assert.equal(chosen.account?.name, 'claude-d', 'the dispatch excludes the held account');
+  await assert.rejects(selectAccount(config, 'worker', { ...profile, accounts: ['claude-c'] }, { quota: false, now: () => clock, cacheMs: 0, work: 'GY-48' }), /exhausted its quota mid-session/, 'a profile with only the held account waits for its reset');
+
+  // A session Herdr still reports working is left alone, whatever its pane shows.
+  assert.ok(!reads.includes('pane-gy-49'), 'a working session\'s pane is not judged');
+  const busyAfter = await reload(busy.filed.id);
+  assert.ok(busyAfter.lease, 'the working session keeps its lease');
+  assert.ok(!stalls.some(stall => stall.key === busy.filed.key));
+  assert.ok(!closed.includes('pane-gy-49'));
 });
