@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { defaultChildRun } from '../src/child-runner.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import type { MasterConfig } from '../src/master.js';
-import { attributeFailures, baseFailurePrefix, baseFailureReason, clearBaseTipCheckCache, failureIsBase, mergeOne, runMergeTrial, trialFailureReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { attributeFailures, baseFailurePrefix, baseFailureReason, baseTipCheckCacheLimit, baseTipCheckCacheSize, clearBaseTipCheckCache, failureIsBase, mergeOne, runMergeTrial, trialFailureReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { Work } from '../src/model.js';
 import {
@@ -417,16 +417,18 @@ test('unit:repository-check-rerun-keeps-new-failures — a whole-check rerun tha
   const firstFile = 'tests/a.test.ts', nextFile = 'tests/b.test.ts';
   const firstTap = `TAP version 13\n# Subtest: ${firstFile}\n    not ok 1 - case a\n    1..1\nnot ok 1 - ${firstFile}\n1..1\n`;
   const rerunTap = `TAP version 13\n# Subtest: ${nextFile}\n    not ok 1 - case b\n    1..1\nnot ok 1 - ${nextFile}\n1..1\n`;
-  const first: MergeTrialRun = { build: 'pass', tests: { passed: 0, failed: [firstFile], files: 1 }, durationMs: 1, logTail: '', files: [firstFile], proofs: {}, runnerExit: 1 };
+  const first: MergeTrialRun = { build: 'pass', tests: { passed: 0, failed: [firstFile], files: 1 }, durationMs: 1, logTail: 'log for case a', files: [firstFile], proofs: {}, runnerExit: 1, failingCase: 'case a' };
   const attributed = await attributeFailures(first, firstTap,
     { root: '/coordinator', base: '/coordinator', mergeSha: head, changedFiles: ['src/a.ts'], proofs: [], proofFiles: [], baseTip: tip, timeoutMs: 60_000 },
     async () => '',
     async (commit) => commit === head
-      ? { run: { build: 'pass', tests: { passed: 0, failed: [nextFile], files: 1 }, durationMs: 1, logTail: '', runnerExit: 1 }, tap: rerunTap }
+      ? { run: { build: 'pass', tests: { passed: 0, failed: [nextFile], files: 1 }, durationMs: 1, logTail: 'log for case b', runnerExit: 1, failingCase: 'case b' }, tap: rerunTap }
       : { run: { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '' }, tap: 'ok\n' });
   assert.deepEqual(attributed.tests.failed, [nextFile], 'the newly observed rerun failure stays on the verdict');
+  assert.equal(attributed.failingCase, 'case b', 'the refusal case is the rerun\'s, not the flaked first-run case');
+  assert.match(attributed.logTail, /case b/, 'the diagnostic log is the rerun\'s');
   assert.equal(attributed.base, undefined, 'a failure only the head\'s rerun has is not the base\'s');
-  assert.match(trialFailureReason({ run: attributed })!, /tests\/b\.test\.ts/, 'the refusal names the still-failing file');
+  assert.match(trialFailureReason({ run: attributed })!, /tests\/b\.test\.ts: case b/, 'the refusal names the still-failing file and its case');
 });
 
 test('unit:base-tip-check-cache-skips-unavailable — a base retest that reaches no verdict is not cached, so the next candidate retries and can hold as a base failure', async () => {
@@ -451,5 +453,36 @@ test('unit:base-tip-check-cache-skips-unavailable — a base retest that reaches
   assert.equal(baseAttempts, 2, 'the unavailable base result was not cached');
   assert.ok(failureIsBase(retried), 'the retry can hold as a base failure once the base answers');
   assert.deepEqual(retried.base!.files, [file]);
+  clearBaseTipCheckCache();
+});
+
+test('unit:base-tip-check-cache-bounds — a new tip drops the previous tip\'s entries and the cache never holds more than its bound', async () => {
+  clearBaseTipCheckCache();
+  const head = 'e'.repeat(40);
+  const tip1 = '1'.repeat(40), tip2 = '2'.repeat(40);
+  const file = 'tests/bound.test.ts', caseTitle = 'unit:bound — base fails';
+  const tap = `TAP version 13\n# Subtest: ${file}\n    not ok 1 - ${caseTitle}\n    1..1\nnot ok 1 - ${file}\n1..1\n`;
+  const first: MergeTrialRun = { build: 'pass', tests: { passed: 0, failed: [file], files: 1 }, durationMs: 1, logTail: '', files: [file], proofs: {}, runnerExit: 1 };
+  const verdict = (files: string[]) => ({ build: 'pass' as const, tests: { passed: 0, failed: files, files: files.length }, durationMs: 1, logTail: '', runnerExit: 1 });
+  const retest = async () => ({ run: verdict([file]), tap });
+  await attributeFailures(first, tap,
+    { root: '/coordinator', base: '/coordinator', mergeSha: head, changedFiles: ['src/a.ts'], proofs: [], proofFiles: [], baseTip: tip1, timeoutMs: 60_000 },
+    async () => '', retest);
+  assert.equal(baseTipCheckCacheSize(), 1, 'one usable base tip is remembered');
+  await attributeFailures(first, tap,
+    { root: '/coordinator', base: '/coordinator', mergeSha: head, changedFiles: ['src/a.ts'], proofs: [], proofFiles: [], baseTip: tip2, timeoutMs: 60_000 },
+    async () => '', retest);
+  assert.equal(baseTipCheckCacheSize(), 1, 'a new tip drops the previous tip\'s entry rather than retaining both');
+  // One more than the bound of distinct failing-file keys on the live tip.
+  for (let i = 0; i < baseTipCheckCacheLimit + 1; i++) {
+    const alone = `tests/f${i}.test.ts`;
+    const aloneTap = `TAP version 13\n# Subtest: ${alone}\n    not ok 1 - case ${i}\n    1..1\nnot ok 1 - ${alone}\n1..1\n`;
+    const aloneFirst: MergeTrialRun = { build: 'pass', tests: { passed: 0, failed: [alone], files: 1 }, durationMs: 1, logTail: '', files: [alone], proofs: {}, runnerExit: 1 };
+    await attributeFailures(aloneFirst, aloneTap,
+      { root: '/coordinator', base: '/coordinator', mergeSha: head, changedFiles: ['src/a.ts'], proofs: [], proofFiles: [], baseTip: tip2, timeoutMs: 60_000 },
+      async () => '',
+      async (_commit, files) => ({ run: verdict(files), tap: aloneTap }));
+  }
+  assert.ok(baseTipCheckCacheSize() <= baseTipCheckCacheLimit, `cache held ${baseTipCheckCacheSize()} entries past its bound of ${baseTipCheckCacheLimit}`);
   clearBaseTipCheckCache();
 });

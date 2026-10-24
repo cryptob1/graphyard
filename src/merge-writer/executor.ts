@@ -480,10 +480,23 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
  * this process — the repository-check path has no per-file selection, so the same tip's run answers
  * every head that hits it. Only a usable verdict is stored; a null or build-failure miss is retried
  * on the next candidate so a transient checkout/install/runner failure cannot pin a false head blame.
+ * Entries keep the derived failing files, cases, crash and assertion — not the child's captured TAP —
+ * and only the live tip's keys stay, capped so historical tips cannot grow the coordinator's memory.
  */
-const baseTipCheckCache = new Map<string, { run: TrialRun; tap: string }>();
+type BaseTipCheckEntry = { failed: string[]; cases: string[]; crash?: string; assertion?: string };
+export const baseTipCheckCacheLimit = 8;
+const baseTipCheckCache = new Map<string, BaseTipCheckEntry>();
 /** Clears the base-tip check cache (tests that mock the same tip with different outcomes). */
 export const clearBaseTipCheckCache = () => baseTipCheckCache.clear();
+/** How many base-tip check entries the writer currently holds (tests of the bound). */
+export const baseTipCheckCacheSize = () => baseTipCheckCache.size;
+/** Remember a usable base-tip check: drop every other tip's entries, refresh LRU order, evict past the bound. */
+function rememberBaseTipCheck(tip: string, key: string, entry: BaseTipCheckEntry) {
+  for (const existing of [...baseTipCheckCache.keys()]) if (!existing.startsWith(`${tip}:`)) baseTipCheckCache.delete(existing);
+  baseTipCheckCache.delete(key);
+  baseTipCheckCache.set(key, entry);
+  while (baseTipCheckCache.size > baseTipCheckCacheLimit) baseTipCheckCache.delete(baseTipCheckCache.keys().next().value!);
+}
 /**
  * GY-1834: who a trial's failing test files are charged to. A proof file in which one of the item's
  * proof cases failed is never set aside: it stays failing, and so does every proof file of a run
@@ -497,7 +510,8 @@ export const clearBaseTipCheckCache = () => baseTipCheckCache.clear();
  *
  * GY-2960: whole-repository checks re-run the entire check (no per-file selection). A rerun may fail
  * files the first run never named; those stay on the verdict so an empty intersection cannot clear a
- * still-failing head (trialFailureReason ignores runnerExit).
+ * still-failing head (trialFailureReason ignores runnerExit). When that replacement is adopted, the
+ * refusal's case, timeout and log come from the rerun — not a flaked first-run failure.
  */
 export async function attributeFailures(first: MergeTrialRun, firstTap: string, input: MergeTrialInput, git: ChildRun,
   retest: (sha: string, files: string[]) => Promise<{ run: TrialRun; tap: string } | null>): Promise<MergeTrialRun> {
@@ -532,6 +546,18 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   const flakedFiles = failed.filter(file => !held.includes(file) && !still.includes(file));
   const flakedTests = named.filter(test => !again.has(test) && !own(test));
   let result: MergeTrialRun = { ...first, tests: { ...first.tests, failed: [...held, ...still], passed: first.tests.passed + flakedFiles.length } };
+  // Adopting the rerun's replacement failures (or its remaining ones after flakes): its case, timeout
+  // and log name what still stands. Held proof failures keep the first run's diagnostics.
+  if (!held.length && still.length && (still.some(file => !failed.includes(file)) || flakedFiles.length)) {
+    const caseName = rerun.run.failingCase ?? [...again][0];
+    const { failingCase: _case, timedOut: _timed, ...rest } = result;
+    result = {
+      ...rest,
+      logTail: rerun.run.logTail,
+      ...(caseName ? { failingCase: caseName } : {}),
+      ...(rerun.run.timedOut ? { timedOut: true } : {}),
+    };
+  }
   if (flakedFiles.length || flakedTests.length) {
     result.flaked = { files: flakedFiles, tests: flakedTests };
     if (!still.length && !held.length) result = { ...result, runnerExit: rerun.run.runnerExit ?? 0 };
@@ -548,17 +574,22 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
     const attempted = await retest(tip, still).catch(() => null);
     // A miss or non-verdict is not cached: the next candidate retries after the host recovers.
     if (!attempted || attempted.run.build !== 'pass') return result;
-    baseTipCheckCache.set(cacheKey, attempted);
-    onBase = attempted;
+    const crash = crashedProcessLine(attempted.run.logTail) ?? crashedProcessLine(attempted.tap);
+    const assertion = firstFailingAssertion(attempted.tap);
+    onBase = {
+      failed: attempted.run.tests.failed,
+      cases: casesOf(attempted.tap, attempted.run.logTail),
+      ...(crash ? { crash } : {}),
+      ...(assertion ? { assertion } : {}),
+    };
+    rememberBaseTipCheck(tip, cacheKey, onBase);
   }
-  const files = still.filter(file => onBase.run.tests.failed.includes(file));
+  const files = still.filter(file => onBase.failed.includes(file));
   // Attributed by case, not by file: every case the rerun failed must fail on the base tip too, and a rerun that named no case attributes nothing.
-  const cases = [...again], onBaseTests = casesOf(onBase.tap, onBase.run.logTail).filter(test => !own(test));
+  const cases = [...again], onBaseTests = onBase.cases.filter(test => !own(test));
   if (!files.length || !cases.length || !cases.every(test => onBaseTests.includes(test))) return result;
   // GY-2954: the refusal carries the base run's own report, so the next operator reads the reason instead of the journal.
-  const crash = crashedProcessLine(onBase.run.logTail) ?? crashedProcessLine(onBase.tap);
-  const assertion = firstFailingAssertion(onBase.tap);
-  return { ...result, base: { tip, files, tests: onBaseTests, cases, ...(crash ? { crash } : {}), ...(assertion ? { assertion } : {}) } };
+  return { ...result, base: { tip, files, tests: onBaseTests, cases, ...(onBase.crash ? { crash: onBase.crash } : {}), ...(onBase.assertion ? { assertion: onBase.assertion } : {}) } };
 }
 
 /**
