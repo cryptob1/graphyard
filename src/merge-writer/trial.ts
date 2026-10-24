@@ -447,7 +447,7 @@ export const touchesDashboard = (files: readonly string[]) => files.some(file =>
 export const browserSuite = 'browser-tests/';
 /**
  * What a trial, master status and doctor record when a managed repository has no scripts/ci-tests.mjs
- * and no test or typecheck check to run (GY-2958): never a silent pass with zero tests.
+ * and no test, typecheck, or test:browser check to run (GY-2958): never a silent pass with zero tests.
  */
 export const noTestCheckConfigured = 'no test check configured';
 /** One repository check a trial runs when scripts/ci-tests.mjs is absent: its gate name and argv. */
@@ -460,7 +460,8 @@ export const checkCommandArgv = (command: string): string[] | null => {
 /**
  * The test and typecheck checks a trial runs when scripts/ci-tests.mjs is absent (GY-2958): every
  * graphyard.json preMerge entry that names a command, except build (already run), else `npm test`
- * and `npm run typecheck` when package.json defines those scripts.
+ * and `npm run typecheck` when package.json defines those scripts. `test:browser` is the GY-2092
+ * suite (dashboard changes only); it is configured but not listed here so the trial does not run it twice.
  */
 export function repositoryTrialChecks(input: {
   preMerge?: readonly { check: string; command: string | null }[] | null;
@@ -478,9 +479,12 @@ export function repositoryTrialChecks(input: {
   if (typeof scripts.typecheck === 'string') fallback.push({ check: 'typecheck', argv: ['npm', 'run', 'typecheck'] });
   return fallback;
 }
+/** True when package.json declares the Playwright suite the trial runs on dashboard changes (GY-2092). */
+export const hasBrowserTestCheck = (scripts?: Record<string, unknown> | null): boolean =>
+  typeof scripts?.['test:browser'] === 'string';
 /**
  * The trial's test gate as master status and doctor surface it for a checkout (GY-2958): ci-tests,
- * the repository's own checks, or an explicit `no test check configured`.
+ * the repository's own checks (including test:browser), or an explicit `no test check configured`.
  */
 export function trialTestGateStatus(root: string):
   | { configured: true; via: 'ci-tests' | 'checks'; checks: string[] }
@@ -494,8 +498,9 @@ export function trialTestGateStatus(root: string):
   try { scripts = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }).scripts ?? null; }
   catch { /* absent */ }
   const checks = repositoryTrialChecks({ preMerge, scripts });
-  if (!checks.length) return { configured: false, detail: noTestCheckConfigured };
-  return { configured: true, via: 'checks', checks: checks.map(entry => entry.check) };
+  if (checks.length) return { configured: true, via: 'checks', checks: checks.map(entry => entry.check) };
+  if (hasBrowserTestCheck(scripts)) return { configured: true, via: 'checks', checks: ['test:browser'] };
+  return { configured: false, detail: noTestCheckConfigured };
 }
 export interface RunTrialInput {
   /** The coordinator checkout whose object store holds the merge commit. */
@@ -782,6 +787,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
       }
       let packageScripts: Record<string, unknown> | undefined;
+      let browserSuitePassed = false;
       if (await holds('package.json')) {
         const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
         const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
@@ -802,17 +808,20 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
         // Chromium installs into the host's shared Playwright cache (a no-op once present); an install that fails is the host's, retried, never the merge's.
-        if (packageScripts?.['test:browser'] && touchesDashboard(input.changedFiles)) {
+        if (hasBrowserTestCheck(packageScripts) && touchesDashboard(input.changedFiles)) {
           enter('tests');
           const chromium = await child('tests', 'npx', ['playwright', 'install', 'chromium']);
           if (!chromium.ok) throw runnerFailure('tests', chromium);
           const browser = await child('tests', 'npm', ['run', 'test:browser']);
           if (hostEnded(browser)) throw runnerFailure('tests', browser);
           if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });
+          browserSuitePassed = true;
         }
       }
       // GY-2958: without Graphyard's own selection script, run the managed repository's preMerge /
       // package.json test checks; a Node package with none configured records that explicitly.
+      // A Playwright-only package whose browser suite already passed counts that run; one whose
+      // suite is configured but not selected for this change (no dashboard touch) is not "missing".
       if (!await holds('scripts/ci-tests.mjs')) {
         if (!(await holds('package.json'))) return finish('pass', { passed: 0, failed: [], files: 0 });
         let preMerge: { check: string; command: string | null }[] | null = null;
@@ -823,11 +832,14 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           } catch { /* unreadable policy: fall through to package.json scripts */ }
         }
         const checks = repositoryTrialChecks({ preMerge, scripts: packageScripts });
-        enter('tests');
         if (!checks.length) {
+          if (browserSuitePassed) return finish('pass', { passed: 1, failed: [], files: 1 });
+          if (hasBrowserTestCheck(packageScripts)) return finish('pass', { passed: 0, failed: [], files: 0 });
+          enter('tests');
           log.push(noTestCheckConfigured);
           return finish('pass', { passed: 0, failed: [noTestCheckConfigured], files: 0 });
         }
+        enter('tests');
         const failed: string[] = [];
         let runnerExit: number | null = 0;
         for (const check of checks) {
