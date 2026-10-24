@@ -1,4 +1,4 @@
-// Concern: `graphyard master status` — one page: the serving commit against main's tip, each open item, the merge writer, live sessions and free worker profiles.
+// Concern: `graphyard master status` — one page: the managed repository's served commit against its base tip (only what a deployment provider records; unconfigured when none does), each open item, the merge writer, live sessions and free worker profiles.
 import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents } from '../master.js';
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
@@ -21,14 +21,20 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const now = Date.parse(snapshot.now) || Date.now();
   const deploy = readDeployRecord(deployRecordPath(root));
   const main = await Promise.resolve(run('git', ['-C', root, 'rev-parse', `refs/remotes/origin/${master.baseBranch}`])).then(out => String(out).trim(), () => null);
-  const serving = deploy?.tip ?? state?.release?.commit ?? null;
+  // The managed repository's release health reads only what its own deployment records as served.
+  // With no deployment provider there is no game deployment to report, and the control plane's own
+  // build revision (state.release, the Graphyard build this loop loaded) never stands in as one: it
+  // is not the game's code, and reading it as a lagging deployment made serving-at-main unsatisfiable.
+  const serving = deploy
+    ? { unconfigured: false, commit: short(deploy.tip), main: short(main), atMain: !!deploy.tip && deploy.tip === main, failedDeploy: deploy.failed ? { tip: short(deploy.failed), reason: deploy.reason, restoring: short(deploy.restore ?? null) } : null }
+    : { unconfigured: true, commit: null, main: short(main), atMain: null, failedDeploy: null };
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const masterAgent = state?.master.agentName ? runtime.agents.find(agent => agent.name === state.master.agentName || (!!state.master.pane && agent.pane_id === state.master.pane)) : undefined;
   const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;
   const sessions = snapshot.work.flatMap(item => (item.sessions ?? []).filter(session => session.state === 'running')
     .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null })));
   return {
-    serving: { commit: short(serving), main: short(main), atMain: !!serving && serving === main, failedDeploy: deploy?.failed ? { tip: short(deploy.failed), reason: deploy.reason, restoring: short(deploy.restore ?? null) } : null },
+    serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
     masterSession: masterSummary(state?.master ?? emptyMasterSession(), now, masterAgent),

@@ -7,7 +7,7 @@ import { sweepManagedCheckouts } from '../producer.js';
 import { endRegistrySlot, endRegistrySessionById } from '../master/registry-slot.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
 import { masterProfile, masterSessionEffects } from '../master/master-session.js';
-import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson, readSessionScreen, inspectWorkerCredentials, dispatchWork, removeAttemptWorktree, profileAccount, recordObservedExhaustion, sessionAccount } from '../master.js';
+import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson, readSessionScreen, inspectWorkerCredentials, dispatchWork, preservePartialWork, removeAttemptWorktree, profileAccount, recordObservedExhaustion, sessionAccount } from '../master.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
@@ -74,6 +74,23 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         resetsAt: stall.notice?.resetsAt ?? null,
         partialWork: { state: 'not-applicable', detail: 'the stalled attempt left its worktree as it stood; the redispatch starts from the shared base' },
       }, randomUUID());
+    },
+    // GY-2953: a lease a supervisor's time bound or a worker's silence ended without a submission
+    // still holds the attempt's work in its worktree. Before the cleanup removes that tree, the
+    // uncommitted rest is committed on the attempt's own branch and the capacity record that ends
+    // the lease names the commit, so the redispatch's handoff advertises it instead of sending the
+    // next worker back to the shared base to redo the attempt blind.
+    endExpiredLease: async (item, lease) => {
+      const space = item.workspaces?.find(entry => entry.epoch === lease.epoch);
+      if (!space || space.host !== current().hostId) return null;
+      const partialWork = await preservePartialWork(space.path, `${item.key} attempt ${lease.epoch} expired`, run);
+      await mutate(`work/${item.id}/capacity`, {
+        event: 'exhausted', role: 'worker', epoch: lease.epoch, cause: 'interrupted',
+        profile: lease.owner.slice(0, 80), account: null, runtime: null,
+        reason: 'was ended by its lapsed lease: nothing was submitted, and its uncommitted work was kept before the worktree cleanup',
+        resetsAt: null, partialWork,
+      }, randomUUID());
+      return partialWork;
     },
     // The agent-registry session a review or proof session ran under, ended when the close step
     // judges it over (GY-2944): the ledgers name it, the fleet client ends it.

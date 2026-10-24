@@ -19,7 +19,7 @@ Graphyard's one remote credential is the merge writer's deploy key ([install](in
 
 ## Recovery
 
-A dead supervisor's lease lapses; the close step reconciles it and the item is claimable again.
+A dead supervisor's lease lapses; the close step keeps what the attempt had not committed on its branch and records it for the redispatch's handoff, then reconciles the lease and the item is claimable again.
 
 ### Producer-runtime faults
 
