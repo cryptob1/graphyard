@@ -569,16 +569,18 @@ export function githubCliPreflight(provider: Provider, status: { code: number; s
 }
 
 /**
- * GY-2940: the checkout's origin, which the control-plane merge writer pushes through with the
- * deploy key over SSH alone. Any other form — the https one `gh repo create --source` leaves
- * behind, most often — fails naming the exact set-url command that fixes it.
+ * GY-2940: the URL `git push origin` uses — the pushurl when one is set, the url otherwise — which
+ * the control-plane merge writer pushes OWNER/REPO through with the deploy key over SSH alone. Any
+ * other URL — the https one `gh repo create --source` leaves behind, most often, or an SSH one
+ * naming another repository — fails naming the exact set-url command that fixes it.
  */
 export function repositoryOriginPreflight(root: string, repository: string): PreflightItem {
   const ssh = sshOrigin(repository);
   let origin = '';
-  try { origin = execFileSync('git', ['-C', root, 'remote', 'get-url', 'origin'], { encoding: 'utf8' }).trim(); } catch { origin = ''; }
-  if (origin.startsWith('git@github.com:')) return { name: 'Repository', ok: true, detail: `origin is ${origin}, which the merge writer's deploy key pushes over SSH` };
-  return { name: 'Repository', ok: false, detail: origin ? `origin is ${origin}, and the merge writer pushes with the SSH deploy key alone` : 'the checkout names no origin, and the merge writer pushes with the SSH deploy key alone', fix: `git remote set-url origin ${ssh}` };
+  try { origin = execFileSync('git', ['-C', root, 'remote', 'get-url', '--push', 'origin'], { encoding: 'utf8' }).trim(); } catch { origin = ''; }
+  const pushed = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)(.+?)(?:\.git)?$/.exec(origin)?.[1];
+  if (pushed?.toLowerCase() === repository.toLowerCase()) return { name: 'Repository', ok: true, detail: `origin pushes to ${origin}, which the merge writer's deploy key pushes over SSH` };
+  return { name: 'Repository', ok: false, detail: origin ? `origin pushes to ${origin}, and the merge writer pushes ${repository} with the SSH deploy key alone` : `the checkout names no origin, and the merge writer pushes ${repository} with the SSH deploy key alone`, fix: `git remote set-url origin ${ssh}` };
 }
 
 /**

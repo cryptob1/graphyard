@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { mergeWriterIdle, mergeWriterReads, mergeWriterStep } from '../src/daemon/cycle-merge-writer.js';
 import { emptyDaemonState } from '../src/master-daemon.js';
+import { actionLine } from '../src/daemon/run.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { ChildRun } from '../src/child-runner.js';
 import type { Cycle } from '../src/daemon/cycle.js';
@@ -80,13 +81,15 @@ test('unit:merge-push-failure-carries-stderr — the push step rethrows git\'s s
   };
   await step(); await mergeWriterIdle(state);
   await step();
-  const detail = state.actions[`merge-writer:GY-1:${head}`]?.detail ?? '';
+  const action = state.actions[`merge-writer:GY-1:${head}`]!;
+  const detail = action.detail;
   assert.match(detail, /Merge of GY-1 head .* failed before it was recorded, so the head stays queued and is tried again/);
   assert.ok(detail.includes('fatal: could not read Username'), `the recorded failure names the cause: ${detail}`);
   assert.ok(detail.includes(STDERR), 'the whole stderr line survives in the record');
-  // The log line the loop prints is this action's detail, prefixed exactly as run.ts prints it.
-  const logLine = `[graphyard-master] cycle ${state.cycle} merge failed: ${detail}`;
-  assert.ok(logLine.includes('fatal: could not read Username'), 'the loop\'s log line names the cause');
+  // The log line the loop prints for this action, in run.ts's own format.
+  const logLine = actionLine(state.cycle, action);
+  assert.match(logLine, /^\[graphyard-master\] cycle \d+ merge failed: /);
+  assert.ok(logLine.includes(STDERR), 'the loop\'s log line names the cause');
   // Nothing was recorded pushed: the head stays queued, and the attempt's records stop at the trial.
   assert.deepEqual(recorded.map(entry => entry.event.kind), ['intent', 'trial']);
 });
