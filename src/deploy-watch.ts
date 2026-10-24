@@ -64,7 +64,8 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
  */
 export async function deployOnce(file: string, ports: DeployWatchPorts, log: (line: string) => void = line => console.error(line), owner: string | null = null): Promise<'unchanged' | 'deployed' | 'rolled-back' | 'kept' | 'restoring'> {
   const tip = await ports.fetch();
-  const record = readDeployRecord(file) ?? { tip: await ports.head(), failed: null, reason: null, at: '' };
+  const stored = readDeployRecord(file);
+  const record = stored ?? { tip: await ports.head(), failed: null, reason: null, at: '' };
   const write = (entry: Omit<DeployRecord, 'at' | 'repository'>) => writeDeployRecord(file, { ...entry, repository: owner });
   const run = async (commit: string) => { for (const step of steps) { log(`[graphyard-deploy] ${step} ${commit.slice(0, 12)}`); try { await ports[step](commit); } catch (error) { throw Object.assign(new Error(`${step} failed: ${message(error)}`), { step }); } } };
   const restore = async (previous: string, failed: string, reason: string, attempts: number) => {
@@ -82,7 +83,13 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
     return restore(record.restore, tip, record.reason ?? '', attempts);
   }
   const previous = record.restore ?? record.tip;
-  if (tip === previous || tip === record.failed) return 'unchanged';
+  if (tip === previous || tip === record.failed) {
+    // The base tip is what the checkout already serves: nothing to deploy, but a record an older
+    // watcher left without the repository it serves gains the name on this first pass, so master
+    // status reads the serving commit before the next merge rewrites the record (GY-2957).
+    if (stored && stored.tip === tip && (stored.repository ?? null) !== owner) await write({ tip, failed: stored.failed, reason: stored.reason, restore: stored.restore, attempts: stored.attempts });
+    return 'unchanged';
+  }
   const before = await ports.database().catch(() => null);
   try {
     await run(tip);
