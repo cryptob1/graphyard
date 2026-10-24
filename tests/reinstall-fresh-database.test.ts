@@ -93,7 +93,7 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
     status: async () => green(loop !== null),
     credentialAnswers: token => recordedCredentialAnswers(root, SERVER, fetcher(), token),
     stopLoop: async () => { stops++; await stopLoop(); return { unit: null }; },
-    publishOnboarding: async () => null, onboardingMerged: async () => true,
+    publishOnboarding: async () => null
   });
   const request: UpRequest = { repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null };
   const count = (command: string) => { const [first, second] = command.split(' '); return calls.filter(args => args[0] === first && (first === 'install' ? args.includes(second) : args[1] === second)).length; };

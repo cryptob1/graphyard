@@ -174,7 +174,6 @@ function accountsWorld(checkout: string, installDir: string, options: AccountsWo
     status: async () => installed ? status() : null,
     installDirectory: () => installDir,
     publishOnboarding: async () => null,
-    onboardingMerged: async () => true,
     async cli(args) {
       calls.push(args);
       const joined = args.join(' ');

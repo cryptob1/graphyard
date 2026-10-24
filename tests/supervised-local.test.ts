@@ -47,7 +47,7 @@ function dependencies(w: World, root: string, events: UpEvent[]): UpDependencies
     // The admin credential is on this machine: a supervised run still never provisions identities with it.
     operatorToken: async () => 'a'.repeat(40),
     status: async () => status(w),
-    publishOnboarding: async () => null, onboardingMerged: async () => true,
+    publishOnboarding: async () => null,
     supervise: async () => { w.supervised++; return { operatorLogin: OPERATOR }; },
     // The control plane is the only merge writer (GY-1978): the repository exists and the deploy key is registered.
     gh: async () => ({ code: 0, stdout: '{}' }), ensureDeployKey: async () => { w.deployKeys = (w.deployKeys ?? 0) + 1; return 'registered'; },

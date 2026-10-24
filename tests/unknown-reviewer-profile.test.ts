@@ -158,7 +158,6 @@ function upWorld(checkout: string, events: UpEvent[], profiles: { workers: numbe
         setup: { protection: 'off', loop },
       } : null,
       publishOnboarding: async () => null,
-      onboardingMerged: async () => true,
       installDirectory: () => join(checkout, 'install-dir'),
       ensureDeployKey: async (installDir: string, repository: string) => join(installDir, 'deploy-key'),
       setMerger: async () => {},
