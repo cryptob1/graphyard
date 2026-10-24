@@ -21,7 +21,7 @@ export const trialRef = (head: string) => `refs/graphyard/trial/${head}`;
 const fullSha = /^[0-9a-f]{40}$/;
 
 // A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
-const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
+export const ansiEscape = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 /**
  * The line a trial's log tail puts where it cut a failing group's output (GY-1639): what follows may
  * be the middle of a `failing tests:` summary whose heading was cut, so it reopens summary reading.
@@ -129,10 +129,21 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */
 export const trialLookupEntries = ['node_modules', '.git', 'package.json'] as const;
 /**
- * Where a trial's temporary directory and short checkout may go, in order: the platform's own, then
- * the coordinator's.
+ * The suite's own durable temporary root (tests/helpers/run-tests.ts's durableTestTmpdir makes the
+ * same one): short and on disk. It is the trial's fallback so the suite never runs under the
+ * session directory: a tmpdir three levels deep in the managed root is what pushed unix sockets
+ * past the kernel's 108-byte `sun_path` (listen EINVAL) and typed launch lines past
+ * `launchCommandLimit`, and that failed main's own fifteen registry and confinement files on every
+ * base run once two empty stray .git directories had poisoned /tmp and the coordinator's tmpdir
+ * alike (GY-2954).
  */
-export const trialTemporaryRoots = (own = tmpdir()): string[] => [...new Set(['/tmp', own])];
+export const durableTemporaryRoot = (home = homedir()) => join(home, '.gy', 'tmp');
+/**
+ * Where a trial's temporary directory and short checkout may go, in order: the platform's own, then
+ * the coordinator's, then the suite's short durable root (GY-2954), and only when every one of
+ * them is lookup-poisoned does the trial fall back to its session directory.
+ */
+export const trialTemporaryRoots = (own = tmpdir(), home = homedir()): string[] => [...new Set(['/tmp', own, durableTemporaryRoot(home)])];
 /** Whether `directory` or a folder above it, the filesystem root included, holds an entry an upward lookup would resolve. */
 export function lookupPoisoned(directory: string, exists: (path: string) => boolean = existsSync): boolean {
   for (let at = directory; ; at = dirname(at)) {
@@ -158,8 +169,8 @@ export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly str
  * whose loop unit's TMPDIR is /var/tmp), and no service override is needed to keep it out.
  */
 export const trialCheckoutRoots = (home = homedir()): string[] => [join(home, '.gy', 'trials')];
-/** The folders a trial's checkout never goes under (GY-2020): /tmp, /var/tmp and the process tmpdir. */
-export const trialExcludedRoots = (own = tmpdir()): string[] => [...new Set(['/tmp', '/var/tmp', own])];
+/** The folders a trial's checkout never goes under (GY-2020): /tmp, /var/tmp, the process tmpdir and the suite's durable root (GY-2954) — every temporary root, since the suite treats a checkout under any of them as a test fixture. */
+export const trialExcludedRoots = (own = tmpdir(), home = homedir()): string[] => [...new Set(['/tmp', '/var/tmp', own, durableTemporaryRoot(home)])];
 const within = (path: string, root: string) => { const to = relative(root, path); return to === '' || !to.startsWith('..') && !isAbsolute(to); };
 /**
  * The folder a trial's short checkout is made in (GY-1565, GY-2020): the first of `roots` under none
@@ -598,6 +609,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
   };
   try {
+    // GY-2954: the short durable fallback may not exist yet on a host that has not run the suite;
+    // make it, or the trial would land its temporary directory in the session directory.
+    if (!input.temporaryRoots) await mkdir(durableTemporaryRoot(), { recursive: true }).catch(() => {});
     const root = trialTemporaryRoot(checkout.directory, roots);
     if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
