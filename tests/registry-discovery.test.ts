@@ -144,10 +144,15 @@ async function loggedClaude(root: string, name: string) {
   return join(root, name);
 }
 
-test('unit:registry-propose-names-master-role — a proposal over a host with three logged-in environments names a master role beside worker, reviewer and producer, at concurrency 1, naming those accounts', async () => {
+test('unit:registry-propose-names-master-role — a proposal over a host with three logged-in environments names a master role beside worker, reviewer and producer, at concurrency 1, naming those accounts', async t => {
   const root = join(scratch, 'master-role'), directory = join(root, '.coding_agents'), home = join(root, 'home');
   const environments = [await loggedClaude(directory, 'claude-a'), await loggedClaude(directory, 'claude-b'), await loggedClaude(directory, 'claude-c')];
   await mkdir(home, { recursive: true });
+  // opencode keeps its login under XDG_DATA_HOME, which a host may set outside `home`; pin it to
+  // the fixture home so discovery sees only the logins this test created.
+  const hostDataHome = process.env.XDG_DATA_HOME;
+  t.after(() => { if (hostDataHome === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = hostDataHome; });
+  process.env.XDG_DATA_HOME = join(home, '.local/share');
   const preview = await registryCommand({ hostId: HOST }, ['propose', '--directory', directory],
     { read: async () => emptyRegistry(), write: async () => { throw new Error('a preview stores nothing'); } },
     { home, executables: () => false }) as any;
