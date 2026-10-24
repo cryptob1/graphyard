@@ -36,7 +36,7 @@ test('unit:up-sets-ssh-origin — up\'s repository creation leaves origin at git
   const deps: UpDependencies = {
     root, emit: event => events.push(event), now: () => 0, sleep: async () => {},
     serverUrl: async () => SERVER, masterToken: async () => 'm'.repeat(40), status: async () => null,
-    publishOnboarding: async () => null, onboardingMerged: async () => true,
+    publishOnboarding: async () => null,
     cli: async args => args.includes('--plan')
       ? { code: 0, stdout: JSON.stringify({ preflight: [{ name: 'GitHub CLI', ok: true }] }) }
       : { code: 1, stdout: '', stderr: 'the run stops here; the origin is already set' },
