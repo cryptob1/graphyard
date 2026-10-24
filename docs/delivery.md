@@ -3,7 +3,7 @@
 
 Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
 
-**`graphyard-deploy.service` deploys continuously** (compose/local installs, beside `graphyard-master.service`; `master init` installs both; the loop installs a missing deploy unit): `graphyard upgrade --watch` fetches origin; each new base tip is checked out, built, restarted and checked at `/healthz`, then `graphyard-local:<sha12>` images except the serving and previous tips' are removed; failing, it rolls back and waits. `.graphyard/deploy.json` records the served tip; the loop restarts onto it. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline. Main moves only by the merge writer's push.
+**`graphyard-deploy.service` deploys continuously** (compose/local installs, beside `graphyard-master.service`; `master init` installs both; the loop installs a missing deploy unit): `graphyard upgrade --watch --checkout <install>/deploy/src` fetches origin; each new base tip is checked out in that install-own worktree, built, restarted and checked at `/healthz` for the deployed commit's release, then `graphyard-local:<sha12>` images except the serving and previous tips' are removed; failing, it rolls back and waits. `.graphyard/deploy.json` records the served tip; the loop restarts onto it. Merge-writer trials run required cases uncredentialed; timeouts re-queue. `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline. Main moves only by the merge writer's push.
 
 ### E2E record credential
 
