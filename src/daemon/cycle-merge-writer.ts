@@ -13,7 +13,7 @@ import { mergeSubject, runTrial, trialMerge, TrialCleanupError, TrialTimeoutErro
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import { loadProjectDelivery } from '../project-applications.js';
 import { defaultMergeBatch, mergeBatch, type BatchResult } from '../merge-writer/batch.js';
-import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { criterionProofs, firstParentHolds, keyReusedRefusal, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -132,10 +132,10 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
     // GY-1902: an item citing a case bound to a declared static application is previewed from the coordinator checkout, its record written through the merge-record route.
     itemPreviews: { root, base: options.base, timeoutMs: trialTimeoutMinutes * 60_000, run, hostEnvironment: options.environment, now: options.now,
       delivery: () => loadProjectDelivery(options.environment ?? process.env, root), baseTip: tip, record: (item, preview, site) => options.record(item, previewRecordEvent(preview, site)), ...options.itemPreviews },
-    // Only git's own stale-lease wording is a rejection the executor re-reads the tip for; a remote's refusal (a branch rule, a hook) or a transport failure is thrown as it came.
+    // Only git's own stale-lease wording is a rejection the executor re-reads the tip for; a remote's refusal (a branch rule, a hook) or a transport failure is thrown as it came, with git's stderr in the message (GY-2940).
     push: async (mergeSha, baseTip) => {
       try { await run('git', ['-C', root, ...pushArgs(base, baseTip, mergeSha)], { env: pushEnvironment(settings.deployKeyFile, options.environment) }); return 'pushed'; }
-      catch (error) { if (staleLeaseRejection(output(error))) return 'rejected'; throw error; }
+      catch (error) { if (staleLeaseRejection(output(error))) return 'rejected'; throw pushFailureWithStderr(error); }
     },
     // The whole first-parent history, not a window of it: an intent older than any bound is still a push (AC-5).
     holds: sha => firstParentHolds(args => git(...args), ref, sha),

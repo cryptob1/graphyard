@@ -40,7 +40,7 @@ bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with
 
 ## 2. Graphyard and the repository
 
-Needs a GitHub `origin` the deploy key pushes to over SSH. **Verify:** doctor readiness `repository` and `test-formats`.
+Needs a GitHub `origin` the deploy key pushes to over SSH; `up` sets it (`git remote set-url origin git@github.com:OWNER/REPO.git`) right after `gh repo create` leaves it at https, and a control-plane install preflight refuses another push URL naming that command. **Verify:** doctor readiness `repository` and `test-formats`.
 
 ## 3. Install the control plane
 

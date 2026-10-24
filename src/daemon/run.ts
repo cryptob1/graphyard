@@ -16,6 +16,9 @@ import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { cliCommit } from '../protocol-version.js';
 import { loopCodeRoot } from './checkout-state.js';
 
+/** The line the loop logs for each action a cycle took; the tests that pin a logged failure build it from here. */
+export const actionLine = (cycle: number, action: Pick<DaemonAction, 'kind' | 'state' | 'detail'>) => `[graphyard-master] cycle ${cycle} ${action.kind} ${action.state}: ${action.detail}`;
+
 /** The compact daemon view `master status` joins onto Graphyard truth. */
 export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
@@ -132,7 +135,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           const recovered = noteCycleSuccess(state);
           if (recovered) await effects.persist(state);
           cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length });
-          for (const action of result.actions) log(`[graphyard-master] cycle ${result.metrics.cycle} ${action.kind} ${action.state}: ${action.detail}`);
+          for (const action of result.actions) log(actionLine(result.metrics.cycle, action));
           log(`[graphyard-master] cycle ${result.metrics.cycle} complete with ${result.metrics.open} open and ${result.actions.length} action(s)${recovered ? `; recovered after ${recovered} failed cycle(s)` : ''}`);
         } catch (error) {
           const failure = await noteCycleFailure(state, error, phase, { now: now(), intervalMs: interval(), ceilingMs: cycleFailureCeiling(watchdog.windowMs), persist: effects.persist });

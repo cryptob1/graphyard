@@ -19,6 +19,7 @@ import { applicationProblems, caseIdsOf, projectDeliveryAssignment, projectDeliv
 import { delegationLimitAssignments, delegationLimitVariables } from './limits.js';
 import { assertOutsideRepository, ensureTokens, fingerprint, installDirectory, installRecordSchema, plannedPrincipals, prepareInstallDirectory, principalOfRole, principalRecords, principalsVariable, readInstallRecord, reconcileRoster, recordedRoster, tokenFile, workerPrincipals, writeInstallRecord, Vault, type InstallRecord, type RosterPrincipal } from './secrets.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrRebindRefusal } from '../repository-setup.js';
+import { sshOrigin } from '../merger-mode.js';
 import { herdrViaEnv, installHerdrInstance, type HerdrInstance } from '../master/herdr.js';
 import { localTransport, type Transport } from './transport.js';
 import { localDatabaseVariable, localSettings, type LocalSupervisor } from './local.js';
@@ -568,6 +569,23 @@ export function githubCliPreflight(provider: Provider, status: { code: number; s
 }
 
 /**
+ * GY-2940: the URL `git push origin` uses — the pushurl when one is set, the url otherwise — which
+ * the control-plane merge writer pushes OWNER/REPO through with the deploy key over SSH alone. Any
+ * other URL — the https one `gh repo create --source` leaves behind, most often, or an SSH one
+ * naming another repository — fails naming the exact set-url command that fixes it.
+ */
+export function repositoryOriginPreflight(root: string, repository: string): PreflightItem {
+  const ssh = sshOrigin(repository);
+  const git = (...args: string[]) => { try { return execFileSync('git', ['-C', root, ...args], { encoding: 'utf8' }).trim(); } catch { return ''; } };
+  const origin = git('remote', 'get-url', '--push', 'origin');
+  const pushed = /^(?:git@github\.com:|ssh:\/\/git@github\.com\/)(.+?)(?:\.git)?$/.exec(origin)?.[1];
+  if (pushed?.toLowerCase() === repository.toLowerCase()) return { name: 'Repository', ok: true, detail: `origin pushes to ${origin}, which the merge writer's deploy key pushes over SSH` };
+  // An explicit pushurl is what set-url --push changes; set-url alone changes the url it would keep overriding.
+  const flag = git('config', '--get-all', 'remote.origin.pushurl') ? ' --push' : '';
+  return { name: 'Repository', ok: false, detail: origin ? `origin pushes to ${origin}, and the merge writer pushes ${repository} with the SSH deploy key alone` : `the checkout names no origin, and the merge writer pushes ${repository} with the SSH deploy key alone`, fix: `git remote set-url${flag} origin ${ssh}` };
+}
+
+/**
  * The plan's step for the merge writer's deploy key (GY-1551, GY-2010), the only credential a full
  * install gives Graphyard on GitHub: generated beside the install and registered read-write through
  * the gh login.
@@ -588,6 +606,8 @@ export async function buildPlan(session: InstallSession): Promise<InstallPlan> {
   // gh registers the deploy key; observe-only still refuses a signed-out caller (GY-1862). It needs
   // only the `repo` scope.
   preflight.push(githubCliPreflight(context.provider, await gh(['auth', 'status'], { allowFailure: true }), session.inputs.repository));
+  // GY-2940: the control-plane merge writer pushes this checkout with the deploy key over SSH alone, so an https origin is refused before anything is installed.
+  if (session.delivery.merger === 'control-plane' && !observeOnly) preflight.push(repositoryOriginPreflight(session.root, session.inputs.repository));
   // The master loop runs from this checkout and its unit refuses a temporary directory: say so
   // before anything is created (GY-1457). The test suite's checkouts are all temporary, so it
   // checks durableCheckoutPreflight directly.
