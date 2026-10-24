@@ -7,7 +7,7 @@ import { tmpdir } from 'node:os';
 import { defaultChildRun } from '../src/child-runner.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import type { MasterConfig } from '../src/master.js';
-import { baseFailurePrefix, baseFailureReason, clearBaseTipCheckCache, failureIsBase, mergeOne, runMergeTrial, trialFailureReason, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { attributeFailures, baseFailurePrefix, baseFailureReason, clearBaseTipCheckCache, failureIsBase, mergeOne, runMergeTrial, trialFailureReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { Work } from '../src/model.js';
 import {
@@ -410,4 +410,46 @@ test('unit:repository-check-base-failure-holds-head — the same failing reposit
     candidate: reworkWork.candidate,
     mergeLedger: { key: 'GY-2960b', state: 'refused', head, baseTip: null, mergeSha: null, risk: null, intentAt: null, pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason: refusal.reason }, events: 1 },
   }), 'an ordinary trial-failed refusal grounds a rework');
+});
+
+test('unit:repository-check-rerun-keeps-new-failures — a whole-check rerun that drops the first failing file but fails another keeps the new file on the verdict so trialFailureReason still refuses', async () => {
+  const head = 'a'.repeat(40), tip = 'b'.repeat(40);
+  const firstFile = 'tests/a.test.ts', nextFile = 'tests/b.test.ts';
+  const firstTap = `TAP version 13\n# Subtest: ${firstFile}\n    not ok 1 - case a\n    1..1\nnot ok 1 - ${firstFile}\n1..1\n`;
+  const rerunTap = `TAP version 13\n# Subtest: ${nextFile}\n    not ok 1 - case b\n    1..1\nnot ok 1 - ${nextFile}\n1..1\n`;
+  const first: MergeTrialRun = { build: 'pass', tests: { passed: 0, failed: [firstFile], files: 1 }, durationMs: 1, logTail: '', files: [firstFile], proofs: {}, runnerExit: 1 };
+  const attributed = await attributeFailures(first, firstTap,
+    { root: '/coordinator', base: '/coordinator', mergeSha: head, changedFiles: ['src/a.ts'], proofs: [], proofFiles: [], baseTip: tip, timeoutMs: 60_000 },
+    async () => '',
+    async (commit) => commit === head
+      ? { run: { build: 'pass', tests: { passed: 0, failed: [nextFile], files: 1 }, durationMs: 1, logTail: '', runnerExit: 1 }, tap: rerunTap }
+      : { run: { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '' }, tap: 'ok\n' });
+  assert.deepEqual(attributed.tests.failed, [nextFile], 'the newly observed rerun failure stays on the verdict');
+  assert.equal(attributed.base, undefined, 'a failure only the head\'s rerun has is not the base\'s');
+  assert.match(trialFailureReason({ run: attributed })!, /tests\/b\.test\.ts/, 'the refusal names the still-failing file');
+});
+
+test('unit:base-tip-check-cache-skips-unavailable — a base retest that reaches no verdict is not cached, so the next candidate retries and can hold as a base failure', async () => {
+  clearBaseTipCheckCache();
+  const head = 'c'.repeat(40), tip = 'd'.repeat(40);
+  const file = 'tests/shared.test.ts', caseTitle = 'unit:shared — both tips fail';
+  const tap = `TAP version 13\n# Subtest: ${file}\n    not ok 1 - ${caseTitle}\n    1..1\nnot ok 1 - ${file}\n1..1\n`;
+  const first: MergeTrialRun = { build: 'pass', tests: { passed: 0, failed: [file], files: 1 }, durationMs: 1, logTail: '', files: [file], proofs: {}, runnerExit: 1 };
+  const input = { root: '/coordinator', base: '/coordinator', mergeSha: head, changedFiles: ['src/a.ts'], proofs: [], proofFiles: [], baseTip: tip, timeoutMs: 60_000 };
+  let baseAttempts = 0;
+  const verdict = (files: string[]) => ({ build: 'pass' as const, tests: { passed: 0, failed: files, files: files.length }, durationMs: 1, logTail: '', runnerExit: 1 });
+  const retest = async (commit: string, files: string[]) => {
+    if (commit === head) return { run: verdict(files), tap };
+    baseAttempts++;
+    if (baseAttempts === 1) return null;
+    return { run: verdict(files), tap };
+  };
+  const missed = await attributeFailures(first, tap, input, async () => '', retest);
+  assert.equal(missed.base, undefined, 'a miss attributes nothing');
+  assert.equal(baseAttempts, 1);
+  const retried = await attributeFailures(first, tap, input, async () => '', retest);
+  assert.equal(baseAttempts, 2, 'the unavailable base result was not cached');
+  assert.ok(failureIsBase(retried), 'the retry can hold as a base failure once the base answers');
+  assert.deepEqual(retried.base!.files, [file]);
+  clearBaseTipCheckCache();
 });

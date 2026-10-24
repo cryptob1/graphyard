@@ -478,9 +478,10 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
 /**
  * GY-2960: base-tip check results reused for every head that fails the same tip (and files) during
  * this process — the repository-check path has no per-file selection, so the same tip's run answers
- * every head that hits it.
+ * every head that hits it. Only a usable verdict is stored; a null or build-failure miss is retried
+ * on the next candidate so a transient checkout/install/runner failure cannot pin a false head blame.
  */
-const baseTipCheckCache = new Map<string, { run: TrialRun; tap: string } | null>();
+const baseTipCheckCache = new Map<string, { run: TrialRun; tap: string }>();
 /** Clears the base-tip check cache (tests that mock the same tip with different outcomes). */
 export const clearBaseTipCheckCache = () => baseTipCheckCache.clear();
 /**
@@ -493,6 +494,10 @@ export const clearBaseTipCheckCache = () => baseTipCheckCache.clear();
  * those that fail there too, with every case the rerun failed failing there too, are the base's (`failureIsBase`). Nothing is skipped: a file that fails
  * on the head and passes on the base stays the head's failure, and a rerun or base run that could
  * not reach a verdict attributes nothing.
+ *
+ * GY-2960: whole-repository checks re-run the entire check (no per-file selection). A rerun may fail
+ * files the first run never named; those stay on the verdict so an empty intersection cannot clear a
+ * still-failing head (trialFailureReason ignores runnerExit).
  */
 export async function attributeFailures(first: MergeTrialRun, firstTap: string, input: MergeTrialInput, git: ChildRun,
   retest: (sha: string, files: string[]) => Promise<{ run: TrialRun; tap: string } | null>): Promise<MergeTrialRun> {
@@ -518,7 +523,12 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   const again = new Set(casesOf(rerun.tap, rerun.run.logTail));
   // A file whose rerun fails one of the item's proofs is the head's too: it is never the base's.
   const ownAgain = [...again].some(own);
-  const still = failed.filter(file => !held.includes(file) && rerun.run.tests.failed.includes(file));
+  // Original files that still fail, plus any new failure the whole-check rerun observed (selection
+  // reruns cannot introduce files outside `failed`; repository checks can).
+  const still = [
+    ...failed.filter(file => !held.includes(file) && rerun.run.tests.failed.includes(file)),
+    ...rerun.run.tests.failed.filter(file => !failed.includes(file) && !held.includes(file)),
+  ];
   const flakedFiles = failed.filter(file => !held.includes(file) && !still.includes(file));
   const flakedTests = named.filter(test => !again.has(test) && !own(test));
   let result: MergeTrialRun = { ...first, tests: { ...first.tests, failed: [...held, ...still], passed: first.tests.passed + flakedFiles.length } };
@@ -535,10 +545,12 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   const cacheKey = `${tip}:${still.slice().sort().join(',')}`;
   let onBase = baseTipCheckCache.get(cacheKey);
   if (onBase === undefined) {
-    onBase = await retest(tip, still).catch(() => null);
-    baseTipCheckCache.set(cacheKey, onBase);
+    const attempted = await retest(tip, still).catch(() => null);
+    // A miss or non-verdict is not cached: the next candidate retries after the host recovers.
+    if (!attempted || attempted.run.build !== 'pass') return result;
+    baseTipCheckCache.set(cacheKey, attempted);
+    onBase = attempted;
   }
-  if (!onBase || onBase.run.build !== 'pass') return result;
   const files = still.filter(file => onBase.run.tests.failed.includes(file));
   // Attributed by case, not by file: every case the rerun failed must fail on the base tip too, and a rerun that named no case attributes nothing.
   const cases = [...again], onBaseTests = casesOf(onBase.tap, onBase.run.logTail).filter(test => !own(test));
