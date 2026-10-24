@@ -4,6 +4,7 @@ import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { sweepManagedCheckouts } from '../producer.js';
+import { endRegistrySlot } from '../master/registry-slot.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
 import { masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, inspectWorkerCredentials, dispatchWork, removeAttemptWorktree } from '../master.js';
@@ -54,6 +55,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     closeSession: pane => closeHerdrPane(pane, run),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
+    // The agent-registry session a review or proof session ran under, ended when the close step
+    // judges it over (GY-2944): the ledgers name it, the fleet client ends it.
+    releaseRegistrySession: (session, reason) => endRegistrySlot(root, current(), session, reason),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: path => removeAttemptWorktree(root, path, run),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),

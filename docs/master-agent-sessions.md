@@ -49,4 +49,6 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted
 
 **Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
 
+**Registry slot**: the launch's agent-registry session rides its ledger record; the loop's close step ends it once the verdict is recorded, the item leaves review, or the pane is gone from Herdr (the reason names the pane), so a finished review or proof stops consuming its role's concurrency. Producers likewise.
+
 **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown; from 130min renewal refused. Open scope asks exempt.
