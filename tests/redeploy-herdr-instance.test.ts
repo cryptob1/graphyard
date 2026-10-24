@@ -19,6 +19,9 @@ test('unit:redeploy-carries-herdr-instance — the restart step\'s redeploy pass
   assert.equal(own.match(/--herdr-instance/g)?.length, 2, 'both the --plan preview and the --apply carry it');
   assert.equal(installRequestFromArgs(redeployArguments({ ...record, herdrInstance: true }, 'img')).request.herdr, 'instance');
   assert.doesNotMatch(redeployStep(record), /--herdr-instance/, 'an installation on the host\'s default Herdr instance redeploys without it');
+  const workerless = redeployArguments({ ...record, herdrInstance: true, principals: record.principals.slice(0, 2) }, 'img');
+  assert.deepEqual(installRequestFromArgs(workerless).request, { ...installRequestFromArgs(workerless).request, workers: 0, herdr: 'instance' }, 'a --workers 0 own-instance install redeploys as one, not observation-only');
+  assert.ok(!workerless.includes('--observe-only'));
 });
 
 test('unit:own-herdr-instance-recorded — an install applied with --herdr-instance records it, so a later redeploy from the record carries it', async () => {
@@ -34,5 +37,6 @@ test('unit:own-herdr-instance-recorded — an install applied with --herdr-insta
     assert.ok(redeployArguments(created, 'img').includes('--herdr-instance'));
     assert.equal((await apply(redeployArguments(created, 'img'))).herdrInstance, true, 'the redeploy keeps the choice');
     assert.equal((await apply(['--provider', 'compose', '--repo', 'owner/project', '--apply'])).herdrInstance, true, 'a rerun naming no Herdr choice keeps it');
+    assert.equal((await apply(['--provider', 'compose', '--repo', 'owner/project', '--no-herdr', '--apply'])).herdrInstance, true, '--no-herdr leaves the own instance, so keeps it');
   } finally { await fixture.cleanup(); }
 });
