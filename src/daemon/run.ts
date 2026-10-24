@@ -20,7 +20,7 @@ import { loopCodeRoot } from './checkout-state.js';
 export const actionLine = (cycle: number, action: Pick<DaemonAction, 'kind' | 'state' | 'detail'>) => `[graphyard-master] cycle ${cycle} ${action.kind} ${action.state}: ${action.detail}`;
 
 /** The compact daemon view `master status` joins onto Graphyard truth. */
-export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string) {
+export function daemonSummary(state: DaemonState, now: number, intervalMs: number, hostId?: string, masterAgent?: { agent_status?: string }) {
   const lastCycleAt = state.lastCycleAt ? Date.parse(state.lastCycleAt) : Number.NaN;
   const lagMs = Number.isFinite(lastCycleAt) ? now - lastCycleAt : null;
   const recent = Object.entries(state.actions).map(([key, action]) => ({ key, ...action })).sort((a, b) => Date.parse(b.at) - Date.parse(a.at));
@@ -35,7 +35,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     release: state.release,
     profiles: state.profiles,
     config: state.config,
-    master: masterSummary(state.master, now),
+    master: masterSummary(state.master, now, masterAgent),
   };
 }
 

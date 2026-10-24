@@ -2,6 +2,8 @@
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { assertDispatchable } from '../master.js';
+import type { ExhaustionSignal } from '../model/capacity.js';
+import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort } from '../coordination.js';
 import { masterHandover } from '../master/master-session.js';
@@ -306,25 +308,72 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
   }
 }
 
-/** The loop's own master session: launched when Herdr shows none, adopted when it does; the cycle never prompts it. */
+/** The loop's own master session: launched when Herdr shows none, adopted when it does; the cycle never prompts it.
+ *  A pane that has stopped on its provider's usage or session limit is not a working master (GY-2949): the
+ *  loop judges the pane's recent output with the same limit-notice reader workers use, holds the account
+ *  until the notice's reset, closes the pane, and launches the role's next account in the same cycle — so a
+ *  spent account cannot leave the master, and the blockers only it decides, idle for the rest of the window. */
 async function masterSession(cycle: Cycle, open: Work[]) {
-  const { config, state, effects, herdr, launcher, snapshot } = cycle;
+  const { config, state, effects, herdr } = cycle;
   const sessions = effects.masterSession;
   if (!sessions || !herdr.available) return;
   const master = state.master;
   const handle = herdr.agents.find(agent => agent.name === (master.agentName ?? config.masterAgentName));
   if (!handle) {
-    if (launcher.busy(masterLaunchKey)) return;
-    launcher.submit(masterLaunchKey, [], async sink => {
-      try {
-        const launched = await sessions.launch(masterHandover({ work: open, cliPath: config.cliPath }));
-        state.master = { ...emptyMasterSession(), ...launched, startedAt: new Date(cycle.now()).toISOString() };
-        sink.push(await record(state, masterLaunchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
-      } catch (error) {
-        sink.push(await record(state, masterLaunchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: `The master session could not be launched; the next cycle tries again: ${message(error)}`, attempts: (state.actions[masterLaunchKey]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist));
-      }
-    });
+    submitMasterLaunch(cycle, open);
     return;
   }
-  if (!master.agentName) state.master = { ...emptyMasterSession(), agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: snapshot.now, adopted: true };
+  if (!master.agentName) state.master = { ...emptyMasterSession(), agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: cycle.snapshot.now, adopted: true };
+  await masterPaneFailover(cycle, handle, open);
+}
+
+/** The launch the absent or failed-over master session owes, handed to the launcher so a slow pane creation never stalls the cycle. The registry session the previous pane ran under is ended first, so the role's one slot frees for this launch. */
+function submitMasterLaunch(cycle: Cycle, open: Work[]) {
+  const { config, state, effects, launcher } = cycle;
+  const sessions = effects.masterSession!;
+  if (launcher.busy(masterLaunchKey)) return;
+  launcher.submit(masterLaunchKey, [], async sink => {
+    try {
+      if (state.master.session && sessions.end) await sessions.end(state.master.session, 'the master session it recorded is gone from Herdr; the loop launches its replacement').catch(() => undefined);
+      const launched = await sessions.launch(masterHandover({ work: open, cliPath: config.cliPath }));
+      state.master = { ...emptyMasterSession(), ...launched, startedAt: new Date(cycle.now()).toISOString() };
+      sink.push(await record(state, masterLaunchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
+    } catch (error) {
+      sink.push(await record(state, masterLaunchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: `The master session could not be launched; the next cycle tries again: ${message(error)}`, attempts: (state.actions[masterLaunchKey]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist));
+    }
+  });
+}
+
+/**
+ * The pane judged for a stop its runtime already named (GY-2949): a provider limit notice holds the
+ * session's account until the notice's reset (the effect workers' notices ride), and a pane whose
+ * runtime exited names itself; either is treated as absent — the pane closes, and the role's next
+ * account launches the master in the same cycle. A pane with ordinary output is adopted as today.
+ */
+async function masterPaneFailover(cycle: Cycle, handle: HerdrAgent, open: Work[]) {
+  const { state, effects, clock } = cycle;
+  const sessions = effects.masterSession!;
+  const master = state.master;
+  if (cycle.launcher.busy(masterLaunchKey)) return;
+  const exited = endedRuntimeStates.includes(handle.agent_status ?? '');
+  let notice: ExhaustionSignal | null = null;
+  if (!exited) {
+    const pane = master.pane ?? handle.pane_id ?? null;
+    if (!pane) return;
+    const screen = await Promise.resolve(effects.sessionScreen?.({ pane, agentName: master.agentName })).catch(() => null) ?? null;
+    if (screen === null) return;
+    notice = detectRuntimeExhaustion(screen, master.runtime, clock);
+    if (!notice) return;
+  }
+  const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
+  const key = 'master:failover';
+  try {
+    if (notice && master.account && sessions.exhaust) await sessions.exhaust(master.account, notice);
+    if (handle.pane_id) await Promise.resolve(effects.closeSession(handle.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
+    state.master = { ...master, agentName: null, pane: null, runtime: null, adopted: false, rotations: master.rotations + 1,
+      lastEnd: { cause: notice ? 'exhausted' : 'exited', at: new Date(clock).toISOString(), detail: reason.slice(0, 500) },
+      limitedUntil: notice?.resetsAt ?? null };
+    await note(cycle, key, 'failover', null, 'done', `The master session ${master.agentName} is treated as absent (${reason}); the account it spent is held until its reset, and the master launches on the role's next account`);
+  } catch (error) { await note(cycle, key, 'failover', null, 'failed', `Could not fail the master session over: ${message(error)}`); return; }
+  submitMasterLaunch(cycle, open);
 }

@@ -103,6 +103,8 @@ export const masterSessionSchema = z.object({
   rotations: z.number().int().min(0).default(0),
   /** Why the last session ended and when: exited, exhausted, or budget. */
   lastEnd: z.object({ cause: z.string().max(40), at: z.string(), detail: z.string().max(500) }).strict().nullable().default(null),
+  /** The account hold a provider limit notice on the pane recorded (GY-2949): the instant the account resets. Cleared when a session launches or is adopted. */
+  limitedUntil: z.string().nullable().default(null),
   /** The last wake: when, the subject keys it named (empty for a heartbeat), and whether it was the heartbeat. */
   lastWake: z.object({ at: z.string(), causes: z.array(z.string().max(60)).max(20), heartbeat: z.boolean() }).strict().nullable().default(null),
   /** Consecutive liveness misses: an exit is established on the second. */
@@ -125,12 +127,23 @@ export const masterSessionSchema = z.object({
 }).strict();
 export type MasterSessionState = z.infer<typeof masterSessionSchema>;
 export const emptyMasterSession = (): MasterSessionState => masterSessionSchema.parse({});
+/**
+ * The master session's one reading (GY-2949): `working`, `idle` (when Herdr reports the pane idle),
+ * `limited until T` while the account hold a limit notice recorded stands, and `absent` once the pane
+ * is closed with no hold standing — the states `master status` shows on its one page.
+ */
+export function masterSessionState(master: MasterSessionState, now: number, agent?: { agent_status?: string }) {
+  if (master.agentName) return agent?.agent_status === 'idle' ? 'idle' : 'working';
+  if (master.limitedUntil && Date.parse(master.limitedUntil) > now) return `limited until ${master.limitedUntil}`;
+  return 'absent';
+}
 /** The master line of the daemon summary (GY-898); the session and heartbeat budgets are added by the reader from its config. */
-export function masterSummary(master: MasterSessionState, now: number) {
+export function masterSummary(master: MasterSessionState, now: number, agent?: { agent_status?: string }) {
   const startedAt = master.startedAt ? Date.parse(master.startedAt) : Number.NaN;
   return { session: master.agentName, pane: master.pane, runtime: master.runtime, account: master.account, adopted: master.adopted,
     startedAt: master.startedAt, ageMs: Number.isFinite(startedAt) ? Math.max(0, now - startedAt) : null,
-    rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching };
+    rotations: master.rotations, lastEnd: master.lastEnd, lastWake: master.lastWake, launching: master.launching,
+    state: masterSessionState(master, now, agent) };
 }
 
 export const daemonStateSchema = z.object({

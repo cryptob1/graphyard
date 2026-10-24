@@ -21,6 +21,10 @@ Launches take the first account under `run.quotaCeilingPercent`, else fail over;
 
 `master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr. `master registry propose` proposes the master role beside the others — the reviewer's accounts, concurrency 1 — so a fresh install's loop launches its own session; renaming the role's accounts replaces that proposal.
 
+### A pane stopped on its provider's limit is absent (GY-2949)
+
+Each cycle reads the master pane's recent output with the same limit-notice judge workers use. A usage or session limit notice (`You've hit your session limit · resets 1:30am`) is treated as absent: the account is held until the parsed reset (the hold rides every selection, so the spent plan is not asked again), the pane closes, and the role's next account launches the master in the same cycle. A pane whose runtime reports exited is closed and relaunched the same way, with no hold. `master status` shows the session's state on its one page: `working`, `idle` (Herdr reports the pane idle), `limited until T` while the hold stands, and `absent` once the pane is closed with no hold standing.
+
 ### A closed Herdr workspace is replaced
 
 Each cycle checks `herdrWorkspace` against `herdr workspace list`, as does the next reload after any launch refused with `workspace_not_found`. A workspace Herdr no longer lists is replaced in `.graphyard/master.json` by the one `masterAgentName` runs in (else the first listed), recorded as a `config` action with its reason, and items blocked on dispatches into the closed workspace are unblocked.
