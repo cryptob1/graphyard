@@ -6,6 +6,7 @@ import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort } from '../coordination.js';
+import type { CoordinationRounds } from '../server/work-view.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState } from './state.js';
@@ -156,6 +157,21 @@ function sessionEnded(item: Work, session: NonNullable<Work['sessions']>[number]
   return null;
 }
 
+/**
+ * The attempt whose lapsed lease the control plane's reconciliation already cleared (GY-2956): the
+ * item's current attempt, unsubmitted, still without a worker exhaustion on the record, ended
+ * `expired` by that reconciliation — the coordination view's `attemptEnd` is the only witness the
+ * record carries, the lease itself is gone. Returned as the lease the preservation acts through:
+ * its epoch and owner, with a workspace of the attempt on this host for the work to be kept in.
+ */
+function reconciledAttempt(item: Work, hostId: string): Pick<NonNullable<Work['lease']>, 'epoch' | 'owner'> | null {
+  const end = (item as Work & CoordinationRounds).attemptEnd;
+  if (!end || end.end !== 'expired' || end.epoch !== item.epoch) return null;
+  if ((item.capacity?.exhaustions ?? []).some(entry => entry.role === 'worker' && entry.epoch === end.epoch)) return null;
+  const space = item.workspaces?.find(entry => entry.epoch === end.epoch && entry.host === hostId);
+  return space ? { owner: space.owner, epoch: end.epoch } : null;
+}
+
 /** The ended attempts' worktrees on this host: no live lease and no running session holds their epoch. */
 export function endedAttemptWorktrees(work: Work[], hostId: string, now: number) {
   return work.flatMap(item => (item.workspaces ?? []).filter(space => space.host === hostId
@@ -186,21 +202,26 @@ async function closeStep(cycle: Cycle) {
     await stallStep(cycle, item, session);
   }
   if (effects.reclaimLease) for (const item of snapshot.work) {
+    if (item.stage === 'done' || item.submission) continue;
     const lease = item.lease;
-    if (item.stage === 'done' || !lease || item.submission || Date.parse(lease.expiresAt) > clock) continue;
-    const key = `reclaim:lease:${item.id}:${lease.epoch}`;
+    // GY-2953: a lease still on the record that lapsed is ended here, after the attempt's work is
+    // kept. GY-2956: the control plane's own reconciliation clears a lapsed lease within one of its
+    // ticks, long before this loop's next snapshot, so the attempt usually reaches it with no lease
+    // at all — the attempt's `expired` end on the record is then the only witness, and the work is
+    // kept all the same, or the redispatch silently starts from the shared base.
+    const ended = lease ? (Date.parse(lease.expiresAt) <= clock ? lease : null)
+      : effects.endExpiredLease ? reconciledAttempt(item, config.hostId) : null;
+    if (!ended) continue;
+    const key = `reclaim:lease:${item.id}:${ended.epoch}`;
     if (state.actions[key]?.state === 'done') continue;
     try {
-      // GY-2953: before the lease is reconciled and the ended attempt's worktree cleaned, keep the
-      // attempt's work on the record, so the redispatch's handoff names the commit instead of
-      // silently starting from the shared base. A record that ended the lease needs no resync.
-      const kept = effects.endExpiredLease ? await effects.endExpiredLease(item, lease) : null;
-      if (!kept) await effects.reclaimLease(item);
+      const kept = effects.endExpiredLease ? await effects.endExpiredLease(item, ended) : null;
+      if (!kept && lease) await effects.reclaimLease(item);
       await note(cycle, key, 'reclaim', item.key, 'done', kept
-        ? `${item.key}: epoch ${lease.epoch}'s lease lapsed with nothing submitted; its work is on the record for the redispatch's handoff (${kept.state}${kept.commit ? `, commit ${kept.commit.slice(0, 12)}` : ''}${kept.branch ? ` on ${kept.branch}` : ''}), and the lease is ended`
-        : `${item.key}: the lease ${lease.owner} held under epoch ${lease.epoch} lapsed with nothing submitted; the control plane reconciles it`, lease.owner);
+        ? `${item.key}: epoch ${ended.epoch}'s lease lapsed with nothing submitted; its work is on the record for the redispatch's handoff (${kept.state}${kept.commit ? `, commit ${kept.commit.slice(0, 12)}` : ''}${kept.branch ? ` on ${kept.branch}` : ''})${lease ? ', and the lease is ended' : ', whose reconciliation the control plane had already recorded'}`
+        : `${item.key}: the lease ${ended.owner} held under epoch ${ended.epoch} lapsed with nothing submitted; the control plane reconciles it`, ended.owner);
     }
-    catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `${item.key}: the lapsed lease could not be reconciled: ${message(error)}`, lease.owner); }
+    catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `${item.key}: the lapsed lease could not be reconciled: ${message(error)}`, ended.owner); }
   }
   if (effects.removeWorktree) for (const { item, space } of endedAttemptWorktrees(snapshot.work, config.hostId, clock)) {
     const key = `worktree:${item.id}:${space.epoch}`;
