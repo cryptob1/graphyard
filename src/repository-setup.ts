@@ -597,15 +597,18 @@ export interface LoopCodeFacts {
   /** The loop cursor's text; null when none is written. */
   cursor: string | null;
   host?: string | null;
+  /** The install's pinned coordinator snapshots (GY-2937): the `coordinator/current` links a loop unit starts by design. */
+  snapshots?: string[];
   /** How a path is compared: realpath on this machine, the path itself on a host. */
   canonical?: (path: string) => string;
 }
 /**
  * The judgement itself (GY-1859): a loop runs this CLI's code only when its unit starts this CLI's
- * checkout (or the repository's, a unit naming no launcher) and its cursor records loading exactly
- * this CLI's commit from a clean tree. A cursor naming no commit is not proof, and neither is a
- * known-good pin or held snapshot on another commit: those are this install's machinery, but the
- * command asked for this CLI's code.
+ * checkout (or the repository's, a unit naming no launcher, or — GY-2937 — the install's pinned
+ * coordinator snapshot, which the deploy unit pins and the loop restarts onto by design) and its
+ * cursor records loading exactly this CLI's commit from a clean tree. A cursor naming no commit is
+ * not proof, and neither is a known-good pin or held snapshot on another commit: those are this
+ * install's machinery, but the command asked for this CLI's code.
  */
 export function judgeLoopCode(facts: LoopCodeFacts): LoopCodeReading {
   const canonical = facts.canonical ?? canonicalPath;
@@ -618,17 +621,24 @@ export function judgeLoopCode(facts: LoopCodeFacts): LoopCodeReading {
   try { const recorded = facts.cursor === null ? null : JSON.parse(facts.cursor)?.release; release = { commit: typeof recorded?.commit === 'string' ? recorded.commit : null, dirty: typeof recorded?.dirty === 'boolean' ? recorded.dirty : null }; } catch { /* an unreadable cursor records nothing */ }
   const same = (commit: string | null | undefined, expected: string | null) => !!commit && !!expected && commit.toLowerCase() === expected.toLowerCase();
   let loopStale: string | null = null, loopReplace: LoopCodeReading['loopReplace'] = null;
+  // GY-2937: the install's pinned coordinator snapshot is the loop's own checkout (the deploy unit
+  // pins it and the loop restarts onto it), so a unit starting it is judged by its commit alone,
+  // below — and any staleness still replaces the unit, since no restart moves an ExecStart off the
+  // snapshot; only a rewrite, after up lifts the pins, starts this CLI.
+  const pinned = !!loop.launcher && new Set(facts.snapshots?.map(canonical) ?? []).has(canonical(loop.launcher));
   {
     // The loop always starts a CLI, never the repository's own entry, so a launcher its ExecStart
-    // names must be this CLI's: one in the managed checkout (Graphyard managing itself from a second
-    // checkout) loads that checkout's code on every restart, so only a rewrite moves it. The
-    // repository checkout is accepted only as the WorkingDirectory of a unit naming no launcher.
-    const foreign = loop.launcher ? canonical(loop.launcher) !== canonical(cli.root) : !!loop.checkout && !own.has(canonical(loop.checkout));
+    // names must be this CLI's (or the install's pinned snapshot, GY-2937): one in the managed
+    // checkout (Graphyard managing itself from a second checkout) loads that checkout's code on
+    // every restart, so only a rewrite moves it. The repository checkout is accepted only as the
+    // WorkingDirectory of a unit naming no launcher.
+    const foreign = !pinned && (loop.launcher ? canonical(loop.launcher) !== canonical(cli.root) : !!loop.checkout && !own.has(canonical(loop.checkout)));
     if (foreign) { loopStale = `${loop.path} starts the CLI in ${loop.checkout}${release.commit ? ` at ${shortSha(release.commit)}` : ''}, not this checkout (${cli.root}) at ${shortSha(cli.commit)}`; loopReplace = 'unit'; }
     else if (!release.commit) { loopStale = `${loop.path} runs a loop whose cursor records no commit it loaded, so it is not known to run this checkout's ${shortSha(cli.commit)}`; loopReplace = 'restart'; }
     else if (!same(release.commit, cli.commit)) { loopStale = `${loop.path} runs ${shortSha(release.commit)}, not this checkout's ${shortSha(cli.commit)}`; loopReplace = 'restart'; }
     else if (release.dirty === true) { loopStale = `${loop.path} runs ${shortSha(release.commit)} with uncommitted changes it loaded, not this checkout's clean ${shortSha(cli.commit)}`; loopReplace = 'restart'; }
   }
+  if (loopStale && pinned) loopReplace = 'unit';
   return { ...base, loopCommit: release.commit, loopStale, loopReplace };
 }
 
@@ -673,7 +683,15 @@ export async function readLoopCode(root: string, options: {
     const loop = units ? await unit(units.master) : null;
     const credentialFile = typeof master?.credentialFile === 'string' ? resolve(master.credentialFile) : null;
     const cursor = !loop ? null : options.cursor !== undefined ? options.cursor : credentialFile ? await files.read(loopCursorPath(credentialFile)) : null;
-    return judgeLoopCode({ cli: { root: cliRoot, commit: cliCommit }, primary, repository, loop, cursor });
+    // GY-2937: the install's pinned coordinator snapshot, whose launcher the loop's unit names by design.
+    const snapshots = await (async () => {
+      if (!repository) return [];
+      try {
+        const [{ installDirectory }, { installIdFor }, { knownGoodDirectory }] = await Promise.all([import('./install/secrets.js'), import('./install/types.js'), import('./master/known-good.js')]);
+        return [join(knownGoodDirectory(installDirectory(installIdFor(repository))), 'current')];
+      } catch { return []; }
+    })();
+    return judgeLoopCode({ cli: { root: cliRoot, commit: cliCommit }, primary, repository, loop, cursor, snapshots });
   } catch (failure) { return failed(failure); }
 }
 

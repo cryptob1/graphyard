@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, writeFile, readFile } from 'node:fs/promises';
+import { mkdir, writeFile, readFile, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
@@ -466,6 +466,71 @@ test('unit:doctor-flags-loop-on-other-code — the reading judges the units agai
     assert.ok(status.loopCode && typeof status.loopCode.cli.root === 'string', 'doctor reads what the units run');
     assert.equal(status.loopCode!.loop, null, 'under the test runner the operator\'s real units are never read');
     
+  } finally {
+    if (configHome === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = configHome;
+  }
+});
+
+test('unit:doctor-loop-code-pinned-snapshot — a loop unit starting the install\'s pinned coordinator snapshot is this install\'s own checkout: green when it holds this CLI\'s commit, stale naming both commits when it holds another, foreign on any other path', async () => {
+  const { readLoopCode } = await repositorySetup();
+  const { readinessChecklist } = await readinessModule();
+  const { setupFromZeroChecks, setupLine } = await import('../src/setup-from-zero.js');
+  const units: InstallUnits = perInstallUnits('acme/shop');
+
+  // A simulated host whose install was upgraded past GY-2877: the loop unit starts the pinned
+  // coordinator snapshot under the install directory (the deploy unit pins it), not this CLI's
+  // checkout — the healthy shape every install now runs, which the path check used to call foreign.
+  const base = await temporaryDirectory('graphyard-doctor-loop-pinned-snapshot');
+  const configHome = process.env.GRAPHYARD_CONFIG_HOME;
+  process.env.GRAPHYARD_CONFIG_HOME = join(base, 'config');
+  try {
+    const root = join(base, 'repo'), unitDirectory = join(base, 'units'), home = join(base, 'home'), cliCheckout = join(base, 'cli'), stranger = join(base, 'stranger');
+    const installDir = join(base, 'config', 'acme-shop'), snapshot = join(installDir, 'coordinator', COMMIT.slice(0, 12)), current = join(installDir, 'coordinator', 'current');
+    for (const directory of [join(root, '.graphyard'), unitDirectory, home, join(cliCheckout, 'bin'), join(stranger, 'bin'), join(snapshot, 'dist')]) await mkdir(directory, { recursive: true });
+    await symlink(snapshot, current);
+    await writeFile(join(root, '.graphyard', 'master.json'), JSON.stringify({ repository: 'acme/shop', credentialFile: join(home, 'master.token') }));
+    const run = (_command: string, args: string[]) => args[2] === 'rev-parse' ? `${COMMIT}\n` : '';
+    const read = (cursor?: string) => readLoopCode(root, {
+      cliPath: join(cliCheckout, 'bin', 'graphyard.mjs'), run, units, unitDirectory, home,
+      ...(cursor !== undefined ? { cursor } : {}),
+    });
+
+    // The healthy pinned install: the snapshot holds this checkout's commit and the loop's cursor
+    // records loading it — the reading is green and both doctor lines pass.
+    await writeFile(join(unitDirectory, units.master), `[Service]\nWorkingDirectory=${root}\nExecStart=/usr/bin/node ${join(current, 'dist', 'cli.js')} master run\n`);
+    await writeFile(join(home, 'master.daemon.json'), JSON.stringify({ release: { commit: COMMIT, dirty: false } }));
+    const serving = await read();
+    assert.equal(serving.loop?.launcher, current, 'the reading records the pinned snapshot as the unit\'s checkout');
+    assert.equal(serving.loopCommit, COMMIT, 'the cursor records the commit the loop loaded from the snapshot');
+    assert.equal(serving.loopStale, null, 'the snapshot at this checkout\'s commit is this code');
+    assert.equal(serving.loopReplace, null);
+    const checklist = (code: LoopCodeReading | null) => readinessChecklist('through-merge', {
+      repository: 'acme/shop',
+      server: { url: SERVER, reachable: true, role: 'coordinator' },
+      setup: { proposal: null, appliedAt: 'an earlier run', githubApp: null, drift: [], unreadable: [], loopCode: code },
+      proposal: null,
+    });
+    assert.equal(checklist(serving).items.find(item => item.id === 'loop-code')!.status, 'ready', 'the readiness item is green');
+    const servingLine = (await setupFromZeroChecks({ root, status: null, environments: join(root, 'none'), loopCode: serving })).find(check => check.id === 'loop-code')!;
+    const servingText = setupLine(servingLine);
+    assert.match(servingText, /^PASS loop-code: /, 'the healthy pinned install prints a PASS loop-code line');
+    assert.ok(servingText.includes(COMMIT.slice(0, 12)) && servingText.includes('runs this checkout'), `the line names the commit and this checkout: ${servingText}`);
+
+    // The snapshot holding another commit (the serving tip trails this checkout): one stale line
+    // naming both commits, and the unit is replaced — no restart moves an ExecStart off the pin.
+    await writeFile(join(home, 'master.daemon.json'), JSON.stringify({ release: { commit: OLD_COMMIT, dirty: false } }));
+    const stale = await read();
+    assert.match(stale.loopStale ?? '', new RegExp(`runs ${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`), 'the stale line names both commits');
+    assert.equal(stale.loopReplace, 'unit', 'the pinned unit is rewritten, never only restarted');
+    const staleLine = (await setupFromZeroChecks({ root, status: null, environments: join(root, 'none'), loopCode: stale })).find(check => check.id === 'loop-code')!;
+    assert.equal(staleLine.status, 'fail');
+    assert.match(staleLine.detail, new RegExp(`${OLD_COMMIT.slice(0, 12)}, not this checkout's ${COMMIT.slice(0, 12)}`));
+
+    // A unit starting some other checkout is still foreign, exactly as before.
+    await writeFile(join(unitDirectory, units.master), `[Service]\nWorkingDirectory=${root}\nExecStart=/usr/bin/node ${join(stranger, 'bin', 'graphyard.mjs')} master run\n`);
+    const foreign = await read(JSON.stringify({ release: { commit: OLD_COMMIT, dirty: false } }));
+    assert.match(foreign.loopStale ?? '', new RegExp(`starts the CLI in ${quote(stranger)} at ${OLD_COMMIT.slice(0, 12)}, not this checkout \\(${quote(cliCheckout)}\\) at ${COMMIT.slice(0, 12)}`), 'an unrelated checkout is named with both paths and both commits');
+    assert.equal(foreign.loopReplace, 'unit', 'a unit on another checkout is rewritten');
   } finally {
     if (configHome === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = configHome;
   }
