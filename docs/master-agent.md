@@ -5,7 +5,7 @@ The master (`coordinator`) routes and administers remote access unasked, never i
 
 ## Operate
 
-Cycle until every in-scope item is Done or carries a recorded blocker and the serving commit is main's tip. `master status` prints one page: the serving commit against main's tip, each open item's stage, owner, head and blocker, the merge writer's queue and last merge, live sessions and free worker profiles. Review findings, rework, idle workers and proof setup are not stopping conditions.
+Cycle until every in-scope item is Done or carries a recorded blocker and the release health line is satisfied. `master status` prints one page: the serving commit against main's tip, each open item's stage, owner, head and blocker, the merge writer's queue and last merge, live sessions and free worker profiles. The serving line reads only what a deployment provider records for the managed repository: `atMain` true or false against main's tip, or `unconfigured` with no claim at all when the repository has no deployment provider — the control plane's own build revision is never reported as the managed repository's served commit. Review findings, rework, idle workers and proof setup are not stopping conditions.
 
 ## The loop
 
