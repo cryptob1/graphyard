@@ -267,6 +267,20 @@ export const pushArgs = (base: string, baseTip: string, mergeSha: string) => ['p
  */
 export const staleLeaseRejection = (output: string) => /\bstale info\b/i.test(output);
 
+/**
+ * GY-2940: a failed push whose message stops at `Command failed: git … push …` gains git's stderr
+ * (first 300 chars), so the 'failed before it was recorded' line the loop records and logs names
+ * the cause. The error is thrown as it came — same object, its stdout, stderr and status intact —
+ * with only the message extended; one that already carries the stderr, or a push with none, is
+ * left alone.
+ */
+export function pushFailureWithStderr(error: unknown): Error {
+  const failed = error as { message?: unknown; stderr?: unknown };
+  const stderr = typeof failed.stderr === 'string' ? failed.stderr.trim().slice(0, 300) : '';
+  if (error instanceof Error && stderr && typeof failed.message === 'string' && !failed.message.includes(stderr)) error.message = `${failed.message}: ${stderr}`;
+  return error instanceof Error ? error : new Error(String(error));
+}
+
 /** Whether the base branch's first-parent history holds `sha`, exactly and unbounded (AC-5): trial.ts's walk, which the trial merge shares. */
 export { firstParentHolds } from './trial.js';
 

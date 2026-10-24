@@ -10,6 +10,7 @@ import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonA
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
 import { hotspots } from './hotspots.js';
+import { settledPurpose } from '../model/session-state.js';
 import { profileHealth, clearProfileFailure, recordProfileFailure } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
@@ -195,6 +196,25 @@ async function closeStep(cycle: Cycle) {
     if (state.actions[key]) continue;
     try { if (await effects.removeWorktree(space.path)) await note(cycle, key, 'reclaim', item.key, 'done', `Removed ${item.key} epoch ${space.epoch}'s worktree ${space.path}: its attempt ended`); }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `Could not remove ${item.key} epoch ${space.epoch}'s worktree ${space.path}: ${message(error)}`); }
+  }
+  // GY-2944: a review or proof session whose dispatch request is answered, whose item has left
+  // the stage it was launched for, or whose pane Herdr no longer reports is over — and so is the
+  // agent-registry session its launch ran under. The registry ends it with the reason (a vanished
+  // pane names the pane), so a finished review or proof stops consuming its role's concurrency;
+  // master status and master registry then show it ended, with that reason. The handle itself is
+  // left to the session report and the reconcile passes, which own its relaunch.
+  if (effects.releaseRegistrySession) for (const item of snapshot.work) for (const session of item.sessions ?? []) {
+    if (session.state !== 'running' || session.host !== config.hostId || (session.kind !== 'review' && session.kind !== 'proof')) continue;
+    const paneGone = !!session.pane && cycle.herdr.available && !cycle.herdr.agents.some(agent => agent.pane_id === session.pane);
+    const reason = settledPurpose(item, session, clock)
+      ?? (paneGone ? `the Herdr inventory no longer reports pane ${session.pane} (${session.agentName ?? session.id}), so its session is gone` : null);
+    if (!reason) continue;
+    const key = `release:${item.id}:${session.id}`;
+    if (state.actions[key]?.state === 'done') continue;
+    try {
+      const ended = await effects.releaseRegistrySession({ key: item.key, id: session.id, kind: session.kind, head: session.head ?? null, pane: session.pane ?? null, agentName: session.agentName ?? null }, reason);
+      await note(cycle, key, 'close', item.key, 'done', `Released ${session.id}'s agent-registry session (${ended ?? 'none recorded'}): ${reason}`, session.principal ?? null);
+    } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not release ${session.id}'s agent-registry session: ${message(error)}`, session.principal ?? null); }
   }
   await effects.sweepCheckouts?.();
 }

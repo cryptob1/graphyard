@@ -162,6 +162,7 @@ function upWorld(checkout: string, events: UpEvent[], profiles: { workers: numbe
       ensureDeployKey: async (installDir: string, repository: string) => join(installDir, 'deploy-key'),
       setMerger: async () => {},
       gh: async args => args[0] === 'repo' && args[1] === 'view' ? { code: 0, stdout: '{"name":"project"}' } : { code: 1, stdout: '', stderr: `unexpected gh ${args.join(' ')}` },
+      git: async () => ({ code: 0, stdout: '', stderr: '' }),
       async cli(args) {
         calls.push(args);
         const joined = args.join(' ');

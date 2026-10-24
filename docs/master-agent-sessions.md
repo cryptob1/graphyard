@@ -19,7 +19,7 @@ Launches take the first account under `run.quotaCeilingPercent`, else fail over;
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr.
+`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr. `master registry propose` proposes the master role beside the others — the reviewer's accounts, concurrency 1 — so a fresh install's loop launches its own session; renaming the role's accounts replaces that proposal.
 
 ### A closed Herdr workspace is replaced
 
@@ -50,5 +50,7 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted
 **Worker stall** (`run.inactivityMinutes`, 10): a worker session Herdr reports idle with no recorded activity for the window is re-prompted once with its own work; still idle a whole window after that re-prompt, the close step ends it as **`stalled`**: the pane closes, the attempt releases with its lease (a provider limit notice on the pane holds its account — Z.AI's 429 envelope for 15 minutes), and the item dispatches again next cycle.
 
 **Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
+
+**Registry slot**: the launch's agent-registry session rides its ledger record; the loop's close step ends it once the verdict is recorded, the item leaves review, or the pane is gone from Herdr (the reason names the pane), so a finished review or proof stops consuming its role's concurrency. Producers likewise.
 
 **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown; from 130min renewal refused. Open scope asks exempt.

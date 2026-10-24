@@ -2,6 +2,7 @@
 import type { Work } from '../model.js';
 import type { SessionHandle, SessionHandleInput } from '../model/sessions.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
+import type { RegistrySlot } from '../master/registry-slot.js';
 import type { WorkerProfile, HerdrAgent, ProfileAccountHealth } from '../master.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
 import { type DaemonAction, type DaemonState, type LoopRelease, storeAction } from './state.js';
@@ -51,6 +52,8 @@ export interface DaemonEffects {
    * the item dispatchable again. Absent, no stalled session is ended.
    */
   endStall?: (work: Work, session: SessionHandle, stall: { reason: string; notice: ExhaustionSignal | null }) => Promise<unknown>;
+  /** Ends the agent-registry session a review or proof session was launched under (GY-2944): the ledgers name it; absent, nothing is released. */
+  releaseRegistrySession?: (session: RegistrySlot, reason: string) => Promise<unknown>;
   /** The control plane's reconciliation of an item whose lease lapsed with nothing submitted (`POST work/:id/resync`). */
   reclaimLease?: (work: Work) => Promise<unknown>;
   /** Removes an ended attempt's worktree (never forced); whether one was removed. */

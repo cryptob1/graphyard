@@ -490,8 +490,8 @@ test('integration:registry-setup-proposal — setup discovers the logged-in CLIs
   assert.equal(preview.applied, false); assert.match(preview.next, /--apply/);
   assert.deepEqual(preview.proposal.runtimes.map((runtime: any) => runtime.name), ['claude', 'codex', 'muse']);
   assert.deepEqual(preview.proposal.accounts.map((account: any) => [account.name, account.runtime, account.model, account.credential.home]), [['claude-b', 'claude', 'claude-default', isolated], ['codex-a', 'codex', 'codex-default', codexHome], ['claude', 'claude', 'claude-default', join(home, '.claude')], ['muse', 'muse', 'muse-default', null]]);
-  // The master role is never proposed (GY-898): the operator names its accounts themselves.
-  assert.deepEqual(preview.proposal.roles.map((role: any) => role.name), fleetRoles.filter(name => name !== 'master')); assert.ok(preview.proposal.roles.every((role: any) => role.accounts.join() === 'claude-b,codex-a,claude,muse' && role.concurrency >= 1));
+  // The master role is proposed beside the others (GY-2939), so the loop's master session launches on a fresh install.
+  assert.deepEqual(preview.proposal.roles.map((role: any) => role.name), fleetRoles); assert.ok(preview.proposal.roles.every((role: any) => role.accounts.join() === 'claude-b,codex-a,claude,muse' && role.concurrency >= 1));
   assert.equal((await ok('agent-registry', auditor) as FleetView).configured, false, 'a proposal stores nothing');
 
   const applied = await registryCommand({ hostId: HOST }, ['propose', '--directory', directory, '--apply'], cli, { home, executables: name => name === 'muse' }) as any;

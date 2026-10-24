@@ -4,6 +4,7 @@ import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
 import { sweepManagedCheckouts } from '../producer.js';
+import { endRegistrySlot } from '../master/registry-slot.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
 import { masterSessionEffects } from '../master/master-session.js';
 import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson, readSessionScreen, inspectWorkerCredentials, dispatchWork, removeAttemptWorktree, profileAccount, recordObservedExhaustion, sessionAccount } from '../master.js';
@@ -74,6 +75,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
         partialWork: { state: 'not-applicable', detail: 'the stalled attempt left its worktree as it stood; the redispatch starts from the shared base' },
       }, randomUUID());
     },
+    // The agent-registry session a review or proof session ran under, ended when the close step
+    // judges it over (GY-2944): the ledgers name it, the fleet client ends it.
+    releaseRegistrySession: (session, reason) => endRegistrySlot(root, current(), session, reason),
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: path => removeAttemptWorktree(root, path, run),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
