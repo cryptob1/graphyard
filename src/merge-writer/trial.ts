@@ -11,6 +11,7 @@ import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '.
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
 import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master/host-memory.js';
+import { parseFailedTests } from '../model/base-failure.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -259,6 +260,16 @@ export interface TrialRun {
   phases?: TrialPhaseDurations;
   /** The attempts before this one that reached no verdict (GY-1832): a verdict on the retry carries the first attempt's outcome. */
   retried?: TrialNoVerdict[];
+  /**
+   * GY-2960: the first failing case a repository check's output named (node:test / TAP), so the
+   * refusal reason can name it beside the failing files; absent when the check named none.
+   */
+  failingCase?: string;
+  /**
+   * GY-2960: the check's named failures are only test time-outs (browser tests under load): the
+   * refusal still fails the head but says `timed out` so the operator can tell load from regression.
+   */
+  timedOut?: boolean;
 }
 /** A trial's phases, in order (GY-1832): the checkout and its install, the build, the test selection, the test run. */
 export const trialPhases = ['install', 'build', 'selection', 'tests'] as const;
@@ -581,6 +592,30 @@ export function failingFilesInLog(out: string, ran?: readonly string[]): string[
   }
   return [...files].filter(file => !ran || ran.includes(file));
 }
+const fileLevelFailure = /^tests\/[\w./-]+\.test\.ts$/;
+const timeoutFailure = /timed?\s*out|Timeout of \d+m?s exceeded/i;
+/**
+ * GY-2960: the failing files and cases a repository check's node:test / TAP output names — up to
+ * ten files (`test at file:line`, `✖`/`not ok` carrying a path), the first failing case in log
+ * order, and whether every named case's nearby output is only a time-out (load, not a regression).
+ */
+export function repositoryCheckFailure(log: string): { files: string[]; cases: string[]; firstCase: string | null; timedOut: boolean } {
+  const files = failingFilesInLog(log).slice(0, 10);
+  const cases = parseFailedTests(log).filter(name => !fileLevelFailure.test(name));
+  let firstCase: string | null = null;
+  for (const raw of log.split('\n')) {
+    const line = raw.replace(ansiEscape, '').trimEnd();
+    const spec = /^\s*✖ (.+?) \(\d+(?:\.\d+)?m?s\)(?:\s+#.*)?$/.exec(line);
+    const tap = /^\s*not ok \d+ - (.+?)(\s+#\s+(?:TODO|SKIP)\b.*)?$/i.exec(line);
+    const name = (spec?.[1] ?? (tap && !tap[2] ? tap[1] : null))?.trim() ?? null;
+    if (name && name.length <= 500 && !fileLevelFailure.test(name)) { firstCase = name; break; }
+  }
+  const timedOut = cases.length > 0 && cases.every(name => {
+    const at = log.indexOf(name);
+    return timeoutFailure.test(at < 0 ? name : log.slice(Math.max(0, at - 80), at + 400));
+  });
+  return { files, cases, firstCase, timedOut };
+}
 /** The runner's per-file records (`--durations FILE`, tests/helpers/file-durations.mjs): one JSON line per file that ran, with whether it passed. */
 export function runnerRecords(text: string): { file: string; passed: boolean }[] {
   return text.split('\n').flatMap(line => {
@@ -739,7 +774,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
-  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail = tail()): TrialRun => ({ build, tests, durationMs: Math.max(0, now() - startedAt), logTail, runnerExit, ...(groups ? { groups } : {}), phases: enter() });
+  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail = tail(), detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => ({
+    build, tests, durationMs: Math.max(0, now() - startedAt), logTail, runnerExit, ...(groups ? { groups } : {}), phases: enter(),
+    ...(detail?.failingCase ? { failingCase: detail.failingCase } : {}),
+    ...(detail?.timedOut ? { timedOut: true } : {}),
+  });
   const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
   const trial = async (): Promise<TrialRun> => {
     try {
@@ -841,17 +880,25 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         enter('tests');
         const failed: string[] = [];
-        let runnerExit: number | null = 0;
+        let passed = 0, runnerExit: number | null = 0;
+        let detail: { failingCase?: string | null; timedOut?: boolean } | undefined;
+        let failingOutput: string | undefined;
         for (const check of checks) {
           const ran = await child('tests', check.argv[0]!, check.argv.slice(1));
           if (hostEnded(ran)) throw runnerFailure('tests', ran);
           if (!ran.ok) {
-            failed.push(check.check);
+            // GY-2960: name the failing test files and first case from the check's output, not only the check.
+            const parsed = repositoryCheckFailure(ran.out);
+            failed.push(...(parsed.files.length ? parsed.files : [check.check]));
+            detail = { failingCase: parsed.firstCase, timedOut: parsed.timedOut };
+            failingOutput = log.at(-1);
             runnerExit = exitCode({ status: ran.status, signal: ran.signal, cause: ran.cause });
             break;
           }
+          passed++;
         }
-        return finish('pass', { passed: Math.max(0, checks.length - failed.length), failed, files: checks.length }, runnerExit);
+        const logTail = failingOutput && log.join('\n').length > tailLength ? failureTail([failingOutput]) : tail();
+        return finish('pass', { passed, failed, files: checks.length }, runnerExit, undefined, logTail, detail);
       }
       enter('selection');
       // A selection child the host killed or could not start is no verdict (GY-1832); only one that exits non-zero fails the selection.

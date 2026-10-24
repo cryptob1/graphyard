@@ -185,12 +185,18 @@ export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<Mer
 export const keyReusedRefusal = (error: unknown) => /Idempotency key reused with different input/.test(error instanceof Error ? error.message : String(error));
 
 /** The refusal a failed trial records: the conflicting paths, the failing build step, or the failing test files (AC-3). */
-export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests'> | null }): string | null {
+export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut'> | null }): string | null {
   if (trial.conflict?.length) return `${trialFailurePrefix}: the merge conflicts in ${trial.conflict.slice(0, 20).join(', ')}`;
   const run = trial.run;
   if (!run) return `${trialFailurePrefix}: the trial reached no verdict`;
   if (run.build === 'fail') return `${trialFailurePrefix}: build step npm run build`;
-  if (run.tests.failed.length) return `${trialFailurePrefix}: tests ${run.tests.failed.slice(0, 20).join(', ')}`;
+  if (run.tests.failed.length) {
+    // GY-2960: a repository check names its failing files; timed-out-only failures say so, else the first case rides after the files.
+    const files = run.tests.failed.slice(0, 20).join(', ');
+    if (run.timedOut) return `${trialFailurePrefix}: tests ${files} timed out`;
+    if (run.failingCase) return `${trialFailurePrefix}: tests ${files}: ${run.failingCase}`;
+    return `${trialFailurePrefix}: tests ${files}`;
+  }
   return null;
 }
 /**
@@ -431,13 +437,22 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
       throw Object.assign(new Error(`could not discover the proof test files: ${String(failed.message ?? error)}`), { status: null, signal: null, timedOut: failed.timedOut, stdout: failed.stdout, stderr: failed.stderr, cause: `could not discover the proof test files: ${String(failed.message ?? error).slice(0, 300)}` });
     }
   };
+  const capture = async (invoke: () => ReturnType<ChildRun>) => {
+    const own = epoch;
+    try { const out = String(await invoke()); if (own === epoch) tap += `${out}\n`; return out; }
+    catch (error) { if (own === epoch) tap += `${childOutput(error)}\n`; throw error; }
+  };
   const run: ChildRun = async (command, args, options) => {
     if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && (args[1] === 'affected' || args[1] === 'select')) { const files = await proofFiles(options); return widened(String(await inner(command, args, options)), files); }
     const at = command === 'node' ? args.indexOf(runner) : -1;
-    if (at < 0) return inner(command, args, options);
-    const own = epoch;
-    try { const out = String(await inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options)); if (own === epoch) tap += `${out}\n`; return out; }
-    catch (error) { if (own === epoch) tap += `${childOutput(error)}\n`; throw error; }
+    if (at >= 0) {
+      return capture(() => inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options));
+    }
+    // GY-2960: a repository check's npm test/typecheck output is the TAP the base-failure attribution reads for cases.
+    if (command === 'npm' && (args[0] === 'test' || (args[0] === 'run' && (args[1] === 'test' || args[1] === 'typecheck')))) {
+      return capture(() => inner(command, args, options));
+    }
+    return inner(command, args, options);
   };
   const counted = (): ProofCounts => Object.fromEntries(input.proofs.map(proof => { const { executed, failed } = countProofCases(tap, proof); return [proof, { executed, failed }]; }));
   let verdict: TrialRun, leftover: string | undefined;
@@ -461,6 +476,14 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
 }
 
 /**
+ * GY-2960: base-tip check results reused for every head that fails the same tip (and files) during
+ * this process — the repository-check path has no per-file selection, so the same tip's run answers
+ * every head that hits it.
+ */
+const baseTipCheckCache = new Map<string, { run: TrialRun; tap: string } | null>();
+/** Clears the base-tip check cache (tests that mock the same tip with different outcomes). */
+export const clearBaseTipCheckCache = () => baseTipCheckCache.clear();
+/**
  * GY-1834: who a trial's failing test files are charged to. A proof file in which one of the item's
  * proof cases failed is never set aside: it stays failing, and so does every proof file of a run
  * that named no failing case. Every failing file is run once more on the same merge commit; a file
@@ -477,8 +500,9 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   if (first.build !== 'pass' || !failed.length || failed.length !== first.tests.failed.length) return first;
   const own = (test: string) => { const proof = leadingProof(test); return !!proof && input.proofs.includes(proof); };
   // A runner's file-level line (`not ok N - tests/x.test.ts`) names the file, not a case: only cases are named.
-  const casesOf = (tap: string) => parseFailedTests(tap).filter(name => !/^tests\/[\w./-]+\.test\.ts$/.test(name));
-  const named = casesOf(firstTap);
+  // GY-2960: a repository check may leave its cases only on the verdict's logTail when TAP was not injected.
+  const casesOf = (tap: string, fallback = '') => parseFailedTests(tap || fallback).filter(name => !/^tests\/[\w./-]+\.test\.ts$/.test(name));
+  const named = casesOf(firstTap, first.logTail);
   // A proof file is held only for a failing proof case of the item in it (or when the run named no case at all):
   // an unrelated case failing beside the proofs, in that file or another proof file, is attributed like any other file's.
   // A failing proof case whose file the TAP does not name holds every failing proof file.
@@ -491,7 +515,7 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   // Every failing file reruns, held ones too, so the rerun names each case that failed only once.
   const rerun = await retest(input.mergeSha, failed).catch(() => null);
   if (!rerun || rerun.run.build !== 'pass') return first;
-  const again = new Set(casesOf(rerun.tap));
+  const again = new Set(casesOf(rerun.tap, rerun.run.logTail));
   // A file whose rerun fails one of the item's proofs is the head's too: it is never the base's.
   const ownAgain = [...again].some(own);
   const still = failed.filter(file => !held.includes(file) && rerun.run.tests.failed.includes(file));
@@ -507,11 +531,17 @@ export async function attributeFailures(first: MergeTrialRun, firstTap: string, 
   try { tip = input.baseTip ?? String(await git('git', ['-C', input.root, 'rev-parse', `${input.mergeSha}^1`])).trim().toLowerCase(); }
   catch { return result; }
   if (!/^[0-9a-f]{40}$/.test(tip)) return result;
-  const onBase = await retest(tip, still).catch(() => null);
+  // GY-2960: the same base tip's check is reused for every head that fails it during this process.
+  const cacheKey = `${tip}:${still.slice().sort().join(',')}`;
+  let onBase = baseTipCheckCache.get(cacheKey);
+  if (onBase === undefined) {
+    onBase = await retest(tip, still).catch(() => null);
+    baseTipCheckCache.set(cacheKey, onBase);
+  }
   if (!onBase || onBase.run.build !== 'pass') return result;
   const files = still.filter(file => onBase.run.tests.failed.includes(file));
   // Attributed by case, not by file: every case the rerun failed must fail on the base tip too, and a rerun that named no case attributes nothing.
-  const cases = [...again], onBaseTests = casesOf(onBase.tap).filter(test => !own(test));
+  const cases = [...again], onBaseTests = casesOf(onBase.tap, onBase.run.logTail).filter(test => !own(test));
   if (!files.length || !cases.length || !cases.every(test => onBaseTests.includes(test))) return result;
   // GY-2954: the refusal carries the base run's own report, so the next operator reads the reason instead of the journal.
   const crash = crashedProcessLine(onBase.run.logTail) ?? crashedProcessLine(onBase.tap);
