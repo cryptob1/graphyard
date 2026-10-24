@@ -742,16 +742,20 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + blockingStandardSection
     + repetitionReviewSection(files);
 }
-/** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. */
+/** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. `plane.baseTip` is the diff base the session judges — for a candidate review the head's merge base with the base branch (GY-2948), for a post-merge review the merge commit's first parent — and anchors the memory digest too: the digest's "changes since" window reaches past that base to the tip, so it names items merged between the two, which a reviewer judging against the merge base still wants in mind. */
 function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null) {
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
   const subject = plane.postMerge
     ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
     : `Review head ${plane.head} against base ${plane.baseTip} — the head's merge base with the base branch — under policy revision ${binding.policyRevision}, for work item ${binding.key}: the control plane observed it from the shared object store, and there is no pull request. The delta to judge is head versus that base: a file the base branch gained after ${plane.baseTip} is not part of this delta, so its absence from the head is not a removal. `;
+  // AC-2: the verdict itself names its scope — the body is carried verbatim, so the request has it
+  // open with the head and base, and the server records the launch's base beside them.
+  const scope = `Open the review body by naming the head and the base you judged against, so the verdict itself records which commits were in scope. `;
   const outcome = plane.postMerge
     ? 'Name each finding that meets the blocking standard on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
     : '';
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
+    + scope
     + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, criteria, files, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history) })
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')

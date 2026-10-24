@@ -108,7 +108,7 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   assert.match(staleReviewReason(record(owed, { sha: P }), [owed])!, /not delivered as dddddddddddd/);
   const launched = delivered('GY-10', { id: owed.id, reviewLaunch: { id: 'launch-1', reviewer: 'review-claude-1', requester: 'graphyard-master', head: M, baseTip: P, tokenHash: 'e'.repeat(64), at, expiresAt: at, postMerge: true, verdict: null } });
   assert.equal(controlPlaneVerdict(record(owed), [launched]), null);
-  launched.reviewLaunch!.verdict = { reviewer: 'review-claude-1', sha: M, state: 'CHANGES_REQUESTED', body: verdictBody, submittedAt: at, source: 'control-plane', reviewId: 77 };
+  launched.reviewLaunch!.verdict = { reviewer: 'review-claude-1', sha: M, state: 'CHANGES_REQUESTED', body: verdictBody, submittedAt: at, source: 'control-plane', reviewId: 77, baseSha: P };
   assert.deepEqual(controlPlaneVerdict(record(owed), [launched]), { state: 'CHANGES_REQUESTED', reviewer: 'review-claude-1', reviewId: 77, submittedAt: at });
   assert.equal(controlPlaneVerdict(record(owed, { launch: 'other-launch' }), [launched]), null, 'another launch\'s verdict is not this record\'s');
   const refused = delivered('GY-10', { reviewLaunch: { ...launched.reviewLaunch!, verdict: null, refused: { at, reason: 'Reviewer review-claude-1 implemented GY-10' } } });

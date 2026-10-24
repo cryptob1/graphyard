@@ -165,9 +165,14 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
       return { refusal: { reason, status: 403 } };
     }
     const state = verdictStateOf(data.event), submittedAt = now.toISOString();
-    const inserted = await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4) RETURNING seq', [work!.id, actor.id, reviewVerdictEvent, JSON.stringify({ key: work!.key, launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, event: data.event, body: data.body, submittedAt, postMerge: launch!.postMerge, source: 'control-plane' })]);
+    // Every verdict carries the base its session judged (GY-2948 AC-2): the launch's baseTip, the
+    // head's merge base with the base branch, so the verdict itself — in the ledger event, the
+    // observation.reviews entry and the launch's verdict record — says which commits were in scope,
+    // even after a relaunch replaces the launch record.
+    const baseSha = launch!.baseTip;
+    const inserted = await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4) RETURNING seq', [work!.id, actor.id, reviewVerdictEvent, JSON.stringify({ key: work!.key, launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, event: data.event, body: data.body, submittedAt, postMerge: launch!.postMerge, source: 'control-plane', baseSha })]);
     const reviewId = Number(inserted.rows[0]?.seq);
-    const verdict: ControlPlaneVerdict = { reviewer: launch!.reviewer, sha: data.sha, state, body: data.body, submittedAt, source: 'control-plane', reviewId };
+    const verdict: ControlPlaneVerdict = { reviewer: launch!.reviewer, sha: data.sha, state, body: data.body, submittedAt, source: 'control-plane', reviewId, baseSha };
     // The verdict stands where GitHub's review would: `exactApproval` finds an APPROVED of the exact
     // candidate head by someone other than its author, and the review gate reads a change request.
     // Every verdict carries its body; a change request also carries its BLOCKING findings, as a
@@ -181,7 +186,7 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
           reviewIds: (observation.reviews ?? []).map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0)
         };
       }
-      observation.reviews = [...(observation.reviews ?? []), { reviewer: launch!.reviewer, sha: data.sha, state, id: reviewId, submittedAt, body: data.body, ...(state === 'CHANGES_REQUESTED' ? { blocking: blockingFindings(data.body) } : {}), source: 'control-plane' } as (typeof observation.reviews)[number]];
+      observation.reviews = [...(observation.reviews ?? []), { reviewer: launch!.reviewer, sha: data.sha, state, id: reviewId, submittedAt, body: data.body, baseSha, ...(state === 'CHANGES_REQUESTED' ? { blocking: blockingFindings(data.body) } : {}), source: 'control-plane' } as (typeof observation.reviews)[number]];
       observation.reviewIds = [...(observation.reviewIds ?? []), reviewId];
     }
     work!.reviewLaunch = { ...launch!, verdict };

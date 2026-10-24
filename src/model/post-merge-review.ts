@@ -19,6 +19,8 @@ export interface ControlPlaneVerdict {
   reviewer: string; sha: string; state: 'APPROVED' | 'CHANGES_REQUESTED' | 'COMMENTED'; body: string; submittedAt: string; source: 'control-plane';
   /** The ledger sequence of the `review.verdict` event: the verdict's id wherever a review id is read. */
   reviewId: number;
+  /** GY-2948 AC-2: the base the session judged against — the launch's baseTip, the head's merge base with the base branch — so the verdict itself, not the launch record a relaunch replaces, says which commits were in scope. */
+  baseSha: string;
 }
 
 /**
