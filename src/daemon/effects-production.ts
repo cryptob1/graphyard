@@ -105,13 +105,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       return { head, dirty };
     },
     // GY-2961: the attempt bound's stop — the same preservation a lapsed lease gets (a successor
-    // receives the diff), with the bound named on the capacity record that releases the lease.
+    // receives the diff), with the bound named on the capacity record that releases the lease. The
+    // record is written even when this host holds no registered worktree to preserve from, so the
+    // stop always ends the attempt it names.
     endAttemptBound: async (item, session, why) => {
       const config = current();
       const epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
-      const space = item.workspaces?.find(entry => entry.epoch === epoch);
-      if (!Number.isSafeInteger(epoch) || !space || space.host !== config.hostId) return null;
-      const partialWork = await preservePartialWork(space.path, `${item.key} attempt ${epoch} stopped at its attempt bound`, run);
+      const space = Number.isSafeInteger(epoch) ? item.workspaces?.find(entry => entry.epoch === epoch) : undefined;
+      const partialWork = space && space.host === config.hostId
+        ? await preservePartialWork(space.path, `${item.key} attempt ${epoch} stopped at its attempt bound`, run)
+        : { state: 'not-applicable' as const, detail: 'the bound stop found no registered worktree on this host to keep work from' };
       await mutate(`work/${item.id}/capacity`, {
         event: 'exhausted', role: 'worker', epoch, cause: 'interrupted',
         profile: session.principal.slice(0, 80), account: null, runtime: session.runtime?.slice(0, 40) ?? null,

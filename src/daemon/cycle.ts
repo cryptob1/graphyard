@@ -298,7 +298,7 @@ async function attemptBoundStep(cycle: Cycle, item: Work, session: NonNullable<W
     const kept = await effects.endAttemptBound(item, session, why);
     await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished',
       outcome: `stopped by the attempt bound: ${why}`.slice(0, 500) });
-    await note(cycle, key, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: the attempt ${why}${kept?.commit ? `; its uncommitted work is kept as ${kept.commit.slice(0, 12)}` : ', and a successor receives its diff'}`, session.principal);
+    await note(cycle, key, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: the attempt ${why}${kept?.state === 'committed' && kept.commit ? `; its uncommitted work is kept as ${kept.commit.slice(0, 12)}` : kept?.state === 'discarded' ? `; its uncommitted work could not be kept (${kept.detail ?? 'no detail'})` : ', and its worktree is as the attempt left it'}`, session.principal);
   }
   catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not end ${session.id} at its attempt bound: ${message(error)}`, session.principal); }
   return true;
