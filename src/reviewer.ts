@@ -485,7 +485,11 @@ export function assertReviewCandidate(work: Work, observedAt: string, request?: 
   // Only a head that conflicts with the base, or whose mergeability GitHub has not computed, waits
   // for a sync.
   if (behindBaseHold(work)) throw new Error(`${work.key} candidate ${candidate.sha.slice(0, 12)} does not contain the base branch tip ${observation.baseTip?.slice(0, 12) ?? ''}; ${observation.conflicting ? 'GitHub reports a merge conflict with it' : 'GitHub does not report it mergeable'}, so a review would judge a diff the sync will change. Run graphyard sync ${work.key} and push`);
-  return { key: work.key, pr: candidate.pr, sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, author: candidate.author, branch: candidate.branch };
+  // The binding's base is the head's merge base with the base branch (GY-2948): the delta the
+  // reviewer judges is head versus that base, so a file the base branch gained after it — merged
+  // while this worker worked — is never part of the reviewed diff, let alone reported as removed.
+  // The tip itself (`candidate.baseSha`) stays the currency the supersession checks above read.
+  return { key: work.key, pr: candidate.pr, sha: candidate.sha, baseSha: observation.mergeBase ?? candidate.baseSha, policyRevision: work.policyRevision, author: candidate.author, branch: candidate.branch };
 }
 
 export type ReviewBinding = ReturnType<typeof assertReviewCandidate>;
@@ -743,7 +747,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
   const subject = plane.postMerge
     ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
-    : `Review head ${plane.head} against base ${plane.baseTip} under policy revision ${binding.policyRevision}, for work item ${binding.key}: the control plane observed it from the shared object store, and there is no pull request. `;
+    : `Review head ${plane.head} against base ${plane.baseTip} — the head's merge base with the base branch — under policy revision ${binding.policyRevision}, for work item ${binding.key}: the control plane observed it from the shared object store, and there is no pull request. The delta to judge is head versus that base: a file the base branch gained after ${plane.baseTip} is not part of this delta, so its absence from the head is not a removal. `;
   const outcome = plane.postMerge
     ? 'Name each finding that meets the blocking standard on its own line starting BLOCKING: as PATH:LINE — FINDING; Graphyard files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item. Post REQUEST_CHANGES when any BLOCKING line stands and APPROVE otherwise. '
     : '';
@@ -1273,7 +1277,10 @@ export function staleReviewReason(record: Pick<ReviewRecord, 'key' | 'sha' | 'ba
   if (item.reworkRequested) return 'rework was requested for the item';
   if (!item.submission || !item.candidate) return 'the item no longer has a submitted candidate';
   if (item.candidate.sha !== record.sha) return `head changed from ${record.sha.slice(0, 12)} to ${item.candidate.sha.slice(0, 12)}`;
-  if (item.candidate.baseSha !== record.baseSha) return `base changed from ${record.baseSha.slice(0, 12)} to ${item.candidate.baseSha.slice(0, 12)}`;
+  // The record's base is the diff base its session judged: the head's merge base then, not the
+  // tip, so a tip that moved past it without changing that merge base does not stale the session.
+  const base = item.observation?.mergeBase ?? item.candidate.baseSha;
+  if (base !== record.baseSha) return `base changed from ${record.baseSha.slice(0, 12)} to ${base.slice(0, 12)}`;
   if (item.policyRevision !== record.policyRevision) return `policy revision changed from ${record.policyRevision} to ${item.policyRevision}`;
   return null;
 }

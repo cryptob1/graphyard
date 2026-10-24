@@ -140,6 +140,8 @@ export interface Observation {
   // The real base-branch head and its tree, recorded separately from the candidate's bound base
   // so a held binding never hides where the managed branch actually points.
   baseTip?: string; baseTree?: string;
+  /** The head's merge base with that tip: the base both the scope diff (GY-2082) and the review that judges the head (GY-2948) diff against. Absent on observations recorded before it was kept. */
+  mergeBase?: string;
   // The head contains that base tip by ancestry. A review is only requested for a head that does.
   baseTipContained?: boolean;
   protected: boolean; files: string[]; at: string;

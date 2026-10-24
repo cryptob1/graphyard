@@ -114,7 +114,11 @@ export async function recordReviewLaunch(services: Services, actor: Principal, i
     } else {
       demand(work!.observation?.source === 'control-plane', `${work!.key} was observed by GitHub, not the control plane; its review posts through gh`, 409);
       demand(work!.candidate?.sha.toLowerCase() === data.head, `${work!.key}'s candidate is ${work!.candidate ? work!.candidate.sha.slice(0, 12) : 'none'}, not ${data.head.slice(0, 12)}; a review is launched on the submitted head`, 409);
-      demand(work!.observation!.candidate.baseSha.toLowerCase() === data.baseTip, `${work!.key}'s candidate is observed on base ${work!.observation!.candidate.baseSha.slice(0, 12)}, not ${data.baseTip.slice(0, 12)}`, 409);
+      // The launch binds the base the session judges (GY-2948): the candidate's merge base with the
+      // base branch, as the observation records it — a file the base gained after it is never part
+      // of the reviewed delta, so the tip itself is not what a review is registered against.
+      const diffBase = work!.observation!.mergeBase ?? work!.observation!.candidate.baseSha;
+      demand(diffBase.toLowerCase() === data.baseTip, `${work!.key}'s candidate is judged against base ${diffBase.slice(0, 12)}, not ${data.baseTip.slice(0, 12)}`, 409);
     }
     // One launch stands per item: a relaunch replaces the earlier registration and withdraws its token.
     const withdraw = work!.reviewLaunch ? [work!.reviewLaunch.tokenHash] : [];

@@ -92,7 +92,7 @@ export async function observeHead(git: GitRunner, input: HeadObservationInput): 
   return {
     source: 'control-plane',
     candidate: { sha: head, baseSha: baseTip, pr: 0, branch, author },
-    files: scopeFiles.map(file => file.path), scopeFiles, baseTip, baseTipContained,
+    files: scopeFiles.map(file => file.path), scopeFiles, baseTip, mergeBase, baseTipContained,
     protected: false, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true,
     at: (input.at ?? new Date()).toISOString(),
   };
