@@ -9,12 +9,14 @@ import { observeSessions, registeredLaunch, reportedHandle, type SessionReportEn
 import { runtimeSessionOf, sessionLiveness, sessionRole, sessionVanishGraceMs, supersededSession, type LivenessOptions, type SessionHandle, type SessionHandleInput, type SessionKind, type RuntimeSession } from './model/sessions.js';
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
+import type { AgentRegistry } from './model/registry.js';
 import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
 import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
+import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from './master/registry-slot.js';
 import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
 import { launchRefusalProbeDue, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeRefusalProbeMs, wholeFindings } from './model/post-merge-review.js';
 import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
@@ -142,6 +144,12 @@ export const dispatchCursorSchema = z.object({
    * it on the cursor keeps that judgment across a restart of the loop.
    */
   sessionMisses: z.record(z.string(), z.string()).default({}),
+  /**
+   * The registry sessions this host's tick found unbacked by Herdr, each carrying when it was first
+   * missed (GY-2945). One a restarted loop no longer tracks among its handles is judged here, so
+   * the second consecutive miss survives a restart of the loop, as the handle misses do.
+   */
+  registryMisses: z.record(z.string(), z.string()).default({}),
   /**
    * What launches last observed about each agent account and the launches that skipped an account,
    * with the reason. Read from the environment log beside the cursor, which every launcher writes;
@@ -424,6 +432,15 @@ export interface DispatchEffects {
    * GY-113 exists to end, so the shipped `dispatchEffects` always wires it.
    */
   endSession?: (closure: SessionClosure) => Promise<unknown>;
+  /**
+   * The control plane's agent registry document, or null when it cannot be read (GY-2945); and the
+   * end of one of its live sessions — a reviewer or producer session of this host no Herdr pane
+   * backs, which the ledgers name and this loop may never have launched, is ended on the second
+   * consecutive miss so it stops consuming its role's concurrency. A dispatcher wired without
+   * either leaves the registry's slots to the control plane's own settlement rules.
+   */
+  registry?: () => Promise<AgentRegistry | null>;
+  endRegistrySession?: (session: { id: string; role: string; work: string | null; pane: string; agentName: string | null }, reason: string) => Promise<unknown>;
   /**
    * Wakes the item's observation job now (GY-1429), so a verdict a reviewer posted is read and its
    * request settled without waiting on the observation scheduler's cadence. A dispatcher wired
@@ -739,6 +756,8 @@ export interface DispatchTick { at: string; launched: DispatchLaunch[]; refused:
   followUps?: { work: string; sha: string; filed: string[]; memory: number; failure?: string }[];
   /** Session records this tick reconciled against the runtime, and the ones whose closure could not be written back. */
   closed: SessionClosure[]; closeFailures: { work: string; id: string; reason: string }[];
+  /** Registry sessions this tick ended because no Herdr pane backed them (GY-2945), with the missing pane. */
+  registryClosed?: { work: string | null; id: string; role: string; pane: string }[];
   /** The session report (GY-172): how many sessions this tick observed, how many records it wrote, and the writes that failed. */
   sessions?: { observed: number; written: number; failures: { work: string; id: string; reason: string }[] };
   /** Items whose observation this tick woke because a reviewer had answered their request (GY-1429). */
@@ -842,6 +861,32 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       catch (error) { tick.closeFailures.push({ work: closure.key, id: closure.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
     }
   })();
+  // GY-2945: the registry sessions of this host that no Herdr pane backs — a session a restarted
+  // loop no longer tracks among its handles, whose ledger record is all that names its pane. The
+  // control plane's own settlement keeps such a session live while its request stands, so the
+  // finished review it belongs to pins its role at the concurrency limit. Judged here, where the
+  // slot is spent: the first tick records the miss, the second ends the session with the missing
+  // pane named, and the request the slot held back launches in this tick or the next. An unread
+  // registry or an unread Herdr is a gap: nothing is judged and the misses stand as they were.
+  if (effects.registry && effects.endRegistrySession && herdr) {
+    const document = await effects.registry();
+    if (document) {
+      const misses: Record<string, string> = {};
+      tick.registryClosed = [];
+      for (const orphan of orphanedRegistrySessions(document, config.hostId, herdr, [...reviews, ...producers], clock)) {
+        const first = Date.parse(cursor.registryMisses[orphan.id] ?? '');
+        const firstMissedAt = Number.isFinite(first) ? Math.min(first, clock) : clock;
+        misses[orphan.id] = new Date(firstMissedAt).toISOString();
+        // The second consecutive miss is the end; an entry survives a failed end, so the next
+        // tick retries it rather than starting the grace again.
+        if (!Number.isFinite(first)) continue;
+        const reason = `the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
+        try { await effects.endRegistrySession(orphan, reason); tick.registryClosed.push({ work: orphan.work, id: orphan.id, role: orphan.role, pane: orphan.pane }); }
+        catch (error) { tick.closeFailures.push({ work: orphan.work ?? '', id: orphan.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
+      }
+      cursor.registryMisses = misses;
+    }
+  }
   const settledHandles = new Set(closures.map(closure => sessionHandleKey(closure.workId, closure.id)));
   // Herdr unreadable: nothing is launched, because a launch needs the agent inventory to count
   // each profile's sessions against its limit; the requests wait and the tick says so.
@@ -1410,6 +1455,11 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     // And ends one when the sweep finds it over. The same coordinator mutation: a record that says
     // running is what holds the role slot, so closing it is as much this loop's job as opening it.
     endSession: (closure: SessionClosure) => mutate(`work/${closure.workId}/session`, closureHandle(closure), randomUUID()),
+    // GY-2945: the registry this host's sessions are reconciled against, read with the same
+    // coordinator credential every launch authenticates with, and the end of one of its sessions
+    // no Herdr pane backs — a null document and an unreadable registry are gaps, never judgments.
+    registry: () => registryDocument(current()),
+    endRegistrySession: (session, reason) => endRegistrySessionById(current(), session.id, reason),
     // The same three moves the coordination loop makes for a session exhausted mid-work.
     selectedAccount: async (role, profile) => (await readEnvironmentLog(current())).selected?.[selectionKey(role, profile)] ?? null,
     holdAccount: (account, observed) => recordObservedExhaustion(current(), account, observed, deps.now?.(), {}),
