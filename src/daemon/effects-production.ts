@@ -57,6 +57,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
     // The loop's one stall re-prompt (GY-2943), delivered to the session's pane as its runtime accepts prompts.
     promptSession: async (session, text) => { const target = session.pane ?? session.agentName; if (!target) throw new Error(`the session has neither a pane nor a runtime name to prompt`); await herdrJson(['agent', 'prompt', target, text], run); },
+    // GY-2959: the reject key that answers a blocked session's own permission prompt, as the launcher answers a consent prompt.
+    sessionKeys: async (session, keys) => { const target = session.pane ?? session.agentName; if (!target) throw new Error(`the session has neither a pane nor a runtime name to send keys to`); await herdrJson(['agent', 'send-keys', target, ...keys], run); },
     sessionScreen: session => session.pane || session.agentName ? readSessionScreen(session.pane ?? session.agentName!, run) : null,
     // GY-2943: the stalled attempt ends through the capacity record — `interrupted` when its pane
     // showed no provider limit notice, `quota` with the notice's reset when it did, so the account

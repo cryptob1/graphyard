@@ -393,19 +393,30 @@ export async function onSelectedSession<T>(selected: LaunchSelection, failed: st
  */
 export const openCodeAllowAll = { '*': 'allow', edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'allow', doom_loop: 'allow' };
 /**
+ * The external-directory permission a launch carries once its repository root is known (GY-2959):
+ * the repository tree — every worktree beside the assigned one, its `.graphyard` tree included —
+ * is granted, and everything outside the repository is denied, so a worker that bisects in a
+ * second worktree or reads a sibling path never stops on the external-directory prompt for a
+ * person. The explicit `.graphyard` entry keeps the grant readable beside the tree's, whichever
+ * glob rules a runtime applies to dot-directories.
+ */
+export const openCodeRepositoryGrant = (root: string) => ({ [`${root}/**`]: 'allow', [`${root}/.graphyard/**`]: 'allow', '*': 'deny' });
+/**
  * An operator's own OpenCode permission document that asks nothing (the recipe's `permits`) is laid
  * over the allow-all rather than replacing it: a key it leaves out (`external_directory`,
- * `doom_loop`, …) keeps Graphyard's `allow` instead of falling back to OpenCode's default, which asks.
+ * `doom_loop`, …) keeps Graphyard's `allow` — or, when the repository root is known, the
+ * repository-tree grant — instead of falling back to OpenCode's default, which asks.
  */
-function openCodePermission(operator: string | undefined) {
-  if (operator === undefined) return JSON.stringify(openCodeAllowAll);
+function openCodePermission(operator: string | undefined, repositoryRoot?: string) {
+  const base = repositoryRoot ? { ...openCodeAllowAll, external_directory: openCodeRepositoryGrant(repositoryRoot) } : openCodeAllowAll;
+  if (operator === undefined) return JSON.stringify(base);
   const document: unknown = JSON.parse(operator);
-  return document && typeof document === 'object' && !Array.isArray(document) ? JSON.stringify({ ...openCodeAllowAll, ...document }) : operator;
+  return document && typeof document === 'object' && !Array.isArray(document) ? JSON.stringify({ ...base, ...document }) : operator;
 }
-export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'prompt' = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}) {
+export function agentLaunchPlan(kind: string | undefined, approvals: 'auto' | 'prompt' = 'auto', agentArgs: string[] = [], environment: Record<string, string> = {}, repositoryRoot?: string) {
   const plan = launchPlan(kind, approvals, agentArgs, environment);
   if (!plan.applied || kind !== 'opencode') return plan;
-  return { ...plan, environment: { ...plan.environment, OPENCODE_PERMISSION: openCodePermission(environment.OPENCODE_PERMISSION) }, prompts: 'every permission prompt, including edits, shell commands, fetches, and paths outside the worktree',
+  return { ...plan, environment: { ...plan.environment, OPENCODE_PERMISSION: openCodePermission(environment.OPENCODE_PERMISSION, repositoryRoot) }, prompts: 'every permission prompt, including edits, shell commands, fetches, and paths outside the worktree',
     tradeoff: 'opencode edits files, runs shell commands, fetches URLs, and reaches outside its worktree without asking.' };
 }
 
@@ -441,7 +452,7 @@ export function registryToolsArgs(account: FleetLaunchAccount) {
  * detached worktree under the managed worktree root, and is given its own session directory there
  * and nothing beside it.
  */
-export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: LaunchAccount | null, reach: { writable?: string[] } = {}) {
+export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'prompt'; agentArgs: string[]; environment: Record<string, string> }, account: LaunchAccount | null, reach: { writable?: string[]; repositoryRoot?: string } = {}) {
   // A registry account carries its runtime's launch contract: what to start, its own startup
   // arguments, the variable that selects the login home, and the flag that selects its model.
   const contract = account && 'fleet' in account ? account.fleet.contract : null;
@@ -453,7 +464,7 @@ export function accountLaunch(profile: { kind?: string; approvals: 'auto' | 'pro
   const profileEnvironment = fleetArgs ? {} : profile.environment;
   // An approvals opt-out is refused, naming the runtime, before any session starts (GY-184).
   assertNoApprovalOptOut(kind ?? 'unnamed', profile.approvals);
-  const plan = agentLaunchPlan(kind, profile.approvals, fleetArgs ?? [...(contract?.args ?? []), ...own], { ...contract?.environment, ...profileEnvironment });
+  const plan = agentLaunchPlan(kind, profile.approvals, fleetArgs ?? [...(contract?.args ?? []), ...own], { ...contract?.environment, ...profileEnvironment }, reach.repositoryRoot);
   // So is an effective launch whose own arguments or environment still let the runtime ask.
   if (plan.refusal) throw new LaunchRefusedError(kind ?? 'unnamed', plan.refusal);
   // The plan's variables come last: they are the recipe's, where the profile set none, or the

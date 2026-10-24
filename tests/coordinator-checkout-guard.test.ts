@@ -15,7 +15,6 @@ import { grantWorkerPaths, runtimeSandboxes, workerPaths, writablePaths } from '
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim();
 const addedDirectories = (args: string[], cwd: string) => args.flatMap((arg, index) => arg === '--add-dir' ? [join(cwd, args[index + 1])] : []);
-const openCodeConfined = JSON.stringify({ edit: 'allow', bash: 'allow', webfetch: 'allow', external_directory: 'deny' });
 
 /** A coordinator checkout laid out like a Graphyard installation, with one managed assignment worktree. */
 async function coordinatorFixture() {
@@ -52,7 +51,7 @@ const workerProfiles = (fixture: Fixture): WorkerProfile[] => {
   return ([
     { ...base, name: 'claude-worker', agentName: 'graphyard-claude-1', kind: 'claude' as const, agentArgs: [], environment: {} },
     { ...base, name: 'codex-worker', agentName: 'graphyard-codex-1', kind: 'codex' as const, agentArgs: [], environment: {} },
-    { ...base, name: 'opencode-worker', agentName: 'graphyard-opencode-1', kind: 'opencode' as const, agentArgs: [], environment: { OPENCODE_PERMISSION: openCodeConfined } },
+    { ...base, name: 'opencode-worker', agentName: 'graphyard-opencode-1', kind: 'opencode' as const, agentArgs: [], environment: {} },
   ]).map(profile => workerProfileSchema.parse(profile));
 };
 
@@ -64,9 +63,10 @@ test('unit:worker-confined-to-worktree — every worker profile is launched with
     const writable = writablePaths({ ...paths, commonDir: paths.commonDir ?? join(main, '.git') });
     for (const profile of workerProfiles(fixture)) {
       // The profile as configured launches: no confinement opt-out, and the effective launch
-      // grants nothing but the worktree and its Git admin directories.
+      // grants nothing but the worktree and its Git admin directories (the opencode launch derives
+      // its repository-tree permission itself, GY-2959).
       assert.equal(workerConfinementRefusal(profile), null, `${profile.name} as configured launches`);
-      const launch = accountLaunch(profile, null);
+      const launch = accountLaunch(profile, null, { repositoryRoot: main });
       const args = grantWorkerPaths(profile.kind, launch.args, writable, worktree);
       const granted = addedDirectories(args, worktree);
       if (profile.kind === 'codex') {
@@ -75,7 +75,10 @@ test('unit:worker-confined-to-worktree — every worker profile is launched with
         assert.ok(granted.every(path => path.endsWith('/.git') || path.includes('/.git/')), `the coordinator checkout's working files are granted to no codex worker: ${granted.join(', ')}`);
       }
       if (profile.kind === 'opencode') {
-        assert.equal(JSON.parse(launch.environment.OPENCODE_PERMISSION).external_directory, 'deny', 'the opencode worker edits no path outside its worktree');
+        const grant = JSON.parse(launch.environment.OPENCODE_PERMISSION).external_directory;
+        assert.equal(grant[`${main}/**`], 'allow', 'the opencode worker works the repository tree without prompting: its own bisect worktree beside the assigned one is granted');
+        assert.equal(grant[`${main}/.graphyard/**`], 'allow', 'the managed worktrees under .graphyard are granted beside it');
+        assert.equal(grant['*'], 'deny', 'the opencode worker reaches no path outside the repository');
       }
       if (profile.kind !== 'claude') continue;
       // Claude Code is confined by its harness rules: both files the session reads deny writing
@@ -104,7 +107,5 @@ test('unit:worker-confined-to-worktree — every worker profile is launched with
     // The other half: each confined runtime refuses the settings that would unconfine it.
     assert.match(workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'danger-full-access'], environment: {} })!, /workspace-write/);
     assert.match(workerConfinementRefusal({ kind: 'claude', agentArgs: ['--yolo'], environment: {} })!, /--yolo/);
-    assert.match(workerConfinementRefusal({ kind: 'opencode', agentArgs: [], environment: {} })!, /external_directory/);
-    assert.match(workerConfinementRefusal({ kind: 'opencode', agentArgs: [], environment: { OPENCODE_PERMISSION: '{"edit":"allow","external_directory":"allow"}' } })!, /external_directory/);
   } finally { await fixture.dispose(); }
 });

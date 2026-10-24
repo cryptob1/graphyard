@@ -5,7 +5,7 @@
 
 ## Approval modes
 
-[`"approvals": "auto"`](onboarding.md#agent-environments) adds per-runtime unattended flags: Claude Code `--permission-mode bypassPermissions`; Codex `--ask-for-approval never --sandbox workspace-write`; opencode `OPENCODE_PERMISSION`; others likewise; Pi none. Never started: `"prompt"`, `refusedLaunchKinds`, runtimes without command-line requests; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}`.
+[`"approvals": "auto"`](onboarding.md#agent-environments) adds per-runtime unattended flags: Claude Code `--permission-mode bypassPermissions`; Codex `--ask-for-approval never --sandbox workspace-write`; opencode `OPENCODE_PERMISSION`; others likewise; Pi none. A worker launch derives opencode's document from the checkout it serves (GY-2959): the repository tree — `<repository>/**` and `<repository>/.graphyard/**` — is granted so a second worktree beside the assigned one never prompts, and everything outside the repository is denied; a profile's own document lays over it. Never started: `"prompt"`, `refusedLaunchKinds`, runtimes without command-line requests; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}`.
 
 ## The coordinator checkout is confined at the OS level
 
@@ -54,6 +54,8 @@ claude … --settings …/.graphyard/harness/ROLE.json --append-system-prompt-fi
 Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted once quiet past `run.acknowledgementSeconds` (90); resultless is **`never started`**: relaunched ≤3 times (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
 
 **Worker stall** (`run.inactivityMinutes`, 10): a worker session Herdr reports idle with no recorded activity for the window is re-prompted once with its own work; still idle a whole window after that re-prompt, the close step ends it as **`stalled`**: the pane closes, the attempt releases with its lease (a provider limit notice on the pane holds its account — Z.AI's 429 envelope for 15 minutes), and the item dispatches again next cycle.
+
+**Blocked on its runtime's own prompt** (GY-2959): a worker Herdr reports `blocked` is answered by the close step, not renewed under — the loop reads the prompt off the pane and sends its reject key once (OpenCode's external-directory Allow once / Always allow / Reject chooses Reject, which leaves the worker inside its worktree; a destructive command's No is declined the same way); one still blocked a whole window after the answer ends as **`stalled`** naming the prompt text, lease released, item dispatchable. One that unblocked after the key is left alone, and a new prompt gets a fresh answer. The launch instruction names the external-directory prompt beside the rm/mv one, and the worker launch pre-grants the repository tree so the prompt does not appear for a worktree beside the assigned one.
 
 **Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
 

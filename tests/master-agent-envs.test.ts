@@ -5,7 +5,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, type EnvironmentProbe } from '../src/master.js';
+import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, workerPrompt, type EnvironmentProbe } from '../src/master.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
 import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
@@ -400,7 +400,10 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     const workerCalls: string[][] = [];
     await dispatchWork(root, ready(), { name: 'oc', principal: 'worker-oc', agentName: 'eng-oc', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a'] }, [], herdr(workerCalls), [ready()], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: { cacheMs: 0 } });
     const workerTab = tabEnvironment(workerCalls[0]);
-    assert.equal(JSON.parse(workerTab.OPENCODE_PERMISSION).external_directory, 'allow'); assert.equal(workerTab.GRAPHYARD_TOKEN_FILE, credential);
+    // GY-2959: the worker launch derives the repository-tree grant from the checkout it serves; the reviewer keeps the broad allow-all.
+    const workerGrant = JSON.parse(workerTab.OPENCODE_PERMISSION).external_directory;
+    assert.equal(workerGrant[`${root}/**`], 'allow'); assert.equal(workerGrant[`${root}/.graphyard/**`], 'allow'); assert.equal(workerGrant['*'], 'deny');
+    assert.equal(workerTab.GRAPHYARD_TOKEN_FILE, credential);
     assert.equal(workerTab.GH_CONFIG_DIR, undefined); assert.equal(JSON.stringify(workerCalls).includes('worker-oc-token-'), false);
     await saveReviewerProfile(root, { name: 'review-oc', agentName: 'review-oc', kind: 'opencode', accounts: ['opencode-a'] });
     const reviewCalls: string[][] = [];
@@ -486,4 +489,28 @@ test('unit:unappliable-home-refused — an account whose home no variable can ca
     { name: 'Error', message: /^Graphyard refuses to launch account muse-b: its home \/accounts\/muse-b cannot be applied because runtime muse names no login-home variable and the muse kind has none known, so the session would run on the default login instead of muse-b\. Set the runtime's home variable with master registry runtime set NAME --home-variable VAR\.$/ });
   // An account with no home runs on the runtime's own login, as before.
   assert.equal(accountLaunch({ approvals: 'auto', agentArgs: [], environment: {} }, registryAccount('muse', null)).account, 'muse-b');
+});
+
+// GY-2959: OpenCode asks before reaching any path outside its launch directory, which a worker
+// reaches as soon as it creates a second worktree (a bisect) or reads a sibling path — GY-98's
+// worker sat at the prompt for good. The worker launch now derives the permission document from
+// the checkout it serves: the repository tree is granted, everything outside it denied, and the
+// instruction names the prompt beside the rm/mv one.
+test('unit:opencode-launch-pregrants-repository-tree — an opencode worker launch carries the external-directory grant for the repository root and .graphyard (denied outside), and its instruction names the external-directory prompt', async () => {
+  const opencodeAccount = { name: 'opencode-a2', kind: 'opencode' as const, home: await account(environments, 'opencode-a2', 'opencode') };
+  const { root, credentialDirectory, cleanup } = await master();
+  try {
+    await configure(root, next => { next.environments = [opencodeAccount]; });
+    const credential = await token(credentialDirectory, 'workers', 'worker-oc2', 'worker-oc2-token-');
+    const workerCalls: string[][] = [];
+    await dispatchWork(root, ready(), { name: 'oc2', principal: 'worker-oc2', agentName: 'eng-oc2', mode: 'launch', kind: 'opencode', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {}, accounts: ['opencode-a2'] }, [], herdr(workerCalls), [ready()], async () => ({ epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000, new Date().toISOString(), { probe: { cacheMs: 0 } });
+    const grant = JSON.parse(tabEnvironment(workerCalls[0]).OPENCODE_PERMISSION).external_directory;
+    assert.equal(grant[`${root}/**`], 'allow', 'the repository tree is granted: a bisect worktree beside the assigned one never prompts');
+    assert.equal(grant[`${root}/.graphyard/**`], 'allow', 'the managed and bisect worktrees under .graphyard are granted beside it');
+    assert.equal(grant['*'], 'deny', 'everything outside the repository is denied, so no other prompt waits for a person');
+    assert.match(workerPrompt({ cliPath: launcher }, { key: 'GY-68', title: 'Agent environments' }, { principal: 'worker-oc2' }, 1), /external-directory prompt/, 'the launch instruction names the external-directory prompt');
+    // A registry account's launch contract carries the same derivation.
+    const fleet = accountLaunch({ kind: 'opencode', approvals: 'auto', agentArgs: [], environment: {} }, { ...registryAccount('opencode', null), name: 'opencode-a2' }, { repositoryRoot: root });
+    assert.equal(JSON.parse(fleet.environment.OPENCODE_PERMISSION).external_directory[`${root}/.graphyard/**`], 'allow');
+  } finally { await cleanup(); await rm(join(environments, 'opencode-a2'), { recursive: true, force: true }); }
 });

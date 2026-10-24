@@ -148,6 +148,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let claimedEpoch: number | undefined;
   const startFailures: AccountStartFailure[] = [];
   let closedAgent: string | null = null;
+  // The repository's true root, through the common Git directory: a coordinator checkout that is
+  // itself a linked worktree still derives the root every sibling worktree sits under (GY-2959).
+  const repositoryRoot = dirname(await sharedGitDirectory(root) ?? root);
   if (profile.mode === 'existing') {
     if (!target) throw new Error('Existing worker is not visible in Herdr');
     throw new Error('Existing sessions are observable but cannot be safely adopted for new work; use a launch profile so Graphyard supervises the agent process');
@@ -210,8 +213,10 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         }
         // The Git directories the worker writes are granted once its worktree exists (launchWorker).
         // A launch refused for its effective arguments gives the chosen session back at once (GY-184).
+        // The repository root rides the choice, so an opencode launch derives its repository-tree
+        // permission from the checkout the dispatch serves (GY-2959).
         const chosen = selected;
-        const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account));
+        const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot: repositoryRoot ?? undefined }));
         launched = launch;
         // A prompt the runtime never accepted closes the session and releases the claim; the launch is
         // then made once more from a fresh claim, rather than leaving an idle session holding the item.
@@ -453,6 +458,14 @@ export function autonomousSession(outcome: string, blocker: string) {
  */
 export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
 /**
+ * OpenCode asks before reaching any path outside its launch directory — a worker reaches one as
+ * soon as it creates a second worktree (a bisect) or reads a sibling path (GY-2959) — so the
+ * launch pre-grants the repository tree and the instruction names the prompt beside the rm/mv one:
+ * a prompt that still appears names a path outside the repository, and Reject keeps the worker
+ * inside its worktree.
+ */
+export const externalDirectoryPromptGuidance = 'Your launch has already granted the repository tree, so an OpenCode external-directory prompt names a path outside the repository: choose its Reject and continue with explicit paths inside your assigned worktree. ';
+/**
  * A worker that asked to rewrite a wrong commit waited on the master to say "fix forward" (GY-1477,
  * GY-1567): rewriting the assigned branch is never granted, so the request says so.
  */
@@ -499,6 +512,7 @@ export function workerPrompt(
     + verificationMapDigest(verificationMaps, [...new Set([work.description ?? '', ...(work.criteria ?? []).map(criterion => criterion.text)].flatMap(namedPaths))], 'worker')
     + submissionPolicyRule
     + destructivePromptGuidance
+    + externalDirectoryPromptGuidance
     + branchRewriteGuidance
     + simplicityParagraph
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')

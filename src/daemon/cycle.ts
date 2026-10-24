@@ -4,7 +4,7 @@ import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { assertDispatchable } from '../master.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
-import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
+import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
 import { dispatchSort } from '../coordination.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterHandover } from '../master/master-session.js';
@@ -259,11 +259,21 @@ async function closeStep(cycle: Cycle) {
  * after its re-prompt began a new quiet spell, and is re-prompted once again. The pane's screen is
  * judged against the session runtime's provider limit notices: one found goes on the attempt's end,
  * so the account it spent is held for the fleet's next selection (GY-2943 AC-1).
+ *
+ * A session Herdr reports `blocked` is not idle but stopped on its runtime's own prompt (GY-2959):
+ * the loop reads it off the pane, answers it once with the reject key — the decline that leaves the
+ * worker inside its worktree — and one still blocked a whole window after that answer ends as
+ * stalled naming the prompt. One that unblocked after the key is left alone, and answers a new
+ * prompt with a fresh key.
  */
 async function stallStep(cycle: Cycle, item: Work, session: NonNullable<Work['sessions']>[number]) {
   const { config, state, effects, clock, herdr } = cycle;
   if (!effects.endStall || !effects.promptSession || session.kind !== 'implementation') return;
   const agent = herdr.agents.find(candidate => (session.pane && candidate.pane_id === session.pane) || (!!session.agentName && candidate.name === session.agentName));
+  const reject = `reject:${item.id}:${session.id}`;
+  if (agent?.agent_status === 'blocked') return blockedPromptStep(cycle, item, session, reject, effects.endStall);
+  // The prompt the last key answered is gone, so a new one gets its own answer.
+  delete state.actions[reject];
   if (agent?.agent_status !== 'idle' || !(clock - Date.parse(session.updatedAt) >= inactivityMs(config))) return;
   const key = repromptKey(item, session), quiet = Math.round(inactivityMs(config) / 60_000);
   const reprompted = state.actions[key]?.state === 'done' ? Date.parse(state.actions[key].at) : null;
@@ -285,6 +295,44 @@ async function stallStep(cycle: Cycle, item: Work, session: NonNullable<Work['se
     await effects.promptSession(session, stallReprompt(item, quiet));
     await note(cycle, key, 'wake', item.key, 'done', `Re-prompted quiet ${session.id} with its own work after ${quiet} minutes without activity`, session.principal);
   } catch (error) { await note(cycle, key, 'wake', item.key, 'failed', `Could not re-prompt quiet ${session.id}: ${message(error)}`, session.principal); }
+}
+
+/**
+ * A session blocked on its runtime's own prompt (GY-2959): the loop reads it off the pane and
+ * answers it once with the reject key — the decline that leaves the worker inside its worktree —
+ * recording the answer, so the key is sent once per blocked episode and never twice. A session
+ * still blocked a whole inactivity window after the answer ends as stalled naming the prompt: the
+ * pane closes, the lease releases, and the item dispatches again (a provider limit notice on the
+ * pane holds the account, as an idle stall's does). One whose screen shows nothing the loop can
+ * answer still gets its window, anchored at the cycle the block was first seen.
+ */
+async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<Work['sessions']>[number], key: string, endStall: NonNullable<DaemonEffects['endStall']>) {
+  const { config, state, effects, clock } = cycle;
+  const answered = state.actions[key]?.state === 'done' ? Date.parse(state.actions[key].at) : null;
+  if (answered !== null) {
+    if (clock - answered < inactivityMs(config)) return;
+    const key2 = `close:${item.id}:${session.id}`;
+    try {
+      const screen = await Promise.resolve(effects.sessionScreen?.(session)).catch(() => null) ?? null;
+      const prompt = screen !== null ? classifyRuntimePrompt(screen, clock) : null;
+      const notice = screen !== null ? detectRuntimeExhaustion(screen, session.runtime, clock) : null;
+      const text = prompt?.text ?? 'the pane showed no prompt the loop could read';
+      if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
+      await endStall(item, session, { reason: `stalled at a runtime prompt: ${text}`, notice });
+      await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished',
+        outcome: `stalled at a runtime prompt: ${text}${notice ? `; its provider's limit notice holds the account: ${notice.reason}` : ''}`.slice(0, 500) });
+      await note(cycle, key2, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: stalled at a runtime prompt: ${text}`, session.principal);
+    } catch (error) { await note(cycle, key2, 'close', item.key, 'failed', `Could not end ${session.id} stalled at its runtime prompt: ${message(error)}`, session.principal); }
+    return;
+  }
+  try {
+    const screen = await Promise.resolve(effects.sessionScreen?.(session)).catch(() => null) ?? null;
+    const prompt = screen !== null ? classifyRuntimePrompt(screen, clock) : null;
+    if (prompt?.keys?.length && effects.sessionKeys) await effects.sessionKeys(session, prompt.keys);
+    await note(cycle, key, 'wake', item.key, 'done', prompt?.keys?.length
+      ? `Answered ${session.id}'s runtime prompt with its reject key (${prompt.answer}): "${prompt.text}"`
+      : `${session.id} is blocked on a runtime prompt the loop cannot answer ("${prompt?.text ?? 'none read off the pane'}"); one window before its attempt ends stalled`, session.principal);
+  } catch (error) { await note(cycle, key, 'wake', item.key, 'failed', `Could not answer ${session.id}'s runtime prompt: ${message(error)}`, session.principal); }
 }
 
 /**

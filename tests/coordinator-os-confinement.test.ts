@@ -652,16 +652,15 @@ test('unit:unconfined-launch-refused — a launch that cannot apply the confinem
   assert.match(codexUnsandboxed!, /workspace-write/, 'refusal message identifies correct sandbox mode');
   assert.match(codexUnsandboxed!, /danger-full-access/, 'refusal message names the incorrect setting');
 
-  const opencodeUndanied = workerConfinementRefusal({ kind: 'opencode', environment: { OPENCODE_PERMISSION: '{"edit":"allow","external_directory":"allow"}' } });
-  assert.ok(opencodeUndanied !== null, 'opencode with external_directory allow must be refused');
-  assert.match(opencodeUndanied!, /external_directory/, 'refusal message identifies the permission');
-  assert.match(opencodeUndanied!, /"deny"/, 'refusal message specifies correct setting');
-
   const claudeSafe = workerConfinementRefusal({ kind: 'claude', agentArgs: [] });
   assert.equal(claudeSafe, null, 'claude with no flags is allowed');
 
   const codexSafe = workerConfinementRefusal({ kind: 'codex', agentArgs: ['--sandbox', 'workspace-write'] });
   assert.equal(codexSafe, null, 'codex with workspace-write is allowed');
+
+  // GY-2959: the opencode worker's confinement is the repository-tree permission its launch derives
+  // from the checkout it serves, so the profile itself carries no external-directory requirement.
+  assert.equal(workerConfinementRefusal({ kind: 'opencode', agentArgs: [], environment: {} }), null, 'opencode launches on the repository-tree grant its launch derives');
 });
 
 test('unit:launcher-knows-its-checkout — the launcher derives its coordinator checkout from either of its entries, and refuses a launch it cannot confine', () => {

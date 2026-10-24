@@ -9,19 +9,24 @@ import { exhaustionTail, outOfCreditsScreen } from '../fleet.js';
  * that stops on one waits for a person no one will be. The loop answers the shapes it knows with
  * the answer that does nothing: a Yes/No (or proceed/cancel) menu whose "yes" runs a destructive
  * command is declined, and the session is then told how to carry on without that command. A
- * runtime's folder-trust dialog is `folder-trust`: the loop never answers it (consent-prompt.ts),
- * it relaunches the session, whose launch records the folder's trust before the runtime starts
- * (GY-1304). Claude's usage-limit menu is `usage-limit`: the account is spent, the loop never
- * chooses on it (one choice spends money, which only a person may do) and fails the session over
- * instead (GY-1566). Any other prompt is `unknown`, and the loop fails the attempt on it rather than waiting.
+ * permission menu whose "yes" grants the runtime something (OpenCode's Access external directory,
+ * with its Allow once / Always allow / Reject options, GY-2959) is `permission`: the safe answer
+ * is the same decline — Reject leaves the worker inside its worktree — so its reject key is the
+ * loop's answer. A runtime's folder-trust dialog is `folder-trust`: the loop never answers it
+ * (consent-prompt.ts), it relaunches the session, whose launch records the folder's trust before
+ * the runtime starts (GY-1304). Claude's usage-limit menu is `usage-limit`: the account is spent,
+ * the loop never chooses on it (one choice spends money, which only a person may do) and fails
+ * the session over instead (GY-1566). Any other prompt is `unknown`, and the loop ends the
+ * attempt on it rather than waiting.
  */
 export interface RuntimePrompt {
   /**
-   * `destructive-command` is a known shape with a safe answer; `folder-trust` is a runtime's folder-trust
-   * dialog, which the loop answers by relaunching; `usage-limit` is Claude's menu on a spent account,
-   * which the loop answers by failing the session over; `unknown` is everything else a blocked screen shows.
+   * `destructive-command` and `permission` are known shapes with a safe decline; `folder-trust` is a
+   * runtime's folder-trust dialog, which the loop answers by relaunching; `usage-limit` is Claude's
+   * menu on a spent account, which the loop answers by failing the session over; `unknown` is
+   * everything else a blocked screen shows.
    */
-  kind: 'destructive-command' | 'folder-trust' | 'usage-limit' | 'unknown';
+  kind: 'destructive-command' | 'permission' | 'folder-trust' | 'usage-limit' | 'unknown';
   /** The prompt's own words, collapsed to one line and bounded, as the record quotes it. */
   text: string;
   /** The keys that choose the non-destructive answer, and that answer's label; null for an unknown prompt. */
@@ -138,6 +143,8 @@ export function classifyRuntimePrompt(screen: string | null | undefined, now = D
     if (exhaustion) return { kind: 'usage-limit', text, keys: null, answer: null, exhaustion };
     const yes = options.find(option => affirmative.test(option.label)), no = options.find(option => negative.test(option.label));
     if (yes && no && destructivePrompt(question)) return { kind: 'destructive-command', text, keys: [no.number], answer: `${no.number}. ${no.label}` };
+    // A permission menu grants the runtime something; the decline keeps the session where it is.
+    if (yes && no) return { kind: 'permission', text, keys: [no.number], answer: `${no.number}. ${no.label}` };
     return { kind: 'unknown', text, keys: null, answer: null };
   }
   const tail = filled.slice(-4).map(({ entry }) => entry);

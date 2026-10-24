@@ -43,6 +43,8 @@ export interface DaemonEffects {
    * work, sent again by the loop that supervises it. Absent, no quiet session is re-prompted.
    */
   promptSession?: (session: SessionHandle, text: string) => Promise<unknown>;
+  /** Sends a blocked session's runtime the keys that answer its own prompt (GY-2959): the reject choice the prompt classifier read off the pane. Absent, a blocked session is only ended stalled. */
+  sessionKeys?: (session: Pick<SessionHandle, 'pane' | 'agentName'>, keys: string[]) => Promise<unknown>;
   /** The session's terminal, as text; null when the runtime cannot be read (the limit-notice judge reads it). A master pane is judged by pane and name alone. */
   sessionScreen?: (session: Pick<SessionHandle, 'pane' | 'agentName'>) => string | null | Promise<string | null>;
   /**

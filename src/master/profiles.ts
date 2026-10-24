@@ -125,10 +125,12 @@ export type WorkerProfile = z.infer<typeof workerProfileSchema>;
  * Why a worker profile may not launch as configured, or null (GY-857). Every worker is launched
  * with writes confined to its assigned worktree — Claude Code through harness rules that deny
  * the coordinator checkout's own files, Codex through its workspace-write sandbox and the Git
- * directories granted beside it, opencode through `external_directory: "deny"` — so a profile
- * that turns its runtime's confinement off is refused when the launcher installs the worker's
- * harness, naming the setting. It is judged at launch and not at parse (GY-184's precedent): an
- * existing master.json keeps loading and says why the profile cannot start.
+ * directories granted beside it, opencode through the repository-tree permission its launch
+ * derives from the checkout it serves (GY-2959: the tree is granted so a sibling worktree never
+ * prompts, everything outside the repository denied) — so a profile that turns its runtime's
+ * confinement off is refused when the launcher installs the worker's harness, naming the setting.
+ * It is judged at launch and not at parse (GY-184's precedent): an existing master.json keeps
+ * loading and says why the profile cannot start.
  */
 export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: readonly string[]; environment?: Record<string, string> }): string | null {
   const args = profile.agentArgs ?? [];
@@ -142,19 +144,7 @@ export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: r
       if (value !== 'workspace-write') return `A codex worker profile cannot set ${flag} ${value}: only the workspace-write sandbox confines the session's writes to its assigned worktree and the Git directories granted beside it. Remove the flag or set it to workspace-write.`;
     }
   }
-  if (profile.kind === 'opencode' && !openCodeExternalDenied(profile.environment?.OPENCODE_PERMISSION)) {
-    return `An opencode worker profile must set OPENCODE_PERMISSION to a JSON permission document whose "external_directory" is "deny": Graphyard's allow-all default would let the session edit paths outside its assigned worktree. Set the profile variable to {"edit":"allow","bash":"allow","webfetch":"allow","external_directory":"deny"}.`;
-  }
   return null;
-}
-/** Whether an OPENCODE_PERMISSION document denies every external directory: absent, unparseable, `allow`, or an `ask` leaf all count as not denied. */
-function openCodeExternalDenied(raw: string | undefined): boolean {
-  if (raw === undefined) return false;
-  let document: unknown;
-  try { document = JSON.parse(raw); } catch { return false; }
-  const external = (document && typeof document === 'object' && !Array.isArray(document) ? (document as Record<string, unknown>).external_directory : undefined);
-  const denied = (node: unknown): boolean => node === 'deny' || (!!node && typeof node === 'object' && !Array.isArray(node) && Object.values(node).every(denied));
-  return denied(external);
 }
 
 // A reviewer session holds no Graphyard identity: it reads a candidate and posts one GitHub
