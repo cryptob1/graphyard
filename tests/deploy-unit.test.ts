@@ -7,8 +7,7 @@ import { writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { buildPlan, prepareInstall } from '../src/install/index.js';
 import type { LocalSupervisor } from '../src/install/local.js';
-import { deployHealth, gitWatchPorts, pruneImages } from '../src/cli/upgrade.js';
-import { deployUnitText } from '../src/supervisor.js';
+import { gitWatchPorts, pruneImages } from '../src/cli/upgrade.js';
 import { deployRecordPath, readDeployRecord, watchMain, type DeployWatchPorts } from '../src/deploy-watch.js';
 import { cycleSteps } from '../src/master-daemon.js';
 import { restartCause } from '../src/daemon/run.js';
@@ -183,6 +182,8 @@ test('unit:deploy-prunes-old-images — one upgrade --watch pass whose health ch
 });
 
 test('unit:deploy-health-expects-deployed-commit — a checkout whose HEAD another install moves between restart and health still has its health step expect the deployed commit\'s release, never the HEAD\'s', async () => {
+  // Imported here so the test fails as a case, not at load, against code without the export.
+  const { deployHealth } = await import('../src/cli/upgrade.js') as { deployHealth: (cliRoot: string, url: string, attempts?: number, pauseMs?: number) => (commit: string) => Promise<void> };
   const { checkout, commit, a } = await repositories();
   const b = await commit('B');
   let version = '';
@@ -214,6 +215,7 @@ test('unit:deploy-health-expects-deployed-commit — a checkout whose HEAD anoth
 });
 
 test('unit:deploy-unit-has-own-checkout — the deploy unit names a checkout under its install\'s own directory, never the operator\'s source checkout, and two installs on one host get two', async () => {
+  const { deployUnitText } = await import('../src/supervisor.js');
   const home = await temporaryDirectory('deploy-unit-home'), source = await temporaryDirectory('deploy-unit-source');
   const previous = process.env.GRAPHYARD_CONFIG_HOME;
   process.env.GRAPHYARD_CONFIG_HOME = home;
