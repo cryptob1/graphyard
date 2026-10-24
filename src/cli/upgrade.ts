@@ -213,6 +213,15 @@ export async function ensureDeployCheckout(checkout: string, source: string, run
 }
 
 /**
+ * The repository the deploy watch serves (GY-2955): its checkout's origin's owner/name, null when it
+ * names none. The deploy record keeps it, so a control-plane upgrade installed for one repository
+ * cannot pass for another repository's deployment.
+ */
+export const servedRepository = (cliRoot: string): string | null => {
+  try { return repositoryFromRemote(git(cliRoot, 'remote', 'get-url', 'origin')); } catch { return null; }
+};
+
+/**
  * Removes every per-commit image `graphyard-local:<sha12>` (or the older `previous-<sha12>`) but the kept
  * commits', one `docker image rm` each; docker refuses one a container uses, and each failure is one
  * logged line, never the deploy's.
@@ -296,7 +305,7 @@ export const upgradeCommands = defineCommands([{
       if (typeof ports === 'string') throw new Error(ports);
       const stopping = new AbortController();
       for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => stopping.abort());
-      return watchMain(deployRecordPath(repoRoot), ports, { intervalMs: master.run.intervalSeconds * 1000, once: flags.includes('--once'), signal: stopping.signal });
+      return watchMain(deployRecordPath(repoRoot), ports, { intervalMs: master.run.intervalSeconds * 1000, once: flags.includes('--once'), signal: stopping.signal, repository: servedRepository(cliRoot) });
     }
     const toIndex = flags.indexOf('--to');
     const to = toIndex >= 0 ? flags[toIndex + 1] ?? '' : stableChannel;

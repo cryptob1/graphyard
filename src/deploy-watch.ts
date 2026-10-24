@@ -10,8 +10,11 @@ import { setTimeout as delay } from 'node:timers/promises';
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
  * while a rollback has not yet succeeded, the tip still to restore (tip is then null: nothing is served).
+ * `repository` names the repository the watch serves — its origin's owner/name — so a record for one
+ * repository cannot pass for another's release health; records written before it was kept (or by a
+ * checkout whose origin names no repository) name none (GY-2955).
  */
-export interface DeployRecord { tip: string | null; failed: string | null; reason: string | null; at: string; restore?: string | null; attempts?: number }
+export interface DeployRecord { tip: string | null; failed: string | null; reason: string | null; at: string; restore?: string | null; attempts?: number; repository?: string | null }
 export const deployRecordPath = (root: string) => join(root, '.graphyard', 'deploy.json');
 export function readDeployRecord(file: string): DeployRecord | null {
   if (!existsSync(file)) return null;
@@ -59,17 +62,18 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
  * fails is retried on later passes, up to rollbackAttempts, and is recorded as served only once it
  * succeeds; a new base tip is deployed in its place.
  */
-export async function deployOnce(file: string, ports: DeployWatchPorts, log: (line: string) => void = line => console.error(line)): Promise<'unchanged' | 'deployed' | 'rolled-back' | 'kept' | 'restoring'> {
+export async function deployOnce(file: string, ports: DeployWatchPorts, log: (line: string) => void = line => console.error(line), owner: string | null = null): Promise<'unchanged' | 'deployed' | 'rolled-back' | 'kept' | 'restoring'> {
   const tip = await ports.fetch();
   const record = readDeployRecord(file) ?? { tip: await ports.head(), failed: null, reason: null, at: '' };
+  const write = (entry: Omit<DeployRecord, 'at' | 'repository'>) => writeDeployRecord(file, { ...entry, repository: owner });
   const run = async (commit: string) => { for (const step of steps) { log(`[graphyard-deploy] ${step} ${commit.slice(0, 12)}`); try { await ports[step](commit); } catch (error) { throw Object.assign(new Error(`${step} failed: ${message(error)}`), { step }); } } };
   const restore = async (previous: string, failed: string, reason: string, attempts: number) => {
     try { await run(previous); } catch (error) {
       log(`[graphyard-deploy] the rollback to ${previous.slice(0, 12)} failed (attempt ${attempts}): ${message(error)}`);
-      await writeDeployRecord(file, { tip: null, failed, restore: previous, attempts, reason: `${reason}; the rollback to ${previous.slice(0, 12)} failed (attempt ${attempts} of ${rollbackAttempts}): ${message(error)}` });
+      await write({ tip: null, failed, restore: previous, attempts, reason: `${reason}; the rollback to ${previous.slice(0, 12)} failed (attempt ${attempts} of ${rollbackAttempts}): ${message(error)}` });
       return 'restoring' as const;
     }
-    await writeDeployRecord(file, { tip: previous, failed, reason });
+    await write({ tip: previous, failed, reason });
     return 'rolled-back' as const;
   };
   if (record.restore && tip === record.failed) {
@@ -82,13 +86,13 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
   const before = await ports.database().catch(() => null);
   try {
     await run(tip);
-    await writeDeployRecord(file, { tip, failed: null, reason: null });
+    await write({ tip, failed: null, reason: null });
     log(`[graphyard-deploy] serving ${tip.slice(0, 12)}`);
     await ports.prune(previous ? [tip, previous] : [tip]);
     return 'deployed';
   } catch (error) {
     const reason = message(error), step = (error as { step?: string }).step;
-    if (!previous) { await writeDeployRecord(file, { tip: null, failed: tip, reason }); return 'rolled-back'; }
+    if (!previous) { await write({ tip: null, failed: tip, reason }); return 'rolled-back'; }
     if (step !== 'checkout' && step !== 'build') {
       // The server started on the tip's code, which may have migrated the database; the previous tip runs only on a generation it supports.
       const [after, supported, migrates] = await Promise.all([ports.database().catch(() => null), ports.schema(previous).catch(() => null), ports.schema(tip).catch(() => null)]);
@@ -97,7 +101,7 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
         const why = after !== null && before !== null && after > before ? `it migrated the database from generation ${before} to ${after}` : `the database may be at generation ${reached ?? 'unknown'}, past the ${ceiling ?? 'unknown'} the previous tip supports`;
         log(`[graphyard-deploy] ${tip.slice(0, 12)} ${reason}; kept: ${why}, which the previous tip would refuse`);
         await ports.pin(tip).catch(failed => log(`[graphyard-deploy] the pin of ${tip.slice(0, 12)} failed: ${message(failed)}`));
-        await writeDeployRecord(file, { tip, failed: null, reason: `${reason}; kept because ${why}` });
+        await write({ tip, failed: null, reason: `${reason}; kept because ${why}` });
         return 'kept';
       }
     }
@@ -106,11 +110,11 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
   }
 }
 
-/** `upgrade --watch`: a pass every interval until stopped; a pass that throws (a fetch that failed) is logged and retried. */
-export async function watchMain(file: string, ports: DeployWatchPorts, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; log?: (line: string) => void }) {
+/** `upgrade --watch`: a pass every interval until stopped; a pass that throws (a fetch that failed) is logged and retried. `repository` is the record's owner: the repository the watch serves. */
+export async function watchMain(file: string, ports: DeployWatchPorts, options: { intervalMs: number; once?: boolean; signal?: AbortSignal; log?: (line: string) => void; repository?: string | null }) {
   const log = options.log ?? (line => console.error(line));
   for (;;) {
-    try { await deployOnce(file, ports, log); } catch (error) { log(`[graphyard-deploy] the pass failed and runs again: ${error instanceof Error ? error.message : String(error)}`); }
+    try { await deployOnce(file, ports, log, options.repository ?? null); } catch (error) { log(`[graphyard-deploy] the pass failed and runs again: ${error instanceof Error ? error.message : String(error)}`); }
     if (options.once || options.signal?.aborted) return;
     try { await delay(options.intervalMs, undefined, { signal: options.signal }); } catch { return; }
   }

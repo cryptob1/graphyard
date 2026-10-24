@@ -12,6 +12,9 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-2951: master status compares the managed repository's served revision to its base tip — only
 // what a deployment provider records. The control plane's own build revision (the loop's loaded
 // release in the cursor) is not the game's code and never stands in as a game deployment.
+// GY-2955: a deploy record counts for a repository only when it names it as the one it serves; the
+// control plane's upgrade record (or one an older control plane left without a name) is not the
+// game's release health.
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 't', GIT_AUTHOR_EMAIL: 't@t', GIT_COMMITTER_NAME: 't', GIT_COMMITTER_EMAIL: 't@t' } }).trim();
 const build = '1ea42dc24a1a4f4b6e2d8d2f1e0c9b8a7d6c5b4a', gameMain = 'ec5a2827eb41c3d2a1f0e9d8c7b6a5f4e3d2c1b0', served = 'a1b2c3d4e5f60718293a4b5c6d7e8f9012345678';
@@ -35,8 +38,11 @@ async function managed() {
 
 const status = (root: string, config: MasterConfig) => masterStatusReport(root, config, async () => ({ work: [], now: new Date().toISOString() }), async () => `${gameMain}\n`);
 
-const deployRecord = (root: string, tip: string | null, failed: string | null = null) => mkdir(join(root, '.graphyard'), { recursive: true })
-  .then(() => writeFile(deployRecordPath(root), JSON.stringify({ tip, failed, reason: failed ? 'health failed: /healthz answered 503' : null, at: new Date().toISOString() })));
+const deployRecord = (root: string, tip: string | null, failed: string | null = null, repository: string | null = 'cryptob1/graphyard-openworld') => mkdir(join(root, '.graphyard'), { recursive: true })
+  .then(() => writeFile(deployRecordPath(root), JSON.stringify({ tip, failed, reason: failed ? 'health failed: /healthz answered 503' : null, at: new Date().toISOString(), repository })));
+
+/** What an older control plane persisted: no owner named. */
+const recordWithoutOwner = (root: string, tip: string) => deployRecord(root, tip).then(() => writeFile(deployRecordPath(root), JSON.stringify({ tip, failed: null, reason: null, at: new Date().toISOString() })));
 
 test('unit:master-status-managed-release-revisions — with no deployment provider the control-plane build is not a lagging game deployment', async () => {
   const { root, config } = await managed();
@@ -63,4 +69,22 @@ test('unit:master-status-managed-release-revisions — a configured game deploym
   await deployRecord(root, served, gameMain);
   const failed = await status(root, config);
   assert.deepEqual(failed.serving.failedDeploy, { tip: gameMain.slice(0, 12), reason: 'health failed: /healthz answered 503', restoring: null });
+});
+
+test('unit:master-status-managed-release-revisions — a record naming another repository is not the game\'s release health', async () => {
+  const { root, config } = await managed();
+  await deployRecord(root, build, null, 'cryptob1/graphyard');
+  const report = await status(root, config);
+  assert.equal(report.serving.unconfigured, true, 'the control plane\'s own deploy record does not report the game\'s served commit');
+  assert.equal(report.serving.commit, null);
+  assert.equal(report.serving.atMain, null, 'the control-plane tip is never compared to the game\'s base tip');
+});
+
+test('unit:master-status-managed-release-revisions — an unattributed record an older control plane left is not the game\'s release health either', async () => {
+  const { root, config } = await managed();
+  await recordWithoutOwner(root, build);
+  const report = await status(root, config);
+  assert.equal(report.serving.unconfigured, true);
+  assert.equal(report.serving.commit, null);
+  assert.equal(report.serving.atMain, null);
 });

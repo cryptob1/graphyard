@@ -67,7 +67,9 @@ export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFil
 /**
  * Why the loop should restart now, or null: the deploy unit serves a commit other than the one this
  * process loaded and the checkout holds it, so a restart loads it; or a confined master filed a
- * restart request. `head` reads the commit the loop's code checkout holds.
+ * restart request. `head` reads the commit the loop's code checkout holds. The record is the
+ * control plane's own regardless of which repository it names (GY-2955): an install managing a
+ * different repository still restarts its loop onto the revision the upgrade served.
  */
 export function restartCause(config: Pick<MasterConfig, 'credentialFile' | 'cliPath'>, root: string, loaded: string | null, head = () => cliCommit(loopCodeRoot(config.cliPath, root))): string | null {
   if (existsSync(loopRestartRequestPath(config))) return 'a master restart was requested';

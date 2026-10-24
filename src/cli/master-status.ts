@@ -21,11 +21,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const now = Date.parse(snapshot.now) || Date.now();
   const deploy = readDeployRecord(deployRecordPath(root));
   const main = await Promise.resolve(run('git', ['-C', root, 'rev-parse', `refs/remotes/origin/${master.baseBranch}`])).then(out => String(out).trim(), () => null);
-  // The managed repository's release health reads only what its own deployment records as served.
-  // With no deployment provider there is no game deployment to report, and the control plane's own
-  // build revision (state.release, the Graphyard build this loop loaded) never stands in as one: it
-  // is not the game's code, and reading it as a lagging deployment made serving-at-main unsatisfiable.
-  const serving = deploy
+  // The managed repository's release health reads only what its own deployment records as served,
+  // and only a record that names this repository as the one it serves. The control plane's deploy
+  // unit writes the same file for the revision its loop restarts onto; for an install managing a
+  // different repository that record names the control plane's code, not the game's, and neither it
+  // nor the control plane's own build revision (state.release, the Graphyard build this loop
+  // loaded) ever stands in as the game's release health (GY-2951, GY-2955).
+  const serving = deploy && deploy.repository?.toLowerCase() === master.repository.toLowerCase()
     ? { unconfigured: false, commit: short(deploy.tip), main: short(main), atMain: !!deploy.tip && deploy.tip === main, failedDeploy: deploy.failed ? { tip: short(deploy.failed), reason: deploy.reason, restoring: short(deploy.restore ?? null) } : null }
     : { unconfigured: true, commit: null, main: short(main), atMain: null, failedDeploy: null };
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
