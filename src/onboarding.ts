@@ -9,7 +9,7 @@ import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { installIdFor } from './install/types.js';
 import { applicationProblems, caseIdsOf, detectApplications } from './project-applications.js';
 import { defaultCandidateSchedule, deliveryPolicySchema, generatedWorkflowFiles, localDeliveryDefaults, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy, type GateCheck, type MergeGate } from './model/delivery-policy.js';
-import { onboardingBranch, onboardingWorkRequest, pullRequestNumber } from './model/onboarding-work.js';
+import { onboardingBranch, onboardingWorkRequest } from './model/onboarding-work.js';
 
 export function repositoryFromRemote(remote: string) {
   const value = remote.trim();
@@ -611,7 +611,7 @@ export async function installedOnboarding(root: string, repository: string, url:
   return { directory, url: record.url, githubApp: record.github ? { appId: record.github.appId, slug: record.github.slug } : null };
 }
 
-// --- Filing the onboarding pull request as a work item (GY-1478) -----------------------------------
+// --- Filing the onboarding change as a work item (GY-1478) -----------------------------------------
 
 /**
  * The checks the onboarding item waits for: the pull-request checks the delivery policy the
@@ -629,8 +629,8 @@ export async function onboardingChecks(root: string): Promise<string[] | null> {
 export interface OnboardingFiling {
   /** The control plane's address and the operator's admin credential: only an operator may create, claim and submit for an item it files. */
   server: string; token: string;
-  /** The onboarding pull request, and the checks its item requires (null: the control plane's default). */
-  url: string; commit: string; checks: string[] | null;
+  /** The onboarding commit on `graphyard/onboarding`, submitted like a worker's `complete --head`, and the checks its item requires (null: the control plane's default). */
+  commit: string; checks: string[] | null;
   /** Where the workspace is registered: this machine, and a path under the checkout no worktree uses. */
   host: string; path: string;
   /** Fixed before the first try: each step's idempotency key derives from it, so a rerun replays the filing instead of filing twice. */
@@ -638,14 +638,12 @@ export interface OnboardingFiling {
 }
 
 /**
- * File the onboarding pull request as a work item (GY-1478 AC-1): create it, release it, claim it,
- * register the onboarding branch as its workspace and submit the pull request, as a worker would.
- * Submitted, it holds no lease and the loop owns it: the reviewer reviews it, the checks run and the
- * control plane merges it under the normal gates.
+ * File the onboarding change as a work item (GY-1478 AC-1): create it, release it, claim it,
+ * register the onboarding branch as its workspace and submit the commit's head, as a worker's
+ * `complete --head` would. Submitted, it holds no lease and the loop owns it: the reviewer reviews
+ * it, the checks run and the control plane merges it under the normal gates.
  */
 export async function fileOnboardingWork(filing: OnboardingFiling, fetcher: typeof fetch = fetch, now: () => number = Date.now): Promise<{ key: string; id: string }> {
-  const pr = pullRequestNumber(filing.url);
-  if (!pr) throw new Error(`${filing.url} names no pull request`);
   const call = async (path: string, step: string, body?: unknown) => {
     const response = await fetcher(`${filing.server.replace(/\/+$/, '')}/api/${path}`, { method: body === undefined ? 'GET' : 'POST', signal: AbortSignal.timeout(60_000),
       ...(body === undefined ? { headers: { Authorization: `Bearer ${filing.token}` } }
@@ -654,9 +652,9 @@ export async function fileOnboardingWork(filing: OnboardingFiling, fetcher: type
     if (!response.ok) throw new Error(`the control plane refused the onboarding item's ${step}: ${String(answer?.error ?? answer?.message ?? response.status).slice(0, 300)}`);
     return answer;
   };
-  const created = await call('work', 'create', onboardingWorkRequest(filing.url, filing.checks));
+  const created = await call('work', 'create', onboardingWorkRequest(filing.commit, filing.checks));
   const id = typeof created?.id === 'string' ? created.id : '', key = typeof created?.key === 'string' ? created.key : '';
-  if (!id || !key) throw new Error('the control plane named no work item for the onboarding pull request');
+  if (!id || !key) throw new Error('the control plane named no work item for the onboarding change');
   await call(`work/${id}/ready`, 'ready', {});
   // The lease-bound steps are keyed by the epoch they act under, read afresh: a rerun after an
   // earlier try's lease lapsed claims a new epoch instead of replaying the expired claim's receipt.
@@ -668,12 +666,6 @@ export async function fileOnboardingWork(filing: OnboardingFiling, fetcher: type
   const epoch = Number(claimed);
   if (!Number.isSafeInteger(epoch) || epoch <= 0) throw new Error(`claiming ${key} named no epoch`);
   await call(`work/${id}/workspace`, `workspace-${epoch}`, { epoch, host: filing.host, path: filing.path, branch: onboardingBranch });
-  try {
-    await call(`work/${id}/submit`, `submit-${epoch}`, { epoch, pr });
-  } catch (error: any) {
-    if (String(error?.message ?? '').includes('--head instead')) {
-      await call(`work/${id}/submit`, `submit-${epoch}-head`, { epoch, head: filing.commit });
-    } else throw error;
-  }
+  await call(`work/${id}/submit`, `submit-${epoch}`, { epoch, head: filing.commit });
   return { key, id };
 }

@@ -52,7 +52,7 @@ Needs a GitHub `origin` the deploy key pushes to over SSH; `up` sets it (`git re
 
 ## 6. Onboard the checkout
 
-`gy init --scan --apply --url SERVER`; merge `AGENTS.md .gitignore graphyard.json` to the base. **Verify:** `setup-proposal` is `ready`.
+`gy init --scan --apply --url SERVER` writes `AGENTS.md .gitignore graphyard.json`; `up` publishes them as one commit on `graphyard/onboarding` and submits that commit as GY-1, head sha like any worker's. The loop reviews and merges it; no pull request is opened and nothing merges by hand. **Verify:** `setup-proposal` is `ready` and `gy status GY-1` is filed.
 
 ## 8. Agent environments
 

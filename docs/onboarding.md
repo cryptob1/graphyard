@@ -9,7 +9,7 @@
 
 Per session: worker identity, host ID, or `init --url https://YOUR-HOST --herdr --host-id NAME --token-stdin`. Commit `AGENTS.md`, `.gitignore`, `graphyard.json`, never `.graphyard/`; the merge writer's trial is the gate; masterless: `graphyard watch GY-N EPOCH -- COMMAND` ([worker](protocol/work-commands.md#watch)).
 
-`init --scan --apply` writes the delivery policy to `graphyard.json`.
+`init --scan --apply` writes the delivery policy to `graphyard.json`. `graphyard up` publishes the files it writes as one commit on `graphyard/onboarding` and submits that commit as a work item (GY-1) by head sha, so the loop reviews and merges it under the normal gates; no pull request is opened.
 
 ### What the generated instructions authorize
 
@@ -25,7 +25,7 @@ Settings › **Agents** › **Connect an account** writes and smoke-tests the 06
 
 ### Configure the fleet
 
-Propose **Agent registry** from login homes: `master registry propose`, then `--apply`.
+Propose **Agent registry** from login homes: `master registry propose`, then `--apply`. The proposal names every role, master included — the reviewer's accounts at concurrency 1, so the loop launches its own session.
 
 `master registry account set NAME --runtime claude --model opus --home ~/.coding_agents/NAME --reason "Plan"`; `--plan NAME` groups accounts under one provider quota.
 

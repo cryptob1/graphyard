@@ -125,7 +125,7 @@ export type UpEvent =
   | { kind: 'step-failed'; step: UpStep; exitCode: number; argv: string[] | null; stderr: string | null; detail: string }
   | { kind: 'waiting'; setupUrl: string; waitingFor: SetupItemId[]; sentence: string }
   | { kind: 'handoff'; step: UpStep; sentence: string; url: string | null; code: string | null }
-  /** GY-1478: the onboarding pull request is the current setup step: its URL, what it waits for and how long it has waited. */
+  /** GY-1478: the onboarding change is the current setup step: what it waits for and how long it has waited. */
   | { kind: 'onboarding'; wait: OnboardingWait }
   | { kind: 'note'; text: string };
 
@@ -167,20 +167,19 @@ export interface UpDependencies {
   now(): number;
   /**
    * Publish the onboarding files `init --scan --apply` wrote (AGENTS.md, .gitignore, graphyard.json,
-   * .github/workflows) as a pull request against the base branch, reusing one already open; null when
-   * the base branch already holds them. WORKFLOWS are the workflow files the apply reported writing:
-   * a publish missing any of them, or AGENTS.md or graphyard.json, refuses naming the file (GY-1480).
+   * .github/workflows) as one commit on `graphyard/onboarding` above the base branch, and push that
+   * branch; null when the base branch already holds them. WORKFLOWS are the workflow files the apply
+   * reported writing: a publish missing any of them, or AGENTS.md or graphyard.json, refuses naming
+   * the file (GY-1480). No pull request is opened; the commit is submitted by head sha (GY-2938).
    */
-  publishOnboarding(workflows: string[]): Promise<{ pullRequest: string, commit: string } | null>;
-  /** Whether the onboarding pull request at URL has merged, so the base branch carries the delivery workflows. */
-  onboardingMerged(url: string): Promise<boolean>;
+  publishOnboarding(workflows: string[]): Promise<{ commit: string } | null>;
   /**
-   * File the onboarding pull request at URL as a work item the loop owns (GY-1478), with the
-   * operator's admin credential in OPERATOR_TOKEN_FILE and request id REQUESTID (fixed across
-   * reruns, so it is filed once): the loop's reviewer reviews it and the control plane merges it
-   * under the normal gates. Null when no admin credential is on this machine.
+   * File the onboarding commit as a work item the loop owns (GY-1478), with the operator's admin
+   * credential in OPERATOR_TOKEN_FILE and request id REQUESTID (fixed across reruns, so it is filed
+   * once): the loop's reviewer reviews the head and the control plane merges it under the normal
+   * gates. Null when no admin credential is on this machine.
    */
-  fileOnboarding?(url: string, commit: string, operatorTokenFile: string | null, requestId: string): Promise<{ key: string } | null>;
+  fileOnboarding?(commit: string, operatorTokenFile: string | null, requestId: string): Promise<{ key: string } | null>;
   /** The control plane's work items, as the master identity reads them; null while none answers. */
   work?(): Promise<any[] | null>;
   /**
@@ -299,9 +298,7 @@ interface UpState {
   version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean;
   /** Where the install saved the operator's admin credential (a path, never the secret): what mints the sign-in link. */
   operatorTokenFile?: string | null;
-  /** The pull request that publishes the onboarding files, until it merges. */
-  onboardingPullRequest?: string | null;
-  /** The work item that pull request is filed as (GY-1478), and the request id that files it once. */
+  /** The work item the onboarding commit is filed as (GY-1478), and the request id that files it once. */
   onboardingWork?: string | null;
   onboardingRequest?: string | null;
   /** GY-1477: the tailnet address a local dashboard was served on, once `tailscale serve` applied it. */
@@ -903,19 +900,24 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // when any of them is not on disk, so a change never says it carries a workflow it lacks.
       const workflows: string[] = Array.isArray(applied?.delivery?.workflows) ? applied.delivery.workflows.filter((path: unknown) => typeof path === 'string') : [];
       // The files are written to this checkout only; the base branch needs them before any work is
-      // delivered, so they are published as a pull request (the base is protected, never pushed to).
+      // delivered, so they are published as one commit on `graphyard/onboarding` (the base is
+      // protected, never pushed to) and the commit is submitted as a work item by head sha, exactly
+      // as a worker's `complete --head` submits (GY-2938): no pull request is opened.
       const published = await deps.publishOnboarding(workflows).catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
-      state.onboardingPullRequest = published?.pullRequest ?? null;
       const carried = workflows.length ? `onboarding files with ${workflows.join(', ')}` : 'onboarding files (no delivery workflow was written)';
       if (!published) return `${carried}: the base branch already holds them`;
-      // GY-1478: the pull request is filed as a work item the loop owns, so its reviewer reviews it,
-      // the checks run and it merges under the normal gates; branch protection never waits on a person.
+      // GY-1478: the commit is filed as a work item the loop owns, so its reviewer reviews it,
+      // the checks run and it merges under the normal gates; nothing waits on a person.
       if (!state.onboardingWork) {
         if (!state.onboardingRequest) { state.onboardingRequest = randomUUID(); await writeState(deps.root, state); }
-        const filed = await (deps.fileOnboarding?.(published.pullRequest, published.commit, state.operatorTokenFile ?? null, state.onboardingRequest) ?? Promise.resolve(null)).catch((error: any) => { throw new UpStop(`onboarding: filing ${published.pullRequest} as a work item failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
+        const filed = await (deps.fileOnboarding?.(published.commit, state.operatorTokenFile ?? null, state.onboardingRequest) ?? Promise.resolve(null)).catch((error: any) => { throw new UpStop(`onboarding: filing ${published.commit.slice(0, 12)} as a work item failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
         state.onboardingWork = filed?.key ?? null;
       }
-      return `${carried} published in ${published.pullRequest}${state.onboardingWork ? `, filed as ${state.onboardingWork} for the loop to review and merge` : ''}`;
+      // Without the item there is no head to observe and no loop to merge the change, so setup
+      // names what is missing instead of waiting on a merge nothing performs (GY-2938).
+      if (!state.onboardingWork) throw new UpStop(`onboarding: the onboarding change was published on ${onboardingBranch} (${published.commit.slice(0, 12)}) but no operator admin credential is on this machine to file it as a work item, so the loop cannot merge it; put the credential in place and rerun ${rerun()}`, upExitCodes.failed);
+      await writeState(deps.root, state);
+      return `${carried} published on ${onboardingBranch} at ${published.commit.slice(0, 12)}, filed as ${state.onboardingWork} for the loop to review and merge`;
     });
 
     // GY-1850: the profile write `master environments --apply` runs on this machine's configured
@@ -1085,26 +1087,28 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     });
 
     await waitGreen(last.map(item => item.id), true);
-    // Setup is green only once the onboarding pull request has merged and the base carries the workflows.
-    if (state.onboardingPullRequest) {
-      const pullRequest = state.onboardingPullRequest;
+    // Setup is green only once the onboarding item is done and the base branch carries the change (GY-2938).
+    if (state.onboardingWork) {
       const deadline = deps.now() + humanWaitMs;
       let shown = '';
-      for (let polls = 0; !(await deps.onboardingMerged(pullRequest)); polls++) {
-        if (polls === 0) deps.emit({ kind: 'note', text: `Waiting for the onboarding pull request ${pullRequest} to merge: it adds Graphyard's delivery workflows to the base branch.${state.onboardingWork ? ` The loop reviews and merges it as ${state.onboardingWork}.` : ''}` });
-        // The current setup step (GY-1478 AC-2): the item's URL, what it waits for, how long; shown again whenever what it waits for changes.
-        const work = state.onboardingWork ? findOnboardingWork(await deps.work?.().catch(() => null), state.onboardingWork) : null;
+      for (let polls = 0; ; polls++) {
+        const work = findOnboardingWork(await deps.work?.().catch(() => null), state.onboardingWork);
         if (work) {
-          onboarding = onboardingWait(work, deps.now(), request.repository);
+          onboarding = onboardingWait(work, deps.now());
           if (onboarding.waitingFor.join() !== shown) { shown = onboarding.waitingFor.join(); deps.emit({ kind: 'onboarding', wait: onboarding }); }
-          if (onboarding.closed) throw new UpStop(`onboarding: ${onboarding.key} (${pullRequest}) was closed without merging, so the base branch lacks Graphyard's delivery workflows; reopen and merge it, or publish them again, then rerun ${rerun()}`, upExitCodes.failed);
-          if (onboarding.merged || work.stage === 'done') break;
+          if (onboarding.closed) throw new UpStop(`onboarding: ${onboarding.key} was closed without merging, so the base branch lacks Graphyard's delivery workflows; publish them again, then rerun ${rerun()}`, upExitCodes.failed);
+          if (onboarding.merged) break;
         }
-        if (deps.now() >= deadline) throw new UpStop(`Still waiting for the onboarding pull request ${pullRequest} to merge${onboarding ? ` (${onboarding.key} waits for ${onboarding.waitingFor.join(' and ')}, ${waitedFor(onboarding.waitedMs)} so far)` : ''}; rerun ${rerun()} to resume`, upExitCodes.waiting);
+        if (deps.now() >= deadline) {
+          // The gate reason names itself: the failing gates' own words, so a wait that times out
+          // says what the item is stuck on, not only that it is stuck (GY-2938 AC-2).
+          const stuck = work ? (work.gates ?? []).filter((gate: any) => gate?.passed !== true)
+            .map((gate: any) => `${gate.name}: ${(gate.reasons ?? []).join('; ')}`).join(', ') : 'the control plane has not answered';
+          throw new UpStop(`Still waiting for ${state.onboardingWork}${onboarding ? ` (it waits for ${onboarding.waitingFor.join(' and ')}, ${waitedFor(onboarding.waitedMs)} so far; ${stuck})` : ` (${stuck})`}; rerun ${rerun()} to resume`, upExitCodes.waiting);
+        }
         await deps.sleep(pollMs);
       }
       if (onboarding) onboarding = { ...onboarding, waitingFor: [], merged: true };
-      state.onboardingPullRequest = null; await writeState(deps.root, state);
     }
     // GY-1477: setup ends with the one sign-in link itself (minted with the operator's credential, a host
     // install's from its redeemed claim), on the reachable address, so nobody runs graphyard login afterwards.
@@ -1571,24 +1575,24 @@ export { onboardingBranch };
 export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;
 
 /**
- * Publish the onboarding files as one commit on the base branch's tip, on `graphyard/onboarding`,
- * and a pull request for it. The commit is built in a scratch index, so the operator's checkout,
- * branch and staged changes are untouched. Rerun, it reuses the open pull request, first
- * force-pushing its branch when it does not carry exactly these files; when the base branch already
- * holds them, nothing is published.
+ * Publish the onboarding files as one commit on the base branch's tip, on `graphyard/onboarding`.
+ * The commit is built in a scratch index, so the operator's checkout, branch and staged changes are
+ * untouched, and the branch is pushed so the change is visible; no pull request is opened — the
+ * commit is submitted by head sha (GY-2938) and the control plane reads it from this checkout's own
+ * object store. The commit is dated from the base tip, so a rerun over the same files publishes the
+ * identical commit and pushes nothing new; when the base branch already holds them, nothing is
+ * published.
  */
-export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string, workflows: readonly string[] = []): Promise<{ pullRequest: string, commit: string } | null> {
+export async function publishOnboarding(root: string, repository: string, run: (program: string, args: string[], env?: Record<string, string>) => string, workflows: readonly string[] = []): Promise<{ commit: string } | null> {
   // GY-1480: every file the publish means to carry must be on disk; one that is not is refused by
-  // name, never skipped, so the pull request never claims a file it does not hold.
+  // name, never skipped, so the change never claims a file it does not hold.
   const missing = [...onboardingRequiredFiles, ...workflows].filter(file => !existsSync(resolve(root, file)));
   if (missing.length) throw new Error(`publishOnboarding refuses: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing from ${root}; rerun graphyard init --scan --apply, then graphyard up`);
-  const open = run('gh', ['pr', 'list', '--repo', repository, '--head', onboardingBranch, '--state', 'open', '--json', 'url', '--jq', '.[0].url // ""']).trim();
   const base = run('gh', ['repo', 'view', repository, '--json', 'defaultBranchRef', '--jq', '.defaultBranchRef.name']).trim();
   run('git', ['fetch', '--quiet', 'origin', base]);
   const baseCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim();
   const index = resolve(root, '.graphyard', `onboarding-index.${process.pid}`);
   await mkdir(dirname(index), { recursive: true });
-  let headCommit: string | null = null;
   try {
     const env = { GIT_INDEX_FILE: index };
     run('git', ['read-tree', baseCommit], env);
@@ -1596,24 +1600,13 @@ export async function publishOnboarding(root: string, repository: string, run: (
     if (present.length) run('git', ['add', '--', ...present], env);
     const tree = run('git', ['write-tree'], env).trim();
     if (tree === run('git', ['rev-parse', `${baseCommit}^{tree}`]).trim()) return null;
-    // GY-1480: an open pull request is reused only when its branch carries exactly these files; one an
-    // earlier run or an older CLI opened without them (the delivery workflow above all) is replaced.
-    if (open) {
-      let branchTree: string | null = null;
-      let branchCommit: string | null = null;
-      try { run('git', ['fetch', '--quiet', 'origin', onboardingBranch]); branchTree = run('git', ['rev-parse', 'FETCH_HEAD^{tree}']).trim(); branchCommit = run('git', ['rev-parse', 'FETCH_HEAD']).trim(); } catch { /* the branch is gone: push it again */ }
-      if (branchTree === tree) return { pullRequest: open, commit: branchCommit! };
-    }
-    const commit = run('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], env).trim();
-    headCommit = commit;
+    // Dated from the base tip, so the same files above the same tip always yield this one commit.
+    const dated = { ...env, GIT_AUTHOR_DATE: run('git', ['show', '-s', '--format=%cI', baseCommit]), GIT_COMMITTER_DATE: run('git', ['show', '-s', '--format=%cI', baseCommit]) };
+    const commit = run('git', ['commit-tree', tree, '-p', baseCommit, '-m', 'Add Graphyard onboarding: coordination instructions, configuration and delivery workflows'], dated).trim();
     // The branch is this command's own: an earlier, interrupted publish is replaced, never merged into.
     run('git', ['push', '--force', 'origin', `${commit}:refs/heads/${onboardingBranch}`]);
+    return { commit };
   } finally { await rm(index, { force: true }); }
-  if (open) return { pullRequest: open, commit: headCommit! };
-  const carried = onboardingFiles.filter(file => existsSync(resolve(root, file)));
-  const created = run('gh', ['pr', 'create', '--repo', repository, '--base', base, '--head', onboardingBranch, '--title', 'Add Graphyard onboarding',
-    '--body', `The files graphyard up wrote while onboarding this repository: ${carried.join(', ')}.${workflows.length ? ` Merging it puts Graphyard's delivery workflows (${workflows.join(', ')}) on ${base}.` : ''}`]).trim();
-  return { pullRequest: created.split('\n').filter(Boolean).pop()!, commit: headCommit! };
 }
 
 /**
@@ -1704,13 +1697,12 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     // GY-1899: the held snapshot's pointer lives under the checkout this CLI runs from, where the
     // loop's holdCliAt wrote it — a lift that read the managed repository would remove nothing.
     liftLoopPins: async () => liftLoopPins(root, { repository: request.repository, heldRoot: loopCodeRoot(cliPath, root) }),
-    onboardingMerged: async url => execFileSync('gh', ['pr', 'view', url, '--json', 'state', '--jq', '.state'], { encoding: 'utf8', timeout: 60_000 }).trim() === 'MERGED',
-    fileOnboarding: async (url, commit, operatorTokenFile, requestId) => {
+    fileOnboarding: async (commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();
       let token = '';
       try { token = operatorTokenFile ? (await readFile(operatorTokenFile, 'utf8')).trim() : ''; } catch { /* no credential on this machine */ }
       if (!server || token.length < 32) return null;
-      return fileOnboardingWork({ server, token, url, commit, checks: await onboardingChecks(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
+      return fileOnboardingWork({ server, token, commit, checks: await onboardingChecks(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
     },
     work: async () => {
       const url = await serverUrl(), token = await masterToken();
@@ -1807,7 +1799,7 @@ export function describeUpEvent(event: UpEvent) {
   if (event.kind === 'step') return event.state === 'start' ? `→ ${event.step}` : `${event.state === 'done' ? '✓' : '·'} ${event.step}${event.detail ? `: ${event.detail}` : ''}`;
   if (event.kind === 'step-failed') return `✗ ${event.step}: ${event.detail}`;
   if (event.kind === 'waiting') return `\n${event.sentence}\n`;
-  if (event.kind === 'onboarding') return !event.wait.waitingFor.length ? `· onboarding: ${event.wait.key}: ${event.wait.line}` : `· onboarding: ${event.wait.key} (${event.wait.url ?? 'its pull request'}) waits for ${event.wait.waitingFor.join(' and ')}, ${waitedFor(event.wait.waitedMs)} so far; the loop reviews and merges it`;
+  if (event.kind === 'onboarding') return !event.wait.waitingFor.length ? `· onboarding: ${event.wait.key}: ${event.wait.line}` : `· onboarding: ${event.wait.key} waits for ${event.wait.waitingFor.join(' and ')}, ${waitedFor(event.wait.waitedMs)} so far; the loop reviews and merges it`;
   if (event.kind === 'handoff') return `NEEDS YOU: ${event.sentence}${event.code ? ` (code ${event.code})` : ''}${event.url ? ` — ${event.url}` : ''}`;
   return event.text;
 }

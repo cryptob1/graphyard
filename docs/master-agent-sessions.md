@@ -19,7 +19,7 @@ Launches take the first account under `run.quotaCeilingPercent`, else fail over;
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr.
+`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr. `master registry propose` proposes the master role beside the others — the reviewer's accounts, concurrency 1 — so a fresh install's loop launches its own session; renaming the role's accounts replaces that proposal.
 
 ### A closed Herdr workspace is replaced
 

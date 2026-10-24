@@ -84,7 +84,6 @@ function dependencies(root: string, events: UpEvent[], w: UpWorld): UpDependenci
     masterToken: async () => TOKEN,
     status: async () => baseStatus(w.loopRunning),
     publishOnboarding: async () => null,
-    onboardingMerged: async () => true,
     signIn: async () => `${SERVER}/#sign-in=${'c'.repeat(43)}`,
     operatorToken: async () => 'o'.repeat(40),
     installDirectory: () => '/install/acme-shop',

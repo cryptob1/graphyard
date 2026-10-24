@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { access, readFile, readdir, stat } from 'node:fs/promises';
+import { access, readFile, readdir, realpath, stat } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { basename, dirname, resolve } from 'node:path';
 import { homedir } from 'node:os';
@@ -343,7 +343,7 @@ export async function discoverHostLogins(options: { directory?: string; home?: s
   for (const environment of environments) await check(environment, 'environment');
   for (const kind of environmentKinds) {
     const location = defaultHomes[kind](home);
-    if (found.some(entry => entry.home === location)) continue;
+    if (await loginAlreadyFound(found, kind, location)) continue;
     const name = found.some(entry => entry.name === kind) ? `${kind}-default` : kind;
     const health = await checkAgentEnvironment({ name, kind, home: location }, probe);
     // A default home nobody logged in to is not an account; an isolated environment is kept either way.
@@ -363,6 +363,26 @@ export async function discoverHostLogins(options: { directory?: string; home?: s
   }
   return found;
 }
+
+/**
+ * Whether `location` is a login discovery already found: the same path, or the same login file
+ * through a compatibility symlink — `~/.claude` → an isolated environment's home, or
+ * `~/.local/share/opencode` → the `opencode/` directory inside one (GY-2939). The named
+ * environment keeps the login; the default-home alias would propose the same login a second
+ * time, double-counting it in the fleet and splitting its quota observations.
+ */
+const loginAlreadyFound = async (found: HostLogin[], kind: EnvironmentKind, location: string) => {
+  if (found.some(entry => entry.home === location)) return true;
+  const loginFile = proposedRuntimes.find(runtime => runtime.name === kind)?.launch.loginFile;
+  const credential = (home: string) => realpath(loginFile ? resolve(home, loginFile) : home).catch(() => null);
+  const target = await credential(location);
+  if (target === null) return false;
+  for (const entry of found) {
+    if (!entry.home || entry.runtime !== kind) continue;
+    if (await credential(entry.home) === target) return true;
+  }
+  return false;
+};
 
 /** Environment directories of the proposed runtimes Graphyard has no probe of its own for: `pi`, `pi-a`, `pi-b`. */
 async function runtimeEnvironments(directory: string) {
@@ -406,10 +426,10 @@ export function proposeFleet(logins: HostLogin[], host: string, current: Pick<Ag
   const models: FleetModel[] = [...new Set(accounts.map(account => account.model))].filter(name => !current.models.some(model => model.name === name))
     .map(name => ({ name, id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong' as const, contextTokens: null, notes: 'The account\'s own default model; name the real model, its cost and capability with master registry model set' } }));
   const serves = (account: FleetAccountInput, role: FleetRoleName) => proposedRuntimeRoles[account.runtime]?.includes(role) ?? true;
-  // The master role is never proposed (GY-898): it is one account the operator names for it with
-  // `master registry role set master`, and the durable loop launches nothing until it is named.
-  const proposed = fleetRoles.filter(name => name !== 'master');
-  const roles: FleetRole[] = !accounts.length ? [] : proposed.flatMap(name => {
+  // The master role is proposed like the reviewer's (GY-2939): the same accounts in the same
+  // preference order at concurrency 1, so a fresh install's loop can launch its master session
+  // instead of failing every cycle until an operator names the account by hand.
+  const roles: FleetRole[] = !accounts.length ? [] : fleetRoles.flatMap(name => {
     const added = accounts.filter(account => serves(account, name)).map(account => account.name);
     const existing = current.roles.find(role => role.name === name);
     if (existing) return [{ ...existing, accounts: [...existing.accounts, ...added.filter(account => !existing.accounts.includes(account))] }];

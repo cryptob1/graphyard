@@ -49,7 +49,6 @@ function dependencies(root: string, w: QuotedWorld): UpDependencies {
     masterToken: async () => 'm'.repeat(40),
     status: async () => baseStatus(w.loopRunning),
     publishOnboarding: async () => null,
-    onboardingMerged: async () => true,
     signIn: async () => `${SERVER}/#sign-in=${'d'.repeat(43)}`,
     operatorToken: async () => 'o'.repeat(40),
     installDirectory: () => '/install/acme-shop',

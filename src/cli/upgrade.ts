@@ -213,9 +213,11 @@ export async function pruneImages(run: ChildRun, keep: string[], log: (line: str
  * minutes pass, the coordinator pin advanced when one exists, and older per-commit images pruned; or the line naming why an install
  * on another provider has none.
  */
-export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; baseBranch: string; url: string; run: ChildRun }): Promise<DeployWatchPorts | string> {
+export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; baseBranch: string; url: string; run: ChildRun; herdrInstance?: boolean }): Promise<DeployWatchPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
-  const install = await readInstallRecord(directory).catch(() => null);
+  const recorded = await readInstallRecord(directory).catch(() => null);
+  // GY-2941: an installation whose own Herdr instance master.json names redeploys with --herdr-instance, though its record predates the field.
+  const install = recorded && input.herdrInstance ? { ...recorded, herdrInstance: true } : recorded;
   if (install?.provider !== 'compose' && install?.provider !== 'local') return `the deploy unit needs a compose or local install; ${install ? `this one runs on ${install.provider}` : 'no install record names this repository'}, so releases reach it only through graphyard upgrade`;
   const run = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000, ...(env ? { env } : {}) })).then(String);
   const inputsFor = (commit: string): UpgradeInputs => {
@@ -267,7 +269,7 @@ export const upgradeCommands = defineCommands([{
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
     if (flags.includes('--watch')) {
       const repoRoot = context.repositoryRoot(), master = await loadMasterConfig(repoRoot);
-      const ports = await watchPorts({ cliRoot: installationRoot, repoRoot, repository: master.repository, baseBranch: master.baseBranch, url: master.url, run: defaultChildRun });
+      const ports = await watchPorts({ cliRoot: installationRoot, repoRoot, repository: master.repository, baseBranch: master.baseBranch, url: master.url, run: defaultChildRun, herdrInstance: !!master.herdrInstance });
       if (typeof ports === 'string') throw new Error(ports);
       const stopping = new AbortController();
       for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => stopping.abort());

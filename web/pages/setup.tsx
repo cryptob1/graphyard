@@ -37,15 +37,14 @@ function ItemAction({ item, onConnect }: { item: SetupItem; onConnect: () => voi
 }
 
 /**
- * The onboarding change as the current setup step (GY-1478): the pull request that adds Graphyard's
- * delivery workflows, filed as a work item the coordinator reviews and merges by itself. It shows
- * what it waits for and how long, with its link, until it merges.
+ * The onboarding change as the current setup step (GY-1478): the commit `graphyard up` published on
+ * its branch, filed as a work item the loop reviews and merges by itself. It shows what it waits
+ * for and how long, until the change is merged (GY-2938: no pull request, no link to open).
  */
 function OnboardingStep({ wait }: { wait: OnboardingWait }) {
   return <li data-setup-item="onboarding" data-done={wait.merged ? 'yes' : 'no'} data-waiting-for={wait.waitingFor.join(' ')} aria-current={wait.merged ? undefined : 'step'}>
     <strong>{wait.merged ? '✓ ' : '○ '}Onboarding change</strong> <span className={wait.merged ? 'green' : 'amber'}>{wait.merged ? 'Done' : wait.closed ? 'Needs you' : 'In progress'}</span>
     <p>{wait.line}</p>
-    {wait.url && <a className="connect-button" data-setup-action="onboarding" href={wait.url} target="_blank" rel="noreferrer">Open the change</a>}
   </li>;
 }
 
@@ -90,7 +89,7 @@ export function SetupView({ status, work, workUnread, now, onConnect }: { status
   // A supervised install (GY-1501) is set up as any other; it only provisions no approver.
   const supervised = statusSupervised(status), items = setupChecklist(status);
   const item = findOnboardingWork(work);
-  const onboarding = item ? onboardingWait(item, now ?? Date.now(), status?.githubRepository?.fullName ?? status?.githubRepository ?? null) : null;
+  const onboarding = item ? onboardingWait(item, now ?? Date.now()) : null;
   const open = onboarding && !onboarding.merged ? 1 : 0;
   const green = checklistGreen(items) && !open && !workUnread;
   const total = items.length + (onboarding ? 1 : 0), left = items.filter(entry => !entry.done).length + open;

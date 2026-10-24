@@ -145,7 +145,7 @@ export function installRequestFromArgs(args: string[]) {
  * upgrade`): its repository, provider, base branch, service, domain and port, and the choices the
  * record carries — its installer-created workers and producer grants, review policy or
  * observation-only mode — so the full apply plans the roster it has and revokes nothing. An
- * installation with no installer-created worker was applied with --observe-only.
+ * installation with no installer-created worker and no own Herdr instance was applied with --observe-only.
  *
  * `sourceRoot` (GY-2168) names the checkout the image builds from, instead of the running CLI's
  * own code root: a redeploy the loop or `graphyard upgrade` starts may load a held snapshot at
@@ -156,7 +156,8 @@ export function redeployArguments(record: InstallRecord, image: string, sourceRo
   const installer = record.principals.filter(principal => principal.source !== 'principal');
   const workers = installer.filter(principal => principal.role === 'worker' && principal.id.startsWith(`${record.installId}-worker-`)).length;
   const proofs = installer.find(principal => principal.role === 'producer' && principal.id === `${record.installId}-ci`)?.proofs ?? [];
-  const mode = !workers ? ['--observe-only'] : ['--workers', String(workers), ...proofs.flatMap(proof => ['--producer-proof', proof])];
+  // GY-2941: a workerless installation on its own Herdr instance was a full --workers 0 install, not an observation-only one.
+  const mode = !workers && !record.herdrInstance ? ['--observe-only'] : ['--workers', String(workers), ...proofs.flatMap(proof => ['--producer-proof', proof]), ...(record.herdrInstance ? ['--herdr-instance'] : [])];
   return ['--repo', record.repository, '--provider', record.provider,
     '--base-branch', record.baseBranch, ...(record.service ? ['--server-name', record.service] : []), ...(record.domain ? ['--domain', record.domain] : []),
     ...(record.deployment?.port ? ['--port', String(record.deployment.port)] : []), '--review-policy', record.reviewPolicy, ...mode, '--image', image,
@@ -895,7 +896,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   if (!health) throw new Error(`The service at ${url} did not become healthy. Inspect: graphyard install --provider ${context.provider} --repo ${session.inputs.repository} --logs`);
 
   let record = session.record ?? emptyRecord(session, url);
-  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
+  record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, herdrInstance: session.inputs.herdr && session.inputs.herdr !== 'skip' ? session.inputs.herdr === 'instance' : record.herdrInstance, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
   await writeInstallRecord(session.directory, record, vault);
 
   const observeOnly = !!session.inputs.observeOnly;
