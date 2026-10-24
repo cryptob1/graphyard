@@ -216,7 +216,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
         // The repository root rides the choice, so an opencode launch derives its repository-tree
         // permission from the checkout the dispatch serves (GY-2959).
         const chosen = selected;
-        const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot: repositoryRoot ?? undefined }));
+        const launch = await onSelectedSession(chosen, `worker launch for ${work.key} failed`, async () => accountLaunch(profile, chosen.account, { repositoryRoot }));
         launched = launch;
         // A prompt the runtime never accepted closes the session and releases the claim; the launch is
         // then made once more from a fresh claim, rather than leaving an idle session holding the item.
