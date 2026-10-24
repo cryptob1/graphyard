@@ -1,6 +1,6 @@
 // Concern: the merge writer's trial merge — the exact merge commit of a head onto main, and its build and affected tests in a credential-free checkout.
 import { randomUUID } from 'node:crypto';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
 import { dirname, join, relative, isAbsolute } from 'node:path';
@@ -445,6 +445,58 @@ export const dashboardPaths = ['web/', 'browser-tests/', 'src/server/routes/', '
 export const touchesDashboard = (files: readonly string[]) => files.some(file => dashboardPaths.some(path => file === path || (path.endsWith('/') && file.startsWith(path))));
 /** The failing entry a trial records when `npm run test:browser` fails. */
 export const browserSuite = 'browser-tests/';
+/**
+ * What a trial, master status and doctor record when a managed repository has no scripts/ci-tests.mjs
+ * and no test or typecheck check to run (GY-2958): never a silent pass with zero tests.
+ */
+export const noTestCheckConfigured = 'no test check configured';
+/** One repository check a trial runs when scripts/ci-tests.mjs is absent: its gate name and argv. */
+export type RepositoryTrialCheck = { check: string; argv: string[] };
+/** `npm run test` → `['npm','run','test']`; empty or whitespace-only commands yield null. */
+export const checkCommandArgv = (command: string): string[] | null => {
+  const parts = command.trim().split(/\s+/).filter(Boolean);
+  return parts.length ? parts : null;
+};
+/**
+ * The test and typecheck checks a trial runs when scripts/ci-tests.mjs is absent (GY-2958): every
+ * graphyard.json preMerge entry that names a command, except build (already run), else `npm test`
+ * and `npm run typecheck` when package.json defines those scripts.
+ */
+export function repositoryTrialChecks(input: {
+  preMerge?: readonly { check: string; command: string | null }[] | null;
+  scripts?: Record<string, unknown> | null;
+}): RepositoryTrialCheck[] {
+  const fromPolicy = (input.preMerge ?? [])
+    .filter(entry => entry.command && !/^(?:build|compile)$/i.test(entry.check))
+    .flatMap(entry => {
+      const argv = checkCommandArgv(entry.command!);
+      return argv ? [{ check: entry.check, argv }] : [];
+    });
+  if (fromPolicy.length) return fromPolicy;
+  const scripts = input.scripts ?? {}, fallback: RepositoryTrialCheck[] = [];
+  if (typeof scripts.test === 'string') fallback.push({ check: 'test', argv: ['npm', 'test'] });
+  if (typeof scripts.typecheck === 'string') fallback.push({ check: 'typecheck', argv: ['npm', 'run', 'typecheck'] });
+  return fallback;
+}
+/**
+ * The trial's test gate as master status and doctor surface it for a checkout (GY-2958): ci-tests,
+ * the repository's own checks, or an explicit `no test check configured`.
+ */
+export function trialTestGateStatus(root: string):
+  | { configured: true; via: 'ci-tests' | 'checks'; checks: string[] }
+  | { configured: false; detail: typeof noTestCheckConfigured } {
+  if (existsSync(join(root, 'scripts/ci-tests.mjs'))) return { configured: true, via: 'ci-tests', checks: ['scripts/ci-tests.mjs'] };
+  let preMerge: { check: string; command: string | null }[] | null = null, scripts: Record<string, unknown> | null = null;
+  try {
+    const delivery = (JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8')) as { delivery?: { mergeGate?: { preMerge?: { check: string; command: string | null }[] } } }).delivery;
+    preMerge = delivery?.mergeGate?.preMerge ?? null;
+  } catch { /* absent or unreadable: fall through to package.json */ }
+  try { scripts = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }).scripts ?? null; }
+  catch { /* absent */ }
+  const checks = repositoryTrialChecks({ preMerge, scripts });
+  if (!checks.length) return { configured: false, detail: noTestCheckConfigured };
+  return { configured: true, via: 'checks', checks: checks.map(entry => entry.check) };
+}
 export interface RunTrialInput {
   /** The coordinator checkout whose object store holds the merge commit. */
   root: string;
@@ -578,11 +630,14 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
 
 /**
  * One attempt of a trial. Check the merge commit out detached as a `trial` checkout (in a short directory beside the trial's
- * temporary one when a clean root is found), run `npm run build`, then the affected
- * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, all under one
- * deadline and `trialEnvironment` with the trial's own empty temporary directory. The runner
- * always gets a selected file list, so a full selection runs every pre-merge file and never the
- * release-candidate suites, and the verdict counts the files that ran. The selection runs in
+ * temporary one when a clean root is found), run `npm run build`, then either the affected
+ * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, or — when that
+ * selection script is absent — every graphyard.json preMerge check command (else `npm test` /
+ * `npm run typecheck` from package.json) under the same deadline and `trialEnvironment` (GY-2958).
+ * A repository with neither the selection script nor any test check records `no test check
+ * configured` instead of a silent pass. The runner always gets a selected file list when
+ * ci-tests runs, so a full selection runs every pre-merge file and never the release-candidate
+ * suites, and the verdict counts the files (or checks) that ran. The selection runs in
  * parallel shards sized to the host (GY-1832, `shardTestFiles`: `trialShardLanes(cores)` at once,
  * none over `trialTestGroupSize` files), each its own runner process over the same checkout at a
  * test concurrency of its share of the cores, and with the files in flight across them within what
@@ -685,9 +740,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     try {
       await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
       // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
-      // A repository the merge does not make a Node package installs and builds nothing, and one without
-      // scripts/ci-tests.mjs selects no tests. Each is read from the merge commit itself, never from the
-      // trial checkout, so an unreadable checkout file never skips a phase the merge carries. Only a
+      // A repository the merge does not make a Node package installs and builds nothing. One without
+      // scripts/ci-tests.mjs runs its graphyard.json preMerge (or package.json test/typecheck) checks
+      // instead (GY-2958). Each path is read from the merge commit itself, never from the trial
+      // checkout, so an unreadable checkout file never skips a phase the merge carries. Only a
       // listing that answers and names no such path is absence: a probe git could not answer (a timeout,
       // an unreadable object store) is a runner failure, never a passing trial that skipped its checks.
       const holds = async (path: string) => {
@@ -725,6 +781,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
         }
       }
+      let packageScripts: Record<string, unknown> | undefined;
       if (await holds('package.json')) {
         const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
         const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
@@ -736,9 +793,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
         // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
-        let scripts: { build?: unknown; 'test:browser'?: unknown } | undefined;
-        try { scripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
-        if (scripts === undefined || scripts?.build) {
+        try { packageScripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
+        if (packageScripts === undefined || packageScripts?.build) {
           enter('build');
           const built = await child('build', 'npm', ['run', 'build']);
           if (hostEnded(built)) throw runnerFailure('build', built);
@@ -746,7 +802,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         }
         // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
         // Chromium installs into the host's shared Playwright cache (a no-op once present); an install that fails is the host's, retried, never the merge's.
-        if (scripts?.['test:browser'] && touchesDashboard(input.changedFiles)) {
+        if (packageScripts?.['test:browser'] && touchesDashboard(input.changedFiles)) {
           enter('tests');
           const chromium = await child('tests', 'npx', ['playwright', 'install', 'chromium']);
           if (!chromium.ok) throw runnerFailure('tests', chromium);
@@ -755,7 +811,36 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });
         }
       }
-      if (!await holds('scripts/ci-tests.mjs')) return finish('pass', { passed: 0, failed: [], files: 0 });
+      // GY-2958: without Graphyard's own selection script, run the managed repository's preMerge /
+      // package.json test checks; a Node package with none configured records that explicitly.
+      if (!await holds('scripts/ci-tests.mjs')) {
+        if (!(await holds('package.json'))) return finish('pass', { passed: 0, failed: [], files: 0 });
+        let preMerge: { check: string; command: string | null }[] | null = null;
+        if (await holds('graphyard.json')) {
+          try {
+            const delivery = (JSON.parse(await readFile(join(worktree, 'graphyard.json'), 'utf8')) as { delivery?: { mergeGate?: { preMerge?: { check: string; command: string | null }[] } } }).delivery;
+            preMerge = delivery?.mergeGate?.preMerge ?? null;
+          } catch { /* unreadable policy: fall through to package.json scripts */ }
+        }
+        const checks = repositoryTrialChecks({ preMerge, scripts: packageScripts });
+        enter('tests');
+        if (!checks.length) {
+          log.push(noTestCheckConfigured);
+          return finish('pass', { passed: 0, failed: [noTestCheckConfigured], files: 0 });
+        }
+        const failed: string[] = [];
+        let runnerExit: number | null = 0;
+        for (const check of checks) {
+          const ran = await child('tests', check.argv[0]!, check.argv.slice(1));
+          if (hostEnded(ran)) throw runnerFailure('tests', ran);
+          if (!ran.ok) {
+            failed.push(check.check);
+            runnerExit = exitCode({ status: ran.status, signal: ran.signal, cause: ran.cause });
+            break;
+          }
+        }
+        return finish('pass', { passed: Math.max(0, checks.length - failed.length), failed, files: checks.length }, runnerExit);
+      }
       enter('selection');
       // A selection child the host killed or could not start is no verdict (GY-1832); only one that exits non-zero fails the selection.
       const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);

@@ -5,6 +5,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary, emptyMasterSession, masterSummary, profileHealth, readDaemonState } from '../master-daemon.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
+import { trialTestGateStatus } from '../merge-writer/trial.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
@@ -35,6 +36,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;
   const sessions = snapshot.work.flatMap(item => (item.sessions ?? []).filter(session => session.state === 'running')
     .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null })));
+  // GY-2958: the trial's test gate for this checkout — ci-tests, repository checks, or an explicit
+  // "no test check configured" so a managed repository never looks like it trials with zero tests.
+  const trialTests = trialTestGateStatus(root);
   return {
     serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
@@ -42,6 +46,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     masterSession: masterSummary(state?.master ?? emptyMasterSession(), now, masterAgent),
     items: snapshot.work.filter(item => item.stage !== 'done').map(item => itemLine(item, now)),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter)),
+    trialTests,
     sessions,
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),
   };

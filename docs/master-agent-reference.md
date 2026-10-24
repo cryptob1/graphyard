@@ -27,4 +27,4 @@ Unacted producer requests relaunch on an untried profile.
 
 ## Merge trial
 
-The merge writer's trial, the only trial: the merge commit's build and affected tests (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in its own `TMPDIR`, killed after 20 minutes; its checkout is removed when it ends.
+The merge writer's trial, the only trial: the merge commit's build and affected tests via `scripts/ci-tests.mjs`, or — without that script — the repository's `preMerge` / `npm test` / `npm run typecheck` checks (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in its own `TMPDIR`, killed after 20 minutes; its checkout is removed when it ends. A managed repository with no test check records that explicitly (`master status` / `doctor`: `trialTests`).
