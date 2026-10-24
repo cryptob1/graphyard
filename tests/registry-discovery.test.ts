@@ -1,6 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { registryCommand } from '../src/cli/master-registry.js';
 import { applyRegistryMutation, emptyRegistry, fleetRoles, type AgentRegistry } from '../src/model/registry.js';
@@ -103,14 +103,15 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     for (const account of proposal.accounts) assert.deepEqual(Object.keys(account.credential).sort(), ['home', 'host'], `${account.name} holds a reference, nothing more`);
     assert.deepEqual(proposal.models.map((model: any) => model.name), ['claude-default', 'codex-default', 'cursor-default', 'opencode-default', 'pi-default']);
 
-    // The role mapping: worker, reviewer and producer are all mapped; Pi serves the worker (GY-1746) and the narrow roles.
+    // The role mapping: worker, reviewer, producer and master are all mapped; Pi serves the worker (GY-1746) and the narrow roles.
     const roles = Object.fromEntries(proposal.roles.map((role: any) => [role.name, role.accounts]));
-    for (const role of ['worker', 'reviewer', 'producer']) assert.ok(roles[role]?.length, `role ${role} is mapped`);
+    for (const role of ['worker', 'reviewer', 'producer', 'master']) assert.ok(roles[role]?.length, `role ${role} is mapped`);
     const full = ['claude-a', 'claude-b', 'claude-c', 'codex', 'cursor-a', 'opencode-a', 'opencode-b'];
     assert.deepEqual(roles.worker, [...full, 'pi-a', 'pi-b']); assert.deepEqual(roles.reviewer, full);
     assert.deepEqual(roles.producer, [...full, 'pi-a', 'pi-b']);
-    // The master role is never proposed (GY-898): the operator names its accounts themselves.
-    assert.deepEqual(proposal.roles.map((role: any) => role.name), fleetRoles.filter(name => name !== 'master'));
+    // The master role is proposed beside the others (GY-2939): the reviewer's accounts in the same order, so the loop's master session launches.
+    assert.deepEqual(roles.master, full);
+    assert.deepEqual(proposal.roles.map((role: any) => role.name), fleetRoles);
 
     // Nothing a credential home holds beyond what the readiness probe decides reaches the proposal.
     const shown = JSON.stringify(preview);
@@ -123,7 +124,7 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     assert.deepEqual(written.map(entry => entry.path), ['agent-registry/apply']);
     assert.equal(applied.revision, 1);
     assert.deepEqual(registry.accounts.map(account => account.name), proposal.accounts.map((account: any) => account.name));
-    assert.deepEqual(registry.roles.map(role => role.name), fleetRoles.filter(name => name !== 'master'), 'the applied proposal proposes no master role (GY-898)');
+    assert.deepEqual(registry.roles.map(role => role.name), fleetRoles, 'the applied proposal names every fleet role, master included (GY-2939)');
     assert.equal(registry.lastMutation?.kind, 'apply');
     const stored = JSON.stringify(registry);
     for (const value of secrets) assert.ok(!stored.includes(value), 'the stored revision never carries a credential');
@@ -134,5 +135,53 @@ test('unit:registry-discovers-agent-environments — propose discovers every ~/.
     assert.match(again.next, /already holds every login/);
   } finally {
     if (saved !== undefined) process.env.XDG_DATA_HOME = saved;
+  }
+});
+
+/** A logged-in Claude environment under the agent environment directory, ready for discovery. */
+async function loggedClaude(root: string, name: string) {
+  await file(join(root, name, '.credentials.json'), { claudeAiOauth: { accessToken: secret(`${name}-access`), refreshToken: secret(`${name}-refresh`), expiresAt: Date.now() + 3_600_000 } });
+  return join(root, name);
+}
+
+test('unit:registry-propose-names-master-role — a proposal over a host with three logged-in environments names a master role beside worker, reviewer and producer, at concurrency 1, naming those accounts', async () => {
+  const root = join(scratch, 'master-role'), directory = join(root, '.coding_agents'), home = join(root, 'home');
+  const environments = [await loggedClaude(directory, 'claude-a'), await loggedClaude(directory, 'claude-b'), await loggedClaude(directory, 'claude-c')];
+  await mkdir(home, { recursive: true });
+  const preview = await registryCommand({ hostId: HOST }, ['propose', '--directory', directory],
+    { read: async () => emptyRegistry(), write: async () => { throw new Error('a preview stores nothing'); } },
+    { home, executables: () => false }) as any;
+  const roles = Object.fromEntries(preview.proposal.roles.map((role: any) => [role.name, role]));
+  assert.deepEqual(Object.keys(roles), ['worker', 'reviewer', 'producer', 'master'], 'the proposal names the master role alongside the worker, reviewer and producer roles');
+  const named = ['claude-a', 'claude-b', 'claude-c'];
+  assert.ok(named.every(name => roles.master.accounts.includes(name)), 'the master role names the logged-in environments');
+  assert.equal(roles.master.concurrency, 1, 'one master session');
+  for (const account of roles.master.accounts) assert.ok(environments.some(home => preview.proposal.accounts.find((entry: any) => entry.name === account).credential.home === home), `${account} is one of the discovered environments`);
+});
+
+test('unit:registry-propose-dedupes-symlinked-homes — a login home that is a symlink to another environment\'s home proposes one account for that login, named after the real directory, with no duplicate in any role', async () => {
+  const root = join(scratch, 'symlinked-homes'), directory = join(root, '.coding_agents'), home = join(root, 'home');
+  const realHome = await loggedClaude(directory, 'claude-a');
+  await file(join(directory, 'opencode-a', 'opencode', 'auth.json'), { anthropic: { type: 'api', key: secret('opencode-a-key') } });
+  // The compatibility symlinks an agent CLI leaves behind: ~/.claude -> the isolated environment's
+  // home, and ~/.local/share/opencode -> that environment's own opencode directory.
+  await mkdir(join(home, '.local/share'), { recursive: true });
+  await symlink(realHome, join(home, '.claude'));
+  await symlink(join(directory, 'opencode-a', 'opencode'), join(home, '.local/share', 'opencode'));
+  const saved = process.env.XDG_DATA_HOME;
+  process.env.XDG_DATA_HOME = join(home, '.local/share');
+  try {
+    const preview = await registryCommand({ hostId: HOST }, ['propose', '--directory', directory],
+      { read: async () => emptyRegistry(), write: async () => { throw new Error('a preview stores nothing'); } },
+      { home, executables: () => false }) as any;
+    const names = preview.proposal.accounts.map((account: any) => account.name);
+    assert.deepEqual(names, ['claude-a', 'opencode-a'], 'one account per login, named after the real directory');
+    for (const role of preview.proposal.roles) {
+      for (const alias of ['claude', 'opencode']) assert.ok(!role.accounts.includes(alias), `role ${role.name} never names the symlink alias ${alias}`);
+      assert.deepEqual(role.accounts.filter((name: any) => names.includes(name)), names, `role ${role.name} names each login once`);
+    }
+    assert.ok(!preview.discovered.some((login: any) => login.source === 'default-home'), 'a symlinked default home is not discovered as a second login');
+  } finally {
+    if (saved === undefined) delete process.env.XDG_DATA_HOME; else process.env.XDG_DATA_HOME = saved;
   }
 });
