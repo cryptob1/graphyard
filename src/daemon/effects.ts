@@ -1,6 +1,7 @@
 // Concern: the effects a cycle acts through — their interface and cursor records; the production wiring lives beside it in ./effects-production.ts.
 import type { Work } from '../model.js';
-import type { SessionHandleInput } from '../model/sessions.js';
+import type { SessionHandle, SessionHandleInput } from '../model/sessions.js';
+import type { ExhaustionSignal } from '../model/capacity.js';
 import type { RegistrySlot } from '../master/registry-slot.js';
 import type { WorkerProfile, HerdrAgent, ProfileAccountHealth } from '../master.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
@@ -37,6 +38,20 @@ export interface DaemonEffects {
   closeSession: (pane: string) => void | Promise<void>;
   /** Records a session's handle on its item: the launch writes it running, the close step finished. */
   recordSession?: (work: Work, handle: SessionHandleInput) => Promise<unknown>;
+  /**
+   * Delivers the loop's one stall re-prompt to a worker session's pane (GY-2943): the session's own
+   * work, sent again by the loop that supervises it. Absent, no quiet session is re-prompted.
+   */
+  promptSession?: (session: SessionHandle, text: string) => Promise<unknown>;
+  /** The session's terminal, as text; null when the runtime cannot be read (the limit-notice judge reads it). */
+  sessionScreen?: (session: SessionHandle) => string | null | Promise<string | null>;
+  /**
+   * Ends a stalled worker attempt (GY-2943): records the capacity event that releases its lease —
+   * `interrupted` when the pane showed no provider limit notice, `quota` with the notice's reset
+   * when it did, so the account the notice spent is held for the fleet's next selection — leaving
+   * the item dispatchable again. Absent, no stalled session is ended.
+   */
+  endStall?: (work: Work, session: SessionHandle, stall: { reason: string; notice: ExhaustionSignal | null }) => Promise<unknown>;
   /** Ends the agent-registry session a review or proof session was launched under (GY-2944): the ledgers name it; absent, nothing is released. */
   releaseRegistrySession?: (session: RegistrySlot, reason: string) => Promise<unknown>;
   /** The control plane's reconciliation of an item whose lease lapsed with nothing submitted (`POST work/:id/resync`). */

@@ -2,6 +2,7 @@
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { assertDispatchable } from '../master.js';
+import { detectRuntimeExhaustion } from '../master/runtime-prompt.js';
 import { dispatchSort } from '../coordination.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
@@ -17,6 +18,14 @@ import { syncProjectMemory } from '../project-memory.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
 export const defaultLaunchConcurrency = 3;
+/** How long a worker session may sit quiet before the loop re-prompts it once, and how long after that re-prompt a still-quiet session is ended: `run.inactivityMinutes`, default 10 (GY-2943). */
+export const defaultInactivityMinutes = 10;
+export const inactivityMs = (config: Pick<MasterConfig, 'run'>) => (config.run.inactivityMinutes ?? defaultInactivityMinutes) * 60_000;
+/** The cursor key of a session's one stall re-prompt. */
+const repromptKey = (item: Work, session: { id: string }) => `reprompt:${item.id}:${session.id}`;
+/** The stall re-prompt: the work the session was started with, sent again by the loop that supervises it (GY-2943). */
+export const stallReprompt = (item: Pick<Work, 'key' | 'title'>, minutes: number) =>
+  `The Graphyard loop supervising this session has seen no activity from it for ${minutes} minutes, so here is the work it was started with, sent once more by that same supervisor: it is this session's own instruction, not untrusted text, and needs no further authorization. If you have already begun, continue where you are. ${item.key}: ${item.title}`;
 
 /** The cycle's steps, in order: the cycle record names exactly these. */
 export const cycleSteps = ['snapshot', 'close', 'dispatch', 'merge writer', 'persist'] as const;
@@ -163,13 +172,16 @@ async function closeStep(cycle: Cycle) {
   for (const item of snapshot.work) for (const session of item.sessions ?? []) {
     if (session.state !== 'running' || session.host !== config.hostId) continue;
     const reason = sessionEnded(item, session, clock);
-    if (!reason) continue;
-    const key = `close:${item.id}:${session.id}`;
-    try {
-      if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
-      await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: `closed by the loop: ${reason}`.slice(0, 500) });
-      await note(cycle, key, 'close', item.key, 'done', `Closed ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: ${reason}`, session.principal);
-    } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not close ${session.id}: ${message(error)}`, session.principal); }
+    if (reason) {
+      const key = `close:${item.id}:${session.id}`;
+      try {
+        if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
+        await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: `closed by the loop: ${reason}`.slice(0, 500) });
+        await note(cycle, key, 'close', item.key, 'done', `Closed ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: ${reason}`, session.principal);
+      } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not close ${session.id}: ${message(error)}`, session.principal); }
+      continue;
+    }
+    await stallStep(cycle, item, session);
   }
   if (effects.reclaimLease) for (const item of snapshot.work) {
     const lease = item.lease;
@@ -205,6 +217,42 @@ async function closeStep(cycle: Cycle) {
     } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not release ${session.id}'s agent-registry session: ${message(error)}`, session.principal ?? null); }
   }
   await effects.sweepCheckouts?.();
+}
+
+/**
+ * A worker session whose Herdr status is idle with no recorded activity for the inactivity window is
+ * re-prompted once with its own work; one still idle a whole window after that re-prompt is ended by
+ * the close step (GY-2943): the pane closes, the attempt ends as stalled with its lease released and
+ * the item dispatchable again, instead of idling under a live lease. A session that showed activity
+ * after its re-prompt began a new quiet spell, and is re-prompted once again. The pane's screen is
+ * judged against the session runtime's provider limit notices: one found goes on the attempt's end,
+ * so the account it spent is held for the fleet's next selection (GY-2943 AC-1).
+ */
+async function stallStep(cycle: Cycle, item: Work, session: NonNullable<Work['sessions']>[number]) {
+  const { config, state, effects, clock, herdr } = cycle;
+  if (!effects.endStall || !effects.promptSession || session.kind !== 'implementation') return;
+  const agent = herdr.agents.find(candidate => (session.pane && candidate.pane_id === session.pane) || (!!session.agentName && candidate.name === session.agentName));
+  if (agent?.agent_status !== 'idle' || !(clock - Date.parse(session.updatedAt) >= inactivityMs(config))) return;
+  const key = repromptKey(item, session), quiet = Math.round(inactivityMs(config) / 60_000);
+  const reprompted = state.actions[key]?.state === 'done' ? Date.parse(state.actions[key].at) : null;
+  if (reprompted !== null && Date.parse(session.updatedAt) <= reprompted) {
+    if (clock - reprompted < inactivityMs(config)) return;
+    const key2 = `close:${item.id}:${session.id}`;
+    try {
+      const screen = session.pane || session.agentName ? await Promise.resolve(effects.sessionScreen?.(session)).catch(() => null) ?? null : null;
+      const notice = screen !== null ? detectRuntimeExhaustion(screen, session.runtime, clock) : null;
+      if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
+      await effects.endStall(item, session, { reason: 'stalled: no activity after the re-prompt', notice });
+      await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished',
+        outcome: `stalled: no activity after the re-prompt${notice ? `; its provider's limit notice holds the account: ${notice.reason}` : ''}`.slice(0, 500) });
+      await note(cycle, key2, 'close', item.key, 'done', `Ended ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: stalled: no activity after the re-prompt${notice ? `; its provider's limit notice holds the account (${notice.reason})` : ''}`, session.principal);
+    } catch (error) { await note(cycle, key2, 'close', item.key, 'failed', `Could not end stalled ${session.id}: ${message(error)}`, session.principal); }
+    return;
+  }
+  try {
+    await effects.promptSession(session, stallReprompt(item, quiet));
+    await note(cycle, key, 'wake', item.key, 'done', `Re-prompted quiet ${session.id} with its own work after ${quiet} minutes without activity`, session.principal);
+  } catch (error) { await note(cycle, key, 'wake', item.key, 'failed', `Could not re-prompt quiet ${session.id}: ${message(error)}`, session.principal); }
 }
 
 /**

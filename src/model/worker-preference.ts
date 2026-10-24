@@ -3,6 +3,8 @@ import type { AgentRegistry, FleetRole } from './registry.js';
 import { classifyRisk, riskRules } from './risk-class.js';
 import { globSurface, repositoryPolicy, type RepositoryPolicy } from './repository-policy.js';
 import { namedPaths, pathScope, pathScopesOverlap } from './documentation-glob.js';
+import { liveSessions } from './registry-sessions.js';
+import { deriveAccountPlan } from '../provider-usage.js';
 
 /**
  * The order a role's accounts are tried in (GY-1746). Only the worker role has a preference: `fast`
@@ -17,6 +19,19 @@ export function workerOrder(registry: AgentRegistry, role: Pick<FleetRole, 'name
   // A strong-preferred item is held for a strong runtime rather than falling to Pi when none is eligible.
   return prefer === 'fast' ? [...pi, ...rest] : rest;
 }
+
+/**
+ * The trial order that spreads concurrent launches across provider plans (GY-2943): accounts on a
+ * plan no live session draws on lead, the plans already holding one trail, each group in the role's
+ * own order — one plan's rate limit must not take every launch down with it.
+ */
+export function planSpreadOrder(registry: AgentRegistry, order: readonly string[]): string[] {
+  const planOf = (name: string) => { const account = registry.accounts.find(entry => entry.name === name); return account ? deriveAccountPlan(account, registry.accounts).planId : ''; };
+  const busy = new Set(liveSessions(registry).map(session => planOf(session.account)));
+  return [...order.filter(name => !busy.has(planOf(name))), ...order.filter(name => busy.has(planOf(name)))];
+}
+/** Skips read in the role's own preference order, whatever the plan spread made of the trial order (GY-2943). */
+export const preferenceOrder = (order: readonly string[]) => (first: { account: string }, second: { account: string }) => order.indexOf(first.account) - order.indexOf(second.account);
 
 /** The attempts an item gets on Pi before the strong runtimes take it: its first two. */
 export const piAttempts = 2;

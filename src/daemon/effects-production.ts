@@ -7,7 +7,7 @@ import { sweepManagedCheckouts } from '../producer.js';
 import { endRegistrySlot } from '../master/registry-slot.js';
 import { dispatchEffects, readDispatchCursor, runDispatchTick, type DispatchCursor } from '../auto-dispatch.js';
 import { masterSessionEffects } from '../master/master-session.js';
-import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, inspectWorkerCredentials, dispatchWork, removeAttemptWorktree } from '../master.js';
+import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observeHerdrAgents, herdrJson, readSessionScreen, inspectWorkerCredentials, dispatchWork, removeAttemptWorktree, profileAccount, recordObservedExhaustion, sessionAccount } from '../master.js';
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
@@ -55,6 +55,26 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     credentials: profiles => inspectWorkerCredentials(root, profiles),
     closeSession: pane => closeHerdrPane(pane, run),
     recordSession: (work, handle) => mutate(`work/${work.id}/session`, handle),
+    // The loop's one stall re-prompt (GY-2943), delivered to the session's pane as its runtime accepts prompts.
+    promptSession: async (session, text) => { const target = session.pane ?? session.agentName; if (!target) throw new Error(`the session has neither a pane nor a runtime name to prompt`); await herdrJson(['agent', 'prompt', target, text], run); },
+    sessionScreen: session => session.pane || session.agentName ? readSessionScreen(session.pane ?? session.agentName!, run) : null,
+    // GY-2943: the stalled attempt ends through the capacity record — `interrupted` when its pane
+    // showed no provider limit notice, `quota` with the notice's reset when it did, so the account
+    // the notice spent is held here (and rides every selection) before the item is dispatchable again.
+    endStall: async (item, session, stall) => {
+      const config = current();
+      const profile = config.workers.find(candidate => candidate.principal === session.principal);
+      const name = profile?.name ?? session.principal, epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
+      const account = profile && Number.isFinite(epoch) ? (await sessionAccount(root, config, 'worker', profile.name, { work: item.key, epoch }))?.environment ?? null : null;
+      if (stall.notice) await recordObservedExhaustion(config, account ?? profileAccount(name), { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
+      await mutate(`work/${item.id}/capacity`, {
+        event: 'exhausted', role: 'worker', epoch, ...(stall.notice ? {} : { cause: 'interrupted' }),
+        profile: name, account, runtime: session.runtime,
+        reason: `${stall.reason}${stall.notice ? ` on its provider's limit notice: ${stall.notice.reason}` : ''}`.slice(0, 500),
+        resetsAt: stall.notice?.resetsAt ?? null,
+        partialWork: { state: 'not-applicable', detail: 'the stalled attempt left its worktree as it stood; the redispatch starts from the shared base' },
+      }, randomUUID());
+    },
     // The agent-registry session a review or proof session ran under, ended when the close step
     // judges it over (GY-2944): the ledgers name it, the fleet client ends it.
     releaseRegistrySession: (session, reason) => endRegistrySlot(root, current(), session, reason),

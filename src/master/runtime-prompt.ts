@@ -1,5 +1,5 @@
 // Concern: what a blocked or stopped session's runtime shows — its prompts and its provider limit notices — and the loop's answer.
-import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
+import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, limitSignalReset, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
 import { exhaustionTail, outOfCreditsScreen } from '../fleet.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
@@ -235,7 +235,8 @@ export function detectRuntimeExhaustion(output: string, runtime: string | null |
     if (!at.length || (line.slice(0, Math.min(...at)).match(/\S+/g) ?? []).length > exhaustionNoticeLabelWords) continue;
     const context = [line, ...lines.slice(index + 1, index + 3)].join(' ').replace(/(\d+[dhms])(?=\d)/gi, '$1 ');
     // The runtime's zone-less resets are its provider's UTC wall clock (GY-1817); every other shape parses as before.
-    return { reason: line.slice(0, 300), resetsAt: parseResetTime(zonelessUtcRuntimes.has(runtime ?? '') && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now) };
+    // A notice that names no reset at all — Z.AI's 429 rate-limit envelope — is held for the envelope's own default (GY-2943).
+    return { reason: line.slice(0, 300), resetsAt: limitSignalReset(line, parseResetTime(zonelessUtcRuntimes.has(runtime ?? '') && !namesZone(context) ? context.replace(zonelessWallClock, '$1Z') : context, now), now) };
   }
   return null;
 }
