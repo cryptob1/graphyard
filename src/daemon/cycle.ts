@@ -165,9 +165,9 @@ export function endedAttemptWorktrees(work: Work[], hostId: string, now: number)
 }
 
 /**
- * Close: end the sessions on this host whose item left the stage they were launched for, ask the
- * control plane to reconcile each lease that lapsed with nothing submitted, and remove the
- * worktrees of ended attempts.
+ * Close: end the sessions on this host whose item left the stage they were launched for, keep what
+ * an attempt ended by a lapsed lease had not committed, ask the control plane to reconcile each
+ * lease that lapsed with nothing submitted, and remove the worktrees of ended attempts.
  */
 async function closeStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock } = cycle;
@@ -190,7 +190,16 @@ async function closeStep(cycle: Cycle) {
     if (item.stage === 'done' || !lease || item.submission || Date.parse(lease.expiresAt) > clock) continue;
     const key = `reclaim:lease:${item.id}:${lease.epoch}`;
     if (state.actions[key]?.state === 'done') continue;
-    try { await effects.reclaimLease(item); await note(cycle, key, 'reclaim', item.key, 'done', `${item.key}: the lease ${lease.owner} held under epoch ${lease.epoch} lapsed with nothing submitted; the control plane reconciles it`, lease.owner); }
+    try {
+      // GY-2953: before the lease is reconciled and the ended attempt's worktree cleaned, keep the
+      // attempt's work on the record, so the redispatch's handoff names the commit instead of
+      // silently starting from the shared base. A record that ended the lease needs no resync.
+      const kept = effects.endExpiredLease ? await effects.endExpiredLease(item, lease) : null;
+      if (!kept) await effects.reclaimLease(item);
+      await note(cycle, key, 'reclaim', item.key, 'done', kept
+        ? `${item.key}: epoch ${lease.epoch}'s lease lapsed with nothing submitted; its work is on the record for the redispatch's handoff (${kept.state}${kept.commit ? `, commit ${kept.commit.slice(0, 12)}` : ''}${kept.branch ? ` on ${kept.branch}` : ''}), and the lease is ended`
+        : `${item.key}: the lease ${lease.owner} held under epoch ${lease.epoch} lapsed with nothing submitted; the control plane reconciles it`, lease.owner);
+    }
     catch (error) { await note(cycle, key, 'reclaim', item.key, 'failed', `${item.key}: the lapsed lease could not be reconciled: ${message(error)}`, lease.owner); }
   }
   if (effects.removeWorktree) for (const { item, space } of endedAttemptWorktrees(snapshot.work, config.hostId, clock)) {

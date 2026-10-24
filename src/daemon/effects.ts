@@ -1,7 +1,7 @@
 // Concern: the effects a cycle acts through — their interface and cursor records; the production wiring lives beside it in ./effects-production.ts.
 import type { Work } from '../model.js';
 import type { SessionHandle, SessionHandleInput } from '../model/sessions.js';
-import type { ExhaustionSignal } from '../model/capacity.js';
+import type { ExhaustionSignal, PartialWork } from '../model/capacity.js';
 import type { RegistrySlot } from '../master/registry-slot.js';
 import type { WorkerProfile, HerdrAgent, ProfileAccountHealth } from '../master.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
@@ -52,6 +52,15 @@ export interface DaemonEffects {
    * the item dispatchable again. Absent, no stalled session is ended.
    */
   endStall?: (work: Work, session: SessionHandle, stall: { reason: string; notice: ExhaustionSignal | null }) => Promise<unknown>;
+  /**
+   * Ends a worker attempt whose lease lapsed with nothing submitted (GY-2953): keeps what the
+   * attempt had not committed as one WIP commit on its own branch in its own worktree, and records
+   * the capacity exhaustion that ends the lease with that partial work on the item — before any
+   * cleanup — so the redispatch's handoff names the commit instead of silently starting from the
+   * shared base. Returns the partial work recorded, or null when this host holds nothing of the
+   * attempt. Absent, the lease is only reconciled.
+   */
+  endExpiredLease?: (work: Work, lease: NonNullable<Work['lease']>) => Promise<PartialWork | null>;
   /** Ends the agent-registry session a review or proof session was launched under (GY-2944): the ledgers name it; absent, nothing is released. */
   releaseRegistrySession?: (session: RegistrySlot, reason: string) => Promise<unknown>;
   /** The control plane's reconciliation of an item whose lease lapsed with nothing submitted (`POST work/:id/resync`). */
