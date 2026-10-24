@@ -1,6 +1,7 @@
 // `graphyard upgrade` (GY-1962): one command moves the CLI checkout, the server, the loop and
 // executors, and the managed repository's generated files to one dated release, in order.
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createBackup } from '../backup.js';
@@ -192,6 +193,26 @@ export function gitWatchPorts(cliRoot: string, baseBranch: string, run: ChildRun
 }
 
 /**
+ * The deploy's health step (GY-2942): /healthz?strict until it answers healthy at the release the
+ * deployed commit's image was stamped with — never the checkout's HEAD, which another install's
+ * deploy or a person may have moved — or the attempts run out.
+ */
+export const deployHealth = (cliRoot: string, url: string, attempts = 36, pauseMs = 5_000) => async (commit: string) => {
+  const { version } = releaseOfCommit(cliRoot, commit);
+  for (let attempt = 1; ; attempt++) {
+    try { return await healthVerdict(await fetch(`${url}/healthz?strict`, { signal: AbortSignal.timeout(10_000) }), version); }
+    catch (error) { if (attempt >= attempts) throw error; await new Promise(done => setTimeout(done, pauseMs)); }
+  }
+};
+
+/** The install's own deploy checkout (GY-2942): a detached worktree of the launcher's checkout, with its own HEAD, added the first time the watch runs. */
+export async function ensureDeployCheckout(checkout: string, source: string, run: ChildRun) {
+  if (existsSync(join(checkout, '.git'))) return;
+  await mkdir(resolve(checkout, '..'), { recursive: true });
+  await run('git', ['-C', source, 'worktree', 'add', '--detach', '--quiet', checkout, 'HEAD']);
+}
+
+/**
  * Removes every per-commit image `graphyard-local:<sha12>` (or the older `previous-<sha12>`) but the kept
  * commits', one `docker image rm` each; docker refuses one a container uses, and each failure is one
  * logged line, never the deploy's.
@@ -222,27 +243,25 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
   const run = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000, ...(env ? { env } : {}) })).then(String);
   const inputsFor = (commit: string): UpgradeInputs => {
     const current = checkoutRelease(cliRoot);
-    return { cliRoot, repoRoot, current, target: { version: current.version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
+    return { cliRoot, repoRoot, current, target: { version: releaseOfCommit(cliRoot, commit).version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
       image: install.provider === 'compose' ? `graphyard-local:${commit.slice(0, 12)}` : install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
   };
   const step = (commit: string, id: UpgradeStepId) => upgradePlan(inputsFor(commit)).steps.find(entry => entry.id === id)!;
+  const tree = gitWatchPorts(cliRoot, input.baseBranch, input.run);
   return {
-    ...gitWatchPorts(cliRoot, input.baseBranch, input.run),
+    ...tree,
     build: async commit => { await run('sh', ['-c', step(commit, 'npm-ci').command], cliRoot); },
     restart: async commit => {
+      // The image builds from this checkout, so one found moved off the deployed commit is put back first.
+      const head = await tree.head();
+      if (head !== commit) { console.error(`[graphyard-deploy] the checkout holds ${head.slice(0, 12)}, not ${commit.slice(0, 12)}; checking it out again`); await tree.checkout(commit); }
       const inputs = inputsFor(commit);
       if (process.env.DATABASE_URL) await liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')).run(step(commit, 'backup'));
       // Every redeploy builds with the stamp of the commit it deploys (GY-2167), so /healthz names that commit.
       const stamp = releaseOfCommit(cliRoot, commit);
       await run('sh', ['-c', step(commit, 'redeploy').command], repoRoot, { ...process.env, GRAPHYARD_VERSION: stamp.version, GRAPHYARD_BUILD_REVISION: stamp.revision });
     },
-    health: async () => {
-      const version = checkoutRelease(cliRoot).version;
-      for (let attempt = 1; ; attempt++) {
-        try { return await healthVerdict(await fetch(`${url}/healthz?strict`, { signal: AbortSignal.timeout(10_000) }), version); }
-        catch (error) { if (attempt >= 36) throw error; await new Promise(done => setTimeout(done, 5_000)); }
-      }
-    },
+    health: deployHealth(cliRoot, url),
     prune: keep => pruneImages(input.run, keep),
     pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },
     schema: async commit => { try { return schemaAt(git(cliRoot, 'show', `${commit}:src/release.ts`)); } catch { return null; } },
@@ -261,15 +280,19 @@ export const upgradeCommands = defineCommands([{
     '                                redeploy the server, restart loop and executors, refresh the',
     '                                generated files, and check /healthz, to one dated release;',
     '                                --plan prints the steps only; a failure names its step and rollback',
-    '  upgrade --watch [--once]        The deploy unit (graphyard-deploy.service): fetch origin and, for',
+    '  upgrade --watch [--once] [--checkout DIR]',
+    '                                The deploy unit (graphyard-deploy.service): fetch origin and, for',
     '                                each new base tip, build, restart, check /healthz, and roll back',
-    '                                to the previous tip on failure',
+    '                                to the previous tip on failure; DIR is the install\'s own checkout',
   ],
   async run(context) {
     const flags = [context.id, ...context.args].filter((arg): arg is string => !!arg);
     if (flags.includes('--watch')) {
       const repoRoot = context.repositoryRoot(), master = await loadMasterConfig(repoRoot);
-      const ports = await watchPorts({ cliRoot: installationRoot, repoRoot, repository: master.repository, baseBranch: master.baseBranch, url: master.url, run: defaultChildRun, herdrInstance: !!master.herdrInstance });
+      // GY-2942: the unit names the install's own checkout; one without it deploys from the launcher's.
+      const checkoutIndex = flags.indexOf('--checkout'), cliRoot = checkoutIndex >= 0 ? resolve(flags[checkoutIndex + 1] ?? '') : installationRoot;
+      if (cliRoot !== installationRoot) await ensureDeployCheckout(cliRoot, installationRoot, defaultChildRun);
+      const ports = await watchPorts({ cliRoot, repoRoot, repository: master.repository, baseBranch: master.baseBranch, url: master.url, run: defaultChildRun, herdrInstance: !!master.herdrInstance });
       if (typeof ports === 'string') throw new Error(ports);
       const stopping = new AbortController();
       for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => stopping.abort());

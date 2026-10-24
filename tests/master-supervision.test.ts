@@ -357,7 +357,7 @@ test('integration:supervisor-install-explicit-only — the unit is written only 
     const replacement = await installLoopSupervisor(unit(other), replaced.host, { replace: true });
     assert.equal(replacement.wrote, 'updated');
     assert.match(await readFile(unitPath, 'utf8'), new RegExp(`^WorkingDirectory=${other}$`, 'm'));
-    assert.deepEqual(changes(replaced.calls).map(call => call.slice(0, 3)), [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']]);
+    assert.deepEqual(changes(replaced.calls).map(call => call.slice(0, 3)), [['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'daemon-reload'], ['systemctl', '--user', 'enable'], ['systemctl', '--user', 'restart'], ['systemctl', '--user', 'restart'], ['loginctl', 'enable-linger']], 'a rewritten deploy unit restarts too (GY-2942)');
 
     // 5. The shared test guard: under the test runner, a home outside the system temporary
     //    directory is refused at the installer, whatever the test passed and before it reads or
