@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -21,6 +21,7 @@ import type { Principal, Work } from '../src/model.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 import { mergeRecordBodySchema } from '../src/server/merge-record.js';
 import { defaultMergeBatch } from '../src/merge-writer/batch.js';
+import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
 
 // GY-2965 AC-2: the merge trial serves the head and runs its bound case. A head carrying
 // e2e:home-shows-change is refused when e2e/cases/home-shows-change.json is absent, naming the
@@ -214,4 +215,29 @@ test('unit:trial-serves-head-and-runs-bound-cases — a trial record carries eve
   const parsed = mergeRecordBodySchema.safeParse({ kind: 'trial', head: sha, baseTip: sha, mergeSha: sha, outcome: 'verdict', build: 'pass',
     tests: { passed: 0, failed: [], files: 0 }, files: [], proofs: {}, durationMs: 1, attempts: [], e2e: results });
   assert.ok(parsed.success, parsed.success ? '' : parsed.error.message);
+});
+
+test('unit:trial-serves-head-and-runs-bound-cases — each case runs against the application delivery.cases binds it to', async () => {
+  const checkout = await temporaryDirectory('trial-e2e-applications', tmpdir());
+  const put = (path: string, content: string) => { mkdirSync(dirname(join(checkout, path)), { recursive: true }); writeFileSync(join(checkout, path), content); };
+  put('graphyard.json', JSON.stringify({ delivery: { mode: 'local',
+    applications: [{ id: 'site', kind: 'static', directory: 'site', build: null }, { id: 'api', kind: 'static', directory: 'api', build: null }],
+    cases: { 'api-answers': 'api', 'site-answers': 'site' },
+  } }));
+  put('site/data.json', JSON.stringify({ message: 'site' }));
+  put('api/data.json', JSON.stringify({ message: 'api' }));
+  const answering = (id: string, message: string) => ({ ...passingCase, id, steps: [{ kind: 'http', method: 'GET', path: '/data.json', status: 200, expect: [{ path: 'message', equals: message }] }] });
+  put('e2e/cases/api-answers.json', JSON.stringify(answering('api-answers', 'api')));
+  put('e2e/cases/site-answers.json', JSON.stringify(answering('site-answers', 'site')));
+  put('e2e/cases/unbound.json', JSON.stringify(answering('unbound', 'site')));
+  const cases = await runTrialE2eCases({
+    worktree: checkout, mergeSha: 'a'.repeat(40), proofs: ['e2e:api-answers', 'e2e:site-answers', 'e2e:unbound'],
+    env: { PATH: process.env.PATH!, HOME: process.env.HOME! }, scratch: checkout, budgetMs: 60_000,
+    holds: async path => existsSync(join(checkout, path)), log: () => {},
+  });
+  const by = (name: string) => cases.find(entry => entry.case === name)!;
+  assert.deepEqual([by('api-answers').executed, by('api-answers').failed], [1, 0], JSON.stringify(cases));
+  assert.deepEqual([by('site-answers').executed, by('site-answers').failed], [1, 0], JSON.stringify(cases));
+  assert.equal(by('unbound').failed, 1);
+  assert.match(by('unbound').failingStep!, /bind it in delivery\.cases to one of site, api/);
 });
