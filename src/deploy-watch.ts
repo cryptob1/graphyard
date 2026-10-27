@@ -6,6 +6,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
+import type { GitRunner } from './merge-writer/local-observation.js';
 
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
@@ -125,4 +126,45 @@ export async function watchMain(file: string, ports: DeployWatchPorts, options: 
     if (options.once || options.signal?.aborted) return;
     try { await delay(options.intervalMs, undefined, { signal: options.signal }); } catch { return; }
   }
+}
+
+/** The managed repository's serving, as the dashboard header reads it (GY-2964). */
+export interface ManagedDeploy {
+  /** The managed repository this answers for. */
+  repository: string;
+  /** A deploy record names this repository as the one it serves and holds a serving tip. */
+  configured: boolean;
+  /** The commit that deploy serves; null when no deploy of this repository is configured. */
+  tip: string | null;
+  /** When that deploy was recorded. */
+  at: string | null;
+  /** The base branch's tip as the shared checkout holds it; null when it cannot be read. */
+  main: string | null;
+  /** Merged changes on the base branch since the configured deploy's commit; null when unreadable. */
+  pending: number | null;
+}
+
+/**
+ * What the managed repository's own deployment serves, read like master status reads it (GY-2955):
+ * only a deploy record naming this repository as the one it serves counts, and the base tip comes
+ * from the shared checkout's ref. The control plane's own build revision and its deployment are
+ * never a stand-in for another repository's release health, so a managed install without such a
+ * record reads unconfigured — "No deploy configured · main <tip>" — never a serving claim.
+ */
+export async function managedDeploy(repository: string, baseBranch: string, root: string | null | undefined, git?: GitRunner | null): Promise<ManagedDeploy> {
+  const record = root ? readDeployRecord(deployRecordPath(root)) : null;
+  const configured = !!(record && record.tip && record.repository?.toLowerCase() === repository.toLowerCase());
+  let main: string | null = null, pending: number | null = null;
+  if (root && git) {
+    for (const ref of [`refs/remotes/origin/${baseBranch}`, `refs/heads/${baseBranch}`]) {
+      const tip = await git(['rev-parse', '--verify', '--quiet', ref]);
+      const sha = tip.stdout.trim();
+      if (tip.status === 0 && /^[0-9a-f]{40}$/.test(sha)) { main = sha; break; }
+    }
+    if (configured && main) {
+      const since = await git(['rev-list', '--count', `${record!.tip}..${main}`]);
+      pending = since.status === 0 && /^\d+$/.test(since.stdout.trim()) ? Number(since.stdout.trim()) : null;
+    }
+  }
+  return { repository, configured, tip: configured ? record!.tip : null, at: configured ? record!.at : null, main, pending };
 }

@@ -7,9 +7,13 @@ import type { Dashboard } from '../pages/dashboard';
 const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(0, 8)}</span>;
 
 /**
- * The board's one release line (GY-1979): the commit production serves, whether it is healthy,
- * and how many merged changes it does not carry yet — read from the production watch's report on
- * status (`production`), the same view the board reads (src/model/release.ts). Health is the
+ * The board's one release line (GY-1979). For an install managing a repository other than
+ * Graphyard's own (GY-2964) it names that repository's own serving, which only a deploy record
+ * naming it can: "Serving <commit>" with the merged changes main holds since it, or "No deploy
+ * configured · main <tip>" — never the control plane's own commit, which serves Graphyard's
+ * code, not the managed repository's. Elsewhere it reads the production watch's report on status
+ * (`production`), the same view the board reads (src/model/release.ts): the commit production
+ * serves, whether it is healthy, and how many merged changes it does not carry yet. Health is the
  * watch's own: an open deployment incident is an unhealthy release; a pending count is lag, not
  * ill health. Where nothing has observed production (no watch configured, a failed provider read,
  * an unknown serving commit) the line says so rather than claiming either way — "Release: not
@@ -18,6 +22,17 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
  * notices) stay unique for readers and tests.
  */
 export function ReleaseLine({ status }: { status?: Dashboard['status'] }) {
+  const deploy = status?.deploy as { configured?: unknown; tip?: unknown; main?: unknown; pending?: unknown } | null | undefined;
+  if (deploy && typeof deploy === 'object') {
+    const configured = deploy.configured === true && typeof deploy.tip === 'string' && !!deploy.tip;
+    const pending = typeof deploy.pending === 'number' ? deploy.pending : null;
+    const main = typeof deploy.main === 'string' && deploy.main ? deploy.main : null;
+    return <p className="release-line" data-release-line={configured ? 'serving' : 'undeployed'}>
+      {configured
+        ? <>Serving {shortSha(deploy.tip as string)}{pending !== null && <> · {pending} merged {pending === 1 ? 'change' : 'changes'} not carried yet</>}</>
+        : <>No deploy configured{main && <> · main {shortSha(main)}</>}</>}
+    </p>;
+  }
   const watch = status?.production as { observedAt?: unknown; serving?: unknown; error?: unknown; pending?: unknown; incidents?: unknown } | null | undefined;
   const observed = !!watch?.observedAt && typeof watch.serving === 'string' && !!watch.serving && !watch.error;
   const incidents = Array.isArray(watch?.incidents) ? watch.incidents.length : 0;

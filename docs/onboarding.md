@@ -50,3 +50,5 @@ Propose **Agent registry** from login homes: `master registry propose`, then `--
 ## The dashboard
 
 Serves `127.0.0.1:4310` ([install](install.md)); a green `up` ends with a single-use `signIn` link (10min), later `graphyard login` (no options) mints one from the install's operator credential; the session lasts 30 days. Status: **Todo**/**Doing**/**Checking**/**Done** — Done = merged, off the board; items are *Delivered* at merge, *Live* once served. **Needs you** cards name the ask and numbered steps. **Settings › Agents**: launch readiness, accounts, roles ([Configure the fleet](#configure-the-fleet)).
+
+The top bar's release line names the managed repository's own serving (GY-2964): `Serving <commit> · N merged changes not carried yet` from the deploy record that names this repository as the one it serves, or `No deploy configured · main <tip>` from the shared checkout when none does — never the control plane's own commit, which serves Graphyard's code. `graphyard master status` reads the same record.
