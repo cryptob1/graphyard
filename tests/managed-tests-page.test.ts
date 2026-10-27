@@ -12,6 +12,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { caseDirectory, loadCases, syncCases } from '../src/e2e/case.js';
+import { ensureShippedScenarios } from '../src/scenarios.js';
 import { TestsView } from '../web/pages/tests.js';
 
 // GY-2964: a managed repository's Tests page lists that repository's own end-to-end cases, never
@@ -104,4 +105,10 @@ test('unit:managed-tests-page-lists-repository-cases-only — a managed reposito
   for (const id of ['capacity-limit-redispatch', 'fixture-static-home', 'fixture-compose-app']) assert.ok(ids.includes(id), `the Graphyard repository install lists the built-in ${id}`);
   for (const entry of (gyTests.cases as any[]).filter(({ id }) => ['capacity-limit-redispatch', 'fixture-static-home', 'fixture-compose-app'].includes(id)))
     assert.ok(Date.parse(entry.changed.at) > 0, `a seeded revision carries a real timestamp, not ${entry.changed.at}`);
+
+  // An install an older release already seeded into heals too: the rows stay in the registry but
+  // are not this repository's cases, so the Tests page still lists only its own.
+  await ensureShippedScenarios(gameStore.pool);
+  assert.ok((await gameApi('scenarios')).some((scenario: any) => scenario.id === 'capacity-limit-redispatch'), 'the seeded rows are registered');
+  assert.deepEqual((await gameApi('tests')).cases.map((entry: any) => entry.id).sort(), ['cart-total', 'home-answers'], 'the seeded fixture cases are still not listed');
 });

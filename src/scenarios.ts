@@ -236,12 +236,16 @@ export type TrackedCase = Omit<CaseSummary, 'latest' | 'lastFailure' | 'history'
 
 /**
  * The Tests page's read (GY-1351): every case's bounded summary, each with its pass rate over the
- * history window and, for a repository E2E case, its tags, target and required mark from the latest revision.
+ * history window and, for a repository E2E case, its tags, target and required mark from the latest
+ * revision. An install managing a repository other than Graphyard's own never lists that release's
+ * seeded built-in scenarios (GY-2964): rows an older release seeded there (by `graphyard`, with no
+ * runs of their own) stay in the registry but are not the repository's cases, so they are left out.
  */
-export async function trackedCases(db: Store['pool']): Promise<{ window: number; cases: TrackedCase[] }> {
+export async function trackedCases(db: Store['pool'], repository?: string | null): Promise<{ window: number; cases: TrackedCase[] }> {
   const summary = await testSummary(db);
   const definitions = new Map<string, Scenario>((await db.query('SELECT DISTINCT ON (id) document FROM scenarios ORDER BY id, revision DESC')).rows.map(row => [row.document.id, row.document]));
-  return { window: summary.window, cases: summary.cases.map(entry => {
+  const seededElsewhere = repository?.toLowerCase() !== graphyardRepository;
+  return { window: summary.window, cases: summary.cases.filter(entry => !(seededElsewhere && !entry.runs && entry.changed?.by === 'graphyard')).map(entry => {
     const judged = entry.history.filter(run => !run.withdrawn && run.result !== 'skipped');
     const definition = definitions.get(entry.id);
     // A run whose target reported no commit is stored on `unknown`; such runs share no commit, so they never make a case flaky together.

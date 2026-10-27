@@ -14,6 +14,6 @@ export const scenarioRoutes = defineRoutes('scenarios', [
   { method: 'GET', path: '/api/scenarios', handle: ({ services }) => scenarios(services.engine.store, services.repository) },
   { method: 'POST', path: '/api/scenarios', handle: async context => defineScenario(context.services.engine.store, context.actor, await parseJson(context), context.idempotencyKey(), context.services.engine.operatorAuthorizer) },
   { method: 'POST', path: /^\/api\/scenarios\/([^/]+)\/runs$/, handle: async (context, [id]) => recordCaseRun(context.services.engine.store, context.actor, decodeURIComponent(id), await parseJson(context), context.services.engine.operatorAuthorizer, context.services.repository) },
-  { method: 'GET', path: '/api/tests', handle: ({ services }) => trackedCases(services.engine.store.pool) },
+  { method: 'GET', path: '/api/tests', handle: ({ services }) => trackedCases(services.engine.store.pool, services.repository) },
   { method: 'GET', path: /^\/api\/tests\/([^/]+)\/runs$/, handle: ({ services, url }, [id]) => runHistory(services.engine.store.pool, decodeURIComponent(id), url.searchParams) },
 ]);
