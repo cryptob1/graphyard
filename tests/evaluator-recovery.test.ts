@@ -10,6 +10,10 @@ import type { ReplayRecord } from '../src/evidence-replay.js';
 import type { ArtifactBackend } from '../src/artifacts.js';
 import { defineScenario } from '../src/scenarios.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 
 /**
  * GY-1841: evaluator recovery. Judging a proof's retained evidence is an evaluation the pinned

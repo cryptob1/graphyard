@@ -14,6 +14,10 @@ import { currentEvidence } from '../src/model.js';
 import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2000-01-01 attempt expiry is written to force a lapse that stays lapsed; Date.now() only sets request deadlines and evidence ages relative to the run.
 
 /**

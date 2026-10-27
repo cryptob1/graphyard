@@ -14,6 +14,10 @@ import { server } from '../src/server.js';
 import { proofPreview } from '../src/coordination.js';
 import type { Definition } from '../src/validation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2000-01-01 expiresAt/deadline/expires_at writes are past and only force an already-lapsed expiry; Date.now() sets deadlines and stamps observations relative to the wall clock.
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };

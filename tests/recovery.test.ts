@@ -14,6 +14,10 @@ import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2000-01-01 expiresAt forces an attempt lapse that stays lapsed, and 2026-09-18 is the injected SigV4 signing clock; Date.now() builds deadlines and snapshot instants on the real clock only.
 
 /**
