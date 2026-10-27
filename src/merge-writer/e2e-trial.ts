@@ -7,7 +7,7 @@ import { parseCase, type CaseFile } from '../e2e/case.js';
 import { projectCaseSuite, buildStaticSite } from '../release-project.js';
 import type { E2eReport } from '../e2e/runner.js';
 import { serveStaticSite } from './preview.js';
-import { composeBounds, composeStack, dockerEnvironment } from '../compose-preview.js';
+import { composeBounds, composeProjectName, composeStack, dockerEnvironment } from '../compose-preview.js';
 import { checkoutRepositoryPolicy, type E2eServe } from '../model/repository-policy.js';
 import { loadProjectDelivery } from '../project-applications.js';
 
@@ -112,11 +112,12 @@ export async function runTrialE2eCases(input: {
       const application = serve.application!;
       const stack = composeStack({
         checkout: input.worktree, file: application.file, service: application.service, port: application.port,
-        project: `trial-e2e-${input.mergeSha.slice(0, 12)}`, environment: dockerEnvironment(input.env), variables: {},
+        project: composeProjectName('trial-e2e', input.mergeSha), environment: dockerEnvironment(input.env), variables: {},
         bounds: composeBounds(), scratch: await mkdtemp(join(input.scratch, 'compose-')),
       });
-      const origin = await stack.start(AbortSignal.timeout(input.budgetMs), input.budgetMs);
-      served = { origin, close: () => stack.close() };
+      // The project is closed whatever happened while it came up: `served` holds it before it starts.
+      served = { origin: '', close: () => stack.close() };
+      served.origin = await stack.start(AbortSignal.timeout(input.budgetMs), input.budgetMs);
     }
     // Every present case loads before any runs; one that does not parse fails as a failing step would.
     const loaded: { proof: string; caseFile: CaseFile }[] = [];
@@ -129,7 +130,8 @@ export async function runTrialE2eCases(input: {
       let report: E2eReport | null = null;
       const suite = projectCaseSuite(input.worktree, `trial-${randomUUID()}`, {
         cases: loaded.map(entry => entry.caseFile),
-        select: () => true, hostEnvironment: input.env, signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
+        // The cases come from the head itself, so they never read the install's secrets.
+        select: () => true, hostEnvironment: input.env, withholdSecrets: true, signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
         report: value => { report = value; },
       });
       await suite.run(served.origin, null);

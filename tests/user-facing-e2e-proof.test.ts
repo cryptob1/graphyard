@@ -71,19 +71,22 @@ test('unit:user-facing-items-require-e2e-proof — create accepts a feature and 
 });
 
 test('unit:user-facing-items-require-e2e-proof — requirements refuses a revision that drops the item\u2019s e2e proof and accepts one that keeps it or opts out', async () => {
-  const work = await engine.execute(operator, 'create', null, withE2e(feature()), id()) as Work;
-  const revision = { expectedPolicyRevision: work.policyRevision, reason: 'Rewriting the criteria', dependencies: [], exclusiveResources: [] };
-  await assert.rejects(engine.execute(operator, 'requirements', work.id, { ...revision, criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['unit:works'] }] }, id()),
-    /owes an end-to-end proof[\s\S]*e2e\/cases\/NAME\.json[\s\S]*No user-facing change/);
-  await assert.rejects(engine.execute(operator, 'requirements', work.id, { ...revision, criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['integration:works'] }] }, id()),
-    /owes an end-to-end proof/);
-  const revised = await engine.execute(operator, 'requirements', work.id, { ...revision,
-    criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['e2e:home-shows-change', 'unit:works'] }] }, id());
-  assert.equal(revised.criteria[0].proofs[0], 'e2e:home-shows-change');
-  const opted = await engine.execute(operator, 'create', null, { ...feature(), description: 'No user-facing change: docs only' }, id()) as Work;
-  const revisedOpted = await engine.execute(operator, 'requirements', opted.id,
-    { expectedPolicyRevision: opted.policyRevision, reason: 'Rewriting the criteria', dependencies: [], exclusiveResources: [], criteria: [{ id: 'AC-1', text: 'Still no behaviour', proofs: ['unit:docs'] }] }, id());
-  assert.equal(revisedOpted.criteria[0].proofs[0], 'unit:docs', 'the opt-out sentence on the item excuses its revisions');
+  for (const [kind, item] of [['feature', feature], ['bug', bug]] as const) {
+    const work = await engine.execute(operator, 'create', null, withE2e(item()), id()) as Work;
+    assert.equal(work.type, kind);
+    const revision = { expectedPolicyRevision: work.policyRevision, reason: 'Rewriting the criteria', dependencies: [], exclusiveResources: [] };
+    await assert.rejects(engine.execute(operator, 'requirements', work.id, { ...revision, criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['unit:works'] }] }, id()),
+      /owes an end-to-end proof[\s\S]*e2e\/cases\/NAME\.json[\s\S]*No user-facing change/);
+    await assert.rejects(engine.execute(operator, 'requirements', work.id, { ...revision, criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['integration:works'] }] }, id()),
+      /owes an end-to-end proof/);
+    const revised = await engine.execute(operator, 'requirements', work.id, { ...revision,
+      criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['e2e:home-shows-change', 'unit:works'] }] }, id());
+    assert.equal(revised.criteria[0].proofs[0], 'e2e:home-shows-change');
+    const opted = await engine.execute(operator, 'create', null, { ...item(), description: 'No user-facing change: docs only' }, id()) as Work;
+    const revisedOpted = await engine.execute(operator, 'requirements', opted.id,
+      { expectedPolicyRevision: opted.policyRevision, reason: 'Rewriting the criteria', dependencies: [], exclusiveResources: [], criteria: [{ id: 'AC-1', text: 'Still no behaviour', proofs: ['unit:docs'] }] }, id());
+    assert.equal(revisedOpted.criteria[0].proofs[0], 'unit:docs', 'the opt-out sentence on the item excuses its revisions');
+  }
   const choreItem = await engine.execute(operator, 'create', null, chore(), id()) as Work;
   const revisedChore = await engine.execute(operator, 'requirements', choreItem.id,
     { expectedPolicyRevision: choreItem.policyRevision, reason: 'Rewriting the criteria', dependencies: [], exclusiveResources: [], criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:chore'] }] }, id());
