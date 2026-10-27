@@ -23,6 +23,10 @@ Cycle until every in-scope item is Done or carries a recorded blocker and the re
 
 Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, loop-owned `rework`. The master attests unproduced `manual:` proofs per head, base and policy revision.
 
+### File user-facing items with an e2e: proof by default
+
+Every `feature` or `bug` item the master files carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — the case the merge trial runs against the served head — unless the change has nothing a user can see, and then the description opens `No user-facing change: <reason>`. `master create` and `master requirements` refuse anything else, naming the case format and the opt-out ([validation](validation.md)).
+
 ### Session liveness is reconciled, not trusted
 
 Each dispatch reconciles reviewer and producer sessions; a handle closes at the second consecutive miss, and so does the agent-registry session a restarted loop left standing — the ledger record names its pane, and the role's slot frees with it. `blocked` frees its slot; its [reason](protocol/work-commands.md#blocked-work) stays on the item until the master clears it.

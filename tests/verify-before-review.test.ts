@@ -39,7 +39,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 const events = async (item: Work, kind: string) => (await store.events(item.id)).filter(event => event.kind === kind).reverse();
 const reviewRequests = async (item: Work) => (await events(item, 'dispatch.requested')).filter(event => event.payload.details.kind === 'review');
 async function submitted(title: string, criteria: Work['criteria']) {
-  let item = await engine.execute(operator, 'create', null, { title, criteria }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(implementer, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(implementer, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/verify/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());

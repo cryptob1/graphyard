@@ -240,7 +240,7 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
 
 test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUESTED on one head for one request is a conflict: both recorded, attention raised, neither acted on, and a fresh review resolves it', async () => {
-  let item = await engine.execute(operator, 'create', null, { title: 'Two verdicts on one head', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Two verdicts on one head', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(implementer, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(implementer, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());
@@ -291,7 +291,7 @@ test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUES
 
   // A person is not the reviewer identity: approving and then requesting changes on one head is
   // their latest word, and that change request still blocks — no conflict, nothing withheld.
-  let human = await engine.execute(operator, 'create', null, { title: 'A person changes their mind', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
+  let human = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'A person changes their mind', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }] }, randomUUID());
   human = await engine.execute(operator, 'ready', human.id, {}, randomUUID());
   human = await engine.execute(implementer, 'claim', human.id, {}, randomUUID());
   human = await engine.execute(implementer, 'workspace', human.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${human.id}`, branch: `graphyard/${human.key.toLowerCase()}-1` }, randomUUID());

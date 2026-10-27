@@ -71,7 +71,7 @@ after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if 
 
 /** An item claimed by the worker with its workspace registered on `branch`, ready to submit. */
 async function assigned(n: number, branch = `graphyard/gy-${n}-1`) {
-  let w = await engine.execute(operator, 'create', null, { title: `Head submission ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Head submission ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;

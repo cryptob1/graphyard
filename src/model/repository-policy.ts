@@ -24,17 +24,29 @@ const declaredEntrySchema = sensitiveEntrySchema.extend({ only: z.enum(['risk', 
 export const pendingOutcomeRules = ['non-blocking', 'blocking'] as const;
 /** What a failed release candidate does (GY-1848): `hold` names the failure and reverts nothing; `revert` is the behaviour a repository that declares nothing keeps. */
 export const releaseFailureActions = ['revert', 'hold'] as const;
+/**
+ * GY-2965: how a head is served for end-to-end runs in the merge writer's trial — `command` run in
+ * the trial checkout until `url` answers, waited for at most `readySeconds`. A repository that
+ * already declares a previewable application (delivery.applications) needs no `serve`: the trial
+ * serves that application the way a preview does.
+ */
+export const e2eServeSchema = z.object({
+  command: z.string().trim().min(1).max(500),
+  url: z.url().max(200),
+  readySeconds: z.number().int().min(1).max(600),
+}).strict();
+export type E2eServe = z.infer<typeof e2eServeSchema>;
 export const repositoryPolicySchema = z.object({
   risk: z.object({ sensitive: z.array(declaredEntrySchema).min(1).max(200) }).strict().optional(),
   review: z.unknown().optional(),
-  e2e: z.object({ pendingOutcomes: z.enum(pendingOutcomeRules) }).strict().optional(),
+  e2e: z.object({ pendingOutcomes: z.enum(pendingOutcomeRules).optional(), serve: e2eServeSchema.optional() }).strict().optional(),
   release: z.object({ onFailure: z.enum(releaseFailureActions).optional(), revertUnmatched: z.boolean().optional() }).strict().optional(),
 }).strict();
 export type RepositoryPolicyInput = z.infer<typeof repositoryPolicySchema>;
 /** The policy in force: every section resolved, the declared one or its default. */
 export interface RepositoryPolicy {
   risk: { sensitive: SensitiveEntry[]; declared: boolean };
-  e2e: { pendingOutcomes: typeof pendingOutcomeRules[number] };
+  e2e: { pendingOutcomes: typeof pendingOutcomeRules[number]; serve: E2eServe | null };
   release: { onFailure: typeof releaseFailureActions[number]; revertUnmatched: boolean };
 }
 
@@ -60,7 +72,7 @@ export const genericSensitiveRules: readonly SensitiveEntry[] = [
 
 export const defaultRepositoryPolicy: RepositoryPolicy = {
   risk: { sensitive: [...genericSensitiveRules], declared: false },
-  e2e: { pendingOutcomes: 'non-blocking' },
+  e2e: { pendingOutcomes: 'non-blocking', serve: null },
   release: { onFailure: 'revert', revertUnmatched: true },
 };
 
@@ -69,7 +81,10 @@ export function resolveRepositoryPolicy(input: unknown): RepositoryPolicy {
   const declared = repositoryPolicySchema.parse(input ?? {});
   return {
     risk: declared.risk ? { sensitive: declared.risk.sensitive.filter(entry => entry.only !== 'lane').map(({ rule, glob }) => ({ rule, glob })), declared: true } : defaultRepositoryPolicy.risk,
-    e2e: declared.e2e ?? defaultRepositoryPolicy.e2e,
+    e2e: {
+      pendingOutcomes: declared.e2e?.pendingOutcomes ?? defaultRepositoryPolicy.e2e.pendingOutcomes,
+      serve: declared.e2e?.serve ?? null,
+    },
     release: {
       onFailure: declared.release?.onFailure ?? defaultRepositoryPolicy.release.onFailure,
       revertUnmatched: declared.release?.revertUnmatched ?? defaultRepositoryPolicy.release.revertUnmatched,

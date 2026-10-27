@@ -137,7 +137,7 @@ test('unit:delta-chain-bounded — a full snapshot recurs at least every snapsho
 
 test('integration:delta-readers — events history, store.events and the timeline replay read deltas as the documents they stand for', async () => {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Readers ${n}`, criteria: [1, 2, 3, 4].map(n => ({ id: `AC-${n}`, text: `Behaves ${randomBytes(900).toString('hex')}`, proofs: ['integration:x'] })) }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Readers ${n}`, criteria: [1, 2, 3, 4].map(n => ({ id: `AC-${n}`, text: `Behaves ${randomBytes(900).toString('hex')}`, proofs: ['integration:x'] })) }, randomUUID());
   const records: Work[] = [plain(w)];
   const run = async (actor: Principal, command: Parameters<Engine["execute"]>[1], data: Record<string, unknown>) => { w = await engine.execute(actor, command, w.id, data, randomUUID()); records.push(plain(w)); };
   await run(operator, 'ready', {}); await run(worker, 'claim', {});

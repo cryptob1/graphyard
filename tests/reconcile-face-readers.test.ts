@@ -38,7 +38,7 @@ after(async () => {
 });
 
 let created = 0;
-const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Face readers ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:face-move-evaluates-readers-only'] }], ...extra }, randomUUID());
+const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { type: 'chore',  title: `Face readers ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:face-move-evaluates-readers-only'] }], ...extra }, randomUUID());
 /** A session-record write: the routine API write whose face moves the production report names. */
 const sessionWrite = (id: string, n: number, state: 'running' | 'finished' = 'running') =>
   engine.execute(operator, 'session', id, { id: `face-readers-session-${n}`, kind: 'coordination', runtime: 'test-runtime', host: 'test-host', subject: 'GY-1898 face-move driver', state }, randomUUID());
@@ -165,7 +165,7 @@ test('unit:face-move-readers-match-full-evaluation — the view, the configurati
   // items its face feeds, the full evaluation held open the whole time; the reference run
   // evaluates every live item each pass. The outcomes must come out equal.
   const item = async (title: string, extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null,
-    { title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:face-move-readers-match-full-evaluation'] }], ...extra }, randomUUID());
+    { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:face-move-readers-match-full-evaluation'] }], ...extra }, randomUUID());
   const script = (x: Work, byReference: Work, sibling: Work, parent: Work, drafter: Work): [string, () => Promise<unknown>][] => [
     // A retitle: the moved item alone; nothing reads a description.
     ['retitle the face item', () => store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{description}', to_jsonb($2::text)) WHERE id = $1`, [x.id, 'moved by an external writer'])],

@@ -116,7 +116,7 @@ test('unit:routine-events-store-no-snapshot — a routine save stores only what 
   try { assert.deepEqual(await documentBefore(client, work.id, new Date(Date.now() + 60_000), () => true), written.at(-1)); } finally { client.release(); }
 
   // Through the engine: a worker's renewals past snapshotEvery are never whole.
-  let w = await engine.execute(operator, 'create', null, { title: 'Renewals', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Renewals', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   for (let beat = 0; beat < snapshotEvery + 5; beat++) w = await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID());
   const beats = (await raw(w.id)).filter(row => row.kind === 'heartbeat');

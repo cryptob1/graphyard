@@ -14,6 +14,10 @@ import { server } from '../src/server.js';
 import { proofPreview } from '../src/coordination.js';
 import type { Definition } from '../src/validation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2000-01-01 expiresAt/deadline/expires_at writes are past and only force an already-lapsed expiry; Date.now() sets deadlines and stamps observations relative to the wall clock.
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -49,7 +53,7 @@ async function fixture(artifactStorage: 'external' | 'postgres' = 'external', ru
   await validation.define(operator, { kind: 'environment', id: environment.id, expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: `instance-${n}`, immutable: true, services: ['api'], resources: [`test-account-${n}`] }, id());
   for (const [ref, actor, role] of [[runnerRef, runner, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated', ...runnerAuthority } : {}) }, id());
   await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario.id, scenarioRevision: scenario.revision, scenarioHash: scenario.hash, digest, runnerImageDigest: inputs }, id());
-  let w = await engine.execute(operator, 'create', null, { title: 'Validation fixture', ...(slice ? { slice } : {}), criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Validation fixture', ...(slice ? { slice } : {}), criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/validation-${n}`, branch: `graphyard/validation-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());

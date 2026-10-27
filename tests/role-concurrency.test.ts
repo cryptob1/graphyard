@@ -174,7 +174,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 test('integration:concurrent-producers — the control plane refuses evidence for an item from the principal that held an assignment on it, and trusts the same principal on an item it never touched', async () => {
   const H = sha40('c1');
   const submitted = async (title: string, claimant: Principal, pr: number) => {
-    let item = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:concurrency'] }] }, randomUUID());
+    let item = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:concurrency'] }] }, randomUUID());
     item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
     item = await engine.execute(claimant, 'claim', item.id, {}, randomUUID());
     item = await engine.execute(claimant, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/concurrency/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());

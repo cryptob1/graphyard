@@ -21,6 +21,10 @@ import {
   shippedScenario,
 } from '../src/scenarios.js';
 
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1708 AC-3: capacity-limit-redispatch ships as revision 1 in src/scenarios.ts; listing, create
 // and run-recording materialize it so filings, e2e sync and case runs work without a prior sync.
 
@@ -135,6 +139,7 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
 
   await assert.rejects(
     api('work', {
+      type: 'chore',
       title: 'Unregistered sibling',
       criteria: [{ id: 'AC-1', text: 'needs a missing scenario', proofs: ['e2e:not-a-registered-scenario'] }],
     }),
@@ -142,6 +147,7 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
   );
 
   const pinned = await api('work', {
+    type: 'chore',
     title: 'Pinned to capacity-limit-redispatch',
     criteria: [{ id: 'AC-1', text: 'capacity-limit-redispatch is registered', proofs: [`e2e:${id}`] }],
   }) as Work;

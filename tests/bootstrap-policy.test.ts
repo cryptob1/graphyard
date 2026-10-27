@@ -11,6 +11,10 @@ import { bootstrapObligations, criterionSchema, deliveredProof, evaluate, inheri
 import { diagnose, obligationLedger, proofPreview } from '../src/coordination.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
+
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 // Time-bomb allowance (GY-1694): the 2026-09-18 declaredAt is a past fixture field of an operator declaration that evaluate and diagnose carry through unchanged; new Date()/Date.now() are the explicit now they are handed.
 
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -166,7 +170,7 @@ test('unit:bootstrap-policy-model schema accepts an operator declaration and ref
 // ---------------------------------------------------------------------------
 
 test('integration:bootstrap-policy-gate lands a bootstrap candidate on review and CI, requiring only its remaining proofs', async () => {
-  const work = await submitted({ title: 'Introduce the recovery harness',
+  const work = await submitted({ type: 'chore',  title: 'Introduce the recovery harness',
     criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: [harnessProof], bootstrap: { reason: 'This candidate introduces the harness the proof needs', contractPaths: [contract] } },
       { id: 'AC-2', text: 'The supervisor stops cleanly', proofs: ['unit:supervisor-stop'] }] });
 
@@ -195,7 +199,7 @@ test('integration:bootstrap-policy-gate lands a bootstrap candidate on review an
 });
 
 test('integration:bootstrap-policy-gate still refuses a bootstrap candidate without review or CI', async () => {
-  const work = await submitted({ title: 'Bootstrap without review',
+  const work = await submitted({ type: 'chore',  title: 'Bootstrap without review',
     criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:noreview-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/noreview/engine.ts'] } }] },
   { reviews: [], checks: [{ name: 'test', result: 'failure', appId: 15368 }] });
   assert.deepEqual(requiredProofs(work, await all()), [], 'the only criterion is deferred');
@@ -211,7 +215,7 @@ test('integration:bootstrap-policy-gate refuses to defer an E2E proof whose scen
 });
 
 test('integration:bootstrap-policy-gate lets an operator declare and withdraw the deferral through a requirement revision', async () => {
-  let work = await engine.execute(operator, 'create', null, { title: 'Deferral declared by revision',
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Deferral declared by revision',
     criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:revised-harness'] }] }, id());
   const revision = { expectedPolicyRevision: work.policyRevision, reason: 'The harness ships with this change', dependencies: [], exclusiveResources: [],
     criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:revised-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/revised/engine.ts'] } }] };
@@ -235,30 +239,30 @@ test('integration:bootstrap-policy-gate lets an operator declare and withdraw th
 // ---------------------------------------------------------------------------
 
 test('integration:bootstrap-policy-inheritance requires the deferred proof of the next change on that contract', async () => {
-  const origin = await submitted({ title: 'Introduce the inherited harness',
+  const origin = await submitted({ type: 'chore',  title: 'Introduce the inherited harness',
     criteria: [{ id: 'AC-1', text: 'Inheritance is proven', proofs: ['integration:inherit-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/inherit/engine.ts'] } }] });
   assert.deepEqual(requiredProofs(origin, await all()), []);
 
-  const heir = await submitted({ title: 'Change the same contract',
+  const heir = await submitted({ type: 'chore',  title: 'Change the same contract',
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:heir'] }] }, { files: ['src/inherit/engine.ts'] });
   assert.deepEqual(requiredProofs(heir, await all()).slice().sort(), ['integration:inherit-harness', 'unit:heir'], 'the deferred proof is inherited as a required criterion');
   assert.deepEqual(inheritedObligations(heir, await all()).map(obligation => obligation.proof), ['integration:inherit-harness']);
   assert.ok(diagnose(heir, await all(), Date.now()).some(entry => entry.kind === 'bootstrap-obligation'));
   assert.equal(proofPreview(heir, await all()).some(row => row.proof === 'integration:inherit-harness'), true, 'the inherited proof is previewed beside the item’s own');
 
-  const unrelated = await submitted({ title: 'Touch a different file',
+  const unrelated = await submitted({ type: 'chore',  title: 'Touch a different file',
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:unrelated'] }] }, { files: ['src/unrelated.ts'] });
   assert.deepEqual(inheritedObligations(unrelated, await all()), [], 'work outside the contract inherits nothing');
 });
 
 test('integration:bootstrap-policy-inheritance refuses a second deferral of an inherited obligation', async () => {
-  await submitted({ title: 'Introduce the renewable harness',
+  await submitted({ type: 'chore',  title: 'Introduce the renewable harness',
     criteria: [{ id: 'AC-1', text: 'Renewal is proven', proofs: ['integration:renew-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/renew/engine.ts'] } }] });
-  await assert.rejects(engine.execute(operator, 'create', null, { title: 'Defer the inherited proof again',
+  await assert.rejects(engine.execute(operator, 'create', null, { type: 'chore',  title: 'Defer the inherited proof again',
     criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness'], bootstrap: { reason: 'Still inconvenient', contractPaths: ['src/renew/engine.ts'] } }] }, id()),
   /is already a bootstrap obligation inherited from/, 'a deferral cannot be renewed by the change that inherits it');
 
-  let heir = await engine.execute(operator, 'create', null, { title: 'Inherit the renewable harness',
+  let heir = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Inherit the renewable harness',
     criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness'] }] }, id());
   await assert.rejects(engine.execute(operator, 'requirements', heir.id, { expectedPolicyRevision: heir.policyRevision, reason: 'Defer it once more', dependencies: [], exclusiveResources: [],
     criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness'], bootstrap: { reason: 'Still inconvenient', contractPaths: ['src/renew/engine.ts'] } }] }, id()),
@@ -268,9 +272,9 @@ test('integration:bootstrap-policy-inheritance refuses a second deferral of an i
 });
 
 test('integration:bootstrap-policy-inheritance clears the obligation once a delivered change proves it', async () => {
-  const origin = await submitted({ title: 'Introduce the dischargeable harness',
+  const origin = await submitted({ type: 'chore',  title: 'Introduce the dischargeable harness',
     criteria: [{ id: 'AC-1', text: 'Discharge is proven', proofs: ['integration:discharge-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/discharge/engine.ts'] } }] });
-  const heir = await submitted({ title: 'Prove the dischargeable harness',
+  const heir = await submitted({ type: 'chore',  title: 'Prove the dischargeable harness',
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:discharge-heir'] }] }, { files: ['src/discharge/engine.ts'] });
   await prove(heir, 'unit:discharge-heir');
   await prove(heir, 'integration:discharge-harness');
@@ -278,7 +282,7 @@ test('integration:bootstrap-policy-inheritance clears the obligation once a deli
 
   await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{stage}','\"done\"') WHERE id=$1", [heir.id]);
   assert.deepEqual(bootstrapObligations(await all()).filter(obligation => obligation.workId === origin.id), [], 'delivering the proof discharges the obligation');
-  const after = await submitted({ title: 'Touch the discharged contract',
+  const after = await submitted({ type: 'chore',  title: 'Touch the discharged contract',
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:discharge-after'] }] }, { files: ['src/discharge/engine.ts'] });
   assert.deepEqual(inheritedObligations(after, await all()), [], 'later work does not inherit a discharged obligation');
 });
@@ -300,7 +304,7 @@ async function deliver(work: Work) {
 }
 
 test('integration:bootstrap-policy-gate delivers a bootstrap candidate whose deferred proof has no evidence', async () => {
-  const work = await submitted({ title: 'Deliver the deferring change',
+  const work = await submitted({ type: 'chore',  title: 'Deliver the deferring change',
     criteria: [{ id: 'AC-1', text: 'The harness proves itself later', proofs: ['integration:deliver-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/deliver/engine.ts'] } },
       { id: 'AC-2', text: 'The change behaves', proofs: ['unit:deliver'] }] });
   await prove(work, 'unit:deliver');
@@ -322,10 +326,10 @@ const bootstrapCriteria = (slug: string, reason = 'Introduces the harness') =>
 const agent = (capabilities: string[]): Principal => ({ id: 'planner', role: 'operator-agent', capabilities: capabilities as Principal['capabilities'], scope: { repositories: ['owner/project'], workItems: ['*'] } });
 
 test('integration:bootstrap-policy-authority keeps bootstrap mode away from workers', async () => {
-  const input = { title: 'Worker declares bootstrap', criteria: bootstrapCriteria('worker-authority') };
+  const input = { type: 'chore', title: 'Worker declares bootstrap', criteria: bootstrapCriteria('worker-authority') };
   await assert.rejects(engine.execute(worker, 'create', null, input, id()), /Operator permission required/, 'a worker cannot create work in bootstrap mode');
 
-  const work = await submitted({ title: 'Worker revises into bootstrap',
+  const work = await submitted({ type: 'chore',  title: 'Worker revises into bootstrap',
     criteria: [{ id: 'AC-1', text: 'Authority is proven', proofs: ['integration:worker-authority-harness'] }] });
   await assert.rejects(engine.execute(worker, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, reason: 'Defer my own proof', dependencies: [], exclusiveResources: [], criteria: bootstrapCriteria('worker-authority') }, id()),
     /Operator permission required/, 'a worker cannot revise its own criteria into bootstrap mode');
@@ -334,7 +338,7 @@ test('integration:bootstrap-policy-authority keeps bootstrap mode away from work
 });
 
 test('integration:bootstrap-policy-authority requires the explicit policy:bootstrap capability of an operator agent', async () => {
-  const input = { title: 'Agent declares bootstrap', description: '', criteria: bootstrapCriteria('agent-authority'), reason: 'Harness ships with this change', policy: { checks: ['test'], review: true } };
+  const input = { type: 'chore', title: 'Agent declares bootstrap', description: '', criteria: bootstrapCriteria('agent-authority'), reason: 'Harness ships with this change', policy: { checks: ['test'], review: true } };
   await assert.rejects(engine.execute(agent(['policy:requirements']), 'create', null, input, id()),
     /Capability policy:bootstrap is required/, 'policy:requirements alone does not authorize a deferral');
 
@@ -342,7 +346,7 @@ test('integration:bootstrap-policy-authority requires the explicit policy:bootst
   assert.equal(declared.criteria[0].bootstrap!.declaredBy, 'planner', 'the declaration is attributed to the operator agent, not the request');
 
   // An agent may still add requirements without the capability, and may withdraw a deferral.
-  let work = await engine.execute(operator, 'create', null, { title: 'Agent revises a deferral', criteria: bootstrapCriteria('revised-authority') }, id());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Agent revises a deferral', criteria: bootstrapCriteria('revised-authority') }, id());
   const revision = { expectedPolicyRevision: work.policyRevision, reason: 'Scope clarified', dependencies: [], exclusiveResources: [] };
   await assert.rejects(engine.execute(agent(['policy:requirements']), 'requirements', work.id, { ...revision,
     criteria: bootstrapCriteria('revised-authority', 'A different excuse') }, id()),
@@ -356,7 +360,7 @@ test('integration:bootstrap-policy-authority requires the explicit policy:bootst
 
 test('integration:bootstrap-policy-authority refuses a declaration outside the agent’s repository scope', async () => {
   const outside = { ...agent(['policy:bootstrap']), scope: { repositories: ['other/project'], workItems: ['*'] } };
-  await assert.rejects(engine.execute(outside, 'create', null, { title: 'Out of scope', description: '', criteria: bootstrapCriteria('scoped-authority'), reason: 'Harness ships with this change', policy: { checks: ['test'], review: true } }, id()),
+  await assert.rejects(engine.execute(outside, 'create', null, { type: 'chore', title: 'Out of scope', description: '', criteria: bootstrapCriteria('scoped-authority'), reason: 'Harness ships with this change', policy: { checks: ['test'], review: true } }, id()),
     /outside this operator-agent scope/);
 });
 

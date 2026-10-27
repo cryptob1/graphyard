@@ -38,7 +38,7 @@ after(async () => {
 });
 
 let created = 0;
-const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Cause ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-tick-cause'] }], ...extra }, randomUUID());
+const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { type: 'chore',  title: `Cause ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-tick-cause'] }], ...extra }, randomUUID());
 /**
  * Run passes until one is quiet (reads nothing, is not full, writes nothing and evaluates less than
  * the fleet: an item with a standing escalation stays due every pass), so the next pass starts from

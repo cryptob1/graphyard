@@ -59,7 +59,7 @@ async function events(kind: string, workId?: string) { return (await store.event
 
 /** Delivered work the way production reaches it: an authorized, verified, independently observed merge. */
 async function delivered(mergeSha = 'e'.repeat(40)) {
-  let w = await engine.execute(operator, 'create', null, { title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/delivery-${serial}`, branch: `graphyard/delivery-${serial}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: serial }, id());
@@ -224,7 +224,7 @@ test('D3-4 workers and observers cannot define or select releases; generation fe
   // Membership must cite the merge GitHub reported for delivered work.
   const done = await delivered();
   await assert.rejects(delivery.createRelease(operator, { ...definition, id: `forged-${f.n}`, members: [{ workId: done.id, mergeSha: 'c'.repeat(40), included: true }] }, id()), /independently observed merge/);
-  const open = await engine.execute(operator, 'create', null, { title: 'Open work', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  const open = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Open work', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   await assert.rejects(delivery.createRelease(operator, { ...definition, id: `forged-${f.n}`, members: [{ workId: open.id, mergeSha: 'e'.repeat(40), included: true }] }, id()), /delivered work/);
 });
 

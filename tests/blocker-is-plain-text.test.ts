@@ -31,7 +31,7 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
 async function claimed(title: string) {
-  let w = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:blocker-is-plain-text'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:blocker-is-plain-text'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));

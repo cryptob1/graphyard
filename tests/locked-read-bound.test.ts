@@ -89,7 +89,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 
 let template: Work;
 async function ensureTemplate() {
-  template ??= await engine.execute(operator, 'create', null, { title: 'Template', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  template ??= await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Template', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
 }
 function open(n: number): Work {
   return { ...structuredClone(template), id: randomUUID(), key: `OPEN-${n}`, title: `Open change ${n}`, description: `What open change ${n} must do. `.repeat(8), ready: n % 2 === 0, stage: 'backlog' } as Work;

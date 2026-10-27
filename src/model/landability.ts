@@ -73,10 +73,11 @@ export const controlPlaneObserved = (work: Pick<Work, 'observation'>) => work.ob
 
 /**
  * GY-1528. The acceptance family of a control-plane candidate. The merge writer's trial is the
- * judge of the tests, not a producer: each criterion's `unit:`/`integration:` proof needs
- * executed > 0 and failed = 0 in `work.mergeLedger.trial.proofs` for the current head; a `manual:`
- * attestation is required only of a sensitive change (`riskOf`); an `e2e:` proof is deferred to
- * release validation; and producer evidence is ignored, so no independence refusal is read.
+ * judge of the tests, not a producer: each criterion's `unit:`/`integration:`/`e2e:` proof needs
+ * executed > 0 and failed = 0 in `work.mergeLedger.trial.proofs` for the current head (GY-2965: an
+ * `e2e:` proof's counts are its bound case's run against the served head; a missing or failing case
+ * refuses the head at the trial itself); a `manual:` attestation is required only of a sensitive
+ * change (`riskOf`); and producer evidence is ignored, so no independence refusal is read.
  */
 function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (LandabilityReason & { proof?: string })[] {
   const head = work.candidate?.sha.toLowerCase() ?? null, trial = work.mergeLedger?.trial ?? null;
@@ -86,7 +87,7 @@ function controlPlaneAcceptance(work: Work, all: Work[], now: Date): (Landabilit
     // A declared post-deploy proof (GY-1660) is observed on the serving release after delivery, never gating the merge.
     if (postDeployProof(proof)) return null;
     const family = proof.slice(0, Math.max(0, proof.indexOf(':')));
-    if (family === 'unit' || family === 'integration') {
+    if (family === 'unit' || family === 'integration' || family === 'e2e') {
       const counts = tried?.proofs[proof];
       if (counts && counts.executed > 0 && counts.failed === 0) return null;
       const seen = !head ? 'there is no candidate' : !tried ? `the merge writer has not trialled ${head.slice(0, 12)}` : !counts ? 'the trial counted none of its cases' : `the trial ran ${counts.executed} and ${counts.failed} failed`;

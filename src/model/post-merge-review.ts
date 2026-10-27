@@ -148,7 +148,7 @@ export function postMergeFollowUp(delivered: Pick<Work, 'key' | 'title' | 'polic
   const where = finding.path ? ` in ${finding.path}${finding.line ? `:${finding.line}` : ''}${others.length ? ` (also ${others.join(', ')})` : ''}` : '';
   return {
     title: `Post-merge review of ${delivered.key} (${mergeSha.slice(0, 12)}): ${finding.text.slice(0, 120)}`.slice(0, 200),
-    description: `The post-merge review of ${delivered.key} ("${delivered.title}"), delivered as merge commit ${mergeSha}, found this BLOCKING${where}:\n\n${finding.text}\n\nFix it on its own head; the delivered item is not reopened.`,
+    description: `No user-facing change: the post-merge review of ${delivered.key} ("${delivered.title}"), delivered as merge commit ${mergeSha}, found this BLOCKING${where}:\n\n${finding.text}\n\nFix it on its own head; the delivered item is not reopened.`,
     type: 'bug' as const, priority: 1,
     criteria: [{ id: 'AC-1', text: `The finding is fixed: ${finding.text.slice(0, 1500)}`, proofs: [`unit:post-merge-follow-up-${index + 1}`] }],
     policy: { checks: delivered.policy?.checks ?? ['test', 'typecheck'], review: true },
