@@ -3,6 +3,7 @@ import { CandidatePr } from '../candidate';
 import { formatDuration } from '../../src/model/duration';
 import { groupOf, nextActor, timedGroups, type Group } from '../groups';
 import { blockerSummary, phaseLabel, phaseOf, plainStatus } from '../../src/model/plain-status';
+import { currentMergeStep } from '../../src/model/merge-ledger';
 import { prSteps, stepHeld } from '../../src/model/pr-steps';
 import type { ActionlessCard } from '../../src/model/actionless';
 import type { ReleaseView } from '../../src/model/release';
@@ -27,12 +28,17 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
   const timed = timedGroups.has(group);
   const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now, release) : null;
   const actor = nextActor(item, group, now, release, all);
-  const pr = item.candidate && <CandidatePr repository={repository} candidate={item.candidate} workKey={item.key}/>;
+  // The merge writer opens no pull request, so a candidate the control plane observed itself names no PR (GY-2963).
+  const pr = item.candidate && item.observation?.source !== 'control-plane' && <CandidatePr repository={repository} candidate={item.candidate} workKey={item.key}/>;
+  // GY-2963: a merge whose trial is advancing names where it is, never a stall.
+  const mergeStep = currentMergeStep(item, now);
+  const merging = mergeStep?.fresh ? `Merging: ${mergeStep.step}, ${formatDuration((now - mergeStep.atMs) / 60000)}` : null;
   // A blocker waiting for a future instant is no stall: its wait is the row's one sentence (GY-1739).
   const waits = group === 'blocked' && item.blocker ? blockerSummary(item.blocker, now, item) : null;
   const why = group === 'needs-you' ? actor.does
     : waits?.kind === 'waiting-until' ? waits.sentence
     : stall ? `Nothing is happening: ${stall.missing} — stuck at “${phaseLabel[phaseOf(item, now)]}” for ${formatDuration((now - Date.parse(stall.heldSince)) / 60000)} with nothing to do next`
+      : merging ? merging
       : group === 'blocked' ? unprefixed(status.blocking ?? status.sentence)
         : group === 'backlog' || (group === 'up-next' && actor.who === 'Nobody yet') ? actor.does : null;
   const waited = item.humanRequest ? Math.max(0, now - Date.parse(item.humanRequest.at)) : null;

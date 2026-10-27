@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises';
 import { wholeDocument } from '../model/work-summary.js';
 import { inheritedObligations, proofAuthority, type Principal, type ProofAuthority } from '../model.js';
+import { withMergePipeline } from '../pipeline-speed.js';
 import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPreview, resourceConflicts } from '../coordination.js';
 import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
@@ -14,8 +15,8 @@ export const workCommands = defineCommands([
     scope: 'work',
     help: ['  status [GY-N]                Control-plane or work status'],
     unscoped: async ({ api, print }) => print(await api('status')),
-    // The risk class of the merge delta reads beside the lane (GY-1521), computed here, never stored.
-    run: async ({ print }, work) => print(withRisk(work)),
+    // The risk class of the merge delta reads beside the lane (GY-1521), computed here, never stored; the merge in flight names its step and elapsed time the same way (GY-2963).
+    run: async ({ print }, work) => print(withRisk(withMergePipeline(work))),
   },
   {
     name: 'diagnose',

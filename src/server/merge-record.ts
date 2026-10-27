@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { demand, type Principal, type Work } from '../model.js';
-import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
+import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, mergeTrialStepKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from '../model/merge-authorization.js';
 import { save } from '../store.js';
@@ -45,6 +45,8 @@ export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('pushed'), mergeSha: sha, pushedAt: instant }).strict(),
   z.object({ kind: z.literal('reconciled'), mergeSha: sha, observedTip: sha }).strict(),
   z.object({ kind: z.literal('refused'), head: sha, reason: z.string().min(1).max(2000) }).strict(),
+  // GY-2963: where the trial is while it runs — a step name and the instant it began, no state.
+  z.object({ kind: z.literal('trial-step'), head: sha, step: z.string().min(1).max(100), at: instant }).strict(),
 ]);
 export type MergeRecordBody = z.infer<typeof mergeRecordBodySchema>;
 /** The save reason a reconciliation delivers under; the ledger's `merge-writer.<kind>` saves carry every other step. */
@@ -65,8 +67,8 @@ function gitRunner(engine: Engine): GitRunner {
 
 /** The item's ledger, folded from its own rows; a refusal no intent opened (a conflicting merge has no commit to intend) stands as the state alone. */
 async function foldItemLedger(db: pg.PoolClient, work: Work, data: MergeRecordBody): Promise<MergeLedgerState | null> {
-  // The executor's trial rows fold too (GY-1528): their proof counts are what control-plane acceptance reads.
-  const kinds = [...Object.values(mergeLedgerKinds), mergeTrialKind];
+  // The executor's trial rows fold too (GY-1528): their proof counts are what control-plane acceptance reads. A trial's step rows fold beside them (GY-2963).
+  const kinds = [...Object.values(mergeLedgerKinds), mergeTrialKind, mergeTrialStepKind];
   const rows = (await db.query(`SELECT kind, payload FROM events WHERE work_id=$1 AND kind = ANY($2::text[]) ORDER BY seq`, [work.id, kinds])).rows as { kind: string; payload: unknown }[];
   const folded = foldMergeLedger(rows.map(row => ({ kind: row.kind, payload: row.payload, work: work.key })))[work.key];
   if (folded) return folded;

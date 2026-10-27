@@ -1,4 +1,5 @@
 import type { Work } from './model.js';
+import { currentMergeStep, type CurrentMergeStep } from './model/merge-ledger.js';
 
 /**
  * An item's timeline: its attempts, submissions, rework rounds and hand-offs, kept on the work
@@ -21,6 +22,8 @@ export interface PipelineTimeline {
   reworkRounds: number;
   /** Hand-offs to a master or operator: blocked reports, and requirements revisions of an item under way. */
   interventions: { blocked: number; requirements: number };
+  /** GY-2963: the merge trial's current step and elapsed time, attached when the item's head is read in flight; never stored. */
+  merge?: PipelineMerge | null;
 }
 declare module './model/work.js' {
   interface Work { pipeline?: PipelineTimeline }
@@ -29,6 +32,27 @@ declare module './model/work.js' {
    * starts the agent, so claim→start is launch overhead and start→first push the agent's own work.
    */
   interface AssignmentIdentity { startedAt?: string }
+}
+
+/** GY-2963: the merge trial step a read of the item names, with the step's elapsed time. */
+export type PipelineMerge = CurrentMergeStep & { stepMs: number };
+/**
+ * The merge in flight for `work`, as its pipeline reports it (GY-2963): the trial's current step
+ * and its elapsed time, `stalled` once no step has advanced within the stall bound. Null when the
+ * item's head is not in flight on the merge writer.
+ */
+export function mergePipeline(work: Pick<Work, 'candidate' | 'mergeLedger'>, now: number): PipelineMerge | null {
+  const step = currentMergeStep(work, now);
+  return step ? { ...step, stepMs: Math.max(0, now - step.atMs) } : null;
+}
+/**
+ * `status GY-N`'s view of the item: the record with `pipeline.merge` attached when its head is in
+ * flight on the merge writer (GY-2963), so the pipeline names the current step and its elapsed
+ * time instead of a bare gate refusal.
+ */
+export function withMergePipeline<T extends Pick<Work, 'candidate' | 'mergeLedger' | 'pipeline'>>(work: T, now = Date.now()): T {
+  const merge = mergePipeline(work, now);
+  return merge ? { ...work, pipeline: { ...work.pipeline, merge } } : work;
 }
 
 const emptyTimeline = (): PipelineTimeline => ({ attempts: [], submittedAt: null, resubmittedAt: null, reworkRounds: 0, interventions: { blocked: 0, requirements: 0 } });

@@ -1,5 +1,6 @@
 // Concern: the merge ledger (GY-1519) — the events a merge leaves on the ledger and their fold per item.
 import { z } from 'zod';
+import type { Work } from './work.js';
 
 /**
  * The merge ledger: every merge Graphyard intends, pushes, reconciles or refuses leaves an event
@@ -20,6 +21,12 @@ export type MergeLedgerKind = typeof mergeLedgerKinds[keyof typeof mergeLedgerKi
  * family reads (model/landability.ts) in place of producer evidence.
  */
 export const mergeTrialKind = 'merge.trial';
+/**
+ * GY-2963: the trial's current step, recorded beside the ledger while the trial runs. It moves no
+ * state; the fold keeps the newest step and its start instant on the state, which master status,
+ * the item's pipeline and the Work page read while a merge is in flight.
+ */
+export const mergeTrialStepKind = 'merge.trial-step';
 
 const sha = z.string().trim().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const instant = z.string().refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
@@ -51,6 +58,10 @@ export const mergeTrialSchema = z.object({ head: sha, mergeSha: sha, proofs: pro
 /** The newest trial the fold kept: the head it tried, the merge commit, each proof's counts, its build verdict and test-file count (GY-2091), and the preview's verdict (GY-1718). */
 export interface MergeLedgerTrial { head: string; mergeSha: string; proofs: Record<string, { executed: number; failed: number }>;
   build?: 'pass' | 'fail'; testFiles?: number; preview?: MergeLedgerPreview | null }
+/** GY-2963: the trial's newest reported step, with the instant it began. */
+export interface MergeLedgerStep { step: string; at: string }
+/** `merge.trial-step`: the trial of `head` reported `step` at `at` (GY-2963). */
+export const mergeTrialStepSchema = z.object({ head: sha, step: z.string().min(1).max(100), at: instant }).strict();
 /**
  * GY-1834: a trial's flake — the failing test files that passed on their immediate rerun of the same
  * merge commit, and the failing cases the rerun did not repeat, none of them the item's proofs.
@@ -79,6 +90,8 @@ export interface MergeLedgerState {
   refusal: { kind: 'merge' | 'revert'; reason: string } | null;
   /** The newest `merge.trial` of this state's intent (GY-1528); absent when none was folded. */
   trial?: MergeLedgerTrial | null;
+  /** GY-2963: the newest `merge.trial-step` of this state's intent, reset by the next intent; absent when none was folded. */
+  trialStep?: MergeLedgerStep | null;
   /** GY-1834: every trial flake of the item, kept across its intents (bounded) so the flake ledger reads each after any restart. */
   flakes?: MergeLedgerFlake[];
   /** How many ledger rows folded into this state. */
@@ -134,6 +147,12 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
       const state = refused && find(event, byHead, refused.head);
       if (!refused || !state) continue;
       Object.assign(state, { state: 'refused', head: refused.head, refusal: { kind: refused.kind, reason: refused.reason }, events: state.events + 1 });
+    } else if (event.kind === mergeTrialStepKind) {
+      // A step moves no state and counts no event: it is the trial's newest reported step (GY-2963).
+      const step = parsed(mergeTrialStepSchema, event.payload);
+      const state = step && find(event, byHead, step.head);
+      if (!step || !state) continue;
+      state.trialStep = { step: step.step, at: step.at };
     } else if (event.kind === mergeTrialKind) {
       // A trial moves no state and counts no event: it is kept beside the state it tried.
       const trial = parsed(mergeTrialSchema, event.payload);
@@ -147,6 +166,28 @@ export function foldMergeLedger(events: readonly MergeLedgerEvent[]): Record<str
     }
   }
   return states;
+}
+
+// ---- The trial step a merge in flight is at (GY-2963) ---------------------------------------------
+
+/**
+ * How long a merge may go without its trial advancing a step before it reads as stalled: a
+ * whole trial builds and tests in far less, so a step this old means nothing is happening any
+ * more. The bound the merge writer's own summary judges its flight by too.
+ */
+export const mergeStallMs = 30 * 60_000;
+
+/** The step a submitted head's merge is at right now, or null when none is in flight for it. */
+export interface CurrentMergeStep extends MergeLedgerStep { atMs: number; fresh: boolean }
+export function currentMergeStep(work: Pick<Work, 'candidate' | 'mergeLedger'>, now: number): CurrentMergeStep | null {
+  const ledger = work.mergeLedger, head = work.candidate?.sha.toLowerCase();
+  if (!ledger || !head || ledger.head !== head || (ledger.state !== 'intent' && ledger.state !== 'pushed')) return null;
+  const at = ledger.state === 'pushed' && ledger.pushedAt ? { step: 'push', at: ledger.pushedAt }
+    : ledger.trialStep?.at && Number.isFinite(Date.parse(ledger.trialStep.at)) ? ledger.trialStep
+    : ledger.intentAt && Number.isFinite(Date.parse(ledger.intentAt)) ? { step: 'queue wait', at: ledger.intentAt } : null;
+  if (!at) return null;
+  const atMs = Date.parse(at.at);
+  return { ...at, atMs, fresh: now - atMs < mergeStallMs };
 }
 
 /** Every merge commit the folded ledger names, lower-case. */

@@ -9,6 +9,7 @@ import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-ground.js';
 import { installIdFor } from '../install/types.js';
 import { defaultMergeWriterRetrials, mergeWriterSettings, trialTimeoutMinutes } from '../master/merge-writer-settings.js';
+import { mergeStallMs } from '../model/merge-ledger.js';
 import { mergeSubject, runTrial, trialMerge, TrialCleanupError, TrialTimeoutError } from '../merge-writer/trial.js';
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
 import { loadProjectDelivery } from '../project-applications.js';
@@ -45,8 +46,9 @@ const attemptProgressSchema = z.object({ at: instant, what: z.string().max(2000)
 export const mergeWriterStateSchema = z.object({
   lastMergeAt: instant.nullable().default(null),
   queue: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, submittedAt: instant, waitingMs: z.number().int().min(0) }).strict()).max(mergeWriterKeptQueue).default([]),
-  /** The merge in flight; `attempt` is the id its record keys carry (GY-1852), persisted before its first write. */
-  inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional() }).strict().nullable().default(null),
+  /** The merge in flight; `attempt` is the id its record keys carry (GY-1852), persisted before its first write. `step` (GY-2963) is where its trial is, with the instant the step began. */
+  inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional(),
+    step: z.string().max(100).optional(), stepStartedAt: instant.optional() }).strict().nullable().default(null),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
   reworks: z.array(pendingReworkSchema).max(mergeWriterKeptReworks).default([]),
   /** GY-2053: the newest attempt progress — a retrial's intent, a trial verdict, a push, a reconcile — recorded beside every ledger write a flight or reconcile makes, so the movement the summary reports advances inside a long flight. Absent until a write records it. */
@@ -117,11 +119,11 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       if ('conflict' in merged) return merged;
       return { mergeSha: merged.mergeSha, files: (await git('diff', '--name-only', baseTip, merged.mergeSha)).split('\n').map(line => line.trim()).filter(Boolean) };
     },
-    trial: async (mergeSha, files, item, baseTip) => {
+    trial: async (mergeSha, files, item, baseTip, onStep) => {
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, run, environment: options.environment, ...(baseTip ? { baseTip } : {}) });
+      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, run, environment: options.environment, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}) });
     },
     // GY-1718: a repository naming a static UAT previews every passing trial whose delta is more than docs or tests.
     preview: async (mergeSha, files) => {
@@ -327,6 +329,7 @@ export const attemptProgressLine = (item: { key: string }, event: MergeRecordEve
     case 'pushed': return `${item.key}'s merge ${sha(event.mergeSha)} was recorded pushed`;
     case 'reconciled': return `${item.key}'s merge ${sha(event.mergeSha)} was reconciled: the base holds it`;
     case 'refused': return `${item.key}'s head ${sha(event.head)} recorded its refusal: ${event.reason.slice(0, 300)}`;
+    case 'trial-step': return `${item.key}'s merge trial is now at ${event.step}`;
     default: return `${item.key} recorded a ${(event as { kind: string }).kind} step`;
   }
 };
@@ -591,10 +594,20 @@ export async function mergeWriterStep(cycle: Cycle) {
           const entry: Flight = { key: due.key, id: due.id, head, startedAt: at(), settled: null };
           // GY-1852: the attempt id is on the persisted state before the attempt's first write; the flight is published only once it is, so a failed persist leaves nothing in flight and a later cycle starts afresh.
           const attempt = randomUUID();
-          writer.inFlight = { key: due.key, id: due.id, head, startedAt: entry.startedAt, attempt }; changed = true;
+          // GY-2963: the flight's first step is its wait — the fetch, the trial merge and the intent
+          // record before the trial's checkout begins — so even a slow start is named from the first instant.
+          writer.inFlight = { key: due.key, id: due.id, head, startedAt: entry.startedAt, attempt, step: 'queue wait', stepStartedAt: entry.startedAt }; changed = true;
           try { await effects.persist(state); } catch (error) { writer.inFlight = null; throw error; }
           flights.set(state, entry);
-          void mergeBatch({ ...reads, record: attemptRecorder(writer, reads.record, attempt, at) }, batch).then(results => { entry.settled = { results }; }, error => { entry.settled = { error }; });
+          const recorder = attemptRecorder(writer, reads.record, attempt, at);
+          // Each step the trial reports is where the merge is: on the in-flight entry master status reads, persisted at once, and on the item's ledger the pipeline and Work page read.
+          const onStep: NonNullable<MergePorts['onStep']> = step => {
+            if (writer.inFlight?.head !== head) return;
+            writer.inFlight = { ...writer.inFlight, step, stepStartedAt: at() };
+            void effects.persist(state).catch(() => {});
+            void recorder(due, { kind: 'trial-step', head, step, at: at() }).catch(() => {});
+          };
+          void mergeBatch({ ...reads, record: recorder, onStep }, batch).then(results => { entry.settled = { results }; }, error => { entry.settled = { error }; });
         }
       }
     }
@@ -605,13 +618,20 @@ export async function mergeWriterStep(cycle: Cycle) {
 /**
  * The `mergeWriter` section of `master status` and the daemon summary: the queue, the merge in flight, the last delivery, the newest refusals, the reworks still owed, and — GY-2053 — the attempt progress and motion bound the owed-decision readers hold a head inside. The two new fields are
  * optional, so a summary an older loop built, or a writer that has not run yet, reads as before.
+ * With `now` (GY-2963) the flight names its current step's elapsed time and whether it has run past
+ * the stall bound without a step advancing.
  */
 export type MergeWriterSummary = {
-  queue: MergeWriterState['queue']; inFlight: MergeWriterState['inFlight']; lastMergeAt: string | null;
+  queue: MergeWriterState['queue']; inFlight: (MergeWriterState['inFlight'] & { stepMs?: number; stalled?: boolean }) | null; lastMergeAt: string | null;
   refusals: MergeWriterState['refusals']; reworks: MergeWriterState['reworks'];
   progress?: MergeWriterState['progress']; motionBoundMs?: MergeWriterState['motionBoundMs'];
 };
-export const mergeWriterSummary = (writer: MergeWriterState | null | undefined): MergeWriterSummary =>
-  writer ? { queue: writer.queue, inFlight: writer.inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals, reworks: writer.reworks, progress: writer.progress, motionBoundMs: writer.motionBoundMs }
-    : { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] };
+export const mergeWriterSummary = (writer: MergeWriterState | null | undefined, now?: number): MergeWriterSummary => {
+  if (!writer) return { queue: [], inFlight: null, lastMergeAt: null, refusals: [], reworks: [] };
+  const at = writer.inFlight ? Date.parse(writer.inFlight.stepStartedAt ?? writer.inFlight.startedAt) : Number.NaN;
+  const inFlight = writer.inFlight && Number.isFinite(at) && now !== undefined
+    ? { ...writer.inFlight, stepMs: Math.max(0, now - at), stalled: now - at >= mergeStallMs }
+    : writer.inFlight;
+  return { queue: writer.queue, inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals, reworks: writer.reworks, progress: writer.progress, motionBoundMs: writer.motionBoundMs };
+};
 export type { MergeRecordEvent };
