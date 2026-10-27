@@ -44,7 +44,8 @@ export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
       proofs: z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).strict()), durationMs: z.number().int().min(0),
       phases: trialPhaseDurations.optional(), attempts: trialAttempts,
       // GY-2965: how each bound E2E case ran against the served head; a run of one becomes a trusted record on the item and a run in the case's history.
-      e2e: z.array(z.object({ proof: z.string().regex(/^e2e:[a-zA-Z0-9._/-]+$/).max(200), case: z.string().max(100), executed: z.number().int().min(0), failed: z.number().int().min(0) }).strict()).max(20).optional(),
+      e2e: z.array(z.object({ proof: z.string().regex(/^e2e:[a-zA-Z0-9._/-]+$/).max(200), case: z.string().max(200), executed: z.number().int().min(0), failed: z.number().int().min(0),
+        missing: z.boolean().optional(), failingStep: z.string().max(2000).nullable().optional() }).strict()).max(20).optional(),
       preview: previewVerdictSchema.optional(), flaked: trialFlakedSchema.optional() }).strict(),
     z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().min(1).max(1000),
       phases: trialPhaseDurations, attempts: trialAttempts.min(1), durationMs: z.number().int().min(0) }).strict(),

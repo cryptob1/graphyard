@@ -902,10 +902,12 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
       if (input.e2eProofs?.length) {
         enter('tests');
-        e2e.push(...await runTrialE2eCases({
+        const ran = await runTrialE2eCases({
           worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env,
           scratch: temporary ?? checkout.directory, budgetMs: remaining(), holds, log: line => log.push(line),
-        }));
+        });
+        // Bounded so the trial record the merge writer posts stays within its schema.
+        e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
       }
       // GY-2958: without Graphyard's own selection script, run the managed repository's preMerge /
       // package.json test checks; a Node package with none configured records that explicitly.

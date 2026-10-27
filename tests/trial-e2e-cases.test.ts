@@ -178,4 +178,15 @@ test('unit:trial-serves-head-and-runs-bound-cases — a failing step refuses the
   const run = await trial(merged.mergeSha, ['src/change.ts', 'e2e/cases/home-shows-change.json']);
   assert.deepEqual(run.proofs['e2e:home-shows-change'], { executed: 1, failed: 1 });
   assert.match(trialFailureReason({ run })!, /^trial failed: e2e case home-shows-change: step 1 GET \//);
+  // The refused head's trial record, carrying the failing step, is accepted by the merge record route.
+  let work = await engine.execute(operator, 'create', null, { title: 'The home page shows the failing change', criteria: [{ id: 'AC-1', text: 'The home page shows the change', proofs: ['e2e:home-shows-change'] }] }, randomUUID()) as Work;
+  work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
+  work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: '/tmp/trial-e2e-failing', branch: `${branch}-failing` }, randomUUID());
+  work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, head: withCase }, randomUUID());
+  const at = new Date().toISOString();
+  assert.equal((await call(`work/${work.id}/merge-record`, coordinator, { kind: 'intent', head: withCase, baseTip, mergeSha: merged.mergeSha, risk: 'normal', at })).status, 200);
+  const recorded = await call(`work/${work.id}/merge-record`, coordinator, { kind: 'trial', head: withCase, baseTip, mergeSha: merged.mergeSha, outcome: 'verdict', build: run.build,
+    tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, attempts: [], e2e: run.e2e });
+  assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
 });
