@@ -118,7 +118,7 @@ test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixtu
   const engine = new Engine(store, 120, 'owner/project');
   engine.directMergeEnvironment = null; engine.baseBranch = 'main';
   const assigned = async (branch: string) => {
-    let w = await engine.execute(operator, 'create', null, { title: 'parity fixture', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }] }, randomUUID());
+    let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'parity fixture', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }] }, randomUUID());
     w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
     const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
     assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));

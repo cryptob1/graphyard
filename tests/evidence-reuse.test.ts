@@ -72,7 +72,7 @@ async function fixture(options: { artifactStorage?: 'external' | 'postgres'; req
   await validation.define(operator, { kind: 'reuse', id: policy.id, expectedRevision: 0, environment, enabled: true, freshnessSeconds: 3600,
     relevant: { dependencies: ['package.json'], lockfiles: ['package-lock.json', '**/yarn.lock'], buildInputs: ['Dockerfile', 'tsconfig.json'], configuration: ['config/**', '.env.example'], migrations: ['migrations/**'], services: { api: ['src/**'] } },
     ignorable: ['docs/**', 'README.md', '*.md'], ...options.policy }, id());
-  let w = await engine.execute(operator, 'create', null, { title: `Reuse fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Reuse fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/reuse-${n}`, branch: `graphyard/reuse-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());

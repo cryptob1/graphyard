@@ -261,8 +261,8 @@ test('integration:index-matches-documents — the index equals the documents aft
   const check = (label: string) => assertIndexMatches(store, label);
 
   // One item through its whole life, the index checked after each write.
-  let w = await engine.execute(operator, 'create', null, { title: 'Indexed', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
-  const other = await engine.execute(operator, 'create', null, { title: 'Bystander', priority: 3, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Indexed', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  const other = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Bystander', priority: 3, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
   await check('created');
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); await check('released');
   assert.ok((await store.pool.query('SELECT due_at FROM work_index WHERE id=$1', [w.id])).rows[0].due_at, 'a pending dispatch row is due');

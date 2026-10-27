@@ -48,7 +48,7 @@ const resyncRow = (item: Work) => item.actionQueue!.actions.find(row => row.kind
 
 let sequence = 0;
 async function submitted() {
-  let item = await engine.execute(operator, 'create', null, { title: `Resync ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Resync ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/resync/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}` }, randomUUID());

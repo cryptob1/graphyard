@@ -110,7 +110,7 @@ async function fixture(options: { artifactStorage?: 'external' | 'postgres'; run
     for (const [ref, actor, role] of [[runnerRef, runnerPrincipal, 'runner'], [collectorRef, collector, 'collector'], [builderRef, builder, 'builder']] as const) await validation.define(operator, { kind: 'registration', id: ref.id, expectedRevision: 0, principalId: actor.id, role, environment, adapterVersion: 'test-v1', proofs: role === 'collector' ? [proof] : [], enabled: true, ...(role === 'runner' ? { executionHost: 'unix:///var/run/docker.sock', attestationPublicKey, executionNetwork: 'gy-isolated', ...options.runnerAuthority } : {}) }, id());
     await validation.define(operator, { kind: 'bundle', id: bundle.id, expectedRevision: 0, scenario: scenario!.id, scenarioRevision: scenario!.revision, scenarioHash: scenario!.hash, digest, runnerImageDigest: inputs }, id());
   }
-  let w = await engine.execute(operator, 'create', null, { title: `Recovery fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Recovery fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/recovery-${n}`, branch: `graphyard/recovery-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());

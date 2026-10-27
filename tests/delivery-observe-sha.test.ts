@@ -56,7 +56,7 @@ const smoked = (w: Work): Work => ({ ...w, policy: { ...w.policy, deploySmoke: t
 
 /** Delivered work the way production reaches it: an authorized, verified, independently observed merge. */
 async function delivered(mergeSha: string) {
-  let w = await engine.execute(operator, 'create', null, { title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/observe-sha-${serial}`, branch: `graphyard/observe-sha-${serial}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: serial }, id());

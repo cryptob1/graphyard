@@ -48,7 +48,7 @@ const request = async (credential: string, method: 'GET' | 'POST', path: string,
 const reload = async (workId: string) => (await store.list()).find(item => item.id === workId)!;
 /** A claimed item to park on: created, readied and claimed under the worker's own credential. */
 const claimed = async (n: number): Promise<Work> => {
-  let work = await engine.execute(operator, 'create', null, { title: `Requirements question ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Requirements question ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   return engine.execute(worker, 'claim', work.id, {}, id());
 };

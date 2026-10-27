@@ -8,6 +8,7 @@ import { leadingProof } from '../model/flake-ledger.js';
 import type { TrialFlaked } from '../model/merge-ledger.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { runTrial, trialAttempts, TrialCleanupError, ansiEscape, type RunTrialInput, type TrialNoVerdict, type TrialNoVerdictOutcome, type TrialPhase, type TrialPhaseDurations, type TrialRun } from './trial.js';
+import type { TrialE2eCase } from './e2e-trial.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';
 import type { ItemPreview, PreviewSiteFile } from '../project-previews.js';
 
@@ -140,6 +141,7 @@ export type MergeRecordEvent =
   | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: 'verdict'; build: 'pass' | 'fail'; tests: TrialRun['tests']; files: string[]; proofs: ProofCounts; durationMs: number;
     /** Each phase's time (GY-1832), and the attempts before the verdict that reached none, oldest first. */ phases?: TrialPhaseDurations; attempts: TrialNoVerdict[];
     /** The preview's verdict (GY-1718), when the passing trial was previewed. */ preview?: PreviewVerdict;
+    /** GY-2965: how each bound E2E case ran against the served head; the passing runs become trusted evidence (the trial is the trusted producer). */ e2e?: TrialE2eCase[];
     /** GY-1834: the trial's flake, kept on the item's merge ledger so the flake ledger reads it after any restart. */ flaked?: TrialFlaked }
   /**
    * A trial that reached no verdict on its retry either (GY-1832): its final outcome, the phase and
@@ -184,11 +186,16 @@ export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<Mer
 /** Whether a record write failed because the server already holds its key with other input: replaying it can never succeed. */
 export const keyReusedRefusal = (error: unknown) => /Idempotency key reused with different input/.test(error instanceof Error ? error.message : String(error));
 
-/** The refusal a failed trial records: the conflicting paths, the failing build step, or the failing test files (AC-3). */
-export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut'> | null }): string | null {
+/** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3). */
+export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> | null }): string | null {
   if (trial.conflict?.length) return `${trialFailurePrefix}: the merge conflicts in ${trial.conflict.slice(0, 20).join(', ')}`;
   const run = trial.run;
   if (!run) return `${trialFailurePrefix}: the trial reached no verdict`;
+  // GY-2965: a head whose bound case is absent, or whose case failed a step, is refused naming the proof's case and the path or step.
+  const missing = run.e2e?.find(entry => entry.missing);
+  if (missing) return `${trialFailurePrefix}: ${missing.proof} has no case at e2e/cases/${missing.case}.json`;
+  const failedCase = run.e2e?.find(entry => entry.failingStep);
+  if (failedCase) return `${trialFailurePrefix}: e2e case ${failedCase.case}: ${failedCase.failingStep}`;
   if (run.build === 'fail') return `${trialFailurePrefix}: build step npm run build`;
   if (run.tests.failed.length) {
     // GY-2960: a repository check names its failing files; timed-out-only failures say so, else the first case rides after the files.
@@ -365,6 +372,8 @@ export { firstParentHolds } from './trial.js';
 
 /** The unit and integration proofs the item's criteria name: the ones whose cases a test file can carry. */
 export const criterionProofs = (work: Pick<Work, 'criteria'>) => [...new Set(work.criteria.flatMap(criterion => criterion.proofs.filter(proof => /^(unit|integration):/.test(proof))))];
+/** The e2e: proofs the item's criteria name (GY-2965): each binds e2e/cases/NAME.json, which the trial runs against the served head. */
+export const e2eProofsOf = (work: Pick<Work, 'criteria'>) => [...new Set(work.criteria.flatMap(criterion => criterion.proofs.filter(proof => /^e2e:/.test(proof))))];
 
 /**
  * Every test file in the merge commit whose source names one of `proofs`, read from the object store
@@ -386,6 +395,8 @@ export async function proofTestFiles(run: ChildRun, root: string, mergeSha: stri
 export interface MergeTrialInput extends RunTrialInput {
   /** The item's `unit:`/`integration:` proof ids, counted per proof from the TAP stream. */
   proofs: readonly string[];
+  /** GY-2965: the item's `e2e:` proofs, each bound to e2e/cases/NAME.json on the head, which the trial serves and runs. */
+  e2eProofs?: readonly string[];
   /** The test files those proofs' cases live in (`proofTestFiles`), run beside the affected selection. */
   proofFiles: readonly string[];
   /** GY-1834: false skips the rerun of failing files and their run on the base tip; on by default. */
@@ -463,14 +474,18 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
     if (error instanceof TrialCleanupError && error.verdict) { verdict = error.verdict; leftover = error.message; }
     else throw error;
   }
-  const first: MergeTrialRun = { ...verdict, files, proofs: counted(), ...(leftover ? { leftover } : {}) };
+  // The bound E2E cases' counts ride the same proofs map the acceptance gate reads (GY-2965).
+  const e2eCounts = Object.fromEntries((verdict.e2e ?? []).map(entry => [entry.proof, { executed: entry.executed, failed: entry.failed }]));
+  const first: MergeTrialRun = { ...verdict, files, proofs: { ...counted(), ...e2eCounts }, ...(leftover ? { leftover } : {}) };
   if (input.attribute === false) return first;
   // A rerun's attempts start their TAP afresh like the trial's, so each run reads only its own answering attempt.
   const rerunAttempt = () => { epoch++; tap = ''; };
+  // A rerun of failing test files (or a run on the base tip) re-runs no E2E case: the head's bound cases were judged by the first attempt, whose counts stand.
+  const rerunInput = { ...input, e2eProofs: [] as const };
   // The proof files the selection discovered are held like those the input named.
-  return attributeFailures(first, tap, { ...input, proofFiles: discovered ?? input.proofFiles }, inner, async (sha, failing) => {
+  return attributeFailures(first, tap, { ...rerunInput, proofFiles: discovered ?? input.proofFiles }, inner, async (sha, failing) => {
     only = failing;
-    try { const rerun = await runTrial({ ...input, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
+    try { const rerun = await runTrial({ ...rerunInput, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
     catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap } : null; }
   });
 }
@@ -721,7 +736,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // GY-1834: a flake rides on the trial record, refused or not, so it is durable before anything else happens.
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
     await ports.record(item, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build, tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs,
-      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}) });
+      ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(preview ? { preview } : {}), ...(flaked ? { flaked } : {}), ...(run.e2e?.length ? { e2e: run.e2e } : {}) });
     const failure = trialFailure ?? previewFailureReason(preview, trialFailurePrefix);
     if (failure) {
       await ports.record(item, { kind: 'refused', head, reason: failure });

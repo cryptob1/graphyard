@@ -54,7 +54,7 @@ const events = async (id: string, kind: string) => (await store.pool.query('SELE
 /** A submitted item whose pull request GitHub then reports merged at `mergedAt`, with no merge execution. */
 async function mergedWithoutExecution(mergedAt: string, observer = engine) {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Direct merge ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Direct merge ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/direct-merge-${n}`, branch: `graphyard/direct-${n}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 700 + n }, randomUUID());

@@ -53,7 +53,7 @@ async function call(principal: Principal, method: 'GET' | 'POST', path: string, 
 
 /** A released item, so the item read and the claim have something to return. */
 async function released() {
-  const work = await engine.execute(operator, 'create', null, { title: 'heap', description: 'Why heap matters', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal' }, randomUUID());
+  const work = await engine.execute(operator, 'create', null, { type: 'chore', title: 'heap', description: 'Why heap matters', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal' }, randomUUID());
   return engine.execute(operator, 'ready', work.id, { reason: 'Priority one' }, randomUUID());
 }
 

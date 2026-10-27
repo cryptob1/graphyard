@@ -90,7 +90,7 @@ test('unit:verify-deployment-removed-history-loads — the kind, deployment comm
   assert.ok(!(nextActionKinds as readonly string[]).includes('verify-deployment'), 'no verify-deployment action kind');
   assert.equal(await operationsCommand({ id: 'verify-deployment', args: ['GY-1'] } as unknown as MasterSession), unhandled, 'master verify-deployment is no subcommand');
 
-  const created = await engine.execute(operator, 'create', null, { title: 'Delivered before GY-1981', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:verify-deployment-removed-history-loads'] }] }, randomUUID()) as Work;
+  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Delivered before GY-1981', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:verify-deployment-removed-history-loads'] }] }, randomUUID()) as Work;
   const dbNow = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
   const legacy = { ...created, stage: 'done', stageEnteredAt: iso(dbNow - day), updatedAt: iso(dbNow - day), ready: true, epoch: 1, lease: null, candidate: null, sessions: [], observation: null, violations: [], gates: [], policy: smokePolicy,
     delivery: { mergeSha, mergedAt: iso(dbNow - day), authorizationRevision: 1, deployment: { ...recorded, observedAt: iso(dbNow - day + 60_000), at: iso(dbNow - day + 61_000) } } } as Work;

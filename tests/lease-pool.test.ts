@@ -41,7 +41,7 @@ function engineOn(store: Store, leaseSeconds = 120) {
   return engine;
 }
 async function ready(engine: Engine, title: string, criteria = [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }]) {
-  const work = await engine.execute(operator, 'create', null, { title, criteria }, randomUUID());
+  const work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria }, randomUUID());
   return engine.execute(operator, 'ready', work.id, {}, randomUUID());
 }
 async function claimed(engine: Engine, title: string, actor = engineer) {

@@ -41,7 +41,7 @@ const get = async (path: string, actor: Principal = coordinator) => {
 };
 
 test('unit:old-scope-history-loads — a document and history carrying scopeRequest, carriedScopeRequest, scopeDecision, scopeWithdrawn and a scope-refusal blocker load and evaluate; the gates name no scope and the blocker clears', async () => {
-  let work = await engine.execute(operator, 'create', null, { title: 'Stored before GY-1992', criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Stored before GY-1992', criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   const at = new Date(Date.now() - 3_600_000).toISOString();
   const request = { epoch: 1, paths: ['src/b.ts'], reason: 'needs b', requestedBy: worker.id, at };

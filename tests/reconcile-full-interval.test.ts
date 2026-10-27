@@ -38,7 +38,7 @@ after(async () => {
 });
 
 let created = 0;
-const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { title: `Full interval ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-full-interval'] }], ...extra }, randomUUID());
+const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { type: 'chore',  title: `Full interval ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-full-interval'] }], ...extra }, randomUUID());
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 /** Quiet passes until one reads nothing, evaluated nothing and is not full, so the next pass starts from a settled view. */
 async function settle() {

@@ -64,7 +64,7 @@ test('unit:planned-files-only-a-hint — the scope, split, research and triage m
 });
 
 test('unit:planned-files-only-a-hint — a head outside the item\'s plannedFiles is accepted with no scope request, hold, blocker or decision', async () => {
-  let w = await engine.execute(operator, 'create', null, { title: 'Hinted', plannedFiles: ['src/planned.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:planned-files-only-a-hint'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Hinted', plannedFiles: ['src/planned.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:planned-files-only-a-hint'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));
@@ -83,7 +83,7 @@ test('unit:planned-files-only-a-hint — a head outside the item\'s plannedFiles
 
 test('unit:planned-files-only-a-hint — an item with twelve planned source files is dispatched whole on the next cycle, with no decomposition or research record', async () => {
   const planned = Array.from({ length: 12 }, (_, index) => `src/module-${index + 1}.ts`);
-  let w = await engine.execute(operator, 'create', null, { title: 'Broad', plannedFiles: planned, criteria: [1, 2, 3, 4, 5, 6].map(n => ({ id: `AC-${n}`, text: `Behaviour ${n}`, proofs: [`unit:broad-${n}`] })) }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Broad', plannedFiles: planned, criteria: [1, 2, 3, 4, 5, 6].map(n => ({ id: `AC-${n}`, text: `Behaviour ${n}`, proofs: [`unit:broad-${n}`] })) }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const directory = await temporaryDirectory('planned-files-hint-loop');
   const credential = join(directory, 'token');

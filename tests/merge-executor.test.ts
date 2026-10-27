@@ -532,7 +532,7 @@ async function request(credential: string, path: string, body?: unknown, key: st
 }
 /** An item the worker claimed, registered on its branch and submitted with `complete --head`, as GY-1523 submits it. */
 async function submittedItem(n: number) {
-  let w = await engine.execute(admin, 'create', null, { title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
+  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
   w = await engine.execute(admin, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
