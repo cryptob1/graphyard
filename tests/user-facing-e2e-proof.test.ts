@@ -9,6 +9,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defineScenario } from '../src/scenarios.js';
 
 // GY-2965: every user-facing item owes an end-to-end proof.
 // AC-1: master create and requirements refuse a feature or bug item without an e2e: proof, naming
@@ -25,7 +26,7 @@ const id = () => randomUUID();
 const feature = (overrides: Record<string, unknown> = {}) => ({ title: 'A user-visible change', criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['unit:works'] }], ...overrides });
 const bug = (overrides: Record<string, unknown> = {}) => ({ ...feature(overrides), type: 'bug', title: 'A user-visible break' });
 const chore = (overrides: Record<string, unknown> = {}) => ({ ...feature(overrides), type: 'chore' });
-const withE2e = (input: Record<string, unknown>) => ({ ...input, criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['e2e:capacity-limit-redispatch'] }] });
+const withE2e = (input: Record<string, unknown>) => ({ ...input, criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['e2e:home-shows-change'] }] });
 
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 402;
@@ -35,12 +36,15 @@ before(async () => {
   engine = new Engine(store, 120, 'owner/project');
   engine.operatorAuthorizer = async (_db, _now, actor) => actor;
   setRepositoryPolicy(servePolicy);
+  // GY-1708: create resolves each e2e: proof's scenario, so this fixture registers the one it names.
+  await defineScenario(store, operator, { id: 'home-shows-change', title: 'The home page shows the change', purpose: 'The home page shows the change',
+    steps: ['open /'], expected: ['the change is shown'], environment: 'any', runner: 'graphyard-e2e', testPath: 'e2e/cases/home-shows-change.json' }, id());
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
 test('unit:user-facing-items-require-e2e-proof — create refuses a feature item and a bug item without an e2e: proof, naming the case format and the opt-out', async () => {
   for (const [name, input] of [['feature', feature()], ['bug', bug()]] as const) {
-    const refusal = await engine.execute(operator, 'create', null, input, id()).catch((error: Error) => error.message);
+    const refusal = await engine.execute(operator, 'create', null, input, id()).then(() => '', (error: Error) => error.message);
     const message = JSON.parse(refusal).map((issue: { message: string }) => issue.message).join('\n');
     assert.match(message, new RegExp(`a ${name} item a user can see owes an end-to-end proof`));
     assert.match(message, /e2e\/cases\/NAME\.json/, 'the refusal names the case format');
@@ -74,8 +78,8 @@ test('unit:user-facing-items-require-e2e-proof — requirements refuses a revisi
   await assert.rejects(engine.execute(operator, 'requirements', work.id, { ...revision, criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['integration:works'] }] }, id()),
     /owes an end-to-end proof/);
   const revised = await engine.execute(operator, 'requirements', work.id, { ...revision,
-    criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['e2e:capacity-limit-redispatch', 'unit:works'] }] }, id());
-  assert.equal(revised.criteria[0].proofs[0], 'e2e:capacity-limit-redispatch');
+    criteria: [{ id: 'AC-1', text: 'The change works', proofs: ['e2e:home-shows-change', 'unit:works'] }] }, id());
+  assert.equal(revised.criteria[0].proofs[0], 'e2e:home-shows-change');
   const opted = await engine.execute(operator, 'create', null, { ...feature(), description: 'No user-facing change: docs only' }, id()) as Work;
   const revisedOpted = await engine.execute(operator, 'requirements', opted.id,
     { expectedPolicyRevision: opted.policyRevision, reason: 'Rewriting the criteria', dependencies: [], exclusiveResources: [], criteria: [{ id: 'AC-1', text: 'Still no behaviour', proofs: ['unit:docs'] }] }, id());
@@ -89,9 +93,9 @@ test('unit:user-facing-items-require-e2e-proof — requirements refuses a revisi
 test('unit:e2e-serve-declaration-required-and-documented — create refuses an e2e: proof where the repository declares neither e2e.serve nor a previewable application, naming the declaration', async () => {
   setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: null } });
   try {
-    const refusal = await engine.execute(operator, 'create', null, withE2e(feature()), id()).catch((error: Error) => error.message);
+    const refusal = await engine.execute(operator, 'create', null, withE2e(feature()), id()).then(() => '', (error: Error) => error.message);
     const message = JSON.parse(refusal).map((issue: { message: string }) => issue.message).join('\n');
-    assert.match(message, /e2e:capacity-limit-redispatch has no way to serve a head/);
+    assert.match(message, /e2e:home-shows-change has no way to serve a head/);
     assert.match(message, /"e2e": \{ "serve": \{ "command", "url", "readySeconds" \} \} in graphyard\.json/);
     assert.match(message, /delivery\.applications/);
   } finally { setRepositoryPolicy(servePolicy); }

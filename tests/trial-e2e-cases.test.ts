@@ -108,7 +108,7 @@ after(async () => {
 const gitOfRoot = (args: readonly string[]) => defaultChildRun('git', ['-C', root, ...args]);
 
 const trial = async (mergeSha: string, changed: string[]) => runMergeTrial({
-  root, base, mergeSha, changedFiles: changed, proofs: [], e2eProofs: ['e2e:home-shows-change'],
+  root, base, mergeSha, changedFiles: changed, proofs: [], e2eProofs: ['e2e:home-shows-change'], proofFiles: [],
   timeoutMs: 120_000, key: 'GY-2965', environment: { PATH: process.env.PATH!, HOME: process.env.HOME! }, retries: 0,
 });
 
