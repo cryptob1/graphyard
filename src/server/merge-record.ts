@@ -10,6 +10,7 @@ import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { trialAuthor } from '../merge-writer/trial.js';
+import { defaultMergeBatch } from '../merge-writer/batch.js';
 import { recordScenarioRun } from '../test-runs.js';
 import { mergeRecordKinds, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
@@ -35,6 +36,8 @@ const tests = z.object({ passed: z.number().int().min(0), failed: z.array(z.stri
 const trialPhase = z.enum(trialPhases), trialNoVerdictOutcome = z.enum(['timeout', 'cancelled', 'host-failure']);
 const trialPhaseDurations = z.object(Object.fromEntries(trialPhases.map(phase => [phase, z.number().min(0)])) as Record<TrialPhase, z.ZodNumber>).strict();
 const trialAttempts = z.array(z.object({ outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().max(1000), phases: trialPhaseDurations }).strict()).max(10);
+/** Every e2e result one trial can owe: a full batch of items, each with create's 50 criteria of 20 proofs. */
+const trialE2eResultLimit = defaultMergeBatch * 50 * 20;
 export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('intent'), head: sha, baseTip: sha, mergeSha: sha, risk: z.string().min(1).max(40), at: instant }).strict(),
   // GY-1832: a trial is a verdict, with its phases' times and the attempts before it that reached none, or a final no-verdict outcome naming its phase and reason.
@@ -45,7 +48,7 @@ export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
       phases: trialPhaseDurations.optional(), attempts: trialAttempts,
       // GY-2965: how each bound E2E case ran against the served head; a run of one becomes a trusted record on the item and a run in the case's history.
       e2e: z.array(z.object({ proof: z.string().regex(/^e2e:[a-zA-Z0-9._/-]+$/).max(200), case: z.string().max(200), executed: z.number().int().min(0), failed: z.number().int().min(0),
-        missing: z.boolean().optional(), failingStep: z.string().max(2000).nullable().optional() }).strict()).max(20).optional(),
+        missing: z.boolean().optional(), failingStep: z.string().max(2000).nullable().optional() }).strict()).max(trialE2eResultLimit).optional(),
       preview: previewVerdictSchema.optional(), flaked: trialFlakedSchema.optional() }).strict(),
     z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().min(1).max(1000),
       phases: trialPhaseDurations, attempts: trialAttempts.min(1), durationMs: z.number().int().min(0) }).strict(),

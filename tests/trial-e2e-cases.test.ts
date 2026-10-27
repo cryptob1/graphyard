@@ -2,6 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
+import { createServer } from 'node:http';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { rm } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -18,6 +19,8 @@ import { defaultChildRun } from '../src/child-runner.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import type { Principal, Work } from '../src/model.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { mergeRecordBodySchema } from '../src/server/merge-record.js';
+import { defaultMergeBatch } from '../src/merge-writer/batch.js';
 
 // GY-2965 AC-2: the merge trial serves the head and runs its bound case. A head carrying
 // e2e:home-shows-change is refused when e2e/cases/home-shows-change.json is absent, naming the
@@ -189,4 +192,26 @@ test('unit:trial-serves-head-and-runs-bound-cases — a failing step refuses the
   const recorded = await call(`work/${work.id}/merge-record`, coordinator, { kind: 'trial', head: withCase, baseTip, mergeSha: merged.mergeSha, outcome: 'verdict', build: run.build,
     tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, attempts: [], e2e: run.e2e });
   assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
+});
+
+test('unit:trial-serves-head-and-runs-bound-cases — an endpoint another application already answers is refused, never counted for the head', async () => {
+  const withCase = await commitFiles({ 'e2e/cases/home-shows-change.json': JSON.stringify(passingCase) });
+  const merged = await trialMerge(gitOfRoot, { head: withCase, baseTip });
+  assert.ok('mergeSha' in merged);
+  // Another application holds the serve URL and would pass the case on the head's behalf.
+  const other = createServer((_request, response) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ message: 'served' })); });
+  await new Promise<void>(resolve => other.listen(servePort, '127.0.0.1', resolve));
+  try {
+    const run = await trial(merged.mergeSha, ['src/change.ts', 'e2e/cases/home-shows-change.json']);
+    assert.deepEqual(run.proofs['e2e:home-shows-change'], { executed: 0, failed: 1 });
+    assert.match(trialFailureReason({ run })!, /already answers before the serve command starts/);
+  } finally { await new Promise<void>(resolve => other.close(() => resolve())); }
+});
+
+test('unit:trial-serves-head-and-runs-bound-cases — a trial record carries every e2e result a full batch of valid items can owe', () => {
+  const results = Array.from({ length: defaultMergeBatch * 50 * 20 }, (_, index) => ({ proof: `e2e:case-${index}`, case: `case-${index}`, executed: 1, failed: 0 }));
+  const sha = 'a'.repeat(40);
+  const parsed = mergeRecordBodySchema.safeParse({ kind: 'trial', head: sha, baseTip: sha, mergeSha: sha, outcome: 'verdict', build: 'pass',
+    tests: { passed: 0, failed: [], files: 0 }, files: [], proofs: {}, durationMs: 1, attempts: [], e2e: results });
+  assert.ok(parsed.success, parsed.success ? '' : parsed.error.message);
 });

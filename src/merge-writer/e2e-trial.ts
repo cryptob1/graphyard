@@ -26,7 +26,7 @@ export interface TrialE2eCase {
 export const noServeRefusal = 'no way to serve the head: declare "e2e": { "serve": { "command", "url", "readySeconds" } } in graphyard.json, or declare a previewable application in delivery.applications';
 
 /** What serves the head while the cases run, and how it is stopped. */
-interface Served { origin: string; close(): Promise<void> }
+interface Served { origin: string; close(): Promise<void>; ended?(): string | null }
 
 /** The checkout's own declarations, read from its graphyard.json and never from the process's. */
 function declaredServe(worktree: string): { serve: E2eServe | null; application: { kind: 'static'; directory: string; build: string | null } | { kind: 'compose'; file: string; service: string; port: number } | null } {
@@ -50,6 +50,9 @@ function declaredServe(worktree: string): { serve: E2eServe | null; application:
  */
 async function serveByCommand(serve: E2eServe, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void): Promise<Served> {
   const startedAt = Date.now(), deadline = startedAt + Math.min(serve.readySeconds * 1000, budgetMs);
+  // An endpoint that answers before the command starts is another application's: its answers would not be the head's.
+  const occupied = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(() => true, () => false);
+  if (occupied) throw new Error(`${serve.url} already answers before the serve command starts; another application holds it, so the head cannot be served there`);
   const child = spawn('sh', ['-c', serve.command], { cwd: worktree, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const chunks: Buffer[] = [];
   child.stdout.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
@@ -60,7 +63,7 @@ async function serveByCommand(serve: E2eServe, worktree: string, env: Record<str
   const close = async () => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ } };
   for (;;) {
     if (exited) { await close(); throw new Error(`${exited}: ${Buffer.concat(chunks).toString('utf8').trim().split('\n').slice(-5).join(' | ').slice(0, 500)}`); }
-    try { await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }); return { origin: serve.url, close }; }
+    try { await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }); return { origin: serve.url, close, ended: () => exited }; }
     catch { /* not answering yet */ }
     if (Date.now() >= deadline) {
       await close();
@@ -135,6 +138,9 @@ export async function runTrialE2eCases(input: {
         report: value => { report = value; },
       });
       await suite.run(served.origin, null);
+      // A serve command that ended during the run left the endpoint to whatever answered after it, so no case counts.
+      const ended = served.ended?.();
+      if (ended) throw new Error(`${ended} while the cases ran`);
       const ran = report as E2eReport | null;
       for (const entry of loaded) {
         const outcome = ran?.cases.find((item: { id: string }) => item.id === entry.proof.slice(4));
