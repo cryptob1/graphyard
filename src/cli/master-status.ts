@@ -48,7 +48,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
     masterSession: masterSummary(state?.master ?? emptyMasterSession(), now, masterAgent),
     items: snapshot.work.filter(item => item.stage !== 'done').map(item => itemLine(item, now)),
-    mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter)),
+    mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
     sessions,
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),

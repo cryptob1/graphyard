@@ -598,18 +598,37 @@ test('unit:trial-checkout-outside-temp — with /tmp a tmpfs and the process tmp
   assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed)), existsSync(live)], [false, false, true]);
 });
 
-test('unit:trial-checkout-reclaim-durable — a crashed checkout that left the trials folder short of space is taken back before the space is measured, and a checkout whose removal failed keeps its owner marker and is taken back by a later pass (GY-2020)', async () => {
+test('unit:trial-checkout-reclaim-durable — a crashed checkout that left the trials folder short of space is taken back before the root is given up on, while a removal that fails keeps its owner marker and is taken back by a later pass (GY-2020, GY-2963)', async () => {
   const home = await temporaryDirectory('gy-trial-home', homedir());
   const [trials] = trialCheckoutRoots(home);
   mkdirSync(trials!, { recursive: true });
-  // Low space while the crashed checkout stands, room once it is gone: the reclaim runs first, so the root is chosen.
+  // Low space while the crashed checkout stands, room once it is gone: the space is measured first,
+  // the taking-back is awaited only on that failure, and the root is measured again — the checkout
+  // is never delayed by the removal when there is room, and never lost when there is not.
   const crashed = join(trials!, `${trialCheckoutPrefix}full`);
+  mkdirSync(join(crashed, 'checkout', 'node_modules'), { recursive: true });
+  writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: 2 ** 22 + 9, startedAt: 1, pidNamespace: processPidNamespace(), at: '' })}\n`);
+  // With room, the choice answers while the taking-back is still running: the removal is off the checkout's path (GY-2963).
+  let releaseReclaim = () => {};
+  const reclaim = () => new Promise<string[]>(resolve => { releaseReclaim = () => resolve(reclaimTrialCheckouts(trials!)); });
+  const roomy: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 1e12 });
+  const gated = trialCheckoutRoot([trials!], 2e9, roomy, [], reclaim);
+  const answered = await Promise.race([gated.then(value => `chosen ${value}`), new Promise(resolve => setTimeout(() => resolve('still waiting'), 100))]);
+  assert.equal(answered, `chosen ${lookupPoisoned(trials!) ? null : trials}`, 'the root is chosen while the stale checkout is still being taken back');
+  releaseReclaim();
+  await reclaimTrialCheckouts(trials!);
+  assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed))], [false, false], 'the stale checkout is taken back beside the choice');
+  // Short of space, the taking-back is awaited and the root is measured again: the stale checkout never keeps its space (GY-2020).
   mkdirSync(join(crashed, 'checkout', 'node_modules'), { recursive: true });
   writeFileSync(tempOwnerMarker(crashed), `${JSON.stringify({ pid: 2 ** 22 + 9, startedAt: 1, pidNamespace: processPidNamespace(), at: '' })}\n`);
   const measured: boolean[] = [];
   const filling: FilesystemProbe = async path => { measured.push(existsSync(crashed)); return { probed: path, volatile: null, freeBytes: existsSync(crashed) ? 1e9 : 1e12 }; };
-  assert.equal(await trialCheckoutRoot([trials!], 2e9, filling, []), lookupPoisoned(trials!) ? null : trials);
-  assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed)), measured], [false, false, [false]], 'the space is measured after the stale checkout went');
+  const gatedReclaim = () => new Promise<string[]>(resolve => { releaseReclaim = () => resolve(reclaimTrialCheckouts(trials!)); });
+  const pending = trialCheckoutRoot([trials!], 2e9, filling, [], gatedReclaim);
+  await new Promise(resolve => setTimeout(resolve, 20));
+  releaseReclaim();
+  assert.equal(await pending, lookupPoisoned(trials!) ? null : trials, 'the root is chosen once the stale checkout went');
+  assert.deepEqual(measured, [true, false], 'the first measure saw the stale checkout; the second, after the taking-back, did not');
   // A removal that fails keeps the directory marked as this live process's own, and the next pass takes it back.
   const stuck = join(trials!, `${trialCheckoutPrefix}stuck`), live = join(trials!, `${trialCheckoutPrefix}live`);
   mkdirSync(join(stuck, 'checkout'), { recursive: true }); mkdirSync(live);
@@ -623,15 +642,17 @@ test('unit:trial-checkout-reclaim-durable — a crashed checkout that left the t
 });
 
 /**
- * GY-2020 (review of 9c5bf7cc113d): every trial first takes back the short checkouts crashed trials
- * left in the on-disk trials folder, which is shared by every head and item and which no tmp reclaim
- * scans. Over a simulated day of the merge writer's trials, each a real trial (a real detached
+ * GY-2020 (review of 9c5bf7cc113d), with GY-2963: every trial takes back the short checkouts
+ * crashed trials left in the on-disk trials folder, which is shared by every head and item and
+ * which no tmp reclaim scans — beside its own checkout since GY-2963, so the taking-back never
+ * delays the checkout, and a crashed checkout is gone by the end of the trial after its crash.
+ * Over a simulated day of the merge writer's trials, each a real trial (a real detached
  * checkout, made and removed) in the trials folder, trials crash now and then, leaving a checkout
  * whose owner is gone; one checkout is held by a process that lives until midday and dies then; one
  * is this process's own and lives all day. Each crashed checkout is taken back by the next trial,
  * the midday one after its owner dies and never before, the live one never; no trial's checkout
- * outlives it; the folder never holds more than the live ones plus the crashes since the last trial;
- * and nothing lands under /tmp, /var/tmp or the tmpdir's name for the folder.
+ * outlives it; the folder never holds more than the live ones; and nothing lands under /tmp, /var/tmp
+ * or the tmpdir's name for the folder.
  */
 test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crashed trials\' checkouts in the shared on-disk trials folder are taken back by the next trial, a live owner\'s never, a dying owner\'s only after it dies, the folder stays bounded, and nothing lands in a temporary root', { timeout: 300_000 }, async () => {
   // A repository the merge does not make a Node package builds and selects nothing: each trial is its real checkout, made and removed.
@@ -669,18 +690,22 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
       if (n % 3 === 1) pending.push(crash());
       if (n % 17 === 9) pending.push(crash());
       if (n === trialsRun / 2) { child.kill('SIGKILL'); await exited; dyingAlive = false; }
+      // This trial's taking-back runs beside the checkout (GY-2963), so what earlier trials left is
+      // judged gone by the time the trial ends; what it holds while it runs is the live owners' and,
+      // while its owner lives, the dying one's.
+      const before = pending;
+      pending = [];
       await runTrial({ root: repo, base: sessions, mergeSha, changedFiles: [], timeoutMs: 120_000, key: `GY-${n}`, environment: { PATH: process.env.PATH! },
         temporaryRoots: [clean], checkoutRoots: [trials!], probe: durable, run: async (command, args, options) => {
           if (command === 'git' && args.includes('worktree') && args.includes('add')) {
             checkouts.push(args[args.indexOf('--detach') + 1]!);
-            // While the trial runs, every crashed checkout before it is gone, the live one stands, and the dying one stands while its owner lives.
-            for (const left of pending) assert.equal(existsSync(left), false, `${left} outlived the trial after its crash`);
-            reclaimed.push(...pending); pending = [];
             assert.ok(existsSync(kept), 'the live owner\'s checkout is never taken');
             if (dyingAlive) assert.ok(existsSync(dying), 'a checkout whose owner lives is never taken');
           }
           return defaultChildRun(command, args, options);
         } });
+      for (const left of before) assert.equal(existsSync(left), false, `${left} outlived the trial that took it back`);
+      reclaimed.push(...before);
       const held = readdirSync(trials!).filter(name => !name.endsWith('.owner'));
       most = Math.max(most, held.length);
       // Bounded: the two live owners' checkouts, never a trial's own after it ends.

@@ -180,17 +180,31 @@ const within = (path: string, root: string) => { const to = relative(root, path)
  * memory-backed volume, is made if missing, and that no stray node_modules, .git or package.json sits
  * in or above (`lookupPoisoned`), so a module the checkout's own install lacks never resolves upward
  * into a stray tree; null when none does, and the checkout stays in the managed session directory.
- * Each root's leftovers are taken back (`reclaimTrialCheckouts`) before its free space is measured,
- * so a crashed checkout that left the volume short never keeps its own space from being reclaimed.
+ * Each root's leftovers are taken back (`reclaimTrialCheckouts`) beside the choice — awaited only
+ * when the space check fails, so they are re-measured once gone — so a crashed checkout that left
+ * the volume short never keeps its own space from being reclaimed, and never delays the checkout (GY-2963).
  */
-export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe, excluded: readonly string[] = trialExcludedRoots()): Promise<string | null> {
+export async function trialCheckoutRoot(roots: readonly string[], minFreeBytes: number, probe?: FilesystemProbe, excluded: readonly string[] = trialExcludedRoots(),
+  reclaim: (root: string) => Promise<string[]> = reclaimTrialCheckouts): Promise<string | null> {
   for (const root of roots) {
     if (excluded.some(temporary => within(root, temporary))) continue;
     try {
-      await reclaimTrialCheckouts(root);
-      await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) });
-      await mkdir(root, { recursive: true });
-      if (!lookupPoisoned(root)) return root;
+      // GY-2963: a crashed trial's leftover is taken back beside this choice, never before it — the
+      // taking-back starts here and is awaited only when the space check fails, so removing a prior
+      // trial's whole installed tree (the eleven minutes of GY-101's queue wait) never delays this
+      // trial's checkout, and a checkout that left the volume short still never keeps its space from
+      // being measured (GY-2020).
+      const taking = reclaim(root);
+      const choose = async (): Promise<string | null> => {
+        await verifyWorktreeRoot(root, { minFreeBytes, ...(probe ? { probe } : {}) });
+        await mkdir(root, { recursive: true });
+        return lookupPoisoned(root) ? null : root;
+      };
+      const first = await choose().catch(() => null);
+      if (first) return first;
+      await taking.catch(() => []);
+      const retried = await choose().catch(() => null);
+      if (retried) return retried;
     } catch { /* the next root */ }
   }
   return null;
@@ -537,6 +551,8 @@ export interface RunTrialInput {
   retries?: number;
   /** Called as each attempt starts, before it runs anything (GY-1832): a caller keeping attempt-scoped evidence starts it afresh. */
   onAttempt?: (attempt: number) => void;
+  /** GY-2963: called at each step's start — checkout, install, build, selection, the tests, each repository check by name — so the merge writer records where the trial is. */
+  onStep?: (step: string) => void;
   /** Where the trial's temporary directory may go; `trialTemporaryRoots()` unless a test names others. */
   temporaryRoots?: readonly string[];
   /** Where the trial's short checkout may go; `trialCheckoutRoots()`, kept out of `trialExcludedRoots()`, unless a test names others, taken as named. */
@@ -694,6 +710,18 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   let phase: TrialPhase = 'install', phaseAt = startedAt;
   /** Closes the running phase's time and opens `next`'s; with no `next`, answers every phase's time so far. */
   const enter = (next: TrialPhase = phase) => { const at = now(); phases[phase] += Math.max(0, at - phaseAt); phase = next; phaseAt = at; return { ...phases }; };
+  // GY-2963: the step the trial is in, reported to the caller at each start, and each step's
+  // duration written into the trial's log, so a slow start is named by its slowest step.
+  let stepLabel = 'checkout', stepAt = startedAt;
+  const stepSeconds = (ms: number) => `${Math.round(ms / 100) / 10}s`;
+  input.onStep?.(stepLabel);
+  const enterStep = (label: string) => {
+    const at = now();
+    log.push(`[step] ${stepLabel} took ${stepSeconds(at - stepAt)}`);
+    stepLabel = label;
+    stepAt = at;
+    input.onStep?.(label);
+  };
   const checkout = await allocateSessionCheckout(input.base, 'trial', input.key ?? 'trial', input.mergeSha, randomUUID());
   // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
   // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
@@ -774,15 +802,19 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
-  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail = tail(), detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => ({
-    build, tests, durationMs: Math.max(0, now() - startedAt), logTail, runnerExit, ...(groups ? { groups } : {}), phases: enter(),
-    ...(detail?.failingCase ? { failingCase: detail.failingCase } : {}),
-    ...(detail?.timedOut ? { timedOut: true } : {}),
-  });
+  const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
+    const closed = enter();
+    const line = `[step] ${stepLabel} took ${stepSeconds(now() - stepAt)}`;
+    log.push(line);
+    return { build, tests, durationMs: Math.max(0, now() - startedAt), logTail: logTail === undefined ? tail() : `${logTail}\n${line}`, runnerExit, ...(groups ? { groups } : {}), phases: closed,
+      ...(detail?.failingCase ? { failingCase: detail.failingCase } : {}),
+      ...(detail?.timedOut ? { timedOut: true } : {}) };
+  };
   const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
   const trial = async (): Promise<TrialRun> => {
     try {
       await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
+      enterStep('install');
       // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
       // A repository the merge does not make a Node package installs and builds nothing. One without
       // scripts/ci-tests.mjs runs its graphyard.json preMerge (or package.json test/typecheck) checks
@@ -841,6 +873,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         try { packageScripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
         if (packageScripts === undefined || packageScripts?.build) {
           enter('build');
+          enterStep('build');
           const built = await child('build', 'npm', ['run', 'build']);
           if (hostEnded(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
@@ -849,6 +882,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         // Chromium installs into the host's shared Playwright cache (a no-op once present); an install that fails is the host's, retried, never the merge's.
         if (hasBrowserTestCheck(packageScripts) && touchesDashboard(input.changedFiles)) {
           enter('tests');
+          enterStep('tests: test:browser');
           const chromium = await child('tests', 'npx', ['playwright', 'install', 'chromium']);
           if (!chromium.ok) throw runnerFailure('tests', chromium);
           const browser = await child('tests', 'npm', ['run', 'test:browser']);
@@ -884,6 +918,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         let detail: { failingCase?: string | null; timedOut?: boolean } | undefined;
         let failingOutput: string | undefined;
         for (const check of checks) {
+          enterStep(`tests: ${check.check}`);
           const ran = await child('tests', check.argv[0]!, check.argv.slice(1));
           if (hostEnded(ran)) throw runnerFailure('tests', ran);
           if (!ran.ok) {
@@ -901,6 +936,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         return finish('pass', { passed, failed, files: checks.length }, runnerExit, undefined, logTail, detail);
       }
       enter('selection');
+      enterStep('selection');
       // A selection child the host killed or could not start is no verdict (GY-1832); only one that exits non-zero fails the selection.
       const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
       if (hostEnded(selection)) throw runnerFailure('selection', selection);
@@ -916,6 +952,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // An affected selection of nothing runs nothing.
       if (!files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
       enter('tests');
+      enterStep('tests');
       // Each shard is one runner process over the same checkout, `lanes` of them at once. Failing per-file
       // records decide which files failed; the human-readable log is read when those records name none —
       // including a partial-record run that finished some files and printed a named failure for another

@@ -149,7 +149,9 @@ export type MergeRecordEvent =
   | { kind: 'trial'; head: string; baseTip: string; mergeSha: string; outcome: TrialNoVerdictOutcome; phase: TrialPhase; reason: string; phases: TrialPhaseDurations; attempts: TrialNoVerdict[]; durationMs: number }
   | { kind: 'pushed'; mergeSha: string; pushedAt: string }
   | { kind: 'reconciled'; mergeSha: string; observedTip: string }
-  | { kind: 'refused'; head: string; reason: string };
+  | { kind: 'refused'; head: string; reason: string }
+  /** GY-2963: the trial's newest step while it runs — where the merge is, before any verdict exists. */
+  | { kind: 'trial-step'; head: string; step: string; at: string };
 /**
  * GY-1902: an item preview's record (project-previews.ts), written through the same coordinator
  * route and record port as the ledger's steps; it moves no merge state and is no ledger event, so
@@ -159,7 +161,7 @@ export interface PreviewRecordEvent { kind: 'preview'; preview: ItemPreview; sit
 export const previewRecordEvent = (preview: ItemPreview, site?: PreviewSiteFile[]) => ({ kind: 'preview', preview, ...(site ? { site } : {}) } satisfies PreviewRecordEvent) as unknown as MergeRecordEvent;
 const previewEvent = (event: MergeRecordEvent): PreviewRecordEvent | null => (event as { kind: string }).kind === 'preview' ? event as unknown as PreviewRecordEvent : null;
 /** The ledger kind each recorded step writes; `trial` is the executor's own record beside the ledger, which the fold ignores. */
-export const mergeRecordKinds = { ...mergeLedgerKinds, trial: 'merge.trial' } as const;
+export const mergeRecordKinds = { ...mergeLedgerKinds, trial: 'merge.trial', 'trial-step': 'merge.trial-step' } as const;
 /**
  * GY-1852: the attempt a record belongs to: an id the loop persists before the attempt's first
  * write, and the write's place in it. A retry of that write replays its exact first input under the
@@ -625,7 +627,7 @@ export interface MergePorts {
   /** The trial merge of `head` onto `baseTip` in the object store (trial.ts `trialMerge`): a commit, or the conflict; `item` names the merge commit's subject. */
   merge(head: string, baseTip: string, item?: { key: string; title?: string | null }): Promise<MergeOutcomeOfTrial>;
   /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted. */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'>, baseTip?: string): Promise<MergeTrialRun>;
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'>, baseTip?: string, onStep?: (step: string) => void): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
    * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
@@ -645,6 +647,8 @@ export interface MergePorts {
   hold?(item: Pick<Work, 'id' | 'key'>): Promise<string | null>;
   /** Records one step on the coordinator (`POST /api/work/:id/merge-record`), idempotent under `mergeRecordKey`, under the attempt `item` names (GY-1852). */
   record(item: Pick<Work, 'id' | 'key'> & { mergeAttempt?: MergeAttempt | null }, event: MergeRecordEvent): Promise<unknown>;
+  /** GY-2963: where the flight's trial is while it runs, recorded on the in-flight entry and the item's ledger; absent, the trial is not reported step by step. */
+  onStep?: (step: string) => void;
 }
 export type MergeOutcome =
   | { outcome: 'merged'; mergeSha: string; baseTip: string; observedTip: string; pushes: number }
@@ -704,7 +708,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     // The intent first (AC-2): a crash from here on is reconciled against the base, never repeated blindly.
     await ports.record(item, { kind: 'intent', head, baseTip, mergeSha, risk: riskOf(item).risk, at: at() });
     let run: MergeTrialRun;
-    try { run = await ports.trial(mergeSha, merged.files, item, baseTip); }
+    try { run = await ports.trial(mergeSha, merged.files, item, baseTip, ports.onStep); }
     catch (error) {
       // No verdict after the retry (GY-1832): the trial's record is its final outcome, never left pending.
       const attempts = trialAttempts(error), last = attempts.at(-1)!;

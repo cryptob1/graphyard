@@ -57,7 +57,7 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
   if (batch.length < 2) return [...results, ...await alone(ports, works)];
   try {
     // A batch trial that times out is trialled one head at a time, so a timeout counts only on the head it is its own (GY-2079).
-    const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }, baseTip).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
+    const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }, baseTip, ports.onStep).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
     if (!run) return [...results, ...await alone(ports, works)];
     let failed = failureIsBase(run) || !!trialFailureReason({ run }), preview: PreviewVerdict | null = null;
     // A preview that could not run is no pass: each head is then previewed alone, as `mergeOne` previews it.

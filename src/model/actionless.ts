@@ -1,4 +1,6 @@
 import { observationWindowHold, type Work } from '../model.js';
+import { mergeWriterRefusal } from './gates.js';
+import { currentMergeStep } from './merge-ledger.js';
 import { plainReason } from './plain-status.js';
 
 /**
@@ -48,15 +50,20 @@ export function actionlessCards(work: Work[], now: number): ActionlessCard[] {
       // nobody's to move, then the session already doing what the build gate waits for, then the
       // item a deferred refusal points at. Anything else has nothing moving it.
       const window = observationWindowHold(item, new Date(now));
+      // GY-2963: the merge writer's own trial is what a merge-writer refusal waits on, and while its
+      // steps advance the item is moving, never stalled — the fault the Work page read as a hang.
+      const step = currentMergeStep(item, now);
       const movedBy = refusal === undefined ? (!failing && item.candidate ? 'the next reading of its pull request' : null)
         : live && failing!.name === 'build' ? item.lease!.owner
           : window ? `its observation window, which closes at ${window.notBefore}`
           : deferredRefusal(refusal) ? refusal.match(/^Dependency (\S+)|: (\S+) is ahead$|^Waiting for (\S+)/)?.slice(1).find(Boolean) ?? 'another item'
-            : null;
-      return { item, gate: failing?.name ?? null, heldSince: item.stageEnteredAt, movedBy,
-        missing: refusal === undefined ? failing ? `Its ${failing.name} step reports a problem without saying what it is`
+            : step?.fresh && mergeWriterRefusal(failing!.name, refusal) ? `the merge writer's trial (${step.step})` : null;
+      const missing = refusal === undefined ? failing ? `Its ${failing.name} step reports a problem without saying what it is`
           : 'Nothing has been checked about it yet'
-          : plainReason(refusal, failing!.name).text };
+          : step && !step.fresh && mergeWriterRefusal(failing!.name, refusal)
+            ? `${plainReason(refusal, failing!.name).text}; its trial last ran ${step.step}`
+            : plainReason(refusal, failing!.name).text;
+      return { item, gate: failing?.name ?? null, heldSince: item.stageEnteredAt, movedBy, missing };
     })
     .sort((a, b) => Date.parse(a.heldSince) - Date.parse(b.heldSince));
 }

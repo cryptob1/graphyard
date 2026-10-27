@@ -31,7 +31,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     lock: state.lock, cycle: state.cycle, lastCycleAt: state.lastCycleAt, lagMs,
     actions: recent.slice(0, 40),
     metrics: state.metrics.at(-1) ?? null,
-    mergeWriter: mergeWriterSummary(state.mergeWriter),
+    mergeWriter: mergeWriterSummary(state.mergeWriter, now),
     release: state.release,
     profiles: state.profiles,
     config: state.config,
