@@ -914,8 +914,9 @@ export class Engine {
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofNames.filter(p => p.startsWith('e2e:'))) {
           // GY-1708: resolveScenario persists a shipped revision (capacity-limit-redispatch) so create
-          // accepts e2e: proofs without a separate e2e sync.
-          const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id });
+          // accepts e2e: proofs without a separate e2e sync. Only Graphyard's own repository install
+          // ships them; another managed repository registers its cases with e2e sync (GY-2964).
+          const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id }, this.repository);
           demand(scenario, `Register E2E scenario ${proof.slice(4)} before creating work that requires it`);
           scenarioRequirements.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
         }
@@ -1338,7 +1339,7 @@ export class Engine {
     for (const proof of proofs.filter(p => p.startsWith('e2e:'))) {
       const pinned = work.scenarioRequirements.find(s => s.proof === proof);
       if (pinned) { pins.push(pinned); continue; }
-      const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id });
+      const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id }, this.repository);
       demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
       pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
     }

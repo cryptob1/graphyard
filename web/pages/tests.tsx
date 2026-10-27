@@ -77,7 +77,7 @@ export function TestsView({ data, error, loading, filter, setFilter, retry, api,
       {canEdit && setView && <button type="button" onClick={() => setView('scenarios')}>Define test cases</button>}</div>
     {error && <div role="alert" className="notice danger">{error} <button type="button" disabled={loading} onClick={retry}>Retry loading tests</button>{data ? <p>Previously loaded results are shown; they may be stale.</p> : null}</div>}
     {loading && !data && <p role="status">Loading tests…</p>}
-    {data && !cases.length && <div className="empty"><span>◇</span><h2>No test cases yet.</h2><p>Define a case, link it to a criterion as <Term term="end-to-end test"><code>e2e:ID</code></Term>, and its trusted runs appear here.</p></div>}
+    {data && !cases.length && <div className="empty"><span>◇</span><h2>No test cases yet.</h2><p>Add a case as <code>e2e/cases/ID.json</code> in the repository, register it with <code>graphyard e2e sync</code>, and <code>graphyard e2e run</code> records its runs here.</p></div>}
     {cases.length > 0 && <>
       <div className="case-filters" role="group" aria-label="Filter test cases">{filters.map(f => <button key={f.id} type="button" className={filter === f.id ? 'chip active' : 'chip'} aria-pressed={filter === f.id} onClick={() => setFilter(f.id)}>{f.label} <span className="count">{count(f.id)}</span></button>)}</div>
       <p className="muted">Flaky: passed and failed on the same commit, or changed result twice or more in its last {data!.window} runs. Pass rate is over those runs. Skipped runs count as neither. E2E cases live in <code>e2e/cases/</code>; <code>graphyard e2e run</code> records their runs.</p>

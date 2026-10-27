@@ -16,6 +16,9 @@ import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../production-environment.js';
+import { managedDeploy } from '../../deploy-watch.js';
+import { graphyardRepository } from '../../scenarios.js';
+import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import { boardFromStatus } from '../../model/board.js';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { snapshotPage } from '../../store/paged-snapshot.js';
@@ -43,8 +46,17 @@ export const statusRoutes = defineRoutes('status', [
       const productionEnvironment = await resolvedProductionEnvironment(engine.store.pool);
       const humanOnly = openHumanOnly(await humanOnlySubjects(services, visibleWork), observedAt.getTime());
       const loop = await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt);
+      // The managed repository's own serving (GY-2964), for every install managing a repository other
+      // than Graphyard's own: what the deploy record naming it serves and how far the base branch the
+      // shared checkout holds is ahead. This process's build and the production watch observe the
+      // control plane's own code, never another repository's release, so its header reads from here;
+      // an install managing Graphyard itself keeps the production watch's release line.
+      const deploy = repository && repository.toLowerCase() !== graphyardRepository
+        ? await managedDeploy(repository, engine.baseBranch, process.env.GRAPHYARD_REPOSITORY_ROOT,
+          engine.gitRunner === undefined ? engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd()) : engine.gitRunner)
+        : null;
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs,
+        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs, deploy,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
