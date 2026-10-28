@@ -186,12 +186,15 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
  * The bubblewrap words that run a session with the coordinator checkout unwritable (GY-888): the
  * whole host exactly as it is, the checkout bind-mounted read-only over it, and only what the
  * session's own work needs re-exposed writable on top — bubblewrap applies each bind in order, so
- * the later ones shadow the read-only one. The shared Git paths and the checkout's FETCH_HEAD
- * resolve through `checkoutGitDirectory`/`checkoutWorktreeAdminDirectory`, so a coordinator that is
- * itself a linked worktree protects its real common Git directory instead of a `.git` pointer file
- * (GY-957, review finding); where that directory lies outside the checkout it is bound read-only
- * beside it, since `--ro-bind root root` alone would leave it writable under `--dev-bind / /`. The
- * namespace also unshares PIDs and mounts a fresh `/proc`, so another process's `/proc/<pid>/root`
+ * the later ones shadow the read-only one. The common Git directory itself is re-exposed writable
+ * (GY-2967: every ref transaction takes the packed-refs lock there), with the coordinator's own
+ * Git state inside it — its index, HEAD, config, hooks and the refs outside the `graphyard/`
+ * namespace — re-bound read-only after it, and, for a session with its own worktree admin, the
+ * shared worktrees area too. The shared Git paths and the checkout's FETCH_HEAD resolve through
+ * `checkoutGitDirectory`/`checkoutWorktreeAdminDirectory`, so a coordinator that is itself a
+ * linked worktree re-exposes its real common Git directory instead of a `.git` pointer file
+ * (GY-957, review finding). The namespace also unshares PIDs and mounts a fresh `/proc`, so
+ * another process's `/proc/<pid>/root`
  * is not a route back to the writable checkout (the escape `containedInstall` closes for installs),
  * and the host's process-launch channels are hidden so no command can start the write outside the
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
@@ -210,14 +213,27 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
   const masks = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
-  const externalGitDir = gitDir !== root && !withinCheckout(gitDir, root) && isDirectoryPath(gitDir) ? [gitDir] : [];
+  // GY-2967: every ref transaction a session runs — commit, merge, reset, branch -f, update-ref, a
+  // cherry-pick's cleanup — takes the common git directory's packed-refs lock once anything has
+  // packed a ref (git gc, git pack-refs), and rewrites packed-refs under that lock, so keeping the
+  // whole git directory read-only refused every ref update on a packed ref with
+  // `packed-refs.lock: Read-only file system`. The common git directory is therefore bound
+  // writable, and the paths that are only the coordinator's own are re-bound read-only inside it:
+  // bubblewrap applies the binds in order, and inside a writable directory a read-only bind still
+  // lets git take its `.lock` (which the writable directory allows) but refuses the write and the
+  // rename that would commit it — so the checkout's index, HEAD, config and hooks and the refs
+  // outside the graphyard namespace keep the protection they had while the directory was read-only.
+  const ownGitState = [join(gitDir, 'config'), join(gitDir, 'HEAD'), join(gitDir, 'index'), join(gitDir, 'refs', 'heads'), join(gitDir, 'logs', 'refs', 'heads'), join(gitDir, 'refs', 'tags'), join(gitDir, 'hooks'), ...(adminDirectory ? [join(gitDir, 'worktrees')] : [])]
+    .filter(path => existsSync(path));
+  const commonGitDir = isDirectoryPath(gitDir) ? [gitDir] : [];
   // A session with no admin of its own re-exposes the whole worktrees area; when the coordinator is
   // itself a linked worktree its own admin (HEAD, index) lies there, so it is bound read-only again
   // after that re-exposure — only its FETCH_HEAD, bound after it, stays writable (GY-957, review finding).
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
   return [bwrap, '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', '--ro-bind', root, root,
-    ...externalGitDir.flatMap(path => ['--ro-bind', path, path]),
+    ...commonGitDir.flatMap(path => ['--bind', path, path]),
+    ...ownGitState.flatMap(path => ['--ro-bind', path, path]),
     ...[...sharedDirectories, ...own, ...(input.writable ?? []).filter(isDirectoryPath)].flatMap(path => ['--bind', path, path]),
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
     ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]), '--'];
