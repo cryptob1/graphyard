@@ -1,10 +1,13 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { parseArgs } from 'node:util';
+import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
+import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
-import { selfVerification } from './verify.js';
+import { changeBase, selfVerification } from './verify.js';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
+import { leadingProof } from '../model/flake-ledger.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { trialTimeoutMinutes } from '../master/merge-writer-settings.js';
 
@@ -93,6 +96,126 @@ export async function rerunTrialFiles(root: string, files: readonly string[], ru
   catch (error: any) { return { ok: false, output: `${error.stdout ?? ''}${error.stderr ?? ''}` || (error instanceof Error ? error.message : String(error)) }; }
 }
 
+/** One failing case a rerun's output names: the case, where the run locates it, and the timing the runner reported. */
+export interface RerunCase { case: string; file: string | null; line: number | null; durationMs: number | null }
+
+const rerunTimestamp = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?Z? ?/;
+// eslint-disable-next-line no-control-regex
+const rerunAnsi = /\u001b\[[0-9;]*m/g;
+const specFailure = /^\s*✖ (.+?) \((\d+(?:\.\d+)?)m?s\)(?:\s+#.*)?$/;
+const tapFailure = /^\s*not ok \d+ - (.+?)(\s+#\s+(?:TODO|SKIP)\b.*)?$/i;
+const fileLevelFailure = /^tests\/[\w./-]+\.test\.ts$/;
+const testAtLine = /^\s*test at (\S+):(\d+):\d+/;
+const stackFrame = /\(([^()\s]+):(\d+):\d+\)/;
+const failureMarker = (line: string): { name: string; durationMs: number | null } | null => {
+  const spec = specFailure.exec(line), tap = spec ? null : tapFailure.exec(line);
+  const name = (spec?.[1] ?? (tap && !tap[2] ? tap[1] : null))?.trim() ?? null;
+  if (!name || name.length > 500 || fileLevelFailure.test(name)) return null;
+  return { name, durationMs: spec ? Math.round(Number(spec[2]!)) : null };
+};
+/** Where a run located a failing case, as a refusal names it. */
+export const locateRerunCase = (found: RerunCase) => `${found.case}${found.file ? ` at ${found.file}:${found.line}` : ''}`;
+
+/**
+ * GY-2968: the failing cases a rerun's runner output names, in order, without the file-level
+ * `not ok tests/x.test.ts` lines. Each case carries the file and line the run itself reports —
+ * node's failing-tests summary pairs a `test at file:line` line with the case printed under it,
+ * and a stack frame naming one of the run's files locates a case the summary does not — and the
+ * timing the spec marker carries. A case located in none of the rerun's own files stays
+ * unlocated; the refusal keeps the run's output beside it, so what this run failed is named
+ * either way.
+ */
+export function rerunFailingCases(output: string, files: readonly string[]): RerunCase[] {
+  const lines = output.split('\n').map(raw => raw.replace(rerunTimestamp, '').replace(rerunAnsi, ''));
+  const cases: RerunCase[] = [], byName = new Map<string, RerunCase>();
+  let current: RerunCase | null = null;
+  for (let index = 0; index < lines.length; index++) {
+    const marker = failureMarker(lines[index]!);
+    if (marker) {
+      const known = byName.get(marker.name);
+      if (known) { current = known; continue; } // node's failing-tests summary repeats the run's own marker
+      current = { case: marker.name, file: null, line: null, durationMs: marker.durationMs };
+      cases.push(current); byName.set(marker.name, current);
+      continue;
+    }
+    const target = (): RerunCase | null => {
+      // node's failing-tests summary pairs a `test at` with the case printed just below it; any
+      // other locator line belongs to the case opened above it.
+      const below = failureMarker(lines[index + 1] ?? '');
+      return (below ? byName.get(below.name) : null) ?? current;
+    };
+    const at = testAtLine.exec(lines[index]!);
+    if (at && files.includes(at[1]!)) {
+      const located = target();
+      if (located && located.file === null) { located.file = at[1]!; located.line = Number(at[2]); }
+      continue;
+    }
+    const frame = stackFrame.exec(lines[index]!);
+    if (!frame) continue;
+    const path = frame[1]!.replace(/^file:\/\//, '');
+    const file = files.find(candidate => path === candidate || path.endsWith(`/${candidate}`));
+    const located = target();
+    if (file && located && located.file === null) { located.file = file; located.line = Number(frame[2]); }
+  }
+  return cases;
+}
+
+/**
+ * GY-2968: run `files` on the base commit's own tree — the base extracted to a scratch tree beside
+ * the worktree's `.graphyard/` state, this worktree's node_modules linked in — and answer whether
+ * they fail, with the output captured. The base's own files answer, never this change's; a tree
+ * that cannot be extracted answers null, and the caller refuses rather than accept unverified.
+ */
+export async function rerunBaseFiles(root: string, base: string, files: readonly string[], run: ChildRun = defaultChildRun): Promise<{ ok: boolean; output: string } | null> {
+  let scratch: string;
+  try { await mkdir(join(root, '.graphyard', 'verify'), { recursive: true }); scratch = await mkdtemp(join(root, '.graphyard', 'verify', 'rerun-')); } catch { return null; }
+  const tree = join(scratch, 'tree');
+  try {
+    await mkdir(tree);
+    const extract = spawnSync('sh', ['-c', 'git archive --format=tar "$1" | tar -x -C "$2"', 'sh', base, tree], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'ignore', 'pipe'] });
+    if (extract.status !== 0 || extract.error) return null;
+    try { await symlink(await realpath(join(root, 'node_modules')), join(tree, 'node_modules')); } catch { /* no dependencies installed */ }
+    return await rerunTrialFiles(tree, files, run);
+  } finally { await rm(scratch, { recursive: true, force: true }); }
+}
+
+const ownProofs = (work: { criteria?: { proofs?: readonly string[] }[] }) => new Set((work.criteria ?? []).flatMap(criterion => criterion.proofs ?? []));
+
+/**
+ * What the rerun's failure means for this head, thrown as a refusal or returned as the notes the
+ * submission records on the item's history. A case of the item's own proofs refuses at once, the
+ * refusal naming what this run failed — never an earlier refusal's text. Failing cases outside
+ * the item's proofs retry once, just their files, on the head and then on the base: one that
+ * passes on the retry is a flake the history records; one the base fails too is recorded as a
+ * base failure; only one that fails the head again and passes on the base refuses.
+ */
+export async function judgeRerun(root: string, work: { key: string; criteria?: { proofs?: readonly string[] }[]; mergeLedger?: { baseTip?: string | null } | null }, failing: readonly string[], rerun: { ok: boolean; output: string }, run: ChildRun = defaultChildRun): Promise<{ flaked: RerunCase[]; baseFailures: RerunCase[] }> {
+  const cases = rerunFailingCases(rerun.output, failing);
+  const proofs = ownProofs(work);
+  const own = (found: RerunCase) => { const proof = leadingProof(found.case); return !!proof && proofs.has(proof); };
+  const outside = cases.filter(found => !own(found));
+  if (!cases.length || outside.length < cases.length)
+    throw new Error(`complete refused: the merge trial's failing tests still fail on this head${cases.length ? `: ${cases.map(locateRerunCase).join(', ')}` : ` (${failing.join(', ')})`}:\n${rerun.output.trimEnd().slice(-4000)}`);
+  // Just the failing cases' files retry; the whole refusal list only when a case's file went unnamed.
+  const retryFiles = outside.every(found => found.file) ? [...new Set(outside.map(found => found.file!))] : [...failing];
+  const retry = await rerunTrialFiles(root, retryFiles, run);
+  const again = retry.ok ? [] : rerunFailingCases(retry.output, retryFiles);
+  const flaked = outside.filter(found => !again.some(repeated => repeated.case === found.case));
+  const still = outside.filter(found => again.some(repeated => repeated.case === found.case));
+  if (!still.length) return { flaked, baseFailures: [] };
+  // A case that failed twice on the head is judged against the base: the refused trial's own base
+  // tip, else the merge base with the base branch's remote tip.
+  const base = typeof work.mergeLedger?.baseTip === 'string' && /^[0-9a-f]{40}$/.test(work.mergeLedger.baseTip) ? work.mergeLedger.baseTip.toLowerCase() : changeBase(root);
+  const headRefusal = (detail: string) => new Error(`complete refused: ${still.map(locateRerunCase).join(', ')} ${still.length === 1 ? 'fails' : 'fail'} on this head again and ${detail}:\n${retry.output.trimEnd().slice(-4000)}`);
+  if (!base) throw headRefusal('the base to compare it against could not be resolved here');
+  const onBase = await rerunBaseFiles(root, base, retryFiles, run);
+  if (!onBase) throw headRefusal(`the base ${base.slice(0, 12)} could not be run to compare`);
+  const baseCases = onBase.ok ? [] : rerunFailingCases(onBase.output, retryFiles);
+  const headOnly = still.filter(found => !baseCases.some(repeated => repeated.case === found.case));
+  if (headOnly.length) throw new Error(`complete refused: ${headOnly.map(locateRerunCase).join(', ')} ${headOnly.length === 1 ? 'fails' : 'fail'} on this head again and ${headOnly.length === 1 ? 'passes' : 'pass'} on the base ${base.slice(0, 12)}:\n${retry.output.trimEnd().slice(-4000)}`);
+  return { flaked, baseFailures: still };
+}
+
 /**
  * GY-1753 AC-1: push the repository's current branch to origin with upstream when it is a
  * `graphyard/` branch, so the PR head exists for a worker whose own push was refused; any other
@@ -135,10 +258,15 @@ export const completeCommand: CliCommand = {
     // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape
     // names files; every other item runs nothing.
     const failing = trialFailureTests(work.mergeLedger?.refusal);
+    let rerun: { flaked: RerunCase[]; baseFailures: RerunCase[] } = { flaked: [], baseFailures: [] };
     if (failing.length) {
       console.error(`complete re-runs the merge trial's failing tests on this head before submitting: ${failing.join(', ')}`);
-      const rerun = await rerunTrialFiles(context.repositoryRoot(), failing);
-      if (!rerun.ok) throw new Error(`complete refused: the merge trial's failing tests still fail on this head (${failing.join(', ')}):\n${rerun.output.trimEnd().slice(-4000)}`);
+      const first = await rerunTrialFiles(context.repositoryRoot(), failing);
+      // GY-2968: a failing case outside the item's proofs retries once on the head and once on the
+      // base before anything is refused — a flake or a base failure is recorded, not a refusal.
+      if (!first.ok) rerun = await judgeRerun(context.repositoryRoot(), work, failing, first);
+      if (rerun.flaked.length) console.error(`complete records the flaked ${rerun.flaked.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
+      if (rerun.baseFailures.length) console.error(`complete records the base failures ${rerun.baseFailures.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
     }
     // GY-1925: the two forms map one-to-one onto the merger modes the engine enforces at submit
     // (GY-1523 — a head is accepted only while the control plane is the merge writer, a pull request
@@ -152,7 +280,13 @@ export const completeCommand: CliCommand = {
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
     // A failed push leaves the remote head at an earlier commit: nothing is submitted (and no lease ended) for it.
     if (push.failure !== undefined) throw new Error(`complete refused: pushing the graphyard/ branch failed, so the pull request would not hold this head: ${push.failure || 'git push failed'}`);
-    const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, body, requestId));
+    // GY-2968: what the rerun set aside travels with the submission, for the control plane to
+    // record on the item's history beside it.
+    const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, {
+      ...body,
+      ...(rerun.flaked.length ? { flaked: rerun.flaked } : {}),
+      ...(rerun.baseFailures.length ? { baseFailures: rerun.baseFailures } : {}),
+    }, requestId));
     context.print({ ...submitted, selfVerification: verification });
   },
 };

@@ -58,6 +58,8 @@ const evidenceArtifact = z.object({
 }).strict().refine(value => value.availability === 'external' ? !!value.url : !value.url, 'Only external artifacts may carry a public URL');
 // GY-1992: plannedFiles and scope widening are retired. An intent or a held decision recorded before then may still name them; they are ignored.
 const retiredField = z.unknown().transform(() => undefined).optional();
+// GY-2968: one failing case a rerun set aside — where the run located it and the timing it gave.
+const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.string().trim().min(1).max(500).nullable(), line: z.number().int().positive().nullable(), durationMs: z.number().int().min(0).nullable() }).strict();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
@@ -81,7 +83,11 @@ const commands = {
   workspace: z.object({ epoch, host: z.string().trim().min(1).max(200), path: z.string().startsWith('/').max(1000).refine(p => !/[\u0000-\u001f]/.test(p), 'Invalid path').transform(workspacePath), branch: z.string().max(255).refine(validBranch, 'Invalid Graphyard branch name'),
     preserved: z.object({ path: z.string().min(1).max(1000), head: z.string().regex(/^[0-9a-f]{40}$/i), branchTip: z.string().regex(/^[0-9a-f]{40}$/i), op: z.enum(['rebase', 'merge', 'cherry-pick']).nullable(), refs: z.string().max(20000), diff: z.string().max(100000), at: z.iso.datetime() }).strict().optional() }).strict(),
   // GY-1523: exactly one of `pr` (accepted only where GitHub observed it) or `head` (the control plane's own observation).
-  submit: z.object({ epoch, pr: z.number().int().positive().optional(), head: sha.optional() }).strict()
+  // GY-2968: what complete's automatic rerun set aside when it accepted the head — the failing
+  // cases outside the item's proofs that passed on their immediate retry (`flaked`), and those the
+  // base fails too (`baseFailures`), each named where the run located it, with the runner's timing.
+  submit: z.object({ epoch, pr: z.number().int().positive().optional(), head: sha.optional(),
+    flaked: z.array(rerunCase).max(50).optional(), baseFailures: z.array(rerunCase).max(50).optional() }).strict()
     .superRefine((data, ctx) => { if ((data.pr === undefined) === (data.head === undefined)) ctx.addIssue({ code: 'custom', message: 'A submission names exactly one of pr (a pull request number) or head (a 40-hex commit)' }); }),
   // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
   // blocker ended it (GY-1008): the same record an interrupted attempt carries.
@@ -1217,6 +1223,11 @@ export class Engine {
           demand(work.workspaces.some(w => w.epoch === data.epoch && w.branch === observed!.candidate.branch), 'PR branch does not match the assigned workspace');
         }
         work.submission = { epoch: data.epoch, pr: number };
+        // GY-2968: what complete's automatic rerun set aside when it accepted this head — the
+        // failing cases outside the item's proofs that passed on their immediate retry, and those
+        // the base fails too. A fact on the item's history, judged by nobody.
+        if (data.flaked?.length) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'complete.flaked', JSON.stringify({ details: { epoch: data.epoch, head: data.head ?? null, cases: data.flaked, at: now.toISOString() } })]);
+        if (data.baseFailures?.length) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'complete.base-failure', JSON.stringify({ details: { epoch: data.epoch, head: data.head ?? null, cases: data.baseFailures, at: now.toISOString() } })]);
         if (data.head !== undefined) {
           // The control plane's reading is the candidate's observation from this instant (GY-1523): the
           // minimal save `observe` makes for a provider reading, with nothing of GitHub's to carry.
