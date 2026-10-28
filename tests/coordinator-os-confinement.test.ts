@@ -83,10 +83,14 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
         assert.equal(confinement.wrapper.at(-1), '--', `${kind}'s wrapper ends with --`);
         // The namespace is pid-isolated with a fresh /proc: another process's root view is not reachable.
         assert.ok(confinement.wrapper.includes('--unshare-pid') && confinement.wrapper.includes('--proc') && confinement.wrapper.includes('/proc'), `${kind}'s namespace isolates /proc`);
-        // Only the session's own Git admin directory is re-exposed, never every assignment's.
+        // Only the session's own Git admin directory is re-exposed, never every assignment's: the
+        // shared worktrees area is bound read-only again (the common git directory it sits in must
+        // be writable for the packed-refs lock, GY-2967) and only the session's own admin shadows it.
         const gitDir = join(root, '.git');
+        const worktreesIdx = confinement.wrapper.indexOf(join(gitDir, 'worktrees'));
+        assert.ok(worktreesIdx > 0 && confinement.wrapper[worktreesIdx - 1] === '--ro-bind', `${kind} keeps every assignment's admin directory read-only inside the writable git directory`);
         assert.ok(confinement.wrapper.includes(join(gitDir, 'worktrees', 'session')), `${kind} binds its own worktree admin directory`);
-        assert.ok(!confinement.wrapper.includes(join(gitDir, 'worktrees')), `${kind} does not unprotect every assignment's admin directory`);
+        assert.ok(!confinement.wrapper.some((word, index) => word === '--bind' && confinement.wrapper[index + 1] === join(gitDir, 'worktrees')), `${kind} does not unprotect every assignment's admin directory`);
         assert.ok(confinement.wrapper.includes(join(gitDir, 'logs', 'refs', 'remotes')), `${kind} keeps remote-tracking reflogs writable, so git fetch can record a new remote branch`);
       }
     }
@@ -209,11 +213,15 @@ test('unit:linked-worktree-coordinator-confined — a coordinator that is itself
     const rootIdx = wrapper.indexOf(root);
     assert.ok(rootIdx > 0 && wrapper[rootIdx - 1] === '--ro-bind', 'the checkout is bound read-only');
     const gitIdx = wrapper.indexOf(gitDir);
-    assert.ok(gitIdx > rootIdx && wrapper[gitIdx - 1] === '--ro-bind' && wrapper[gitIdx + 1] === gitDir, 'the common Git directory outside the checkout is bound read-only after it');
+    assert.ok(gitIdx > rootIdx && wrapper[gitIdx - 1] === '--bind' && wrapper[gitIdx + 1] === gitDir, 'the common Git directory outside the checkout is re-exposed writable after it, so ref transactions can take the packed-refs lock (GY-2967)');
+    const headsIdx = wrapper.indexOf(join(gitDir, 'refs', 'heads'));
+    assert.ok(headsIdx > gitIdx && wrapper[headsIdx - 1] === '--ro-bind', 'the refs outside the graphyard namespace are re-bound read-only inside it');
     assert.ok(wrapper.includes(join(gitDir, 'objects')), 'the shared object store is re-exposed writable');
     assert.ok(wrapper.includes(join(gitDir, 'refs', 'heads', 'graphyard')), 'the shared graphyard branch namespace is re-exposed writable');
     assert.ok(wrapper.includes(join(gitDir, 'worktrees', 'session')), 'the session pins its own worktree admin directory');
-    assert.ok(!wrapper.includes(join(gitDir, 'worktrees')), 'not every assignment\'s admin directory is unprotected');
+    const worktreesIdx = wrapper.indexOf(join(gitDir, 'worktrees'));
+    assert.ok(worktreesIdx > gitIdx && wrapper[worktreesIdx - 1] === '--ro-bind', 'the shared worktrees area stays read-only inside the writable git directory');
+    assert.ok(!wrapper.some((word, index) => word === '--bind' && wrapper[index + 1] === join(gitDir, 'worktrees')), 'not every assignment\'s admin directory is unprotected');
     assert.ok(wrapper.includes(join(gitDir, 'worktrees', 'coordinator', 'FETCH_HEAD')), 'the checkout\'s FETCH_HEAD is re-exposed for fetches from the coordinator root');
     // The sandbox claim gives up on a grant that would hold the real Git directory.
     const addDirGit = await build('codex', ['--sandbox', 'workspace-write', '--add-dir', gitDir]);
@@ -312,7 +320,9 @@ test('unit:linked-worktree-coordinator-reviewer-confined — a reviewer or produ
     assert.ok(confinement, 'the launch carries a confinement');
     const wrapper = confinement.wrapper;
     assert.ok(wrapper.includes(ownAdmin), 'the reviewer pins its own checkout\'s worktree admin');
-    assert.ok(!wrapper.includes(join(gitDir, 'worktrees')), 'the common worktrees area is not re-exposed');
+    const worktreesIdx = wrapper.indexOf(join(gitDir, 'worktrees'));
+    assert.ok(worktreesIdx > 0 && wrapper[worktreesIdx - 1] === '--ro-bind', 'the common worktrees area is bound read-only inside the writable git directory, so the coordinator\'s own admin stays unwritable');
+    assert.ok(!wrapper.some((word, index) => word === '--bind' && wrapper[index + 1] === join(gitDir, 'worktrees')), 'the common worktrees area is not re-exposed');
     const fetchIdx = wrapper.indexOf(join(coordinatorAdmin, 'FETCH_HEAD'));
     assert.ok(fetchIdx > 0 && wrapper[fetchIdx - 1] === '--bind', 'the coordinator FETCH_HEAD stays writable for fetches from the root');
     // A session whose own admin cannot be found still re-exposes the worktrees area, and then binds
