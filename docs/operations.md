@@ -82,6 +82,10 @@ Graphyard observes no remote thread, check run or commit status; no request budg
 
 `/healthz` fails writes refused or the database at `GRAPHYARD_DATABASE_MAX_BYTES`; grow it.
 
+## Database crash
+
+The server outlives a dropped Postgres connection (one log line; the next request reconnects) and waits for a database still starting or recovering. On a compose install, a loop that cannot reach the control plane for 2 minutes runs `docker compose up -d` in the install's compose directory, at most once per 5 minutes, and `master status` shows `controlPlane`: unreachable since when, the server's last exit and the disk space free for Docker's data. Free the disk if that is the cause.
+
 ## Withdrawal and credentials
 
 Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A merge outside the gates is a permanent violation: never bypass; a delivered item with a failed smoke proof stays Done.
