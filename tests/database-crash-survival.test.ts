@@ -40,6 +40,7 @@ function startServer(databaseUrl: string) {
     server.stdout!.on('data', () => { const match = /listening on port (\d+)/.exec(output); if (match) resolve(Number(match[1])); });
     void exited.then(code => reject(new Error(`the server exited ${code} before listening:\n${output}`)));
   });
+  port.catch(() => {}); // awaited by the test; an exit before it listens fails that await, never the process
   return { server, port, exited, output: () => output };
 }
 

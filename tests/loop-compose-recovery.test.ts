@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runDaemon, writeDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
-import { composeServer } from '../src/daemon/compose-recovery.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import type { ChildRunOptions } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -20,6 +19,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 
 test('unit:loop-restarts-stopped-compose-server — over 2 minutes unreachable, the loop runs one docker compose up -d in the compose directory, logs it, and master status names since when, the last exit and the free disk', async () => {
+  // Imported in the test so the base commit, which has no such module, fails this case rather than the file.
+  const { composeServer } = await import('../src/daemon/compose-recovery.js');
   const root = await temporaryDirectory('compose-recovery-root');
   execFileSync('git', ['init', '-q', '-b', 'main'], { cwd: root });
   const credentials = await temporaryDirectory('compose-recovery-credentials');
