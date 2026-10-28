@@ -19,7 +19,13 @@ export function itemLine(item: Work, now: number) {
 
 /** The `master status` page. `run` reads main's tip from the checkout's remote-tracking ref; the deploy unit fetches it. */
 export async function masterStatusReport(root: string, master: MasterConfig, masterApi: (path: string) => Promise<any>, run: ChildRun = defaultChildRun) {
-  const [snapshot, runtime, credentials, state] = await Promise.all([masterApi('work-snapshot') as Promise<{ work: Work[]; now: string }>, observeHerdrAgents(), inspectWorkerCredentials(root, master.workers), readDaemonState(root, master).catch(() => null)]);
+  // An unreachable control plane (GY-2966) is reported, not thrown: since when, the server's last exit and the free disk space, as the loop recorded them.
+  let unreachable: string | null = null;
+  const [snapshot, runtime, credentials, state] = await Promise.all([(masterApi('work-snapshot') as Promise<{ work: Work[]; now: string }>).catch(error => {
+    if (typeof error?.status === 'number') throw error;
+    unreachable = error instanceof Error ? error.message : String(error);
+    return { work: [] as Work[], now: new Date().toISOString() };
+  }), observeHerdrAgents(), inspectWorkerCredentials(root, master.workers), readDaemonState(root, master).catch(() => null)]);
   const now = Date.parse(snapshot.now) || Date.now();
   const deploy = readDeployRecord(deployRecordPath(root));
   const main = await Promise.resolve(run('git', ['-C', root, 'rev-parse', `refs/remotes/origin/${master.baseBranch}`])).then(out => String(out).trim(), () => null);
@@ -42,7 +48,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // GY-2958: the trial's test gate for this checkout — ci-tests, repository checks, or an explicit
   // "no test check configured" so a managed repository never looks like it trials with zero tests.
   const trialTests = trialTestGateStatus(root);
+  const recorded = state?.controlPlane ?? null;
   return {
+    controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.

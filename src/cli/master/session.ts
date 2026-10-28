@@ -25,7 +25,9 @@ export async function openMasterSession(context: CliContext, root: string) {
     const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
   };
   // The host is named so the control plane judges fleet placement for this executor.
-  const coordinator = await masterApi('status', masterToken, 30_000, { [executorHostHeader]: master.hostId }); assertMasterBinding(master, coordinator);
+  // `master status` still reports an unreachable control plane (GY-2966): what the loop recorded about it is on its cursor.
+  const coordinator = await masterApi('status', masterToken, 30_000, { [executorHostHeader]: master.hostId }).catch(error => { if (id === 'status' && typeof error?.status !== 'number') return null; throw error; });
+  if (coordinator) assertMasterBinding(master, coordinator);
   // The CLI's own commit, for the version-skew guard.
   const cli = { commit: cliCommit(fileURLToPath(new URL('../../..', import.meta.url))) };
   const assertProtocol = (status: any) => { const skew = mergeProtocolSkew(status, cli); if (skew) throw new Error(skew); };
