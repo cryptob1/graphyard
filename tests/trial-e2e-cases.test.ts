@@ -22,6 +22,7 @@ import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repos
 import { mergeRecordBodySchema } from '../src/server/merge-record.js';
 import { defaultMergeBatch } from '../src/merge-writer/batch.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
+import { linkedCases } from '../src/model/test-cases.js';
 
 // GY-2965 AC-2: the merge trial serves the head and runs its bound case. A head carrying
 // e2e:home-shows-change is refused when e2e/cases/home-shows-change.json is absent, naming the
@@ -159,6 +160,10 @@ test('unit:trial-serves-head-and-runs-bound-cases — a passing case makes the i
   assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
   work = (await store.list()).find(entry => entry.id === work.id)!;
   assert.equal(evaluateLandability(work, [work], new Date()).verdict, 'landable');
+  // The item's Tests panel shows the case as the trial of the current head ran it.
+  const [shown] = linkedCases(work, null).linked;
+  assert.equal(shown.head, 'pass');
+  assert.deepEqual(shown.trial, { executed: 1, failed: 0 });
 
   // The case's run is a trusted run of that commit, listed with its history on /api/tests.
   const tests = await call('tests', operator);
@@ -193,6 +198,8 @@ test('unit:trial-serves-head-and-runs-bound-cases — a failing step refuses the
   const recorded = await call(`work/${work.id}/merge-record`, coordinator, { kind: 'trial', head: withCase, baseTip, mergeSha: merged.mergeSha, outcome: 'verdict', build: run.build,
     tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, attempts: [], e2e: run.e2e });
   assert.equal(recorded.status, 200, JSON.stringify(recorded.body));
+  work = (await store.list()).find(entry => entry.id === work.id)!;
+  assert.equal(linkedCases(work, null).linked[0].head, 'fail', 'the Tests panel shows the failing case');
 });
 
 test('unit:trial-serves-head-and-runs-bound-cases — an endpoint another application already answers is refused, never counted for the head', async () => {
