@@ -69,3 +69,15 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted
 **Registry slot**: the launch's agent-registry session rides its ledger record; the loop's close step ends it once the verdict is recorded, the item leaves review, or the pane is gone from Herdr (the reason names the pane), so a finished review or proof stops consuming its role's concurrency. Producers likewise. A session whose launching loop restarted away has no handle the successor loop tracks; each dispatch tick also judges every registry session the control plane lists live for this host by the pane its ledger record names, and ends it on the second consecutive miss.
 
 **The attempt bound is a progress bound** (GY-2961): an attempt whose worktree shows a new commit or changed files within the last 20 minutes, and whose lease renews, runs past the bound and is stopped only at the **ceiling** (default 8h); one with neither is stopped at the **bound** (default 130min since the claim). Each cycle the loop reads the attempt's worktree and records what changed on the session handle, so the control plane's renewal refusal counts the same progress. The stop keeps the attempt's uncommitted work as one WIP commit on its branch — a successor receives the diff — and releases the lease. The launch brief names the end instant, the rule and the ceiling (`run.attemptBoundMinutes` / `run.attemptCeilingMinutes` set both per install), and `master status` shows each live attempt's remaining time. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown; from 130min renewal refused as the backstop when no progress of either kind is on the record. Open scope asks exempt.
+
+### The launch reads short; the procedure loads on demand (GY-2972)
+
+A launched session's standing text is the short AGENTS.md block plus its role brief; each names the `guide TOPIC` topics its role needs instead of restating their procedure, and `node $GRAPHYARD_CLI guide TOPIC` (topics: claim, sync, complete, park, blocked, review, proof, master) prints it. The topics moved the older, longer text verbatim, so no rule changed. Word counts before (the item's base commit) and after, rendered with the fixed inputs tests/agents-guide.test.ts pins:
+
+| Text | Before | After |
+| --- | --- | --- |
+| AGENTS.md block | 678 | 101 |
+| Worker brief | 662 | 453 |
+| Reviewer brief | 795 | 553 |
+| Producer brief | 732 | 501 |
+| Master brief | 356 | 246 |

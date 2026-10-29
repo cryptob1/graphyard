@@ -7,6 +7,7 @@ import { masterConfigSchema, type MasterConfig, type MasterRun } from '../src/ma
 import { neededRework, proofRework } from '../src/daemon/rework.js';
 import { producerPrompt } from '../src/producer.js';
 import { piProducerPrompt } from '../src/runner/roles.js';
+import { guideText } from '../src/guide.js';
 import type { Evidence, Work } from '../src/model.js';
 
 // GY-868. On 2026-09-27 seventeen follow-up items sat in acceptance for 6–10 hours: their trusted
@@ -43,14 +44,13 @@ test('unit:producer-prompt-manual-proof-judged — both producer prompts judge a
     piProducerPrompt({ repository: 'owner/project' }, binding, [{ id: 'AC-1', text: 'Review follow-ups are triaged', proofs: [PROOF] }],
       { directory: '/tmp/producer-session', worktree: '/tmp/producer-session/checkout' }, '/repo'),
   ];
-  for (const prompt of prompts) {
-    // The manual-proof rule: judged by cases and checks run, with the exercise record it carries.
-    for (const phrase of ['manual: proof is judged', 'number of test cases and checks', 'judge the criterion', 'exercise record'])
-      assert.ok(prompt.includes(phrase), `the prompt tells the producer the manual-proof rule: ${phrase}`);
-    // The title-prefix rule is scoped: it never counts a manual proof's cases.
-    assert.ok(prompt.includes('applies to unit: and integration: proofs only'), 'the prompt scopes the title rule to unit/integration');
-  }
-  assert.ok(prompts[0].includes('never narrowed with --test-name-pattern'), 'the unit/integration rule keeps its anti-narrowing clause');
+  // GY-2972: the runner, title and manual-judging rules print from guide proof; both briefs name it.
+  const guide = guideText('proof');
+  for (const phrase of ['manual: proof is judged', 'number of test cases and checks', 'judge the criterion', 'exercise record'])
+    assert.ok(guide.includes(phrase), `guide proof tells the producer the manual-proof rule: ${phrase}`);
+  assert.ok(guide.includes('applies to unit: and integration: proofs only'), 'guide proof scopes the title rule to unit/integration');
+  assert.ok(guide.includes('never narrowed with --test-name-pattern'), 'the unit/integration rule keeps its anti-narrowing clause');
+  for (const prompt of prompts) assert.ok(prompt.includes('guide proof names the runner, the title rule and the manual: judging'), 'the brief names guide proof for the runner, title and manual rules');
 });
 
 test('unit:zero-executed-manual-proof-attested — a manual fail with executed 0 is unexercised: no rework is asked for it', () => {

@@ -491,7 +491,7 @@ export function autonomousSession(outcome: string, blocker: string) {
  * whose target it cannot resolve, even with its permission checks skipped — and a session stopped
  * on one waits for a person (GY-197). Worker and producer requests say how to never trigger it.
  */
-export const destructivePromptGuidance = 'Avoid any command that triggers your runtime\'s destructive-operation prompt, which waits for a person and no person will answer it: never give rm or mv a glob or a variable as its target (such as DIR/* or "$DIR") outside a directory you created yourself with mktemp -d. Name explicit paths inside your worktree instead, and for scratch files create a directory with mktemp -d and remove only that directory by its exact path. ';
+export const destructivePromptGuidance = 'Never give rm or mv a glob or a variable as its target outside a directory you created with mktemp -d: your runtime\'s destructive-operation prompt waits for a person nobody will answer. Name explicit paths in your worktree; remove scratch directories only by their exact mktemp -d path. ';
 /**
  * OpenCode asks before reaching any path outside its launch directory — a worker reaches one as
  * soon as it creates a second worktree (a bisect) or reads a sibling path (GY-2959) — so the
@@ -499,12 +499,7 @@ export const destructivePromptGuidance = 'Avoid any command that triggers your r
  * a prompt that still appears names a path outside the repository, and Reject keeps the worker
  * inside its worktree.
  */
-export const externalDirectoryPromptGuidance = 'Your launch has already granted the repository tree, so an OpenCode external-directory prompt names a path outside the repository: choose its Reject and continue with explicit paths inside your assigned worktree. ';
-/**
- * A worker that asked to rewrite a wrong commit waited on the master to say "fix forward" (GY-1477,
- * GY-1567): rewriting the assigned branch is never granted, so the request says so.
- */
-export const branchRewriteGuidance = 'Never rewrite the assigned branch: fix a wrong commit forward with a new commit. ';
+export const externalDirectoryPromptGuidance = 'Your launch already granted the repository tree, so an OpenCode external-directory prompt names a path outside it: Reject it and continue in your worktree. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
   work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment'>>,
@@ -540,9 +535,9 @@ export function workerPrompt(
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
   const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha });
-  return `Implement ${work.key}: ${work.title}. The Graphyard worker launcher has claimed this item under principal ${profile.principal}, created its assigned worktree, and placed this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, commit on the assigned branch, and submit the commit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action (nothing is pushed and no pull request is opened): complete ends your lease and the supervisor then stops this session, which is the attempt ending, not lease loss. Stop immediately if the supervisor reports lease loss before you have submitted. `
+  return `Implement ${work.key}: ${work.title}. The launcher claimed this item under principal ${profile.principal} and put this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, commit on the assigned branch, and submit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action: complete ends your lease; stop at once on lease loss (node ${config.cliPath} guide complete). `
     + attemptBoundSection(config.run, work, epoch)
-    + `Do not submit trusted evidence or merge; the control plane requests the independent review and the proof producers for your exact head as soon as it passes the build gate, so ask nobody to launch them. `
+    + `Do not submit trusted evidence or merge; review and producers are requested on their own. `
     + installed
     + (memoryDigest || '')
     // The maps for the areas the item's description and criteria name.
@@ -550,7 +545,6 @@ export function workerPrompt(
     + submissionPolicyRule
     + destructivePromptGuidance
     + externalDirectoryPromptGuidance
-    + branchRewriteGuidance
     + simplicityParagraph
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
@@ -558,7 +552,7 @@ export function workerPrompt(
     + resumedAttempt(work)
     // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
     + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')
-    + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — do not wait and do not write it as a blocker: record it with node ${config.cliPath} park ${work.key} ${epoch} KIND NEEDED --ask ASK --recommend TEXT --why SENTENCE -- REASON (KIND is goals-and-priorities, money-or-accounts or credentials-for-people; NEEDED is the exact thing the human must provide: every human step the item still needs, in this one request; ASK is one plain sentence naming the human's action; TEXT is the choice you recommend, or the safest way to obtain a value, such as a fine-grained token scoped to one repository with a short expiry and only the permissions needed, and SENTENCE is one plain sentence of why), which ends your lease and parks the item for the human, then stop. `
+    + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — park it with node ${config.cliPath} park ${work.key} ${epoch} (guide park names the fields) and stop; parking ends your lease. Do not wait and do not write it as a blocker. `
     // GY-1987: the worker judges its own diff by the reviewer's standard (graphyard review self) before it submits, so a blocking finding costs a push, not a review round.
     + `Before complete, run node ${config.cliPath} review self ${work.key}, judge your diff by what it prints and fix each BLOCKING finding first. `
     + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
