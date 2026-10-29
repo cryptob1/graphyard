@@ -46,13 +46,16 @@ const context = (root: string, calls: { path: string; body: unknown }[]) => ({
 
 const reruns = async (root: string) => (await readFile(join(root, 'rerun.log'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]);
 
-test('unit:complete-reruns-trial-failures — a trial refusal naming failing test files makes complete run exactly those files on the head and refuse while one still fails', async () => {
+test('unit:complete-reruns-trial-failures — a trial refusal naming failing test files makes complete run exactly those files; a run that fails naming no case submits with the note (GY-2980)', async () => {
   const root = await worktree(['tests/still-fails.test.ts'], ['tests/docs-current-model.test.ts', 'tests/still-fails.test.ts']);
-  const calls: { path: string; body: unknown }[] = [];
-  await assert.rejects(
-    completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('trial failed: tests tests/docs-current-model.test.ts, tests/still-fails.test.ts') } as never),
-    /complete refused: the merge trial's failing tests still fail on this head \(tests\/docs-current-model\.test\.ts, tests\/still-fails\.test\.ts\)/);
-  assert.deepEqual(calls, [], 'the refused complete submitted anyway');
+  const calls: { path: string; body: any }[] = [];
+  await completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('trial failed: tests tests/docs-current-model.test.ts, tests/still-fails.test.ts') } as never);
+  // GY-2980: the run's output names no failing case (a file-level failure, a runner fault), so it
+  // can judge nothing — the submission carries the note and the merge trial judges the head.
+  assert.equal(calls.length, 1, 'the unjudged rerun refused the submission');
+  assert.equal(calls[0]!.path, 'work/id-1/submit');
+  assert.equal(calls[0]!.body.rerunUnjudged.note,
+    'pre-submit rerun could not judge: the rerun of tests/docs-current-model.test.ts, tests/still-fails.test.ts failed without naming a failing case');
   assert.deepEqual(await reruns(root), [['tests/docs-current-model.test.ts', 'tests/still-fails.test.ts']], 'exactly the refusal\'s files ran, once');
 });
 

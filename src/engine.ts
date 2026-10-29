@@ -102,8 +102,11 @@ const commands = {
   // GY-2968: what complete's automatic rerun set aside when it accepted the head — the failing
   // cases outside the item's proofs that passed on their immediate retry (`flaked`), and those the
   // base fails too (`baseFailures`), each named where the run located it, with the runner's timing.
+  // GY-2980: the note a rerun fault records — the reason the rerun could not judge the head, with
+  // the run's last 20 lines. A fact on the item's history; the merge trial judges the head.
   submit: z.object({ epoch, pr: z.number().int().positive().optional(), head: sha.optional(),
-    flaked: z.array(rerunCase).max(50).optional(), baseFailures: z.array(rerunCase).max(50).optional() }).strict()
+    flaked: z.array(rerunCase).max(50).optional(), baseFailures: z.array(rerunCase).max(50).optional(),
+    rerunUnjudged: z.object({ note: z.string().trim().min(1).max(500), output: z.string().max(20000) }).strict().optional() }).strict()
     .superRefine((data, ctx) => { if ((data.pr === undefined) === (data.head === undefined)) ctx.addIssue({ code: 'custom', message: 'A submission names exactly one of pr (a pull request number) or head (a 40-hex commit)' }); }),
   // `partialWork` is how the worker's CLI kept what the attempt had not committed before the
   // blocker ended it (GY-1008): the same record an interrupted attempt carries.
@@ -1249,6 +1252,7 @@ export class Engine {
         // the base fails too. A fact on the item's history, judged by nobody.
         if (data.flaked?.length) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'complete.flaked', JSON.stringify({ details: { epoch: data.epoch, head: data.head ?? null, cases: data.flaked, at: now.toISOString() } })]);
         if (data.baseFailures?.length) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'complete.base-failure', JSON.stringify({ details: { epoch: data.epoch, head: data.head ?? null, cases: data.baseFailures, at: now.toISOString() } })]);
+        if (data.rerunUnjudged) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor.id, 'complete.rerun-unjudged', JSON.stringify({ details: { epoch: data.epoch, head: data.head ?? null, note: data.rerunUnjudged.note, output: data.rerunUnjudged.output, at: now.toISOString() } })]);
         if (data.head !== undefined) {
           // The control plane's reading is the candidate's observation from this instant (GY-1523): the
           // minimal save `observe` makes for a provider reading, with nothing of GitHub's to carry.

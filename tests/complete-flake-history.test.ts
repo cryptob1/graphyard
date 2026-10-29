@@ -50,6 +50,20 @@ test('unit:complete-flake-history — a submission carrying the rerun\'s flake a
   }
 });
 
+test('unit:complete-flake-history — a submission carrying the rerun-unjudged note records it on the item\'s history', async () => {
+  const w = await assigned('Unjudged note', 3);
+  const note = { note: 'pre-submit rerun could not judge: the rerun of tests/gone.test.ts failed without naming a failing case', output: "Could not find 'tests/gone.test.ts'." };
+  await engine.execute(worker, 'submit', w.id, { epoch: w.epoch, pr: 2980, rerunUnjudged: note }, randomUUID());
+  const rows = (await store.pool.query(`SELECT payload FROM events WHERE work_id=$1 AND kind='complete.rerun-unjudged'`, [w.id])).rows;
+  assert.equal(rows.length, 1);
+  const details = (rows[0]!.payload as { details: { epoch: number; head: string | null; note: string; output: string; at: string } }).details;
+  assert.equal(details.epoch, w.epoch);
+  assert.equal(details.head, null, 'the PR form names no head');
+  assert.equal(details.note, note.note);
+  assert.equal(details.output, note.output);
+  assert.ok(Number.isFinite(Date.parse(details.at)), 'the entry carries its instant');
+});
+
 test('unit:complete-flake-history — a submission with no rerun notes records nothing, and an unknown submit field is refused', async () => {
   const w = await assigned('No notes', 2);
   await assert.rejects(engine.execute(worker, 'submit', w.id, { epoch: w.epoch, pr: 2969, stale: true } as never, randomUUID()), /Unrecognized key|Invalid input/);

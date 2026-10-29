@@ -116,17 +116,18 @@ export function rerunCommand(root: string, files: readonly string[]): [string, s
 }
 /**
  * GY-2517: re-run `files` in the worktree and answer whether they passed, with the output captured
- * so the caller prints it. The run is its own process group, killed whole at the bound (GY-2974):
- * a rerun past it refuses, naming the bound, instead of holding complete open.
+ * so the caller prints it. The run is its own process group, killed whole at the bound (GY-2974);
+ * `timedOut` marks a run the bound ended — GY-2980: a fault of the run, judged beside every other
+ * rerun fault, never a refusal by itself.
  */
-export async function rerunTrialFiles(root: string, files: readonly string[], run: ChildRun = defaultChildRun): Promise<{ ok: boolean; output: string }> {
+export async function rerunTrialFiles(root: string, files: readonly string[], run: ChildRun = defaultChildRun): Promise<{ ok: boolean; output: string; timedOut?: true }> {
   const [command, args] = rerunCommand(root, files);
   // A NODE_TEST_CONTEXT inherited from an enclosing test run makes node's runner report to it instead of running the files.
   const { NODE_TEST_CONTEXT: _, ...env } = process.env;
   try { return { ok: true, output: await run(command, args, { cwd: root, env, timeoutMs: rerunBound.ms, group: true }) }; }
   catch (error: any) {
-    if (error?.timedOut) throw new Error(`complete refused: the rerun of ${files.join(', ')} exceeded ${boundText(rerunBound.ms)} and was killed`);
-    return { ok: false, output: `${error.stdout ?? ''}${error.stderr ?? ''}` || (error instanceof Error ? error.message : String(error)) };
+    const output = `${error.stdout ?? ''}${error.stderr ?? ''}` || (error instanceof Error ? error.message : String(error));
+    return error?.timedOut ? { ok: false, output, timedOut: true } : { ok: false, output };
   }
 }
 
@@ -216,37 +217,66 @@ export async function rerunBaseFiles(root: string, base: string, files: readonly
 const ownProofs = (work: { criteria?: { proofs?: readonly string[] }[] }) => new Set((work.criteria ?? []).flatMap(criterion => criterion.proofs ?? []));
 
 /**
- * What the rerun's failure means for this head, thrown as a refusal or returned as the notes the
- * submission records on the item's history. A case of the item's own proofs refuses at once, the
- * refusal naming what this run failed — never an earlier refusal's text. Failing cases outside
- * the item's proofs retry once, just their files, on the head and then on the base: one that
- * passes on the retry is a flake the history records; one the base fails too is recorded as a
- * base failure; only one that fails the head again and passes on the base refuses.
+ * GY-2980: the note a rerun fault puts on the item's history — the reason the rerun could not
+ * judge the head, with the run's last 20 lines. The merge trial, which runs the whole suite and
+ * names failing cases, judges the head as for any submission. The note is bounded where it is
+ * built, so a refusal naming many files can never make the control plane refuse its submission.
  */
-export async function judgeRerun(root: string, work: { key: string; criteria?: { proofs?: readonly string[] }[]; mergeLedger?: { baseTip?: string | null } | null }, failing: readonly string[], rerun: { ok: boolean; output: string }, run: ChildRun = defaultChildRun): Promise<{ flaked: RerunCase[]; baseFailures: RerunCase[] }> {
-  const cases = rerunFailingCases(rerun.output, failing);
+export interface RerunNote { note: string; output: string }
+const rerunNote = (reason: string, output: string): RerunNote => ({ note: `pre-submit rerun could not judge: ${reason}`.slice(0, 500), output: output.trimEnd().split('\n').slice(-20).join('\n').slice(-20000) });
+
+/**
+ * The failing cases a run of `files` names — but only a run that can judge anything (GY-2980): a
+ * run the bound killed, or one that failed without naming a case (the runner could not start or
+ * find a file), leaves the note the submission records instead.
+ */
+const judged = (rerun: { ok: boolean; output: string; timedOut?: true }, files: readonly string[], what: string): { cases: RerunCase[]; note?: RerunNote } => {
+  if (rerun.timedOut) return { cases: [], note: rerunNote(`${what} exceeded ${boundText(rerunBound.ms)} and was killed`, rerun.output) };
+  const cases = rerunFailingCases(rerun.output, files);
+  if (!rerun.ok && !cases.length) return { cases: [], note: rerunNote(`${what} failed without naming a failing case`, rerun.output) };
+  return { cases };
+};
+
+/**
+ * What the rerun's failure means for this head, thrown as a refusal or returned as the notes the
+ * submission records on the item's history. The one refusal a completed rerun names at once: a
+ * failing case of the item's own proofs, the refusal naming what this run failed — never an
+ * earlier refusal's text. Failing cases outside the item's proofs retry once, just their files,
+ * on the head and then on the base: one that passes on the retry is a flake the history records;
+ * one the base fails too is recorded as a base failure; only one that fails the head again and
+ * passes on the base refuses.
+ * GY-2980: a fault of the rerun itself — the run exceeded its bound, the runner could not start
+ * or find a file, the output names no case, the base could not be resolved or run — is no
+ * refusal: the submission carries a note (`pre-submit rerun could not judge: <reason>`, with the
+ * run's last 20 lines) and the merge trial judges the head as for any submission.
+ */
+export async function judgeRerun(root: string, work: { key: string; criteria?: { proofs?: readonly string[] }[]; mergeLedger?: { baseTip?: string | null } | null }, failing: readonly string[], rerun: { ok: boolean; output: string; timedOut?: true }, run: ChildRun = defaultChildRun): Promise<{ flaked: RerunCase[]; baseFailures: RerunCase[]; note?: RerunNote }> {
+  const first = judged(rerun, failing, `the rerun of ${failing.join(', ')}`);
+  if (first.note) return { flaked: [], baseFailures: [], note: first.note };
+  const cases = first.cases;
   const proofs = ownProofs(work);
   const own = (found: RerunCase) => { const proof = leadingProof(found.case); return !!proof && proofs.has(proof); };
   const outside = cases.filter(found => !own(found));
-  if (!cases.length || outside.length < cases.length)
-    throw new Error(`complete refused: the merge trial's failing tests still fail on this head${cases.length ? `: ${cases.map(locateRerunCase).join(', ')}` : ` (${failing.join(', ')})`}:\n${rerun.output.trimEnd().slice(-4000)}`);
+  if (outside.length < cases.length)
+    throw new Error(`complete refused: the merge trial's failing tests still fail on this head: ${cases.map(locateRerunCase).join(', ')}:\n${rerun.output.trimEnd().slice(-4000)}`);
   // Just the failing cases' files retry; the whole refusal list only when a case's file went unnamed.
   const retryFiles = outside.every(found => found.file) ? [...new Set(outside.map(found => found.file!))] : [...failing];
-  const retry = await rerunTrialFiles(root, retryFiles, run);
-  const again = retry.ok ? [] : rerunFailingCases(retry.output, retryFiles);
-  const flaked = outside.filter(found => !again.some(repeated => repeated.case === found.case));
-  const still = outside.filter(found => again.some(repeated => repeated.case === found.case));
+  const retryRun = await rerunTrialFiles(root, retryFiles, run);
+  const retry = judged(retryRun, retryFiles, `the retry of ${retryFiles.join(', ')}`);
+  if (retry.note) return { flaked: [], baseFailures: [], note: retry.note };
+  const flaked = outside.filter(found => !retry.cases.some(repeated => repeated.case === found.case));
+  const still = outside.filter(found => retry.cases.some(repeated => repeated.case === found.case));
   if (!still.length) return { flaked, baseFailures: [] };
   // A case that failed twice on the head is judged against the base: the refused trial's own base
   // tip, else the merge base with the base branch's remote tip.
   const base = typeof work.mergeLedger?.baseTip === 'string' && /^[0-9a-f]{40}$/.test(work.mergeLedger.baseTip) ? work.mergeLedger.baseTip.toLowerCase() : changeBase(root);
-  const headRefusal = (detail: string) => new Error(`complete refused: ${still.map(locateRerunCase).join(', ')} ${still.length === 1 ? 'fails' : 'fail'} on this head again and ${detail}:\n${retry.output.trimEnd().slice(-4000)}`);
-  if (!base) throw headRefusal('the base to compare it against could not be resolved here');
+  if (!base) return { flaked, baseFailures: [], note: rerunNote('the base to compare the failing cases against could not be resolved here', retryRun.output) };
   const onBase = await rerunBaseFiles(root, base, retryFiles, run);
-  if (!onBase) throw headRefusal(`the base ${base.slice(0, 12)} could not be run to compare`);
-  const baseCases = onBase.ok ? [] : rerunFailingCases(onBase.output, retryFiles);
-  const headOnly = still.filter(found => !baseCases.some(repeated => repeated.case === found.case));
-  if (headOnly.length) throw new Error(`complete refused: ${headOnly.map(locateRerunCase).join(', ')} ${headOnly.length === 1 ? 'fails' : 'fail'} on this head again and ${headOnly.length === 1 ? 'passes' : 'pass'} on the base ${base.slice(0, 12)}:\n${retry.output.trimEnd().slice(-4000)}`);
+  if (!onBase) return { flaked, baseFailures: [], note: rerunNote(`the base ${base.slice(0, 12)} could not be run to compare`, retryRun.output) };
+  const baseRun = judged(onBase, retryFiles, `the base run of ${retryFiles.join(', ')}`);
+  if (baseRun.note) return { flaked, baseFailures: [], note: baseRun.note };
+  const headOnly = still.filter(found => !baseRun.cases.some(repeated => repeated.case === found.case));
+  if (headOnly.length) throw new Error(`complete refused: ${headOnly.map(locateRerunCase).join(', ')} ${headOnly.length === 1 ? 'fails' : 'fail'} on this head again and ${headOnly.length === 1 ? 'passes' : 'pass'} on the base ${base.slice(0, 12)}:\n${retryRun.output.trimEnd().slice(-4000)}`);
   return { flaked, baseFailures: still };
 }
 
@@ -292,13 +322,16 @@ export const completeCommand: CliCommand = {
     // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape
     // names files; every other item runs nothing.
     const failing = trialFailureTests(work.mergeLedger?.refusal, context.repositoryRoot());
-    let rerun: { flaked: RerunCase[]; baseFailures: RerunCase[] } = { flaked: [], baseFailures: [] };
+    let rerun: { flaked: RerunCase[]; baseFailures: RerunCase[]; note?: RerunNote } = { flaked: [], baseFailures: [] };
     if (failing.length) {
       console.error(`complete re-runs the merge trial's failing tests on this head before submitting: ${failing.join(', ')}`);
       const first = await rerunTrialFiles(context.repositoryRoot(), failing);
       // GY-2968: a failing case outside the item's proofs retries once on the head and once on the
       // base before anything is refused — a flake or a base failure is recorded, not a refusal.
+      // GY-2980: a fault of the rerun itself is no refusal either — the note travels with the
+      // submission and the merge trial judges the head.
       if (!first.ok) rerun = await judgeRerun(context.repositoryRoot(), work, failing, first);
+      if (rerun.note) console.error(rerun.note.note);
       if (rerun.flaked.length) console.error(`complete records the flaked ${rerun.flaked.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
       if (rerun.baseFailures.length) console.error(`complete records the base failures ${rerun.baseFailures.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
     }
@@ -320,6 +353,7 @@ export const completeCommand: CliCommand = {
       ...body,
       ...(rerun.flaked.length ? { flaked: rerun.flaked } : {}),
       ...(rerun.baseFailures.length ? { baseFailures: rerun.baseFailures } : {}),
+      ...(rerun.note ? { rerunUnjudged: rerun.note } : {}),
     }, requestId));
     context.print({ ...submitted, selfVerification: verification });
   },

@@ -45,7 +45,7 @@ test('unit:complete-rerun-runs-only-failing-files — the rerun runs just the tr
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
 });
 
-test('unit:complete-rerun-killed-at-bound — a rerun that never exits is killed with its process group at the bound and refused, naming the bound, with nothing submitted', async () => {
+test('unit:complete-rerun-killed-at-bound — a rerun that never exits is killed with its process group at the bound and submits with the note naming the bound (GY-2980)', async () => {
   const { completeCommand, rerunBound } = await complete();
   const root = await repository({
     'hang.test.mjs': `import { test } from 'node:test';
@@ -58,15 +58,18 @@ test('hangs', async () => {
 });
 `,
   });
-  const calls: unknown[] = [], bound = rerunBound.ms;
+  const calls: any[] = [], bound = rerunBound.ms;
   rerunBound.ms = 3_000;
   try {
     const started = Date.now();
-    await assert.rejects(completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/hang.test.mjs') } as never),
-      /complete refused: the rerun of tests\/hang\.test\.mjs exceeded 3 s and was killed/);
+    await completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/hang.test.mjs') } as never);
     assert.ok(Date.now() - started < 3_000 + 6_000, 'complete waited well past the bound');
   } finally { rerunBound.ms = bound; }
-  assert.deepEqual(calls, [], 'a rerun past its bound was submitted');
+  // GY-2980: the bound is a fault of the rerun, so it judges nothing — the submission carries the
+  // note naming the bound and the merge trial judges the head.
+  assert.equal(calls.length, 1, 'the unjudged rerun refused the submission');
+  assert.equal(calls[0]!.path, 'work/id-1/submit');
+  assert.equal(calls[0]!.body.rerunUnjudged.note, 'pre-submit rerun could not judge: the rerun of tests/hang.test.mjs exceeded 3 s and was killed');
   const pid = Number(await readFile(join(root, 'grandchild.pid'), 'utf8'));
   let alive = true;
   for (let tries = 0; alive && tries < 40; tries++) { try { process.kill(pid, 0); await delay(50); } catch { alive = false; } }
