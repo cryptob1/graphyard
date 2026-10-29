@@ -1,6 +1,6 @@
 // Concern: workspace commands — sync with the base branch tip, and the supervised worker watch under lease.
 import { randomUUID } from 'node:crypto';
-import { existsSync, rmSync } from 'node:fs';
+import { existsSync } from 'node:fs';
 import { readFile, realpath, writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
@@ -51,23 +51,6 @@ export async function syncWork({ api, print }: CliContext, work: any) {
   else {
     baseTip = git('rev-parse', `refs/remotes/origin/${baseBranch}`); mergeBase = git('merge-base', 'HEAD', baseTip);
     let merge = quietly('merge', '--no-commit', '--no-edit', `refs/remotes/origin/${baseBranch}`);
-    if (merge.status !== 0 && !unmerged().length) {
-      detail = `${merge.stdout}${merge.stderr}`.trim();
-      // A cherry-pick the worker concluded or quit can leave its state behind anyway: removing
-      // CHERRY_PICK_HEAD runs a ref transaction that takes the common git directory's packed-refs
-      // lock, the worker sandbox keeps that directory read-only, and git exits 0 with the state
-      // still in place (GY-2950), so every later sync is refused for a pick that no longer exists.
-      // The state lives entirely in this worktree's own git dir, which the sandbox grants, so sync
-      // ends the pick by removing exactly the files and directories git's own quit removes — no
-      // common ref is touched — and the merge runs.
-      if (/not concluded your cherry-pick/.test(detail)) {
-        for (const name of ['CHERRY_PICK_HEAD', 'AUTO_MERGE', 'MERGE_MSG', 'sequencer']) {
-          const state = quietly('rev-parse', '--git-path', name);
-          if (state.status === 0) rmSync(resolve(cwd, state.stdout.trim()), { recursive: true, force: true });
-        }
-        merge = quietly('merge', '--no-commit', '--no-edit', `refs/remotes/origin/${baseBranch}`);
-      }
-    }
     detail = `${merge.stdout}${merge.stderr}`.trim();
     if (merge.status !== 0 && !unmerged().length) throw new Error(`git merge failed without a conflict to resolve: ${detail}`);
   }

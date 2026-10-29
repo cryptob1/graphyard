@@ -23,15 +23,40 @@ const openClients = new WeakMap<pg.Pool, Set<pg.PoolClient>>();
  * Track every connection a pool opens until the connection has actually closed (GY-483). pg-pool's
  * `end()` resolves once it has asked its idle clients to end, not once their sockets have closed,
  * so a caller that stops the database right after it could terminate a still-open client.
+ *
+ * A connection the database drops (a crash, a restart, `pg_terminate_backend`) raises 'error' on
+ * the pool or on its client; unhandled, that event ended the server process (GY-2966). Both are
+ * handled for the pool's lifetime with one logged line: pg-pool discards the broken client, the
+ * request in flight on it fails, and the next request opens a fresh connection.
  */
-export function trackedPool<P extends pg.Pool>(pool: P): P {
+export function trackedPool<P extends pg.Pool>(pool: P, log: (message: string) => void = message => console.error(message)): P {
   const open = new Set<pg.PoolClient>();
   openClients.set(pool, open);
+  const report = (error: Error) => log(`[store] database connection lost: ${error.message}; the next request reconnects`);
+  pool.on('error', report);
   pool.on('connect', client => {
     open.add(client as pg.PoolClient);
+    client.on('error', report);
     client.once('end', () => open.delete(client as pg.PoolClient));
   });
   return pool;
+}
+
+/** How long the server waits between attempts to reach a database that is not yet accepting connections, at most. */
+export const databaseWaitMaxMs = 5_000;
+/**
+ * Resolve once the database answers a query (GY-2966). A database still starting or recovering —
+ * the 2026-10-27 crash left Postgres in recovery for twenty minutes — is waited for with backoff,
+ * each wait logged, instead of the server exiting on its first refused connection.
+ */
+export async function waitForDatabase(pool: pg.Pool, log: (message: string) => void = message => console.error(message), maxMs = databaseWaitMaxMs) {
+  for (let attempt = 0; ; attempt++) {
+    try { await pool.query('SELECT 1'); return; } catch (error) {
+      const wait = Math.min(250 * 2 ** attempt, maxMs);
+      log(`[store] the database is not accepting connections (${error instanceof Error ? error.message : String(error)}); retrying in ${wait} ms`);
+      await new Promise(resolve => setTimeout(resolve, wait));
+    }
+  }
 }
 
 /**

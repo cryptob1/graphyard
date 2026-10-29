@@ -117,6 +117,7 @@ export function boundDaemonState(state: DaemonState): DaemonState {
   }
   for (const profile of Object.values(state.profiles)) profile.reason = cut(profile.reason, 500);
   if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
+  if (state.controlPlane) state.controlPlane = { ...state.controlPlane, error: cut(state.controlPlane.error, 1000), restart: cut(state.controlPlane.restart, 1000), exitReason: cut(state.controlPlane.exitReason, 1000), freeDisk: cut(state.controlPlane.freeDisk, 500) };
   if (state.master) {
     state.master.agentName = cut(state.master.agentName, 200);
     state.master.pane = cut(state.master.pane, 200);

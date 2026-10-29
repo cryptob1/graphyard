@@ -1,5 +1,6 @@
 // Concern: the production wiring of the cycle's effects — every read, launch and write the loop runs, bound to one coordinator process.
 import { createHash, randomUUID } from 'node:crypto';
+import { join } from 'node:path';
 import { type ChildRun, childRunner } from '../child-runner.js';
 import type { Work } from '../model.js';
 import { RefusedResponse } from '../model/refusal.js';
@@ -16,6 +17,9 @@ import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
 import { loopRunAdoption } from './run-adoption.js';
 import { refusedBodyDetail, type DaemonEffects } from './effects.js';
+import { composeServer } from './compose-recovery.js';
+import { installDirectory, readInstallRecord } from '../install/secrets.js';
+import { installIdFor } from '../install/types.js';
 
 /** Effects bound to the real coordinator process; `config` may be a live source the loop reloads. */
 export function daemonEffects(root: string, source: MasterConfig | (() => MasterConfig), deps: {
@@ -129,6 +133,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     reclaimLease: work => mutate(`work/${work.id}/resync`, {}, randomUUID()),
     removeWorktree: path => removeAttemptWorktree(root, path, run),
     sweepCheckouts: () => sweepManagedCheckouts(root, current()),
+    // GY-2966: the compose install this host recorded for the repository, whose server the loop starts when the control plane stays unreachable.
+    composeServer: async () => {
+      const directory = installDirectory(installIdFor(current().repository));
+      return (await readInstallRecord(directory).catch(() => null))?.provider === 'compose' ? composeServer(join(directory, 'compose'), run) : null;
+    },
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
     // still running past its step's timeout is not started twice.

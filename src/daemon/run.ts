@@ -15,6 +15,7 @@ import { besideCursor } from './state-cursor.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { cliCommit } from '../protocol-version.js';
 import { loopCodeRoot } from './checkout-state.js';
+import { noteControlPlane } from './compose-recovery.js';
 
 /** The line the loop logs for each action a cycle took; the tests that pin a logged failure build it from here. */
 export const actionLine = (cycle: number, action: Pick<DaemonAction, 'kind' | 'state' | 'detail'>) => `[graphyard-master] cycle ${cycle} ${action.kind} ${action.state}: ${action.detail}`;
@@ -36,6 +37,7 @@ export function daemonSummary(state: DaemonState, now: number, intervalMs: numbe
     profiles: state.profiles,
     config: state.config,
     master: masterSummary(state.master, now, masterAgent),
+    controlPlane: state.controlPlane,
   };
 }
 
@@ -134,6 +136,7 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           if (options.reload) for (const action of await noteConfigReload(state, await options.reload().then(reload => { config = reload.config; return reload; }), effects.persist)) log(`[graphyard-master] ${action.kind} ${action.state}: ${action.detail}`);
           phase = 'cycle';
           const result = await runCycle(config, state, effects, now, launcher, log);
+          await noteControlPlane(state, null, now(), effects.composeServer, log);
           const recovered = noteCycleSuccess(state);
           if (recovered) await effects.persist(state);
           cycles.push({ cycle: result.metrics.cycle, actions: result.actions.length });
@@ -144,6 +147,8 @@ export async function runDaemon(config: MasterConfig, state: DaemonState, raw: D
           failed.push({ cycle: failure.cycle, call: failure.call, reason: failure.reason, delayMs: failure.delayMs });
           log(`[graphyard-master] cycle ${failure.cycle} failed in ${describeFailingCall(failure)}: ${failure.reason}; ${state.failures.consecutive} consecutive failure(s), the next cycle runs in ${Math.round(failure.delayMs / 1000)}s`);
           wait = failure.delayMs;
+          await noteControlPlane(state, { ...failure, answered: typeof (error as { status?: unknown })?.status === 'number' }, now(), effects.composeServer, log);
+          if (state.controlPlane) await effects.persist(state).catch(() => {});
         }
         await notify('alive');
         // A restart would kill a merge trial in flight, so it waits for the trial to settle.

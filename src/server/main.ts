@@ -2,6 +2,7 @@ import { once } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { Store } from '../store.js';
+import { waitForDatabase } from '../store/pools.js';
 import { Engine } from '../engine.js';
 import { demand, parseReviewerApps } from '../model.js';
 import { Validation } from '../validation.js';
@@ -31,6 +32,7 @@ export async function main(options: MainOptions = {}) {
   const capacity = observationCapacity();
   const store = new Store(process.env.DATABASE_URL ?? 'postgres://graphyard:graphyard@localhost:5438/graphyard', { max: capacity.poolMax });
   const startedAt = Date.now(); const mark = (step: string) => console.log(`startup ${step} at ${Date.now() - startedAt} ms`);
+  mark('database'); await waitForDatabase(store.pool);
   mark('store.init'); await store.init(); mark('store.init done');
   const engine = new Engine(store);
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);

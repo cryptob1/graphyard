@@ -8,6 +8,7 @@ import type { MasterSessionEffects } from '../master/master-session.js';
 import { type DaemonAction, type DaemonState, type LoopRelease, storeAction } from './state.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
 import type { AdoptedRun } from './run-adoption.js';
+import type { ComposeServer } from './compose-recovery.js';
 export { snapshotRetryDelayMs, retriedSnapshot } from './snapshot-retry.js';
 
 /** GY-1713: body `error` + zod `issues` so a refusal names the refused field; else stringify. */
@@ -87,6 +88,8 @@ export interface DaemonEffects {
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
+  /** The install's compose server (GY-2966), which the loop starts when the control plane stays unreachable; null when the install is not a compose install on this host. */
+  composeServer?: () => ComposeServer | null | Promise<ComposeServer | null>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`). */
   rework?: (work: Work, reason: string, binding?: string) => Promise<unknown>;
   /** One reviewer and producer dispatch tick over the cycle's snapshot (auto-dispatch.ts). */
