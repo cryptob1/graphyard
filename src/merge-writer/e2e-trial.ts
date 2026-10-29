@@ -25,6 +25,9 @@ export interface TrialE2eCase {
 /** Why a case cannot run and the trial refuses the head: the declaration to add. */
 export const noServeRefusal = 'no way to serve the head: declare "e2e": { "serve": { "command", "url", "readySeconds" } } in graphyard.json, or declare a previewable application in delivery.applications';
 
+/** How long a stopped serve command has to end before its group is killed. */
+const closeGraceMs = 20_000;
+
 /** What serves the head while the cases run, and how it is stopped. */
 interface Served { origin: string; close(): Promise<void>; ended?(): string | null }
 
@@ -56,11 +59,23 @@ async function serveByCommand(serve: E2eServe, worktree: string, env: Record<str
   let exited: string | null = null;
   child.on('error', error => { exited = error.message; });
   child.on('close', (code, signal) => { exited = `the serve command ended (${signal ? `signal ${signal}` : `status ${code}`})`; });
-  const close = async () => { try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ } };
+  // stdout/stderr stay open while any descendant that inherited them still runs (the shell may exit first under dash).
+  const whenClosed = (stream: NodeJS.ReadableStream | null) =>
+    !stream || (stream as NodeJS.ReadableStream & { closed?: boolean }).closed
+      ? Promise.resolve()
+      : new Promise<void>(accept => stream.once('close', () => accept()));
+  const descendantsGone = Promise.all([whenClosed(child.stdout), whenClosed(child.stderr)]);
+  // SIGTERM the group so the serve command can stop what it started and remove its files; wait for
+  // descendants (not the shell alone) to finish that cleanup before SIGKILL past the grace.
+  const close = async () => {
+    try { process.kill(-child.pid!, 'SIGTERM'); await Promise.race([descendantsGone, new Promise(accept => setTimeout(accept, closeGraceMs))]); } catch { /* already gone */ }
+    try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ }
+  };
   for (;;) {
     if (exited) { await close(); throw new Error(`${exited}: ${Buffer.concat(chunks).toString('utf8').trim().split('\n').slice(-5).join(' | ').slice(0, 500)}`); }
-    try { await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }); return { origin: serve.url, close, ended: () => exited }; }
-    catch { /* not answering yet */ }
+    // Only a success answers: a server still starting up (503) is not yet the head served.
+    const answered = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(response => response.ok, () => false);
+    if (answered) return { origin: new URL(serve.url).origin, close, ended: () => exited };
     if (Date.now() >= deadline) {
       await close();
       const tail = Buffer.concat(chunks).toString('utf8').trim().split('\n').slice(-5).join(' | ').slice(0, 500);
@@ -122,8 +137,10 @@ export async function runTrialE2eCases(input: {
 async function runGroup(target: E2eServe | Application, proofs: readonly string[], input: Parameters<typeof runTrialE2eCases>[0]): Promise<TrialE2eCase[]> {
   const cases: TrialE2eCase[] = [];
   let served: Served | null = null;
+  // The cases' bearer token, handed to a serve command as GRAPHYARD_E2E_TOKEN so the head it serves can accept it.
+  const token = `trial-${randomUUID()}`;
   try {
-    if (!('kind' in target)) served = await serveByCommand(target, input.worktree, input.env, input.budgetMs, input.log);
+    if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log);
     else if (target.kind === 'static') {
       const build = target.build ? await buildStaticSite(target.build, input.worktree, input.budgetMs, undefined, undefined, input.env) : null;
       if (build) throw new Error(build);
@@ -148,7 +165,7 @@ async function runGroup(target: E2eServe | Application, proofs: readonly string[
     }
     if (loaded.length) {
       let report: E2eReport | null = null;
-      const suite = projectCaseSuite(input.worktree, `trial-${randomUUID()}`, {
+      const suite = projectCaseSuite(input.worktree, token, {
         cases: loaded.map(entry => entry.caseFile),
         // The cases come from the head itself, so they never read the install's secrets; agent-step screenshots stay in the trial's scratch, which the trial removes.
         select: () => true, hostEnvironment: input.env, withholdSecrets: true, artifactsDirectory: join(input.scratch, 'e2e-artifacts'), signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
