@@ -1,0 +1,9 @@
+{
+  "title": "Add the verbose report mode",
+  "description": "The report renders one compact mode only. Add the verbose mode the renderers' callers have asked for.",
+  "type": "feature",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "lib/report.js format(rows, { mode }) renders 'verbose' as 'key: value' lines and leaves 'compact' unchanged; node --test passes with both modes covered.", "proofs": ["unit:report-modes"] }
+  ]
+}
