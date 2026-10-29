@@ -7,6 +7,7 @@ import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { setupMaster } from '../src/master.js';
 import { managedInstructions } from '../src/repository-setup.js';
+import { guideText } from '../src/guide.js';
 import { agentsRenderers } from '../src/cli/workspace-generated.js';
 import { regenerateManagedBlocks } from '../src/sync.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -72,7 +73,7 @@ test('unit:agents-md-worker-block-only — sync regeneration renders the worker 
   const renderers = await agentsRenderers(repositoryRoot);
   assert.equal(renderers.source, 'worktree');
   const clean = managedInstructions('# Rules\n');
-  const conflicted = `${clean.replace('Renew ownership at least every 30 seconds', '<<<<<<< HEAD\nRenew ownership at least every 20 seconds\n=======\nRenew ownership at least every 45 seconds\n>>>>>>> origin/main')}\n${legacyBlock}\n`;
+  const conflicted = `${clean.replace('Act without asking, and record blockers with the CLI.', '<<<<<<< HEAD\nAct without asking, and record blockers with the CLI only after asking.\n=======\nAct without asking, and record blockers with the CLI.\n>>>>>>> origin/main')}\n${legacyBlock}\n`;
   const rendered = regenerateManagedBlocks(conflicted, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text)));
   assert.equal(rendered, `${clean}\n\n`, 'the worker block is rendered afresh and the master block is gone');
   assert.equal(regenerateManagedBlocks(`${clean}${legacyBlock}${legacyBlock}`, text => renderers.managedInstructions(renderers.withoutMasterInstructions(text))), null, 'duplicate master markers are left for the worker');

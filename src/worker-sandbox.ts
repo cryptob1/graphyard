@@ -13,13 +13,16 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
  * common directory alone leaves the worktree's own admin directory read-only; only an explicit
  * grant of that exact path lifts it (GY-134).
  *
- * The common Git directory itself is never a granted root (GY-1321): a worker session runs inside
- * the coordinator confinement (master/profiles.ts readOnlyMountWrapper), which binds the checkout —
- * `.git` included — read-only and re-exposes writable only the shared paths below, and Codex's bwrap
- * sandbox creates mount points under each granted root (`<root>/.git`), which a read-only `.git`
- * refuses before any command runs. So exactly the shared paths the confinement re-exposes are
- * granted, each where it exists: objects, and the remote-tracking and `graphyard/` branch refs and
- * their reflogs. A linked worktree's FETCH_HEAD, index and HEAD live in its own admin directory.
+ * The common Git directory is itself a granted root (GY-2977): every ref transaction takes its
+ * `packed-refs` lock and rewrites that file under it, so the runtime sandbox must allow creating
+ * `<common>/packed-refs.lock` and renaming it to `<common>/packed-refs`. GY-1321 kept it off the
+ * grant list because Codex's bwrap creates mount points under each granted root (`<root>/.git`) and
+ * the coordinator confinement then bound `.git` read-only, which refused those mount points before
+ * any command ran; GY-2967 re-exposes the common directory writable (with the coordinator's own
+ * index, HEAD, config, hooks and non-`graphyard/` refs re-bound read-only inside it), so the grant
+ * is safe. The shared paths the confinement also re-exposes — objects, remote-tracking and
+ * `graphyard/` branch refs and their reflogs — stay on the list beside it. A linked worktree's
+ * FETCH_HEAD, index and HEAD live in its own admin directory.
  */
 export interface WorkerPaths { worktree: string; gitDir: string | null; commonDir: string | null }
 
@@ -30,8 +33,8 @@ export function workerPaths(worktree: string, run: Git = git): WorkerPaths {
   const ask = (...args: string[]) => { try { return run(worktree, args) || null; } catch { return null; } };
   return { worktree, gitDir: ask('rev-parse', '--absolute-git-dir'), commonDir: ask('rev-parse', '--path-format=absolute', '--git-common-dir') };
 }
-/** The shared Git paths under `commonDir` a worker writes, as the coordinator confinement re-exposes them. */
-export const sharedGitPaths = (commonDir: string) => [['objects'], ['refs', 'remotes'], ['logs', 'refs', 'remotes'], ['refs', 'heads', 'graphyard'], ['logs', 'refs', 'heads', 'graphyard']].map(parts => join(commonDir, ...parts));
+/** The shared Git paths under `commonDir` a worker writes, as the coordinator confinement re-exposes them — the common directory itself first (GY-2977: packed-refs lock), then the narrower paths beside it. */
+export const sharedGitPaths = (commonDir: string) => [commonDir, ...[['objects'], ['refs', 'remotes'], ['logs', 'refs', 'remotes'], ['refs', 'heads', 'graphyard'], ['logs', 'refs', 'heads', 'graphyard']].map(parts => join(commonDir, ...parts))];
 const isDirectory = (path: string) => { try { return statSync(path).isDirectory(); } catch { return false; } };
 export const writablePaths = (paths: WorkerPaths) => {
   // A checkout that is not a linked worktree writes through the common directory as its own.
@@ -40,9 +43,10 @@ export const writablePaths = (paths: WorkerPaths) => {
 };
 
 /**
- * What a reviewer or producer session writes (GY-1507): the same narrow Git paths as a worker
- * (`writablePaths`), never the common Git directory itself, which a confined runtime sandbox cannot
- * even start on (`bwrap: Can't create file <common>/.git`). Its directory is anchored at the common
+ * What a reviewer or producer session writes (GY-1507, GY-2977): the same Git paths as a worker
+ * (`writablePaths`), including the common Git directory so the runtime sandbox can take the
+ * packed-refs lock. The outer coordinator confinement still re-binds the coordinator's own index,
+ * HEAD, config, hooks and non-`graphyard/` refs read-only. Its directory is anchored at the common
  * directory (reviewer.ts anchorSessionCheckout), so Git reports that as its own Git directory; only a
  * linked worktree's own admin directory is granted as such. It also adds its detached worktree with
  * `git worktree add`, which registers under `<common>/worktrees`, the area the coordinator

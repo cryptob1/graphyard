@@ -8,6 +8,7 @@ import { setupMaster } from '../src/master.js';
 import { mergerNotRequired, setupChecklist } from '../src/model/setup-checklist.js';
 import { setupFromZeroChecks, setupLine, setupSteps } from '../src/setup-from-zero.js';
 import { applyProposal, managedInstructions, scanProposal, setupRepository } from '../src/repository-setup.js';
+import { guideText } from '../src/guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
@@ -52,9 +53,11 @@ test('unit:setup-checklist-control-plane — doctor\'s setup-from-zero checks pr
 
 test('unit:agents-block-control-plane — the AGENTS.md worker block says complete GY-N EPOCH --head SHA with no push or pull request, and this repository\'s own block is a faithful rendering', async () => {
   const block = managedInstructions('# Rules\n');
-  assert.match(block, /Submit the commit with `complete GY-N EPOCH --head SHA` \(the control plane is the merge\nwriter; the shared object store already holds SHA\)\. This reports implementation\ncompletion and ends your lease in the same transaction; it does not set Done\./);
+  assert.match(block, /Submit with `complete GY-N EPOCH --head SHA`; make `complete` your last action\./);
   assert.ok(!block.includes('PR_NUMBER') && !/\bpush\b/.test(block.replace(/nothing is pushed/g, '')), 'the block names no pull request and asks for no push');
-  assert.match(block, /`complete` your last action: do not heartbeat or edit after it\./);
+  // GY-2972: the submit semantics the block no longer carries print from guide complete.
+  assert.match(guideText('complete').replace(/\s+/g, ' '), /Submit the commit with `complete GY-N EPOCH --head SHA` \(the control plane is the merge writer; the shared object store already holds SHA\)\. This reports implementation completion and ends your lease in the same transaction; it does not set Done\./);
+  assert.match(guideText('complete'), /Make `complete` your last action: do not heartbeat or edit after it\./);
   assert.equal(managedInstructions(block), block, 'regenerating keeps it exactly once');
   const agents = await readFile(join(import.meta.dirname, '../AGENTS.md'), 'utf8');
   assert.ok(!/uses Graphyard at \S+ for ownership/.test(agents), 'this repository\'s AGENTS.md names no server: the origin lives in ignored .graphyard/connection.json (GY-2240)');

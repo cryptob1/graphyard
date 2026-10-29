@@ -13,9 +13,9 @@ Non-master launches get own checkouts, the coordinator's unwritable (Codex sandb
 
 ### Worker sandbox
 
-Codex `--add-dir` roots: `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`; never `.git`.
+Codex `--add-dir` roots: the common `.git` (GY-2977: `packed-refs` lock), `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`.
 
-The read-only mount re-exposes the common `.git` directory writable (GY-2967): every ref transaction a worker runs — commit, merge, reset, `branch -f`, `update-ref`, a cherry-pick's cleanup — takes the common `packed-refs` lock once anything has packed a ref (git gc does), and rewrites that file under the lock. Inside it, the checkout's own state is re-bound read-only — `index`, `HEAD`, `config`, `hooks`, the refs outside `refs/heads/graphyard`, and the shared `worktrees` area for a session with its own worktree admin — where the read-only bind still lets git take its `.lock` (the directory stays writable) but refuses the write and the rename that commits it, so the coordinator's index, HEAD, config and the base branch keep the protection they had.
+The read-only mount re-exposes the common `.git` directory writable (GY-2967): every ref transaction a worker runs — commit, merge, reset, `branch -f`, `update-ref`, a cherry-pick's cleanup — takes the common `packed-refs` lock once anything has packed a ref (git gc does), and rewrites that file under the lock. Each runtime's own sandbox (Codex `--add-dir`, and the equivalent for other runtimes) must grant that common directory too (GY-2977): GY-2967 fixed only the bubblewrap layer, and a nested Codex sandbox that omitted it still refused `packed-refs.lock` with EROFS. Inside the mount, the checkout's own state is re-bound read-only — `index`, `HEAD`, `config`, `hooks`, the refs outside `refs/heads/graphyard`, and the shared `worktrees` area for a session with its own worktree admin — where the read-only bind still lets git take its `.lock` (the directory stays writable) but refuses the write and the rename that commits it, so the coordinator's index, HEAD, config and the base branch keep the protection they had.
 
 Launches take the first account under `run.quotaCeilingPercent`, else fail over; limit notices hold the account (`capacity.exhausted`), among them Z.AI's 429 `Rate limit reached` envelope (`{"code":"1302",…}`), which names no reset and holds its account 15 minutes, and Claude's `You've hit your session limit · resets 1:30am (America/Los_Angeles)` and `You've reached your Fable limit. …` (GY-2962): the session limit holds until the reset it names, a session or usage limit with no readable reset holds 6 hours, and a Fable limit — which names no reset — until the next 08:00 local. Concurrent launches spread across provider plans before any plan takes a second live session, so one plan's limit cannot take the fleet down. Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
 
@@ -69,3 +69,15 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted
 **Registry slot**: the launch's agent-registry session rides its ledger record; the loop's close step ends it once the verdict is recorded, the item leaves review, or the pane is gone from Herdr (the reason names the pane), so a finished review or proof stops consuming its role's concurrency. Producers likewise. A session whose launching loop restarted away has no handle the successor loop tracks; each dispatch tick also judges every registry session the control plane lists live for this host by the pane its ledger record names, and ends it on the second consecutive miss.
 
 **The attempt bound is a progress bound** (GY-2961): an attempt whose worktree shows a new commit or changed files within the last 20 minutes, and whose lease renews, runs past the bound and is stopped only at the **ceiling** (default 8h); one with neither is stopped at the **bound** (default 130min since the claim). Each cycle the loop reads the attempt's worktree and records what changed on the session handle, so the control plane's renewal refusal counts the same progress. The stop keeps the attempt's uncommitted work as one WIP commit on its branch — a successor receives the diff — and releases the lease. The launch brief names the end instant, the rule and the ceiling (`run.attemptBoundMinutes` / `run.attemptCeilingMinutes` set both per install), and `master status` shows each live attempt's remaining time. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown; from 130min renewal refused as the backstop when no progress of either kind is on the record. Open scope asks exempt.
+
+### The launch reads short; the procedure loads on demand (GY-2972)
+
+A launched session's standing text is the short AGENTS.md block plus its role brief; each names the `guide TOPIC` topics its role needs instead of restating their procedure, and `node $GRAPHYARD_CLI guide TOPIC` (topics: claim, sync, complete, park, blocked, review, proof, master) prints it. The topics moved the older, longer text verbatim, so no rule changed. Word counts before (the item's base commit) and after, rendered with the fixed inputs tests/agents-guide.test.ts pins:
+
+| Text | Before | After |
+| --- | --- | --- |
+| AGENTS.md block | 678 | 101 |
+| Worker brief | 662 | 453 |
+| Reviewer brief | 795 | 553 |
+| Producer brief | 732 | 501 |
+| Master brief | 356 | 246 |
