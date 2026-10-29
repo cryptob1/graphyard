@@ -66,11 +66,12 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Pro
     for (const work of works) if (ports.hold && await ports.hold(work)) return [...results, ...await alone(ports, works)];
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
     for (const [index, { work, head, baseTip: parent, mergeSha }] of batch.entries()) {
-      // Every head's proofs (unit, integration and the bound e2e cases) were counted on the batch's one trial; the e2e results ride the first head's record only, so the trusted run records once.
-      const proofs = Object.fromEntries([...criterionProofs(work), ...e2eProofsOf(work)].map(proof => [proof, run.proofs[proof] ?? { executed: 0, failed: 0 }]));
+      // Every head's proofs (unit, integration and the bound e2e cases) were counted on the batch's one trial; each head's record carries only the runs of its own e2e cases.
+      const own = e2eProofsOf(work), e2e = run.e2e?.filter(entry => own.includes(entry.proof)) ?? [];
+      const proofs = Object.fromEntries([...criterionProofs(work), ...own].map(proof => [proof, run.proofs[proof] ?? { executed: 0, failed: 0 }]));
       await ports.record(work, { kind: 'intent', head, baseTip: parent, mergeSha, risk: riskOf(work).risk, at: at() });
       await ports.record(work, { kind: 'trial', head, baseTip: parent, mergeSha: tip, outcome: 'verdict', build: run.build, tests: run.tests, files: run.files, proofs, durationMs: run.durationMs,
-        ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(index === 0 && run.e2e?.length ? { e2e: run.e2e } : {}), ...(preview ? { preview } : {}), ...(flaked && index === 0 ? { flaked } : {}) });
+        ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(e2e.length ? { e2e } : {}), ...(preview ? { preview } : {}), ...(flaked && index === 0 ? { flaked } : {}) });
     }
     if (await ports.push(tip, baseTip) !== 'pushed') return [...results, ...await alone(ports, works)];
     for (const { work, mergeSha } of batch) await ports.record(work, { kind: 'pushed', mergeSha, pushedAt: at() });
