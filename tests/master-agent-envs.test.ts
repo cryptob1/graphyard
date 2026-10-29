@@ -230,9 +230,9 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     assert.equal(tab.CLAUDE_CONFIG_DIR, homes.fresh); assert.equal(tab.GRAPHYARD_HERDR_AGENT_KIND, 'claude'); assert.equal(tab.CODEX_HOME, undefined);
     // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
     // GY-121: both come from the files in the worktree that the short typed line references.
-    assert.match(typedRuntime(calls[1][3]!), / -- claude --permission-mode bypassPermissions --setting-sources user --settings \S+ --append-system-prompt-file "\$GY\.role" "\$\(cat "\$GY\.request"\)"$/, 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
+    assert.match(typedRuntime(calls[1][3]!), / -- claude --permission-mode bypassPermissions --session-id [0-9a-f-]{36} --setting-sources user --settings \S+ --append-system-prompt-file "\$GY\.role" "\$\(cat "\$GY\.request"\)"$/, 'the failed-over worker runs the account runtime and loads its role file, not the repository settings');
     const worker = expandTypedCommand(calls[1][3]!);
-    assert.equal(worker.kind, 'claude'); assert.equal(worker.args[5], sessionHarnessFile(root, 'worker', 'worker-a'));
+    assert.equal(worker.kind, 'claude'); assert.equal(worker.args[worker.args.indexOf('--settings') + 1], sessionHarnessFile(root, 'worker', 'worker-a'));
     assert.equal(roleOf(worker.args), launchAuthorization.replace(/\s+/g, ' '), 'the role file holds the launch authorization');
     assert.match(worker.args.at(-1)!, /^Implement GY-68: /, 'the request is the last argument');
     assert.doesNotMatch(typedRuntime(calls[1][3]!) + worker.args.join(' '), /gpt-codex/);
