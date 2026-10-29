@@ -38,7 +38,7 @@ let onLocked: ((id: string) => Promise<void>) | undefined;
 let openItems: Work[] = [], heldDone: Work[] = [];
 
 const createItem = async (title: string) =>
-  engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-scale'] }] }, randomUUID());
+  engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-scale'] }] }, randomUUID());
 
 /** A delivered item nothing is owed for any more, inserted beside its work-index row. */
 const doneDocument = (template: Work, key: string, over: Partial<Work> = {}): Work => ({

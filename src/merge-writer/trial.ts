@@ -9,6 +9,7 @@ import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionChe
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
+import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
 import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master/host-memory.js';
 import { parseFailedTests } from '../model/base-failure.js';
@@ -284,6 +285,8 @@ export interface TrialRun {
    * refusal still fails the head but says `timed out` so the operator can tell load from regression.
    */
   timedOut?: boolean;
+  /** GY-2965: how every bound E2E case ran against the served head; present when the item names e2e: proofs. */
+  e2e?: TrialE2eCase[];
 }
 /** A trial's phases, in order (GY-1832): the checkout and its install, the build, the test selection, the test run. */
 export const trialPhases = ['install', 'build', 'selection', 'tests'] as const;
@@ -565,6 +568,8 @@ export interface RunTrialInput {
    * skips it unless a test injects a scan (or `false` to force a skip outside the suite).
    */
   secretScan?: ((input: SecretScanInput) => Promise<SecretScanResult>) | false;
+  /** GY-2965: the item's `e2e:` proofs; each binds e2e/cases/NAME.json, which the trial runs against the served head. */
+  e2eProofs?: readonly string[];
 }
 const tailLength = 4000;
 /**
@@ -749,6 +754,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   }
   const env = { ...trialEnvironment(input.environment), ...trialTemporaryVariables(temporary) };
   const log: string[] = [];
+  // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
+  const e2e: TrialE2eCase[] = [];
   const remaining = () => Math.max(1000, deadline - now());
   const tail = () => log.join('\n').slice(-tailLength);
   const output = (error: unknown) => {
@@ -808,7 +815,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     log.push(line);
     return { build, tests, durationMs: Math.max(0, now() - startedAt), logTail: logTail === undefined ? tail() : `${logTail}\n${line}`, runnerExit, ...(groups ? { groups } : {}), phases: closed,
       ...(detail?.failingCase ? { failingCase: detail.failingCase } : {}),
-      ...(detail?.timedOut ? { timedOut: true } : {}) };
+      ...(detail?.timedOut ? { timedOut: true } : {}),
+      ...(e2e.length ? { e2e } : {}) };
   };
   const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
   const trial = async (): Promise<TrialRun> => {
@@ -890,6 +898,16 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });
           browserSuitePassed = true;
         }
+      }
+      // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
+      if (input.e2eProofs?.length) {
+        enter('tests');
+        const ran = await runTrialE2eCases({
+          worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env,
+          scratch: temporary ?? checkout.directory, budgetMs: remaining(), holds, log: line => log.push(line),
+        });
+        // Bounded so the trial record the merge writer posts stays within its schema.
+        e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
       }
       // GY-2958: without Graphyard's own selection script, run the managed repository's preMerge /
       // package.json test checks; a Node package with none configured records that explicitly.

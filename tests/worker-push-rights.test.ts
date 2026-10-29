@@ -115,8 +115,8 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
   commit(seed, 'README.md', 'base', 'Seed'); commit(seed, 'src-own.txt', 'own v0', 'Own file'); commit(seed, 'src-foreign.txt', 'foreign v0', 'Foreign file');
   git(seed, 'push', '-q', 'origin', 'main');
 
-  let work: Work = await engine.execute(operator, 'create', null, { title: 'Contaminated rework', criteria: [{ id: 'AC-1', text: 'Own change', proofs: ['unit:own'] }] }, randomUUID());
-  const foreign: Work = await engine.execute(operator, 'create', null, { title: 'Foreign unlanded', criteria: [{ id: 'AC-1', text: 'Foreign change', proofs: ['unit:foreign'] }] }, randomUUID());
+  let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Contaminated rework', criteria: [{ id: 'AC-1', text: 'Own change', proofs: ['unit:own'] }] }, randomUUID());
+  const foreign: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Foreign unlanded', criteria: [{ id: 'AC-1', text: 'Foreign change', proofs: ['unit:foreign'] }] }, randomUUID());
   const itemBranch = `graphyard/${work.key.toLowerCase()}-1`, pr = 4128;
   // The observer reads the real origin, as the provider would: the PR head, the base tip and the diff between them.
   const observeOrigin = async () => {
@@ -225,7 +225,7 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
 
 test('integration:unrunnable-remedy-reported — a blocker naming a command no launched session may run is reported in master status as a Graphyard defect', async () => {
   const blocked = async (title: string, reason: (branch: string) => string) => {
-    let work: Work = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+    let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
     const itemBranch = `graphyard/${work.key.toLowerCase()}-${work.epoch}`;

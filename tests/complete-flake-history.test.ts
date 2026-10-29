@@ -28,7 +28,7 @@ const flaked = [{ case: 'unit:outside-proof — case A', file: 'tests/flaky.test
 const baseFailures = [{ case: 'unit:outside-proof — case B', file: 'tests/broken-elsewhere.test.ts', line: 7, durationMs: null }];
 
 async function assigned(title: string, n: number) {
-  let w = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:outside-proof'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:outside-proof'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   return await engine.execute(worker, 'workspace', w.id, { epoch: w.epoch, host: 'test', path: `/tmp/complete-flake-history-${n}`, branch: `graphyard/complete-flake-history-${n}` }, randomUUID());

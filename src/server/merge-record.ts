@@ -1,13 +1,17 @@
 import { createHash } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
-import { demand, type Principal, type Work } from '../model.js';
+import { demand, type Evidence, type Principal, type Work } from '../model.js';
 import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, mergeTrialStepKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
 import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from '../model/merge-authorization.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
+import { trialAuthor } from '../merge-writer/trial.js';
+import { defaultMergeBatch } from '../merge-writer/batch.js';
+import { recordScenarioRun } from '../test-runs.js';
 import { mergeRecordKinds, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
@@ -32,13 +36,20 @@ const tests = z.object({ passed: z.number().int().min(0), failed: z.array(z.stri
 const trialPhase = z.enum(trialPhases), trialNoVerdictOutcome = z.enum(['timeout', 'cancelled', 'host-failure']);
 const trialPhaseDurations = z.object(Object.fromEntries(trialPhases.map(phase => [phase, z.number().min(0)])) as Record<TrialPhase, z.ZodNumber>).strict();
 const trialAttempts = z.array(z.object({ outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().max(1000), phases: trialPhaseDurations }).strict()).max(10);
+/** Every e2e result one trial can owe: a full batch of items, each with create's 50 criteria of 20 proofs. */
+const trialE2eResultLimit = defaultMergeBatch * 50 * 20;
 export const mergeRecordBodySchema = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('intent'), head: sha, baseTip: sha, mergeSha: sha, risk: z.string().min(1).max(40), at: instant }).strict(),
   // GY-1832: a trial is a verdict, with its phases' times and the attempts before it that reached none, or a final no-verdict outcome naming its phase and reason.
   z.discriminatedUnion('outcome', [
-    z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: z.literal('verdict'), build: z.enum(['pass', 'fail']), tests, files: z.array(z.string().max(500)).max(1000),
+    z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: z.literal('verdict'), build: z.enum(['pass', 'fail']), tests,
+      files: z.array(z.string().max(500)).max(1000),
       proofs: z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).strict()), durationMs: z.number().int().min(0),
-      phases: trialPhaseDurations.optional(), attempts: trialAttempts, preview: previewVerdictSchema.optional(), flaked: trialFlakedSchema.optional() }).strict(),
+      phases: trialPhaseDurations.optional(), attempts: trialAttempts,
+      // GY-2965: how each bound E2E case ran against the served head; a run of one becomes a trusted record on the item and a run in the case's history.
+      e2e: z.array(z.object({ proof: z.string().regex(/^e2e:[a-zA-Z0-9._/-]+$/).max(200), case: z.string().max(200), executed: z.number().int().min(0), failed: z.number().int().min(0),
+        missing: z.boolean().optional(), failingStep: z.string().max(2000).nullable().optional() }).strict()).max(trialE2eResultLimit).optional(),
+      preview: previewVerdictSchema.optional(), flaked: trialFlakedSchema.optional() }).strict(),
     z.object({ kind: z.literal('trial'), head: sha, baseTip: sha, mergeSha: sha, outcome: trialNoVerdictOutcome, phase: trialPhase, reason: z.string().min(1).max(1000),
       phases: trialPhaseDurations, attempts: trialAttempts.min(1), durationMs: z.number().int().min(0) }).strict(),
   ]),
@@ -119,6 +130,20 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     const payload = kind === 'intent' ? { key: work!.key, ...fields } : kind === 'refused' ? { ...fields, kind: 'merge' } : fields;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, mergeRecordKinds[event.kind], JSON.stringify(payload)]);
     work!.mergeLedger = await foldItemLedger(db, work!, data);
+    // GY-2965: the trial is a trusted producer of its E2E case runs. Every case that ran is recorded on the
+    // item as trusted evidence bound to the merge commit it ran against — a pass and a fail both keep their
+    // run in the case's Tests-page history; only a pass can stand behind the proof, and only through the
+    // trial counts the acceptance gate reads.
+    if (data.kind === 'trial' && data.outcome === 'verdict' && data.e2e?.length) {
+      for (const entry of data.e2e) {
+        if (entry.executed === 0) continue;
+        const evidence: Evidence = { id: randomUUID(), proof: entry.proof, sha: data.mergeSha, baseSha: data.baseTip, policyRevision: work!.policyRevision,
+          producer: trialAuthor, trusted: true, result: entry.failed === 0 ? 'pass' : 'fail', executed: entry.executed, skipped: 0, at: now.toISOString(),
+          environment: 'merge-writer-trial' };
+        work!.evidence.push(evidence);
+        await recordScenarioRun(db, work!, evidence);
+      }
+    }
     if (kind === 'reconciled') {
       const mergedAt = work!.mergeLedger?.pushedAt ?? now.toISOString();
       const observation = work!.observation;

@@ -62,7 +62,7 @@ test('unit:loop-accepts-coordinator-proof-patterns — master run --once runs a 
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
   }
 
-  let w = await engine.execute(operator, 'create', null, { title: 'Proven by hand', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:checked'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Proven by hand', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:checked'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   await assert.rejects(engine.execute(coordinator, 'evidence', w.id, { proof: 'manual:checked', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: w.policyRevision, result: 'pass', executed: 1, skipped: 0 }, randomUUID()),
     /Evidence submission is not permitted/, 'a coordinator never submits evidence, whatever its patterns');

@@ -1,6 +1,16 @@
 <!-- page: Build integrations | 2 | cases -->
 # E2E validation
 
+## Every user-facing item carries an e2e: proof
+
+An item of type `feature` or `bug` — work a user can see — must carry at least one criterion with an `e2e:` proof: the end-to-end case the merge writer's trial runs against the served head before the item can land. `master create` and `master requirements` refuse one otherwise, naming the case format and the opt-out. A head whose bound case is missing or failing is refused by the merge trial, the same way failing tests refuse it.
+
+- **Binding.** An `e2e:NAME` proof binds to `e2e/cases/NAME.json` on the head. A trial of a head that carries the proof but not the case refuses it: `e2e:NAME has no case at e2e/cases/NAME.json`.
+- **Serve declaration.** The repository's graphyard.json declares how a head is served for end-to-end runs, `e2e.serve`: `"e2e": { "serve": { "command", "url", "readySeconds" } }` — `command` runs in the trial checkout until `url` answers, waited for at most `readySeconds`. A repository that already declares a previewable application (`delivery.applications`, a static site or Compose project) needs no `serve`: the trial runs each case against the application `delivery.cases` binds it to (or the only one declared), served the way a preview is. Create refuses an `e2e:` proof in a repository that declares neither, naming the declaration to add.
+- **Opt-out.** Work with nothing a user can see — refactors, docs, headless-only and control-plane-internal changes — opens its description with `No user-facing change:` followed by a reason, and then owes no e2e proof.
+
+The trial records each case's run against the exact merge commit as a trusted run, so the Tests page history fills from the gate. Required `uat` cases still run on every deploy, as below.
+
 An `e2e:` proof passes from pinned candidate/bundle/separate collector; `validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`. `admin` defines cases; runners (`worker`) poll/ack/heartbeat; builders/collectors (`producer`) attest/publish, never both; only trusted attempts append **Tests** runs. [Evidence](protocol/work-commands.md#evidence-and-pipeline) carries trust and grants.
 
 ## Approve the bundle and run an attempt

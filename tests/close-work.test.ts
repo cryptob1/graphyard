@@ -42,7 +42,7 @@ const ok = async (principal: Principal, path: string, body?: unknown) => {
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 const events = async (work: Work) => (await store.pool.query('SELECT actor, kind, payload FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows as { actor: string; kind: string; payload: any }[];
 async function released(title: string): Promise<Work> {
-  const work = await ok(operator, 'work', { title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:close'] }] }) as Work;
+  const work = await ok(operator, 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:close'] }] }) as Work;
   return ok(operator, `work/${work.id}/ready`, {});
 }
 /** Write a field the control plane would have set, directly, as the fixture for what closing must clear. */

@@ -55,7 +55,7 @@ const observation = (work: Work, extra: Partial<Observation> = {}): Observation 
 
 const released = async () => {
   const n = ++serial;
-  const created = await engine.execute(operator, 'create', null, { title: `Liveness ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
+  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Liveness ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
   return engine.execute(operator, 'ready', created.id, {}, id());
 };
 const claimed = async () => engine.execute(worker, 'claim', (await released()).id, {}, id());
@@ -91,7 +91,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   const building = await judge(await claimed());
   assert.equal(building.violation, null);
   assert.equal(building.obligation!.kind, 'session', 'the leased worker owns the build');
-  const backlog = await engine.execute(operator, 'create', null, { title: 'Backlog', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
+  const backlog = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Backlog', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
   assert.deepEqual(await judge(backlog), { work: backlog.id, key: backlog.key, obligation: null, violation: null }, 'backlog is not open work');
 
   // A candidate passing every gate but the merge writer's owes nobody a step (GY-2010): the writer

@@ -47,22 +47,23 @@ const trialLedger = (proofs: Record<string, { executed: number; failed: number }
     { kind: mergeTrialKind, payload: { head: tried, baseTip: base, mergeSha: sha('merge'), build: 'pass', tests: { passed: 1, failed: [], files: 1 }, files: [], proofs, durationMs: 1 } },
   ])['GY-1'];
 
-test('unit:landability-control-plane-ledger-proofs — a control-plane candidate\'s acceptance reads unit:/integration: counts from work.mergeLedger.trial for the current head, asks manual: only of a sensitive change, defers e2e:, and ignores producer evidence', () => {
+test('unit:landability-control-plane-ledger-proofs — a control-plane candidate\'s acceptance reads unit:/integration: counts from work.mergeLedger.trial for the current head, asks manual: only of a sensitive change, reads e2e: counts from the bound-case run of the trial (GY-2965), and ignores producer evidence', () => {
   const acceptance = (work: Work) => landabilityRefusals(evaluateLandability(work, [work], new Date(start)), 'acceptance');
   const untried = item('control-plane', ['src/app.ts']);
   assert.deepEqual(acceptance(untried), [
     `AC-1: unit:item-works needs executed > 0 and failed = 0 in the merge writer's trial of this candidate; the merge writer has not trialled ${head.slice(0, 12)}`,
     `AC-1: integration:item-holds needs executed > 0 and failed = 0 in the merge writer's trial of this candidate; the merge writer has not trialled ${head.slice(0, 12)}`,
-  ], 'normal risk: no manual attestation, e2e deferred');
-  const passed = item('control-plane', ['src/app.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 2, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 } }) });
+    `AC-1: e2e:item-ships needs executed > 0 and failed = 0 in the merge writer's trial of this candidate; the merge writer has not trialled ${head.slice(0, 12)}`,
+  ], 'normal risk: no manual attestation; the e2e case is the trial\'s too');
+  const passed = item('control-plane', ['src/app.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 2, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } }) });
   assert.deepEqual(acceptance(passed), []);
-  const failing = item('control-plane', ['src/app.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 2, failed: 1 }, 'integration:item-holds': { executed: 0, failed: 0 } }) });
+  const failing = item('control-plane', ['src/app.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 2, failed: 1 }, 'integration:item-holds': { executed: 0, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } }) });
   assert.deepEqual(acceptance(failing).map(reason => reason.replace(/^.*; /, '')), ['the trial ran 2 and 1 failed', 'the trial ran 0 and 0 failed']);
   const stale = item('control-plane', ['src/app.ts'], { mergeLedger: trialLedger({ 'unit:item-works': { executed: 2, failed: 0 }, 'integration:item-holds': { executed: 1, failed: 0 } }, sha('older-head')) });
-  assert.equal(acceptance(stale).length, 2, 'a trial of another head proves nothing for this one');
+  assert.equal(acceptance(stale).length, 3, 'a trial of another head proves nothing for this one');
   // Sensitive: the manual attestation is required; trusted producer evidence for the unit proof changes nothing.
   const evidence = [{ id: 'e1', proof: 'unit:item-works', result: 'pass', trusted: true, executed: 5, skipped: 0, failed: 0, producer: 'producer', sha: head, baseSha: base, policyRevision: 1, at: iso(start) }];
-  const sensitive = item('control-plane', ['src/store/schema.ts'], { evidence, mergeLedger: trialLedger({ 'integration:item-holds': { executed: 1, failed: 0 } }) });
+  const sensitive = item('control-plane', ['src/store/schema.ts'], { evidence, mergeLedger: trialLedger({ 'integration:item-holds': { executed: 1, failed: 0 }, 'e2e:item-ships': { executed: 1, failed: 0 } }) });
   assert.deepEqual(acceptance(sensitive).map(reason => reason.split(' ')[1]), ['unit:item-works', 'manual:item-looks']);
   // A producer's judged failure of a proof nothing requires refuses no control-plane build.
   const strayFail = item('control-plane', ['src/app.ts'], { evidence: [{ ...evidence[0], id: 'e2', proof: 'unit:stray', result: 'fail', failed: 1 }], mergeLedger: passed.mergeLedger });

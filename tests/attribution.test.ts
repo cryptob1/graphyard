@@ -13,6 +13,10 @@ import { currentEvidence, type Observation, type Principal, type Work } from '..
 import { server } from '../src/server.js';
 import { attributionDrilldown, candidateManifest, compatibilitySignature, computeAttribution, digestHash, manifestHash, readAttribution, releaseManifest, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 /**
@@ -81,7 +85,7 @@ async function fixture(options: { immutable?: boolean; artifacts?: Record<string
   await define(refs.collector, collector, 'collector'); await define(refs.builder, builder, 'builder');
   await define(refs.observer, observer, 'observer', { services: ['api', 'web'] }); await define(refs.secondObserver, secondObserver, 'observer', { services: ['api', 'web'] }); await define(refs.promoter, promoter, 'promoter', { services: ['api', 'web'] });
   await validation.define(operator, { kind: 'bundle', id: refs.bundle.id, expectedRevision: 0, scenario: scenario.id, scenarioRevision: scenario.revision, scenarioHash: scenario.hash, digest: bundleDigest, runnerImageDigest: runnerImage }, id());
-  let w = await engine.execute(operator, 'create', null, { title: `Attribution fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Attribution fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/attribution-${n}`, branch: `graphyard/attribution-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());
@@ -126,7 +130,7 @@ async function cleanup(f: Fixture) {
 }
 /** Delivered work the way production reaches it: a candidate passing every gate whose merge GitHub reports, independently observed — release membership is checked against this. */
 async function delivered(mergeSha: string) {
-  let w = await engine.execute(operator, 'create', null, { title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/attribution-delivered-${serial}`, branch: `graphyard/attribution-delivered-${serial}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: serial }, id());

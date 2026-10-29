@@ -134,7 +134,7 @@ test('unit:cli-reads-bounded-snapshot — CLI commands read bounded snapshot or 
 
 test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with cursor and pageSize', async () => {
   for (let index = 0; index < 30; index++) {
-    const item = await engine.execute(operator, 'create', null, {
+    const item = await engine.execute(operator, 'create', null, { type: 'chore', 
       title: `Paged item ${index + 1}`, 
       criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }],
     }, randomUUID()) as Work;
@@ -198,7 +198,7 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   await get('work-snapshot?view=full');
   const before = { full: await documentsReadFor('work-snapshot?view=full&pageSize=7&cursor=3'), bounded: await documentsReadFor('work-snapshot?pageSize=7&cursor=3') };
   for (let index = 0; index < 30; index++) {
-    await engine.execute(operator, 'create', null, { title: `Growth item ${index + 1}`, criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }] }, randomUUID());
+    await engine.execute(operator, 'create', null, { type: 'chore',  title: `Growth item ${index + 1}`, criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }] }, randomUUID());
   }
   await get('work-snapshot?view=full');
   const grown = { full: await documentsReadFor('work-snapshot?view=full&pageSize=7&cursor=3'), bounded: await documentsReadFor('work-snapshot?pageSize=7&cursor=3') };

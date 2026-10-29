@@ -75,6 +75,7 @@ test('integration:expired-worker-partial-work-handoff — a worker attempt ended
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
   const filed = await ok(operator, 'POST', 'work', {
     title: 'Preserve a timed-out attempt\'s partial work',
+    type: 'chore',
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-partial-work-handoff'] }],
   }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});

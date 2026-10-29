@@ -55,7 +55,7 @@ async function noise(work: Work, rows = NOISE) {
 
 /** One item's whole life: three attempts, a blocked report that ended the first, a rework round and two submissions. */
 async function lifecycle() {
-  let work = await engine.execute(operator, 'create', null, {
+  let work = await engine.execute(operator, 'create', null, { type: 'chore', 
     title: 'An item whose history outlives one page', 
     criteria: [{ id: 'AC-1', text: 'History is readable at any age', proofs: ['integration:events-pagination'] }],
   }, randomUUID());

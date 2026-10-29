@@ -47,7 +47,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 
 /** The item the fixture session runs, claimed so its lease is live across the whole fixture clock. */
 const item = async (key: string, title: string) => {
-  const filed = await ok(operator, 'POST', 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:idle-session-after-reprompt-is-ended'] }] }) as Work;
+  const filed = await ok(operator, 'POST', 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:idle-session-after-reprompt-is-ended'] }] }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});
   const claimed = await ok(workerA, 'POST', `work/${filed.id}/claim`, {}) as Work;
   return { filed: claimed, session: { id: `worker-a:1`, kind: 'implementation' as const, principal: workerA.id, epoch: claimed.epoch, runtime: 'pi', host: 'loop-host', pane: `pane-${key.toLowerCase()}`, agentName: `agent-${key.toLowerCase()}`, subject: `${key}: ${title}`, state: 'running' as const } };

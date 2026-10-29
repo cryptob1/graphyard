@@ -14,3 +14,4 @@ export * from './model/bootstrap.js';
 export * from './model/gates.js';
 export * from './model/carry.js';
 export * from './model/closure.js';
+export * from './model/user-facing.js';

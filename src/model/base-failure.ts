@@ -47,7 +47,7 @@ export function baseFailureItem(failure: BaseFailure, baseBranch: string) {
     title: `Base branch ${baseBranch} fails ${failure.check} test: ${failure.test}`.slice(0, 200),
     type: 'bug' as const, priority: 0,
     description: [
-      `The master loop filed this item itself (GY-528): the required ${failure.check} check fails the test "${failure.test}" on the head of ${baseBranch}, commit ${failure.baseSha}, in CI run ${runOf(failure)}.`,
+      `No user-facing change: the master loop filed this control-plane repair itself (GY-528); the required ${failure.check} check fails the test "${failure.test}" on the head of ${baseBranch}, commit ${failure.baseSha}, in CI run ${runOf(failure)}.`,
       `The same test fails on every candidate listed below, so it is no candidate's to fix and the loop requests no rework for it: each stays held until ${baseBranch} passes again. Blocked candidates: ${blocked.join(', ') || 'none yet'}.`,
       `Once the ${failure.check} check passes on ${baseBranch} again the loop clears the attention, reruns each blocked candidate's failed job and refreshes each onto the repaired base.`,
     ].join('\n\n').slice(0, 20000),

@@ -101,7 +101,7 @@ async function overwrite(work: Work, mutate: (document: Work) => void) {
   return document;
 }
 async function claimed(title: string) {
-  let work = await engine.execute(operator, 'create', null, { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   work = await engine.execute(worker, 'claim', work.id, {}, id());
   return engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/srv/worktrees/${work.key}-${work.epoch}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, id());

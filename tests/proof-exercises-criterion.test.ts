@@ -42,7 +42,7 @@ before(async () => {
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
 
-const create = () => engine.execute(operator, 'create', null, { title: 'Exercise fixture', criteria: [
+const create = () => engine.execute(operator, 'create', null, { type: 'chore',  title: 'Exercise fixture', criteria: [
   { id: 'AC-1', text: 'An expired lease cannot claim', proofs: [PROOF] },
   { id: 'AC-2', text: 'Something else holds', proofs: [OTHER] },
 ] }, id()) as Promise<Work>;

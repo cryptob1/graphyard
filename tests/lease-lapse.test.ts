@@ -15,7 +15,7 @@ const worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' 
 const replacement: Principal = { id: 'engineer-b', role: 'worker', sessionKind: 'ai' };
 let database: EmbeddedPostgres, store: Store, engine: Engine, expiring: Engine;
 const id = () => randomUUID();
-const input = (title: string) => ({ title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+const input = (title: string) => ({ title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 const events = async (work: Work, kind: string) => (await store.events(work.id)).filter(event => event.kind === kind);
 const merge = (work: Work) => work.gates.find(gate => gate.name === 'merge')!;

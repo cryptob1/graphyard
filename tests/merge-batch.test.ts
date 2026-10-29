@@ -87,3 +87,17 @@ test('unit:merge-batch-fallback — a batch whose trial fails is trialled one he
   assert.ok('outcome' in set && set.outcome.outcome === 'refused' && set.outcome.conflict.join() === 'src/app.ts');
   for (const key of ['GY-1', 'GY-3', 'GY-4']) assert.deepEqual(conflicting.kinds(key), ['intent', 'trial', 'pushed', 'reconciled'], `${key} is merged`);
 });
+
+test('unit:merge-batch-e2e-own-item — each head in a passing batch records only the runs of its own e2e cases, so no case run is attributed to another item', async () => {
+  const run = recording();
+  const items = [1, 2].map(queued);
+  items.forEach((item, index) => item.criteria.push({ id: 'AC-2', text: 'Shows', proofs: [`e2e:case-${index + 1}`] }));
+  const trial = run.ports.trial;
+  run.ports.trial = async (...args) => ({ ...await trial(...args), e2e: [1, 2].map(n => ({ proof: `e2e:case-${n}`, case: `e2e/cases/case-${n}.json`, executed: 1, failed: 0 })) });
+  await mergeBatch(run.ports, items);
+  for (const n of [1, 2]) {
+    const record = run.records.find(entry => entry.key === `GY-${n}` && entry.event.kind === 'trial')!.event;
+    assert.ok(record.kind === 'trial' && record.outcome === 'verdict');
+    assert.deepEqual(record.e2e?.map(entry => entry.proof), [`e2e:case-${n}`], `GY-${n} records its own case run only`);
+  }
+});

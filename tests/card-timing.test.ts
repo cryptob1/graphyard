@@ -207,7 +207,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 
 test('integration:status-duration-tracks-real-progress — a retry loop, a heartbeat and an observation leave the clock running; only entering a new status restarts it', async () => {
   const id = () => randomUUID();
-  let item = await engine.execute(operator, 'create', null, { title: 'Card timing', 
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Card timing', 
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
   item = await engine.execute(operator, 'ready', item.id, {}, id());
 

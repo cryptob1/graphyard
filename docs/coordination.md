@@ -3,7 +3,7 @@
 
 ## Write observable criteria
 
-Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:`: producer-runnable on exact head; `manual:`: master attestation unless in `producerProofs`; `e2e:`: [runner](validation.md). Any trusted pass proves it whatever it executed. `master create` plans; `master requirements` rewrites, lapsing evidence/review/authorization. Post-ship/production/host outcomes need `manual:post-deploy/NAME` or a per-clause observation; never merge-gating.
+Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:`: producer-runnable on exact head; `manual:`: master attestation unless in `producerProofs`; `e2e:`: [runner](validation.md), and required on every user-facing item — a `feature` or `bug` owes a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json`, which the merge trial runs against the served head; only a description opening `No user-facing change: <reason>` opts out. Any trusted pass proves it whatever it executed. `master create` plans; `master requirements` rewrites, lapsing evidence/review/authorization. Post-ship/production/host outcomes need `manual:post-deploy/NAME` or a per-clause observation; never merge-gating.
 
 ## Dispatch optimistically
 

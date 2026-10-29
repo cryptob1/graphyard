@@ -77,7 +77,7 @@ test('unit:mode-parity-github-snapshot — under the github merger the fixture\'
   const named: Record<string, boolean> = {
     'producer evidence: the stray producer failure refuses no build': !switched.evaluate.some(entry => /trusted evidence from/.test(entry.reason)),
     'acceptance from the merge ledger trial: unit and integration proofs pass on its counts': !switched.evaluate.some(entry => /unit:|integration:/.test(entry.reason)),
-    'manual attestations only for sensitive risk, e2e deferred': !switched.evaluate.some(entry => /manual:|e2e:/.test(entry.reason)),
+    'manual attestations only for sensitive risk, e2e judged by the trial like unit and integration (GY-2965)': !switched.evaluate.some(entry => /manual:/.test(entry.reason)),
     'producer sessions: the standing request is withdrawn and none is opened': switched.producers === 0 && switched.dispatch.filter(entry => entry.kind === 'producer').every(entry => entry.event === 'dispatch.cancelled'),
   };
   for (const [behaviour, holds] of Object.entries(named)) assert.ok(holds, `control-plane switches off ${behaviour}: ${JSON.stringify(switched)}`);
@@ -118,7 +118,7 @@ test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixtu
   const engine = new Engine(store, 120, 'owner/project');
   engine.directMergeEnvironment = null; engine.baseBranch = 'main';
   const assigned = async (branch: string) => {
-    let w = await engine.execute(operator, 'create', null, { title: 'parity fixture', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }] }, randomUUID());
+    let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'parity fixture', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }] }, randomUUID());
     w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
     const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
     assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));

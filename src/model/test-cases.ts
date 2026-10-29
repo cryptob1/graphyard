@@ -78,7 +78,7 @@ export interface LinkedCase {
   /** The result on the pull request's current head, from the evidence the gates themselves select. */
   head: HeadResult;
   evidence: { producer: string; sha: string; at: string; executed: number; skipped: number; run: RunIdentity } | null;
-  /** For a `unit:`/`integration:` proof: its case counts in the merge writer's trial of the current head. */
+  /** For a `unit:`/`integration:` proof, or a control-plane item's `e2e:` proof: its case counts in the merge writer's trial of the current head. */
   trial: { executed: number; failed: number } | null;
 }
 export interface TouchedCase { id: string; title: string; testPath: string }
@@ -96,7 +96,7 @@ const testProof = (proof: string) => /^(unit|integration):/.test(proof) || !!sce
 /**
  * The tests a work item's pull request is linked to: every test proof its criteria name, with its
  * result on the current head — a `unit:`/`integration:` proof from the merge writer's trial of
- * that head (GY-2091), an `e2e:` proof from the evidence the acceptance gate selects (trusted,
+ * that head (GY-2091), a control-plane item's `e2e:` proof from that same trial (GY-2965), any other `e2e:` proof from the evidence the acceptance gate selects (trusted,
  * independent, bound to this candidate and policy, the pinned revision) — and, separately, never
  * a gate, the registered cases whose test file the pull request changes.
  */
@@ -110,9 +110,11 @@ export function linkedCases(work: Work, definitions: readonly CaseDefinition[] |
     const id = proof.slice(proof.indexOf(':') + 1);
     const pin = work.scenarioRequirements?.find(requirement => requirement.proof === proof);
     const criteria = work.criteria.filter(criterion => criterion.proofs.includes(proof)).map(criterion => criterion.id);
-    if (/^(unit|integration):/.test(proof)) {
+    // GY-2965: on a control-plane item the merge trial runs an e2e: case against the served head, and the acceptance gate reads its counts, so the panel does too.
+    const trialJudged = /^(unit|integration):/.test(proof) || (work.observation?.source === 'control-plane' && proof.startsWith('e2e:'));
+    if (trialJudged) {
       const counts = trial?.proofs[proof] ?? null;
-      return { id, proof, criteria, title: null, pinned: pin ? { revision: pin.revision, environment: pin.environment } : null,
+      return { id, proof, criteria, title: proof.startsWith('e2e:') ? latest.get(id)?.title ?? null : null, pinned: pin ? { revision: pin.revision, environment: pin.environment } : null,
         head: !work.candidate ? 'no-pr' : counts && counts.executed > 0 ? counts.failed > 0 ? 'fail' : 'pass' : 'not-run',
         evidence: null, trial: counts };
     }

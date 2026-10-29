@@ -37,7 +37,7 @@ const observation = (work: Work, extra: Partial<Observation> = {}): Observation 
 
 async function submitted() {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { title: `Delta ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delta ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/delta-${n}`, branch: `graphyard/delta-${n}` }, randomUUID());
   return w;

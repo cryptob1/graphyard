@@ -187,7 +187,7 @@ test('unit:workspace-failure-spares-profile — the engine keeps the preserved-a
   const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
   const worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' };
   const id = () => randomUUID();
-  const input = (title: string) => ({ title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+  const input = (title: string) => ({ title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
   const claimed = async (actor: Principal = worker) => {
     let work = await engine.execute(operator, 'create', null, input(randomUUID()), id());
     work = await engine.execute(operator, 'ready', work.id, {}, id());

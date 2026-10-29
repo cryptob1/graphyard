@@ -93,7 +93,7 @@ test('unit:reconcile-full-ms-default-and-bounds — the default configuration fu
 test('unit:reconcile-evaluates-item-when-due — a lease expiring at T wakes its item at the first pass at or after T and no pass before it, and an item with no time-bounded input is never evaluated as due', { timeout: 120_000 }, async () => {
   const id = () => randomUUID();
   const create = (title: string, extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null,
-    { title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-evaluates-item-when-due'] }], ...extra }, id());
+    { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-evaluates-item-when-due'] }], ...extra }, id());
   const leased = await create('Due leased');
   await engine.execute(operator, 'ready', leased.id, {}, id());
   await engine.execute(worker, 'claim', leased.id, {}, id());
@@ -154,7 +154,7 @@ test('unit:reconcile-due-times-match-full-evaluation — the default full pass i
   const seedHourFleet = async () => {
     const create = async (title: string, extra: Record<string, unknown> = {}) => {
       const item = await engine.execute(operator, 'create', null,
-        { title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-times-match-full-evaluation'] }], ...extra }, id());
+        { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-times-match-full-evaluation'] }], ...extra }, id());
       await engine.execute(operator, 'ready', item.id, {}, id());
       return item as Work;
     };
@@ -163,7 +163,7 @@ test('unit:reconcile-due-times-match-full-evaluation — the default full pass i
     const child = await create('Hour child', { dependencies: [leased.id] });
     // A backlog item nobody released: its wait runs a day out, so nothing about it is due in the hour.
     await engine.execute(operator, 'create', null,
-      { title: 'Hour draft', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-times-match-full-evaluation'] }] }, id());
+      { type: 'chore',  title: 'Hour draft', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-times-match-full-evaluation'] }] }, id());
     const rowClaim = await create('Hour row claim'), rowDone = await create('Hour row done'), rowRetry = await create('Hour row retry');
     const stalled = await create('Hour stalled'), windowed = await create('Hour window');
     const claimRow = async (item: Work) => (await engine.claimNextAction(executor, { executor: 'exec-1', host: 'hour-host', leaseSeconds: 300, work: item.id }, id())).action!;
@@ -237,7 +237,7 @@ test('unit:reconcile-due-times-match-full-evaluation — the default full pass i
 
 test('unit:reconcile-due-evidence-expiry — an evidence record expiring before every other bound is the instant the evaluation records, since the gate stops counting it then with no write', { timeout: 120_000 }, async () => {
   const work = await engine.execute(operator, 'create', null,
-    { title: 'Due evidence', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-evidence-expiry'] }] }, randomUUID());
+    { type: 'chore',  title: 'Due evidence', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-evidence-expiry'] }] }, randomUUID());
   const at = new Date(await nowMs()), expiresAt = new Date(at.getTime() + 1_000).toISOString();
   const all = await store.list(), copy = structuredClone(all.find(entry => entry.id === work.id)!);
   const without = engine.evaluate(structuredClone(copy), all, at);
@@ -249,7 +249,7 @@ test('unit:reconcile-due-evidence-expiry — an evidence record expiring before 
 test('unit:reconcile-due-held-gates — a mechanical review hold lapsing at its round window is the instant the evaluation records, since the review gate moves then with no write', { timeout: 120_000 }, async () => {
   const { mechanicalRoundStartMs } = await import('../src/mechanical-findings.js');
   const work = await engine.execute(operator, 'create', null,
-    { title: 'Due holds', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-held-gates'] }] }, randomUUID());
+    { type: 'chore',  title: 'Due holds', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-held-gates'] }] }, randomUUID());
   const at = new Date(await nowMs()), all = await store.list(), base = all.find(entry => entry.id === work.id)!;
   const without = engine.evaluate(structuredClone(base), all, at);
   assert.ok(without === null || without > at.getTime() + 1_000, `no other bound of the fixture falls within the second: ${without}`);

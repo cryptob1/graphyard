@@ -18,6 +18,10 @@ import { ledgerSeeded } from '../src/store.js';
 import { schemaVersion } from '../src/release.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+// GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 const run = promisify(execFile);
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'implementer', role: 'worker' };
@@ -70,13 +74,13 @@ async function populate(store: Store) {
   // A submitted item (submission releases its lease), a second item still in backlog, and a
   // third item under a live lease with its registered workspace.
   let w = await engine.execute(operator, 'create', null, { title: 'Booking flow', criteria: [{ id: 'AC-1', text: 'Booking is proven', proofs: ['e2e:booking'] }] }, id());
-  const later = await engine.execute(operator, 'create', null, { title: 'Later work', slice: 'product', criteria: [{ id: 'AC-1', text: 'Later', proofs: ['unit:later'] }] }, id());
+  const later = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Later work', slice: 'product', criteria: [{ id: 'AC-1', text: 'Later', proofs: ['unit:later'] }] }, id());
   await recordLeadRuling(store, lead, later.id, { action: 'send-back', ruleId: 'rules/plan-v1#coverage', reason: 'Negative coverage is missing' }, id());
   await recordIntake(store, operator, { origin: 'verification-finding', title: 'Cancellation is unproven', description: 'Found while reviewing the plan', sourceWorkId: later.id }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'worker-host', path: '/srv/worktrees/booking', branch: 'graphyard/booking-1' }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 7 }, id());
-  let leased = await engine.execute(operator, 'create', null, { title: 'Cancellation flow', criteria: [{ id: 'AC-1', text: 'Cancellation is proven', proofs: ['unit:cancellation'] }] }, id());
+  let leased = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Cancellation flow', criteria: [{ id: 'AC-1', text: 'Cancellation is proven', proofs: ['unit:cancellation'] }] }, id());
   leased = await engine.execute(operator, 'ready', leased.id, {}, id()); leased = await engine.execute(worker, 'claim', leased.id, {}, id());
   await engine.execute(worker, 'workspace', leased.id, { epoch: 1, host: 'worker-host', path: '/srv/worktrees/cancellation', branch: 'graphyard/cancellation-1' }, id());
   w = await engine.observe(w.id, w.revision, { candidate: { sha, baseSha: base, pr: 7, branch: 'graphyard/booking-1', author: 'implementer' }, checks: [{ name: 'test', appId: 15368, result: 'success' }, { name: 'typecheck', appId: 15368, result: 'success' }], reviews: [{ reviewer: 'other', sha, state: 'APPROVED' }], merged: false, mergeSha: null, protected: true, mergeable: true, files: [], at: new Date().toISOString() });
@@ -188,7 +192,7 @@ test('the documented backup and restore exercise preserves assignments, history,
   // The heartbeat the collector was holding continues under the same epoch after restore.
   await validation.collectionHeartbeat(collector, { requestId: request.id, attemptId: request.attempts.at(-1)!.id, epoch: 1 }, id());
   // Sequences continue after the restored rows rather than colliding with them.
-  const created = await engine.execute(operator, 'create', null, { title: 'After restore', criteria: [{ id: 'AC-1', text: 'Continues', proofs: ['unit:after'] }] }, id());
+  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'After restore', criteria: [{ id: 'AC-1', text: 'Continues', proofs: ['unit:after'] }] }, id());
   const numbers = (await restored.pool.query('SELECT number FROM work_items ORDER BY number')).rows.map(r => Number(r.number));
   assert.deepEqual(numbers, [1, 2, 3, 4]); assert.equal(created.key, 'GY-4');
   const seqs = (await restored.pool.query('SELECT seq FROM events ORDER BY seq')).rows.map(r => Number(r.seq));

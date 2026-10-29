@@ -33,7 +33,7 @@ export async function exercise(url, principals, inventory = createInventory(), f
     assert.equal(response.status, status, `Unexpected status for ${path}`); return response.json();
   }
   async function create(title) {
-    const work = await request('work', operator, { title, criteria: [{ id: 'AC-1', text: 'A replacement machine recovers expired work', proofs: ['integration:herdr-recovery'] }] });
+    const work = await request('work', operator, { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'A replacement machine recovers expired work', proofs: ['integration:herdr-recovery'] }] });
     return request(`work/${work.id}/ready`, operator, {});
   }
   const worktree = (machine, work, epoch) => ({ epoch, host: machine.host, path: `/srv/graphyard/${machine.host}/${work.key.toLowerCase()}-${epoch}`, branch: `graphyard/${work.key.toLowerCase()}-${epoch}` });
