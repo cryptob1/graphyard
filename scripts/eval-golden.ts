@@ -189,7 +189,7 @@ export class ComposeScratchInstall implements GoldenInstall {
   async up(): Promise<this> {
     const cli = this.input.cliPath ?? resolve(dirname(fileURLToPath(import.meta.url)), '../bin/graphyard.mjs');
     await new Promise<void>((pass, fail) => {
-      const child = spawn(cli, ['install', '--provider', 'compose', '--repo', this.input.repository, '--herdr-instance',
+      const child = spawn(process.execPath, [cli, 'install', '--provider', 'compose', '--repo', this.input.repository, '--herdr-instance',
         '--port', String(this.input.port), '--apply', '--source-root', this.input.sourceRoot], { stdio: 'inherit' });
       child.on('error', fail);
       child.on('exit', code => code === 0 ? pass() : fail(new Error(`graphyard install --apply exited ${code}`)));
@@ -201,13 +201,13 @@ export class ComposeScratchInstall implements GoldenInstall {
     return e2ePrincipalId(installIdFor(this.input.repository));
   }
 
-  private async request(path: string, body?: unknown): Promise<any> {
+  private async request(path: string, body?: unknown, key: string = randomUUID()): Promise<any> {
     const principal = this.principal();
     const token = await readToken(this.directory, principal);
     if (!token) throw new Error(`The scratch install holds no credential for ${principal} at ${join(this.directory, 'tokens')}: run --apply first`);
     const response = await fetch(`${this.base}/api/${path}`, {
       method: body === undefined ? 'GET' : 'POST',
-      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+      headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': key },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     });
     const answered = await response.json();
@@ -222,7 +222,7 @@ export class ComposeScratchInstall implements GoldenInstall {
       type: item.type,
       priority: item.priority,
       criteria: item.criteria,
-    });
+    }, `golden-${item.name}-run${run}`);
     return { key: work.key, id: work.id };
   }
 
@@ -275,7 +275,7 @@ async function main(argv: string[]): Promise<void> {
   const boundMs = Number(values['bound-minutes'] ?? 90) * 60_000;
   const scratch = await mkdtemp(join(tmpdir(), 'graphyard-golden-'));
   const install = new ComposeScratchInstall({ repository, port, sourceRoot: process.cwd() });
-  await install.up();
+  try { await install.up(); } catch (error) { await install.dispose(); throw error; }
   const resultsPath = join(resultsDir(), `${values.release}.json`);
   const result = await plan(install, { release: values.release, runs, boundMs, goldenDir: values.golden ?? goldenDir(), scratch, resultsPath });
   console.log(`Wrote ${resultsPath}: ${result.rows.length} rows over ${runs} run${runs === 1 ? '' : 's'} of ${result.rows.length / runs} items`);
