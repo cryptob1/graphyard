@@ -92,6 +92,11 @@
     ]
   },
   "e2e": {
-    "pendingOutcomes": "non-blocking"
+    "pendingOutcomes": "non-blocking",
+    "serve": {
+      "command": "node --import tsx scripts/e2e-serve.mjs",
+      "url": "http://127.0.0.1:4391/healthz?ready",
+      "readySeconds": 120
+    }
   }
 }
