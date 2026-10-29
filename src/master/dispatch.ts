@@ -380,9 +380,10 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
   async function launchPrepared() {
     // The session has no GitHub credential and must still reach no keyring.
     const confinementCredential = { ownGitHubCredential: false, secretsBus: null };
-    // The worker writes its worktree, the worktree's own Git admin directory and the shared Git
-    // paths the coordinator confinement re-exposes — never the common Git directory itself (GY-1321);
-    // each is granted to the runtime's sandbox, and the grant is proved below before anything starts.
+    // The worker writes its worktree, the worktree's own Git admin directory, the common Git
+    // directory (GY-2977: packed-refs lock) and the shared Git paths the coordinator confinement
+    // re-exposes; each is granted to the runtime's sandbox, and the grant is proved below before
+    // anything starts.
     const confinementRoot = coordinatorRoot ?? launcherCoordinatorRoot();
     if (confinementRoot) prepareConfinedGitPaths(confinementRoot);
     const paths = workerPaths(prepared.path);

@@ -602,9 +602,9 @@ export async function anchorSessionCheckout(root: string, directory: string, run
 }
 
 /**
- * GY-1507: what a reviewer's or producer's runtime sandbox is granted — the session directory and the
- * same narrow Git paths a worker gets (worker-sandbox.ts sessionWritablePaths), never the common Git
- * directory — plus the host's verification lock directory.
+ * GY-1507 / GY-2977: what a reviewer's or producer's runtime sandbox is granted — the session
+ * directory and the same Git paths a worker gets (worker-sandbox.ts sessionWritablePaths), including
+ * the common Git directory for the packed-refs lock — plus the host's verification lock directory.
  */
 export async function sessionWritable(root: string, config: MasterConfig, directory: string) {
   return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant(root, config)];
