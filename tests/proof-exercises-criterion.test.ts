@@ -9,6 +9,7 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { evaluate, exerciseRefusal, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { producerPrompt, proofOutcome } from '../src/producer.js';
+import { guideText } from '../src/guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { nextAction } from '../src/model/next-action.js';
@@ -104,7 +105,9 @@ test('integration:non-discriminating-proof-refused a discriminating proof is tru
 test('integration:non-discriminating-proof-refused the producer is told to record the stripped run and docs state how a non-exercising proof is reported', async () => {
   const prompt = producerPrompt({ repository: 'owner/project', cliPath: '/cli.mjs' }, { key: 'GY-1', pr: 1, ...binding, group: 'integration', proofs: [PROOF], checkout: '/managed/proof/GY-1' }, { principal: producer.id });
   assert.match(prompt, /A proof that passes against an unchanged tree proves nothing/);
-  assert.match(prompt, /"exercise":\{"criterion":"<the criterion id, such as AC-1>","behaviour":/);
+  // GY-2972: the evidence format, exercise record included, prints from guide proof, which the brief names.
+  assert.match(prompt, /guide proof names the fields/);
+  assert.match(guideText('proof'), /"exercise":\{"criterion":"<the criterion id, such as AC-1>","behaviour":/);
   assert.match(prompt, /git worktree add --detach \/managed\/proof\/GY-1\/exercise/);
 });
 

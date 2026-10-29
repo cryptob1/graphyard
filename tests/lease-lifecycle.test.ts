@@ -7,6 +7,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { managedInstructions } from '../src/repository-setup.js';
+import { guideText } from '../src/guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces, so acceptance evidence maps to
@@ -132,7 +133,9 @@ test('integration:lease-release-on-submit: complete ends the lease with the cand
 
 test('manual:lease-lifecycle-docs: the generated worker instructions say complete ends the lease and forbid heartbeating after submission', () => {
   const block = managedInstructions('');
-  assert.match(block, /`complete GY-N EPOCH --head SHA`[^]*ends your lease in the same transaction/);
-  assert.match(block, /do not heartbeat or edit after it/);
-  assert.match(block, /the supervisor stops the session; that is the attempt ending, not lease\nloss/);
+  assert.match(block, /Submit with `complete GY-N EPOCH --head SHA`; make `complete` your last action\./);
+  // GY-2972: the submit semantics the block no longer carries print from guide complete, which the block names.
+  assert.match(guideText('complete'), /`complete GY-N EPOCH --head SHA`[^]*ends your lease in the same transaction/);
+  assert.match(guideText('complete'), /do not heartbeat or edit after it/);
+  assert.match(guideText('complete').replace(/\s+/g, ' '), /the supervisor stops the session; that is the attempt ending, not lease loss/);
 });
