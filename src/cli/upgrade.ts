@@ -38,7 +38,7 @@ export interface UpgradePlan {
 }
 
 const cli = (root: string, ...args: string[]) => ['node', JSON.stringify(join(root, 'bin/graphyard.mjs')), ...args].join(' ');
-
+const npmCiCommand = (root: string) => `npm ci --prefix ${JSON.stringify(root)}`;
 /** The command that returns to `previous`: the same upgrade towards its release, or its commit when it had none. */
 export const rollbackCommand = (previous: Release, cliRoot: string) => previous.released
   ? `graphyard upgrade --to ${previous.version}`
@@ -63,7 +63,7 @@ export function upgradePlan(inputs: UpgradeInputs): UpgradePlan {
   const url = inputs.url ? ['--url', inputs.url] : [];
   const steps: UpgradeStep[] = [
     { id: 'checkout', title: `Check out ${target.version} (${target.revision.slice(0, 12)}) detached in the CLI checkout`, command: `git -C ${JSON.stringify(cliRoot)} checkout --detach ${target.revision}` },
-    { id: 'npm-ci', title: 'Install the dependencies the target\'s lockfile names', command: `npm ci --prefix ${JSON.stringify(cliRoot)}` },
+    { id: 'npm-ci', title: 'Install the dependencies the target\'s lockfile names', command: npmCiCommand(cliRoot) },
     { id: 'backup', title: `Back up the database at generation ${databaseSchema ?? 'unknown'} (DATABASE_URL) before the server migrates it`, command: `graphyard db backup ${inputs.backupFile}` },
     { id: 'redeploy', title: `Redeploy the server at ${image} through the install adapter`, command: redeploy },
     { id: 'restart', title: 'Restart the master loop on the target code', command: cli(cliRoot, 'master', 'restart') },
@@ -213,6 +213,17 @@ export async function ensureDeployCheckout(checkout: string, source: string, run
 }
 
 /**
+ * The deploy's build checkout (GY-2978): a detached worktree of the watched checkout holding the commit a pass builds and
+ * restarts, so the watched checkout — the workers' CLI checkout when the unit watches it — does not move until health passes.
+ */
+export async function ensureBuildCheckout(build: string, source: string, commit: string, run: ChildRun) {
+  if (existsSync(join(build, '.git'))) { await run('git', ['-C', build, 'checkout', '--detach', '--quiet', commit]); return; }
+  await mkdir(resolve(build, '..'), { recursive: true });
+  await run('git', ['-C', source, 'worktree', 'prune']);
+  await run('git', ['-C', source, 'worktree', 'add', '--detach', '--quiet', build, commit]);
+}
+
+/**
  * The repository the deploy watch serves (GY-2955): its checkout's origin's owner/name, null when it
  * names none. The deploy record keeps it, so a control-plane upgrade installed for one repository
  * cannot pass for another repository's deployment.
@@ -238,10 +249,12 @@ export async function pruneImages(run: ChildRun, keep: string[], log: (line: str
 
 /**
  * The ports `upgrade --watch` (graphyard-deploy.service) runs each base tip through on a compose or
- * local install: git in the CLI checkout, npm ci as the build, the install adapter's redeploy (with a
- * database backup when DATABASE_URL is set) as the restart, /healthz until it passes or three
- * minutes pass, the coordinator pin advanced when one exists, and older per-commit images pruned; or the line naming why an install
- * on another provider has none.
+ * local install: git in the CLI checkout, npm ci and the install adapter's redeploy (with a database
+ * backup when DATABASE_URL is set) in the install's own build worktree, /healthz until it passes or
+ * three minutes pass, then the watched checkout moved and npm-ci'd onto the tip (GY-2978: a worker
+ * CLI's checkout, when the unit watches it, moves only once the server serves the same commit), the
+ * coordinator pin advanced when one exists, and older per-commit images pruned; or the line naming
+ * why an install on another provider has none.
  */
 export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; baseBranch: string; url: string; run: ChildRun; herdrInstance?: boolean }): Promise<DeployWatchPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
@@ -250,26 +263,31 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
   const install = recorded && input.herdrInstance ? { ...recorded, herdrInstance: true } : recorded;
   if (install?.provider !== 'compose' && install?.provider !== 'local') return `the deploy unit needs a compose or local install; ${install ? `this one runs on ${install.provider}` : 'no install record names this repository'}, so releases reach it only through graphyard upgrade`;
   const run = (command: string, args: string[], cwd: string, env?: NodeJS.ProcessEnv) => Promise.resolve(input.run(command, args, { cwd, timeoutMs: 1_800_000, ...(env ? { env } : {}) })).then(String);
+  // GY-2978: the pass builds and redeploys from this worktree at the deployed commit — for a local
+  // install the redeploying CLI and the server it starts are this worktree's code — never from the
+  // watched checkout, whose HEAD stays on the last commit the server served until health passes.
+  const build = join(directory, 'deploy', 'build');
   const inputsFor = (commit: string): UpgradeInputs => {
     const current = checkoutRelease(cliRoot);
-    return { cliRoot, repoRoot, current, target: { version: releaseOfCommit(cliRoot, commit).version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
+    return { cliRoot: build, repoRoot, current, target: { version: releaseOfCommit(cliRoot, commit).version, revision: commit, schema: null }, databaseSchema: null, install, url, cliChanges: [],
       image: install.provider === 'compose' ? `graphyard-local:${commit.slice(0, 12)}` : install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
   };
   const step = (commit: string, id: UpgradeStepId) => upgradePlan(inputsFor(commit)).steps.find(entry => entry.id === id)!;
   const tree = gitWatchPorts(cliRoot, input.baseBranch, input.run);
   return {
     ...tree,
-    build: async commit => { await run('sh', ['-c', step(commit, 'npm-ci').command], cliRoot); },
+    build: async commit => {
+      await ensureBuildCheckout(build, cliRoot, commit, input.run);
+      await run('sh', ['-c', step(commit, 'npm-ci').command], build);
+    },
     restart: async commit => {
-      // The image builds from this checkout, so one found moved off the deployed commit is put back first.
-      const head = await tree.head();
-      if (head !== commit) { console.error(`[graphyard-deploy] the checkout holds ${head.slice(0, 12)}, not ${commit.slice(0, 12)}; checking it out again`); await tree.checkout(commit); }
       const inputs = inputsFor(commit);
       if (process.env.DATABASE_URL) await liveEffects(inputs, join(repoRoot, '.graphyard', 'upgrade.json')).run(step(commit, 'backup'));
       // Every redeploy builds with the stamp of the commit it deploys (GY-2167), so /healthz names that commit.
       const stamp = releaseOfCommit(cliRoot, commit);
       await run('sh', ['-c', step(commit, 'redeploy').command], repoRoot, { ...process.env, GRAPHYARD_VERSION: stamp.version, GRAPHYARD_BUILD_REVISION: stamp.revision });
     },
+    checkout: async commit => { await tree.checkout(commit); await run('sh', ['-c', npmCiCommand(cliRoot)], cliRoot); },
     health: deployHealth(cliRoot, url),
     prune: keep => pruneImages(input.run, keep),
     pin: async commit => { if (knownGoodState(directory)) await pinKnownGood({ installDir: directory, repository: repoRoot }, commit, input.run); },

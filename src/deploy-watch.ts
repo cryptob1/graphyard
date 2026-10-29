@@ -1,5 +1,6 @@
 // Concern: the continuous deploy graphyard-deploy.service runs (`graphyard upgrade --watch`): each new
-// base tip is checked out, built, restarted, health-checked and pinned; a failing one is rolled back
+// base tip is built, restarted and health-checked, and only then — once the server serves the new
+// commit — does the watched checkout move to it and the tip get pinned; a failing one is rolled back
 // to the previous tip, unless it may have migrated the database, and the watch waits for the next tip.
 // The master loop restarts itself onto the tip this records (daemon/run.ts restartCause).
 import { existsSync, readFileSync } from 'node:fs';
@@ -33,7 +34,9 @@ export interface DeployWatchPorts {
   fetch(): Promise<string>;
   /** The commit the checkout holds now: the tip served before the watch recorded one. */
   head(): Promise<string>;
+  /** Moves the watched checkout to the commit; the pass runs it after health, so the CLI checkout never leads the server (GY-2978). */
   checkout(commit: string): Promise<void>;
+  /** Builds the commit in the deploy's own build checkout; the watched checkout does not move for this. */
   build(commit: string): Promise<void>;
   /** Restarts the container or unit the control plane runs in. */
   restart(commit: string): Promise<void>;
@@ -48,7 +51,11 @@ export interface DeployWatchPorts {
   /** The database's schema generation, or null when it cannot be read. */
   database(): Promise<number | null>;
 }
-const steps = ['checkout', 'build', 'restart', 'health', 'pin'] as const;
+// GY-2978: `checkout` is the last deploy step but one. The pass builds and restarts the server from
+// the deploy's own build checkout, so the watched checkout — the workers' CLI checkout when the unit
+// watches it — moves only after the new server passed health and serves the same commit; a failed
+// server deploy leaves the CLI where it was, and no healthy deploy opens the skew window again.
+const steps = ['build', 'restart', 'health', 'checkout', 'pin'] as const;
 /** Rollback attempts before the watch stops retrying one and waits for the base to move. */
 export const rollbackAttempts = 5;
 
@@ -101,14 +108,17 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
   } catch (error) {
     const reason = message(error), step = (error as { step?: string }).step;
     if (!previous) { await write({ tip: null, failed: tip, reason }); return 'rolled-back'; }
-    if (step !== 'checkout' && step !== 'build') {
-      // The server started on the tip's code, which may have migrated the database; the previous tip runs only on a generation it supports.
+    // From the restart on — health and, since GY-2978, the checkout move too — the server has started on the tip's
+    // code, which may have migrated the database; the previous tip runs only on a generation it supports.
+    if (step !== 'build') {
       const [after, supported, migrates] = await Promise.all([ports.database().catch(() => null), ports.schema(previous).catch(() => null), ports.schema(tip).catch(() => null)]);
       const ceiling = supported ?? before, reached = after ?? migrates;
       if (ceiling === null || reached === null || reached > ceiling) {
         const why = after !== null && before !== null && after > before ? `it migrated the database from generation ${before} to ${after}` : `the database may be at generation ${reached ?? 'unknown'}, past the ${ceiling ?? 'unknown'} the previous tip supports`;
         log(`[graphyard-deploy] ${tip.slice(0, 12)} ${reason}; kept: ${why}, which the previous tip would refuse`);
         await ports.pin(tip).catch(failed => log(`[graphyard-deploy] the pin of ${tip.slice(0, 12)} failed: ${message(failed)}`));
+        // The server serves the kept tip, so the CLI checkout follows it too, best-effort like the pin.
+        await ports.checkout(tip).catch(failed => log(`[graphyard-deploy] the checkout of ${tip.slice(0, 12)} failed: ${message(failed)}`));
         await write({ tip, failed: null, reason: `${reason}; kept because ${why}` });
         return 'kept';
       }

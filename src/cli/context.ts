@@ -18,6 +18,15 @@ const commitPattern = /^[0-9a-f]{40}$/i;
 /** The refusal a CLI and a server at different releases name: both releases, and the remedy (GY-1960). */
 export const versionSkewMessage = (cliRelease: string, serverRelease: string) => `CLI ${cliRelease} and server ${serverRelease} differ: run graphyard upgrade`;
 
+/**
+ * The commands a working attempt runs under its lease (GY-2978). A deploy moves the CLI checkout
+ * before the server on installs watched at an older Graphyard, and every other command refuses a
+ * commit difference by name; these proceed instead with a one-line warning, because the wire
+ * protocol is checked by the server's own request validation, so a stopped heartbeat, claim,
+ * complete, blocked or defer loses an attempt to nothing but the skew.
+ */
+export const leaseCommands = new Set(['heartbeat', 'claim', 'complete', 'blocked', 'defer']);
+
 /** What each side of a CLI request runs: the stamped release version, and the commit an unreleased build runs. */
 export interface ReleaseIdentity { version: string; released: boolean; commit: string | null }
 
@@ -100,6 +109,20 @@ export async function createContext(command: string, id: string | undefined, arg
   let resolvedToken: string | undefined; let tokenResolved = false;
   let ownRelease: ReleaseIdentity | null = null;
   let releaseProbe: Promise<{ version?: unknown; commit?: unknown } | null> | null = null;
+  // GY-2978: the skew is judged once per invocation: a lease command prints its warning once, and a
+  // refused one throws the same refusal whichever call of the invocation reaches the check first.
+  let releaseCheck: Promise<void> | null = null;
+  const checkRelease = () => releaseCheck ??= (async () => {
+    // GY-1960: once per invocation the CLI reads the release /healthz serves and refuses a skewed
+    // pair by name, instead of sending a request the server's schemas answer as a bare 400.
+    // GY-2978: a lease command proceeds through the skew with a warning; every other command refuses.
+    ownRelease ??= thisRelease();
+    const skew = releaseSkew(ownRelease, await (releaseProbe ??= readServerRelease(base)));
+    if (skew) {
+      if (leaseCommands.has(command)) console.error(`${skew}; the ${command} proceeds`);
+      else throw new Error(skew);
+    }
+  })();
   const individualToken = async () => {
     if (!tokenResolved) {
       resolvedToken = process.env.GRAPHYARD_TOKEN_FILE ? await readCredentialFile(resolve(process.env.GRAPHYARD_TOKEN_FILE)) : process.env.GRAPHYARD_TOKEN ?? savedToken;
@@ -108,11 +131,7 @@ export async function createContext(command: string, id: string | undefined, arg
     return resolvedToken;
   };
   const api = async (path: string, data?: unknown, requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID()) => {
-    // GY-1960: once per invocation the CLI reads the release /healthz serves and refuses a skewed
-    // pair by name, instead of sending a request the server's schemas answer as a bare 400.
-    ownRelease ??= thisRelease();
-    const skew = releaseSkew(ownRelease, await (releaseProbe ??= readServerRelease(base)));
-    if (skew) throw new Error(skew);
+    await checkRelease();
     const token = await individualToken();
     if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
     const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(cliRequestTimeoutMs) });
@@ -122,7 +141,7 @@ export async function createContext(command: string, id: string | undefined, arg
       // answers at a release other than this CLI's — including one it moved to after the read
       // above — that answer is the skew, and it is named as the skew instead.
       if (response.status === 400 && body && typeof body === 'object' && (body as any).error === 'Invalid input') {
-        const skewNow = releaseSkew(ownRelease, await readServerRelease(base));
+        const skewNow = releaseSkew(ownRelease ??= thisRelease(), await readServerRelease(base));
         if (skewNow) { const named: any = new Error(skewNow); named.status = 400; throw named; }
       }
       const error = new Error(JSON.stringify(body)); (error as any).confirmedRefusal = isConfirmedCoordinationRefusal(response.status, body); (error as any).status = response.status; throw error;

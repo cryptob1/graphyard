@@ -50,7 +50,7 @@ test('unit:deploy-health-expects-deployed-commit — a checkout whose HEAD anoth
   const file = deployRecordPath(await temporaryDirectory('deploy-health-commit'));
   try {
     await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
-    assert.equal(git(checkout, 'rev-parse', 'HEAD'), a, 'the checkout was moved off the deployed commit before health');
+    assert.equal(git(checkout, 'rev-parse', 'HEAD'), b, 'the pass leaves the checkout on the tip the server serves (GY-2978: it moves only after health)');
     assert.deepEqual([readDeployRecord(file)?.tip, readDeployRecord(file)?.failed], [b, null], '/healthz reporting the deployed commit\'s release passes');
 
     // A server answering the moved HEAD's release fails, against the deployed commit's release.
