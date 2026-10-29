@@ -18,8 +18,8 @@ import type { CliContext } from '../src/cli/context.js';
 const head = 'a'.repeat(40);
 const refused = (reason: string) => ({ state: 'refused', head: 'b'.repeat(40), refusal: { kind: 'merge', reason } });
 
-/** A worktree whose suite runner (tests/helpers/run-tests.ts) is a stub recording its file arguments to `rerun.log`, failing those a `rerun-fail` control file lists. */
-async function worktree(fail: string[] = []) {
+/** A worktree whose suite runner (tests/helpers/run-tests.ts) is a stub recording its file arguments to `rerun.log`, failing those a `rerun-fail` control file lists, holding `files` as its own test files. */
+async function worktree(fail: string[] = [], files: string[] = []) {
   const root = await temporaryDirectory('complete-rerun');
   await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { test: 'node --import tsx tests/helpers/run-tests.ts' } }));
   await mkdir(join(root, 'tests', 'helpers'), { recursive: true });
@@ -33,6 +33,7 @@ const failing = existsSync('rerun-fail') ? files.filter(name => readFileSync('re
 if (failing.length) { console.error('✖ failing tests:'); for (const name of failing) console.error('  ' + name); process.exit(1); }
 `);
   if (fail.length) await writeFile(join(root, 'rerun-fail'), `${fail.join('\n')}\n`);
+  for (const file of files) await writeFile(join(root, file), '');
   return root;
 }
 
@@ -46,7 +47,7 @@ const context = (root: string, calls: { path: string; body: unknown }[]) => ({
 const reruns = async (root: string) => (await readFile(join(root, 'rerun.log'), 'utf8')).split('\n').filter(Boolean).map(line => JSON.parse(line) as string[]);
 
 test('unit:complete-reruns-trial-failures — a trial refusal naming failing test files makes complete run exactly those files on the head and refuse while one still fails', async () => {
-  const root = await worktree(['tests/still-fails.test.ts']);
+  const root = await worktree(['tests/still-fails.test.ts'], ['tests/docs-current-model.test.ts', 'tests/still-fails.test.ts']);
   const calls: { path: string; body: unknown }[] = [];
   await assert.rejects(
     completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('trial failed: tests tests/docs-current-model.test.ts, tests/still-fails.test.ts') } as never),
@@ -56,7 +57,7 @@ test('unit:complete-reruns-trial-failures — a trial refusal naming failing tes
 });
 
 test('unit:complete-reruns-trial-failures — the same refusal with every named file passing submits, after running exactly those files', async () => {
-  const root = await worktree();
+  const root = await worktree([], ['tests/docs-current-model.test.ts', 'tests/worker-prompt-gates.test.ts']);
   const calls: { path: string; body: unknown }[] = [];
   await completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('trial failed: tests tests/docs-current-model.test.ts, tests/worker-prompt-gates.test.ts') } as never);
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
@@ -74,7 +75,7 @@ test('unit:complete-reruns-trial-failures — with no trial refusal naming tests
   }
 });
 
-test('unit:trial-failure-tests — only a `trial failed: tests …` merge refusal names files', () => {
+test('unit:trial-failure-tests — only a `trial failed: tests …` merge refusal names files', async () => {
   assert.deepEqual(trialFailureTests(undefined), []);
   assert.deepEqual(trialFailureTests(null), []);
   assert.deepEqual(trialFailureTests({ kind: 'revert', reason: 'trial failed: tests tests/a.test.ts' }), []);
@@ -85,4 +86,13 @@ test('unit:trial-failure-tests — only a `trial failed: tests …` merge refusa
   assert.deepEqual(trialFailureTests({ kind: 'merge', reason: 'trial failed: tests tests/a.test.ts' }), ['tests/a.test.ts']);
   assert.deepEqual(trialFailureTests({ kind: 'merge', reason: 'trial failed: tests tests/docs-current-model.test.ts, tests/worker-prompt-gates.test.ts' }),
     ['tests/docs-current-model.test.ts', 'tests/worker-prompt-gates.test.ts']);
+  // GY-2979: a GY-2960 refusal labels each failure `FILE: case title` and a first failing case rides
+  // after the files, its own commas splitting into prose. An entry names its file — the text before
+  // ': ', a path to an existing test file of the tree the rerun would run — and never its title.
+  assert.deepEqual(trialFailureTests({ kind: 'merge', reason: 'trial failed: tests tests/a.test.ts: integration:case-one title, tests/a.test.ts: integration:case-two title' }), ['tests/a.test.ts']);
+  assert.deepEqual(trialFailureTests({ kind: 'merge', reason: 'trial failed: tests tests/a.test.ts, tests/b.test.ts: integration:case title, its second clause' }), ['tests/a.test.ts', 'tests/b.test.ts']);
+  const tree = await temporaryDirectory('trial-parse');
+  await mkdir(join(tree, 'tests'));
+  await writeFile(join(tree, 'tests', 'present.test.ts'), '');
+  assert.deepEqual(trialFailureTests({ kind: 'merge', reason: 'trial failed: tests tests/present.test.ts: integration:case title, tests/gone.test.ts: integration:other title' }, tree), ['tests/present.test.ts']);
 });
