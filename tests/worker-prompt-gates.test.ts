@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { workerPrompt } from '../src/master/dispatch.js';
+import { guideText } from '../src/guide.js';
 import { workerBeforePushSection, workerFastGates, workerFastGatesCommand, workerFastGatesSentence, workerSyncSentence } from '../src/master/worker-fast-gates.js';
 
 // GY-1797: the fast mechanical gates — the module and docs budget tests, the docs growth and
@@ -47,8 +48,10 @@ test('unit:worker-request-names-fast-gates — the request names the fast mechan
   assert.ok(gatesAt >= 0 && gatesAt < completeAt, 'the gates sentence sits before the complete instruction');
   assert.equal(syncAt + sync.length, gatesAt, 'the gates sentence follows the sync instruction directly');
   assert.equal(request.indexOf('sync GY-1'), syncAt + 'Run node /bin/graphyard.mjs '.length, 'the sync instruction is the first mention of sync');
-  // The standing sync rule the request's instruction restates, in this repository's own instructions.
-  assert.match(readFileSync(`${root}AGENTS.md`, 'utf8'), /Run `sync GY-N` before submitting\./, 'the standing sync instruction the request now states');
+  // GY-2972: the standing sync rule the request's instruction names prints from guide sync; the
+  // repository's own AGENTS.md block stays short and names the guide topics.
+  assert.match(guideText('sync'), /Run `sync GY-N` before submitting\./, 'the standing sync instruction the request names as a guide topic');
+  assert.match(readFileSync(`${root}AGENTS.md`, 'utf8'), /guide TOPIC/, 'the block names guide TOPIC');
   // Nothing else in the request changed: the section is the one addition, sitting between the
   // pre-edit status instruction and the worktree instruction that follows it.
   assert.ok(request.includes(`Run node ${cli} status GY-1 before editing. ${section}Work only in the current assigned worktree`), 'the section is the one addition after the pre-edit instruction');

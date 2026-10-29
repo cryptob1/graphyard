@@ -18,13 +18,13 @@ import { writeReviewBinding } from './review-post.js';
 import type { FleetProbe } from './fleet.js';
 /** The most threads one pull-request-era launch listed, and the most comment IDs one thread's record kept; bounds the fields old ledger records still carry. */
 const listedThreadLimit = 100, threadAliasLimit = 50;
-import { carriedApproval, declaredPostDeploy, implementerIdentities, type Work } from './model.js';
+import { carriedApproval, declaredPostDeploy, implementerIdentities, pinnedCases, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { sessionLiveness, type RuntimeSession, type SessionHandle } from './model/sessions.js';
 import { repeatingPaths as loopRepeatingPaths, touchesRepeatingPath } from './model/repeating-paths.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
-import { findingClassificationSection, freshReadFor, freshReadRecordSchema, freshReadSection, mechanicalFixRecordSchema, mechanicalFixRequests, type FreshReadRecord } from './mechanical-findings.js';
+import { freshReadFor, freshReadRecordSchema, freshReadSection, mechanicalFixRecordSchema, mechanicalFixRequests, type FreshReadRecord } from './mechanical-findings.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from './verification-maps.js';
 import { namedPaths } from './model/documentation-glob.js';
@@ -602,9 +602,9 @@ export async function anchorSessionCheckout(root: string, directory: string, run
 }
 
 /**
- * GY-1507: what a reviewer's or producer's runtime sandbox is granted — the session directory and the
- * same narrow Git paths a worker gets (worker-sandbox.ts sessionWritablePaths), never the common Git
- * directory — plus the host's verification lock directory.
+ * GY-1507 / GY-2977: what a reviewer's or producer's runtime sandbox is granted — the session
+ * directory and the same Git paths a worker gets (worker-sandbox.ts sessionWritablePaths), including
+ * the common Git directory for the packed-refs lock — plus the host's verification lock directory.
  */
 export async function sessionWritable(root: string, config: MasterConfig, directory: string) {
   return [...sessionWritablePaths(directory, await sharedGitDirectory(root)), ...sessionSlotsGrant(root, config)];
@@ -672,21 +672,29 @@ export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
     + 'it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. ';
 }
 /**
- * The criteria-only review rule (GY-166). GY-164 took 19 attempts: its reviewer confirmed both
+ * GY-2975: what a review brief says about a criterion whose proof pins one case: run the head on one
+ * other case the item's own commands accept, and request changes when only the pinned case works.
+ * Empty when no criterion pins one, so every other review request stays byte-identical.
+ */
+export function singleCaseReviewSection(criteria?: readonly ReviewCriterion[]) {
+  const flagged = (criteria ?? []).filter(criterion => pinnedCases(criterion.text).length === 1).map(criterion => criterion.id);
+  if (!flagged.length) return '';
+  return `${flagged.join(', ')} ${flagged.length === 1 ? 'checks' : 'check'} one case: a head can pass by tuning to that case. For each, run the head once on one other case its own commands accept — another seed or input — quote both results, and request changes when the head works only on the pinned case. `;
+}
+/**
+ * The criteria rule (GY-166). GY-164 took 19 attempts: its reviewer confirmed both
  * criteria met around round 16 and kept requesting changes for new edge cases. The reviewer judges
  * the item's acceptance criteria; anything worth fixing is BLOCKING and fixed on the same head,
  * and the rest are nits, never filed as work items (GY-1249). `criteria` are the item's own, written by its operator.
+ * GY-2972: the finding classification and verdict rules moved to `guide review`; the brief names
+ * that topic beside the criteria instead of restating them.
  */
 export function criteriaRuleSection(key: string, sha: string, criteria: { id: string; text: string }[] = []) {
   // Each criterion verbatim: a condition cut from its tail would be judged FOLLOW-UP and silently
   // dropped, and collapsed whitespace changes an indented fragment or exact output it quotes.
   const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
-    + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `
-    + 'Classify each finding as BLOCKING or FOLLOW-UP. BLOCKING: a real defect a user or operator would hit with this change, an acceptance criterion not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. The same worker fixes BLOCKING findings on this head; nothing is deferred to another item. '
-    + 'FOLLOW-UP: nits only — style, naming, hypotheticals and suggestions not worth a round; mention them briefly and move on. '
-    + 'APPROVE when every criterion is met and no finding is BLOCKING; mention the FOLLOW-UP nits in the body instead of requesting changes for them. Graphyard files no backlog item for a nit. '
-    + 'REQUEST_CHANGES cites only BLOCKING findings, and names for each the acceptance criterion or defect it concerns; never request changes for a FOLLOW-UP. Never weaken a criterion to let the change pass. ';
+    + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `;
 }
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
   memory ??= projectMemory;
@@ -699,7 +707,8 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + reviewRoundSection(binding.sha, history)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + postDeployReviewSection(criteria)
-    + findingClassificationSection()
+    + singleCaseReviewSection(criteria)
+    + `Classify findings and post by node ${config.cliPath ?? launcherPath} guide review. `
     + simplicityParagraph
     + blockingStandardSection
     + (fresh ? freshReadSection(fresh, binding.sha) : '')
@@ -708,9 +717,9 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
     + `Judge whether this diff meets what ${binding.key} requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. `
-    + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. `
+    + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command; post it as soon as you have judged the diff, without asking for confirmation. `
     + `GH_CONFIG_DIR points at a reviewer credential that expires within the hour and can only read this repository and write reviews. `
-    + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
+    + `Once posted, stop; Graphyard closes this session once it observes your verdict. `
     + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
 }
 
@@ -738,6 +747,7 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + (context?.round ?? '')
     + criteriaRuleSection(binding.key, binding.head, criteria)
     + postDeployReviewSection(criteria)
+    + singleCaseReviewSection(criteria)
     + controlPlaneFindingSection
     + blockingStandardSection
     + repetitionReviewSection(files);
@@ -757,6 +767,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
     + scope
     + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, criteria, files, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history) })
+    + `Classify findings by node ${config.cliPath ?? launcherPath} guide review. `
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
@@ -789,7 +800,7 @@ const launcherPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.u
  */
 export function reviewPostSection(cliPath: string, changes: string) {
   return `Post exactly one verdict, only through Graphyard, with the review body on standard input: node ${cliPath} review post --event APPROVE <<'EOF' … EOF (use --event REQUEST_CHANGES instead ${changes}). `
-    + 'It binds the verdict to the head this session was launched for and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. Never post a review any other way. ';
+    + 'It binds the verdict to the launched head and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. Never post a review any other way. ';
 }
 
 async function writeReviewerSession(directory: string, token: string) {

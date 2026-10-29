@@ -126,7 +126,7 @@ test('integration:unwritable-workspace-fails-launch — a sandbox that denies th
     // The probe ran in the sandbox the launch built: every grant of the launch is in its policy.
     const policy = sandboxCalls[0][sandboxCalls[0].indexOf('-c') + 1];
     for (const path of [fixture.gitDir, join(fixture.commonDir, 'objects')]) assert.ok(policy.includes(`"${path}"="write"`), `the probe's policy grants ${path}`);
-    assert.ok(!policy.includes(`"${fixture.commonDir}"=`), 'never the common Git directory itself');
+    assert.ok(policy.includes(`"${fixture.commonDir}"="write"`), 'the common Git directory is granted for the packed-refs lock (GY-2977)');
     assert.equal(sandboxCalls[0][sandboxCalls[0].indexOf('-C') + 1], fixture.worktree, 'the probe runs in the worktree the session starts in');
 
     // The same launch in a sandbox that honours the grant starts, and the typed line carries it.
@@ -151,18 +151,19 @@ test('integration:unwritable-workspace-fails-launch — a sandbox that denies th
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:codex-grant-excludes-common-git-dir — a linked worktree\'s codex launch grants the paths the confinement re-exposes writable, never the common Git directory', async () => {
-  const fixture = await linkedWorktree('GY-1321-2');
+test('unit:codex-grant-includes-common-git-dir — a linked worktree\'s codex launch grants the common Git directory (GY-2977: packed-refs lock) and the shared paths the confinement re-exposes beside it', async () => {
+  const fixture = await linkedWorktree('GY-2977-2');
   try {
-    // GY-1321: codex 0.160's bwrap creates <root>/.git under every granted root, and the coordinator
-    // confinement binds the common Git directory read-only, so granting it killed every command.
+    // GY-2977: GY-1321 kept the common directory off the grant list because the confinement then
+    // bound it read-only and Codex's bwrap refused to create <common>/.git; GY-2967 re-exposes it
+    // writable, so the runtime sandbox must grant it for packed-refs.lock.
     const launch = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: {} }, null);
     const args = grantWorkerPaths('codex', launch.args, writablePaths(workerPaths(fixture.worktree)), fixture.worktree);
     const granted = addedDirectories(args, fixture.worktree);
-    assert.ok(!granted.includes(fixture.commonDir), `no --add-dir names ${fixture.commonDir}: ${args.join(' ')}`);
-    assert.ok(!args.includes('../../../.git'), 'nor its relative form');
-    const shared = ['objects', 'refs/remotes', 'logs/refs/remotes', 'refs/heads/graphyard', 'logs/refs/heads/graphyard'].map(path => join(fixture.commonDir, path));
-    assert.deepEqual(granted, [fixture.gitDir, ...shared], 'the admin directory (FETCH_HEAD, index, HEAD) and the shared paths the confinement re-exposes, each once');
+    assert.ok(granted.includes(fixture.commonDir), `--add-dir names ${fixture.commonDir}: ${args.join(' ')}`);
+    assert.ok(args.includes('../../../.git'), 'its relative form keeps the launch line short');
+    const shared = [fixture.commonDir, ...['objects', 'refs/remotes', 'logs/refs/remotes', 'refs/heads/graphyard', 'logs/refs/heads/graphyard'].map(path => join(fixture.commonDir, path))];
+    assert.deepEqual(granted, [fixture.gitDir, ...shared], 'the admin directory (FETCH_HEAD, index, HEAD), the common directory, and the shared paths, each once');
     // A shared path that does not exist is not granted: the confinement re-exposes only existing ones.
     await rm(join(fixture.commonDir, 'logs/refs/remotes'), { recursive: true, force: true });
     assert.ok(!writablePaths(workerPaths(fixture.worktree)).includes(join(fixture.commonDir, 'logs/refs/remotes')));
@@ -206,7 +207,7 @@ test('integration:sandbox-probe-inside-confinement-fails-launch — the sandbox 
     assert.deepEqual(args.slice(ro, ro + 3), ['--ro-bind', fixture.main, fixture.main]);
     assert.ok(args.includes(fixture.gitDir) && args.includes(join(fixture.commonDir, 'objects')), 'the worker\'s own Git paths are re-exposed writable');
     assert.deepEqual(args.slice(args.indexOf('--') + 1, args.indexOf('--') + 3), ['codex', 'sandbox']);
-    assert.ok(!args.some(arg => arg.includes(`"${fixture.commonDir}"="write"`)), 'the probe\'s sandbox never grants the common Git directory');
+    assert.ok(args.some(arg => arg.includes(`"${fixture.commonDir}"="write"`)), 'the probe\'s sandbox grants the common Git directory for packed-refs (GY-2977)');
 
     // A confinement that lets the sandbox start passes the same probe through to it.
     const wrapper = [bwrap, '--ro-bind', fixture.main, fixture.main, '--'];

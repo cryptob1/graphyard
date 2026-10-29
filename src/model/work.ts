@@ -163,6 +163,8 @@ export interface Work extends Create {
   validation?: Record<string, { candidateId: string; requestId?: string; attemptId?: string; reanchor?: { state: 'blocked'; reasons: string[]; supersededRequestId: string; environmentId: string; at: string };
     fault?: { kind: 'evaluator-error'; errors: string[]; attempts: EvaluationAttempt[]; requestId: string; attemptId: string; at: string } }>;
   criteria: Criterion[];
+  /** GY-2975: one warning per criterion whose text pins exactly one case, computed at create and requirements revision; absent when no criterion does. */
+  warnings?: string[];
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
   /** The planned mechanical-fix round the review ledger holds for the current candidate (GY-1764): the only ground that holds an approved head for its bot round. `at` is the instant the control plane accepted the loop's last report of it, so a hold never outlives a ledger the loop can still confirm. */

@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { handoff, loadConnection, managedInstructions, setupRepository } from '../src/repository-setup.js';
+import { guideText } from '../src/guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const secret = 'fixture-worker-token-'.padEnd(40, 'x');
@@ -18,14 +19,18 @@ test('managed instructions refresh one section and preserve all surrounding oper
   const bootstrap = "The initial MVP is a single-agent bootstrap under the operator's supervision. Do not launch other agents for bootstrap work.";
   const original = `# Operator rules\n${bootstrap}\nNever delete customer data.\n`;
   const first = managedInstructions(original);
-  assert.match(first, /dedicated master coordinator keeps cycling: run master status and act on what it names,\nuntil every in-scope item is Done or carries a recorded blocker and the serving commit is\nmain's tip/);
+  // GY-2972: the block is the short every-turn core and names the guide topics; the procedure it
+  // used to carry in full prints from the topics (guide master, guide sync, guide complete).
+  assert.match(first, /Before editing, claim an authorized work item and use its assigned worktree\./);
+  assert.match(first, /`node \$GRAPHYARD_CLI guide TOPIC`/);
+  assert.match(guideText('master').replace(/\s+/g, ' '), /A dedicated master coordinator keeps cycling: run master status and act on what it names, until every in-scope item is Done or carries a recorded blocker and the serving commit is main's tip\./);
   const surrounding = `${first}\n## Team review\nAsk the maintainer.\n`;
   const updated = managedInstructions(surrounding);
   assert.ok(updated.startsWith(original)); assert.ok(updated.endsWith('## Team review\nAsk the maintainer.\n'));
   assert.equal(updated.split('<!-- graphyard -->').length, 2); assert.doesNotMatch(updated, /one.example/);
   assert.equal(updated.split(bootstrap).length - 1, 1, 'setup preserves the protected bootstrap rule byte-for-byte');
   assert.equal(managedInstructions(updated), updated);
-  assert.match(updated, /Run `sync GY-N` before submitting/); assert.match(updated, /never rebase/);
+  assert.match(guideText('sync'), /Run `sync GY-N` before submitting\./); assert.match(guideText('sync'), /never rebase/);
   assert.match(updated, /`complete GY-N EPOCH --head SHA`/); assert.doesNotMatch(updated, /PR_NUMBER|pull request with/);
   for (const broken of ['<!-- graphyard -->', '<!-- /graphyard --><!-- graphyard -->', first + first]) assert.throws(() => managedInstructions(broken), /markers/);
 });

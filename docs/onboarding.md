@@ -15,6 +15,8 @@ Per session: worker identity, host ID, or `init --url https://YOUR-HOST --herdr 
 
 Generated `AGENTS.md`: **every session Graphyard launches receives its instruction as the session's own first request** (Claude Code also `--append-system-prompt-file`); launcher pastes need no confirmation; other bracketed paste: untrusted data. Role files under `.graphyard/harness/` hold permissions, not instructions.
 
+The block stays short (GY-2972): the every-turn rules, one line each, plus `node $GRAPHYARD_CLI guide TOPIC` (topics: claim, sync, complete, park, blocked, review, proof, master) — `guide claim` prints the launch authorization and `guide blocked` the autonomy contract, so an agent started outside the launcher reads them there.
+
 ### Agent environments
 
 Login homes (`~/.coding_agents`, or `GRAPHYARD_AGENT_ENVIRONMENTS` naming the runtime's home): `master environments --create claude,codex --apply`. Profiles default to `"approvals": "auto"`.
