@@ -10,7 +10,7 @@ import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';
  * `report` receives the run's report.
  */
 export function projectCaseSuite(root: string, token: string, options: { fetcher?: typeof fetch; launcher?: E2eLauncher; stepTimeoutMs?: number;
-  report?: (report: E2eReport) => void | Promise<void>; signal?: AbortSignal; select?: (entry: CaseFile) => boolean; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv;
+  report?: (report: E2eReport) => void | Promise<void>; signal?: AbortSignal; select?: (entry: CaseFile) => boolean; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv; artifactsDirectory?: string;
   /** The cases to run, loaded beforehand; when absent they are loaded from `root` at run time. */
   cases?: readonly CaseFile[];
   /** The checkout's release contract: an outcome still pending (GY-1802) runs its failing cases as pending, never blocking. */
@@ -19,7 +19,7 @@ export function projectCaseSuite(root: string, token: string, options: { fetcher
     name: 'e2e',
     run: async (url: string, candidate: { id: string; pendingOutcomes?: readonly string[] } | null) => {
       const suite = e2eSuite(options.cases ? [...options.cases] : await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report, signal: options.signal,
-        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, contract: options.contract });
+        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, contract: options.contract });
       return suite.run(url, candidate);
     },
   };

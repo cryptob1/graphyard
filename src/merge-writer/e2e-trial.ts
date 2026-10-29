@@ -150,8 +150,8 @@ async function runGroup(target: E2eServe | Application, proofs: readonly string[
       let report: E2eReport | null = null;
       const suite = projectCaseSuite(input.worktree, `trial-${randomUUID()}`, {
         cases: loaded.map(entry => entry.caseFile),
-        // The cases come from the head itself, so they never read the install's secrets.
-        select: () => true, hostEnvironment: input.env, withholdSecrets: true, signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
+        // The cases come from the head itself, so they never read the install's secrets; agent-step screenshots stay in the trial's scratch, which the trial removes.
+        select: () => true, hostEnvironment: input.env, withholdSecrets: true, artifactsDirectory: join(input.scratch, 'e2e-artifacts'), signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
         report: value => { report = value; },
       });
       await suite.run(served.origin, null);

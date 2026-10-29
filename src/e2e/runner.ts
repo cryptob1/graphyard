@@ -590,6 +590,8 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   select?: (entry: CaseFile) => boolean;
   /** Run every selected case even after a required one fails, so each records its own result (GY-1535). */
   runAll?: boolean; signal?: AbortSignal; withholdSecrets?: boolean; hostEnvironment?: NodeJS.ProcessEnv;
+  /** Where agent steps keep their screenshots; a fresh directory under tmpdir() by default. */
+  artifactsDirectory?: string;
   /** The checkout's release contract: a candidate outcome still pending on the record it was cut with (GY-1802) runs its failing cases as pending, never blocking. */
   contract?: ReleaseContract | null;
   /** The repository's policy (GY-1843), whose `e2e.pendingOutcomes` decides whether a pending case blocks: by default the graphyard.json of `root`, the candidate's own checkout, never the plane's installed GRAPHYARD_REPOSITORY_POLICY; with no root, the policy in force. */
@@ -609,7 +611,7 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
     const suspendedPreviews = applicationSuspendedCases(selected, probed.previewsServed);
     const pendingCases = pendingUnder([...contractPendingCases(options.contract, candidate?.pendingOutcomes), ...suspended, ...suspendedPreviews], policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, pendingCases, policy });
+      root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, pendingCases, policy });
     if (suspended.length) report.suspendedDeliveries = { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired };
     if (suspendedPreviews.length) report.suspendedPreviews = { cases: suspendedPreviews };
     if (!options.signal && probed.merger === 'unreadable') report.deliveryProbe = 'unreadable';
