@@ -76,6 +76,7 @@ test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended un
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
   const filed = await ok(operator, 'POST', 'work', {
     title: 'Keep a reconciled attempt\'s partial work',
+    type: 'chore',
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-real-snapshot-handoff'] }],
   }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});

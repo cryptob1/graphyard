@@ -45,7 +45,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 
 /** The item claimed so its lease is live across the whole fixture clock, with its session running. */
 const item = async (key: string, title: string) => {
-  const filed = await ok(operator, 'POST', 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:attempt-bound-extends-while-progressing'] }] }) as Work;
+  const filed = await ok(operator, 'POST', 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:attempt-bound-extends-while-progressing'] }] }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});
   const claimed = await ok(worker, 'POST', `work/${filed.id}/claim`, {}) as Work;
   await ok(worker, 'POST', `work/${filed.id}/workspace`, { epoch: claimed.epoch, host: 'loop-host', path: `/srv/worktrees/${key.toLowerCase()}-1`, branch: `graphyard/${key.toLowerCase()}-1` });

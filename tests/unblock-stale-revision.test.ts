@@ -42,7 +42,7 @@ const unblocks = async (work: Work) => (await store.pool.query(`SELECT actor FRO
 
 /** A released, claimed item its worker has reported blocked. */
 async function blocked(title: string, reason = 'Waiting on an external decision', keepLease = false) {
-  let work = await api(master.token, 'work', { title, description: `Why ${title}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal' }) as Work;
+  let work = await api(master.token, 'work', { title, type: 'chore', description: `Why ${title}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal' }) as Work;
   work = await engine.execute(operator, 'ready', work.id, { reason: 'Next by priority' }, randomUUID());
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   const lease = work.lease!;

@@ -22,10 +22,10 @@ const call = async (credential: string, path: string, body: unknown) => {
   return { status: response.status, body: await response.json() as any };
 };
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
-const heldInput = { title: 'Owner hold: schedule credential isolation when the owner says so', 
+const heldInput = { type: 'chore', title: 'Owner hold: schedule credential isolation when the owner says so', 
   description: 'Deferred by the owner. This item stays in the backlog until the owner releases it.',
   criteria: [{ id: 'AC-1', text: 'The owner decides when the work is scheduled', proofs: ['manual:owner-schedules-credential-isolation'] }], reason: 'Owner deferral' };
-const ordinaryInput = { title: 'Ordinary backlog work', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Next by priority' };
+const ordinaryInput = { type: 'chore', title: 'Ordinary backlog work', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Next by priority' };
 const created = async (input: unknown) => { const result = await call(master.token, 'work', input); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body as Work; };
 const release = (credential: string, work: Work) => call(credential, `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Release it' });
 const fixture = (fields: Partial<Work>) => ({ key: 'GY-1', title: 'Work', description: '', criteria: [], ...fields }) as unknown as Work;

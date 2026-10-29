@@ -29,7 +29,7 @@ const interrupted = (epoch: number, endsBlocker: boolean) => ({ event: 'exhauste
   reason: `attempt ${epoch} blocked again after its blocker was cleared`, resetsAt: null, partialWork: { state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/x', detail: 'kept' }, ...(endsBlocker ? { endsBlocker: true } : {}) });
 
 async function blockedAttempt(title: string) {
-  let work = (await call(master.token, 'work', { title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: reblocked attempts end' })).body as Work;
+  let work = (await call(master.token, 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: reblocked attempts end' })).body as Work;
   work = (await call(master.token, `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready' })).body as Work;
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   const lease = work.lease!;
