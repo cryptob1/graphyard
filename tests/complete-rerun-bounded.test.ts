@@ -5,7 +5,6 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { completeCommand, rerunBound } from '../src/cli/complete.js';
 import type { CliContext } from '../src/cli/context.js';
 
 // GY-2974: on 2026-10-29 complete on the Open City install hung over 24 minutes, past its 20-minute
@@ -14,6 +13,8 @@ import type { CliContext } from '../src/cli/context.js';
 // files, in its own process group, killed whole at the bound with a refusal naming it.
 
 const head = 'a'.repeat(40);
+// Imported per case, so a tree without the bound fails these cases rather than the file.
+const complete = () => import('../src/cli/complete.js');
 const refused = (files: string) => ({ state: 'refused', head: 'b'.repeat(40), refusal: { kind: 'merge', reason: `trial failed: tests ${files}` } });
 const context = (root: string, calls: unknown[]) => ({
   args: ['1', '--head', head],
@@ -33,6 +34,7 @@ async function repository(files: Record<string, string>) {
 const marker = (name: string) => `import { test } from 'node:test';\nimport { writeFileSync } from 'node:fs';\ntest('${name}', () => { writeFileSync('${name}.ran', ''); });\n`;
 
 test('unit:complete-rerun-runs-only-failing-files — the rerun runs just the trial\'s failing file, never the suite the test script globs, within the bound', async () => {
+  const { completeCommand, rerunBound } = await complete();
   const root = await repository({ 'failed.test.mjs': marker('failed'), 'other.test.mjs': marker('other'), 'third.test.mjs': marker('third') });
   const calls: unknown[] = [], started = Date.now();
   await completeCommand.run(context(root, calls), { id: 'id-1', key: 'GY-1', mergeLedger: refused('tests/failed.test.mjs') } as never);
@@ -44,6 +46,7 @@ test('unit:complete-rerun-runs-only-failing-files — the rerun runs just the tr
 });
 
 test('unit:complete-rerun-killed-at-bound — a rerun that never exits is killed with its process group at the bound and refused, naming the bound, with nothing submitted', async () => {
+  const { completeCommand, rerunBound } = await complete();
   const root = await repository({
     'hang.test.mjs': `import { test } from 'node:test';
 import { spawn } from 'node:child_process';
