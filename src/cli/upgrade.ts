@@ -14,7 +14,7 @@ import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
-import { parseServeDeclaration, readServeRecord, serveCheckoutPath, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
+import { parseServeDeclaration, readServeRecord, serveCheckoutPath, serveRecordPath, watchServe, type ServeDeclaration, type ServeRecord, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
@@ -216,31 +216,45 @@ export async function ensureDeployCheckout(checkout: string, source: string, run
 /** How long an install or build step of the declared serve may run. */
 const serveInstallTimeoutMs = 1_800_000;
 
-/** Whether the process still named `pid` runs from this serve checkout: a pid recorded before a reboot may name another process now, and a kill must never reach one of those. Without /proc (off Linux) the check cannot be made and the recorded pid is trusted. */
-const servesFromCheckout = (pid: number, checkout: string) => {
-  try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(checkout); } catch { return !existsSync('/proc'); }
+/** The kernel start time of the process named `pid`, or null when none runs under it (or /proc is absent, off Linux). */
+const startedAt = (pid: number): string | null => {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+    return stat.slice(stat.lastIndexOf(')') + 1).trim().split(' ')[19] ?? null;
+  } catch { return null; }
 };
 
-/** The ports the deploy unit's serve pass (GY-2976) runs against the managed repository's main: git in the install's own serve checkout, npm ci as the install, the declared build, and the declared serve command spawned detached. */
+/** Whether the serve process the record tracks still runs: a pid recorded before a reboot may name another process now, and a kill must never reach one of those. Linux answers by the kernel start time recorded beside the pid — a reused pid never matches; without /proc the pid is trusted. */
+const tracksLiveProcess = (record: ServeRecord) => {
+  if (!record.pid) return false;
+  if (!existsSync('/proc')) return true;
+  return startedAt(record.pid) === (record.started ?? null);
+};
+
+/** The ports the deploy unit's serve pass (GY-2976) runs against the managed repository's main: git in the install's own checkout (whose remote-tracking ref master status reads too), npm ci and the declared build in its serve checkout, and the declared serve command spawned detached. */
 export function managedServePorts(input: { root: string; baseBranch: string; run: ChildRun }): ServePorts {
   const checkout = serveCheckoutPath(input.root);
+  const ref = `refs/remotes/origin/${input.baseBranch}`;
   const git = async (...args: string[]) => String(await input.run('git', ['-C', checkout, ...args], { timeoutMs: 120_000 })).trim();
+  const rootGit = async (...args: string[]) => String(await input.run('git', ['-C', input.root, ...args], { timeoutMs: 120_000 })).trim();
   const ensureCheckout = async () => {
     if (existsSync(join(checkout, '.git'))) return;
     await mkdir(resolve(checkout, '..'), { recursive: true });
-    await input.run('git', ['-C', input.root, 'worktree', 'add', '--detach', '--quiet', checkout, 'HEAD'], { timeoutMs: 120_000 });
+    await rootGit('worktree', 'add', '--detach', '--quiet', checkout, 'HEAD');
   };
   return {
+    // The fetch lands in the managed root — the serve checkout is its worktree and shares its refs —
+    // so declaration() reads the root's remote-tracking ref before any serve checkout exists: a
+    // repository that declares no serve.json never gets one created (or fetched into).
     fetch: async () => {
-      await ensureCheckout();
-      await git('fetch', '--quiet', 'origin', input.baseBranch);
-      return git('rev-parse', `refs/remotes/origin/${input.baseBranch}`);
+      await rootGit('fetch', '--quiet', 'origin', input.baseBranch);
+      return rootGit('rev-parse', ref);
     },
     declaration: async () => {
-      const shown = await git('show', `refs/remotes/origin/${input.baseBranch}:.graphyard/serve.json`).catch(() => null);
+      const shown = await rootGit('show', `${ref}:.graphyard/serve.json`).catch(() => null);
       return shown === null ? null : parseServeDeclaration(shown);
     },
-    checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); },
+    checkout: async commit => { await ensureCheckout(); await git('checkout', '--detach', '--quiet', commit); },
     install: async () => {
       // npm ci needs a lockfile; a repository without one installs. A repository with no package.json builds without npm.
       if (!existsSync(join(checkout, 'package.json'))) return;
@@ -253,18 +267,23 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     },
     restart: async serve => {
       const record = readServeRecord(serveRecordPath(input.root));
-      if (record?.pid && servesFromCheckout(record.pid, checkout)) {
-        try { process.kill(record.pid, 'SIGTERM'); } catch { /* already gone */ }
+      if (record && tracksLiveProcess(record)) {
+        // The serve runs detached as its own process group, so the signal reaches the wrapper and
+        // the children it left holding the port, not the wrapper alone.
+        try { process.kill(-record.pid!, 'SIGTERM'); } catch { /* already gone */ }
         for (let wait = 0; wait < 20; wait++) {
-          try { process.kill(record.pid, 0); } catch { break; }
+          try { process.kill(-record.pid!, 0); } catch { break; }
           await new Promise(accept => setTimeout(accept, 100));
         }
-        try { process.kill(record.pid, 'SIGKILL'); } catch { /* already gone */ }
+        try { process.kill(-record.pid!, 'SIGKILL'); } catch { /* already gone */ }
       }
       const [command, ...args] = serve;
       const child = spawn(command!, args, { cwd: checkout, detached: true, stdio: 'ignore' });
+      // A serve command that cannot start (ENOENT) must not crash the watch; the pass records it as a serve that never answered.
+      child.on('error', () => {});
       child.unref();
-      return child.pid ?? null;
+      const pid = child.pid ?? null;
+      return { pid, started: pid ? startedAt(pid) : null };
     },
   };
 }

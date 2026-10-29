@@ -30,6 +30,14 @@ const untilAnswers = async (url: string) => {
   }
   throw new Error(`${url} never answered`);
 };
+/** Waits until the URL stops answering, so a killed serve is judged gone by its port, not its pid. */
+const untilSilent = async (url: string) => {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    if (!(await fetch(url).then(() => true, () => false))) return;
+    await new Promise(accept => setTimeout(accept, 100));
+  }
+  throw new Error(`${url} never went silent`);
+};
 const stopServing = (root: string) => {
   const pid = readServeRecord(serveRecordPath(root))?.pid;
   if (pid) try { process.kill(pid, 'SIGKILL'); } catch { /* already gone */ }
@@ -142,6 +150,67 @@ test('unit:managed-repo-main-served-after-merge — the deploy pass checks a dec
   } finally { stopServing(root); }
 });
 
+test('unit:managed-repo-main-served-after-merge — a serve that died is served again and the record names the new process, so the next restart tracks what holds the port', async () => {
+  const port = await freePort(), url = `http://127.0.0.1:${port}`;
+  const { root } = await managedRepository('managed-serve-restart', port);
+  try {
+    const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
+    assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'served');
+    const first = readServeRecord(serveRecordPath(root));
+    assert.ok(first?.pid);
+    const commit = first.commit as string;
+    await untilAnswers(url);
+
+    // The serve process dies (a reboot, a crash): the record keeps the commit, the port goes dead.
+    process.kill(first.pid!, 'SIGKILL');
+    await untilSilent(url);
+
+    // The re-serve path serves the build the checkout already holds and writes the NEW pid, so the
+    // record tracks the process that actually answers; killing it again silences the port, and the
+    // next pass serves it again under a fresh pid.
+    let previous = first.pid!;
+    for (let round = 0; round < 2; round++) {
+      assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'restarted');
+      const again = readServeRecord(serveRecordPath(root));
+      assert.notEqual(again?.pid, previous, 'the dead pid is replaced by the new serve process\'s');
+      assert.doesNotThrow(() => process.kill(again!.pid!, 0), 'the recorded pid is alive');
+      await untilAnswers(url);
+      assert.equal(await servedCommit(url), commit, 'the same commit serves again');
+      process.kill(again!.pid!, 'SIGKILL');
+      await untilSilent(url);
+      const kept = readServeRecord(serveRecordPath(root));
+      assert.deepEqual({ commit: kept?.commit, failed: kept?.failed }, { commit, failed: null });
+      previous = again!.pid!;
+    }
+  } finally { stopServing(root); }
+});
+
+test('unit:managed-repo-main-served-after-merge — a serve that never answers is recorded as the failure it is, with nothing claimed served', async () => {
+  const port = await freePort(), url = `http://127.0.0.1:${port}`;
+  const { root, pusher, push } = await managedRepository('managed-serve-dead', port);
+  try {
+    const ports = managedServePorts({ root, baseBranch: 'main', run: defaultChildRun });
+    assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}), 'served');
+    await untilAnswers(url);
+
+    // The next commit's serve command exits without ever binding the port: the restart stopped the
+    // previous serve, nothing answers, and the pass records the failure instead of the commit.
+    const dead = await push(pusher, { 'serve.js': 'process.exit(0);\n' }, 'a serve that exits');
+    assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}, { answerTimeoutMs: 1_000 }), 'failed');
+    const record = readServeRecord(serveRecordPath(root));
+    assert.deepEqual({ commit: record?.commit, failed: record?.failed }, { commit: null, failed: dead });
+    assert.match(record?.reason ?? '', /the serve did not answer/);
+    await untilSilent(url);
+    const status = (await statusOf(root, 'owner/game')).serving;
+    assert.deepEqual({ unconfigured: status.unconfigured, commit: status.commit, atMain: status.atMain }, { unconfigured: true, commit: null, atMain: null });
+    assert.equal(status.serve?.url, url, 'the declared URL is still reported');
+    assert.match(status.serve?.failure?.reason ?? '', /the serve did not answer/);
+
+    // A serve failure waits for the next merge, like a build failure.
+    assert.equal(await serveOnce(serveRecordPath(root), ports, () => {}, { answerTimeoutMs: 1_000 }), 'unchanged');
+  } finally { stopServing(root); }
+});
+
 test('unit:serve-optional-and-doctor-checks-it — a repository without serve.json reports exactly what it reported before and the pass does nothing; doctor prints a FAIL line naming the URL when a declared serve does not answer', async () => {
   // A managed repository that declares nothing: the pass records nothing, and master status reads
   // exactly what it read before this feature — unconfigured, no served commit, no atMain claim, no
@@ -159,7 +228,7 @@ test('unit:serve-optional-and-doctor-checks-it — a repository without serve.js
   assert.equal(readServeRecord(serveRecordPath(root)), null, 'nothing was recorded');
 
   assert.deepEqual((await statusOf(root, 'owner/game')).serving,
-    { unconfigured: true, commit: null, main: main.slice(0, 12), atMain: null, failedDeploy: null, pending: null, serve: null });
+    { unconfigured: true, commit: null, main: main.slice(0, 12), atMain: null, failedDeploy: null, serve: null });
   // doctor prints no serve line for a repository that declares nothing.
   const doctorInput = { root, env: {}, status: null, reachable: true, environments: '/nonexistent', sandbox: () => null };
   assert.equal((await setupFromZeroChecks(doctorInput)).find(check => check.id === 'serve'), undefined);
@@ -167,6 +236,7 @@ test('unit:serve-optional-and-doctor-checks-it — a repository without serve.js
   // A declared serve that does not answer: one FAIL line naming the URL, the last build failure with it.
   const dead = await freePort();
   const deadUrl = `http://127.0.0.1:${dead}`;
+  await mkdir(join(root, '.graphyard'), { recursive: true });
   await writeFile(serveRecordPath(root), `${JSON.stringify({ commit: main, url: deadUrl, failed: main, reason: 'the build was told to fail', pid: null, at: new Date().toISOString() }, null, 2)}\n`);
   const checks = await setupFromZeroChecks(doctorInput);
   const serve = checks.find(check => check.id === 'serve') as SetupCheck | undefined;

@@ -41,7 +41,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const serving = {
     unconfigured: report.unconfigured, commit: short(report.commit), main: short(report.main), atMain: report.atMain,
     failedDeploy: report.failedDeploy ? { tip: short(report.failedDeploy.tip), reason: report.failedDeploy.reason, restoring: short(report.failedDeploy.restoring) } : null,
-    pending: report.pending, serve: report.serve,
+    // A repository that declares no serve.json reports exactly what it reported before it (GY-2976), with the serve fields null.
+    ...(report.serve ? { pending: report.pending, serve: report.serve } : { serve: null }),
   };
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const masterAgent = state?.master.agentName ? runtime.agents.find(agent => agent.name === state.master.agentName || (!!state.master.pane && agent.pane_id === state.master.pane)) : undefined;

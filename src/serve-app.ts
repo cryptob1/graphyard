@@ -29,8 +29,10 @@ export function parseServeDeclaration(source: string, file = '.graphyard/serve.j
   return parsed.data;
 }
 
-/** What the serve pass last did: the commit whose build serves, the URL it answers, the commit whose build last failed and why, and the serve process pid. */
-export interface ServeRecord { commit: string | null; url: string | null; failed: string | null; reason: string | null; pid?: number | null; at: string }
+/** What the serve pass last did: the commit whose build serves, the URL it answers, the commit whose build last failed and why, and the serve process it tracks (pid and kernel start time, so a pid reused after a reboot is never mistaken for it). */
+export interface ServeRecord { commit: string | null; url: string | null; failed: string | null; reason: string | null; pid?: number | null; started?: string | null; at: string }
+/** The serve process a restart left running. */
+export interface ServeProcess { pid: number | null; started: string | null }
 export const serveRecordPath = (root: string) => join(root, '.graphyard', 'served.json');
 export function readServeRecord(file: string): ServeRecord | null {
   if (!existsSync(file)) return null;
@@ -45,6 +47,19 @@ async function writeServeRecord(file: string, record: Omit<ServeRecord, 'at'>) {
 /** Whether an HTTP URL answers at all (any status counts: an app may 404 its root and still be served). */
 export const answering = (url: string) => fetch(url, { signal: AbortSignal.timeout(5_000) }).then(() => true, () => false);
 
+/** How long a restarted serve has to answer before the pass records the commit as unserved (a serve that cannot bind, a command that fails). */
+export const serveAnswerTimeoutMs = 30_000;
+
+/** Waits for a restarted serve to answer; false once `timeoutMs` passes without an answer. */
+async function waitAnswer(url: string, timeoutMs: number): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await answering(url)) return true;
+    if (Date.now() >= deadline) return false;
+    await delay(250);
+  }
+}
+
 /** What one serve pass runs a main tip through. */
 export interface ServePorts {
   /** Fetches the base branch and answers its tip. */
@@ -54,21 +69,26 @@ export interface ServePorts {
   checkout(commit: string): Promise<void>;
   install(): Promise<void>;
   build(declaration: ServeDeclaration): Promise<void>;
-  /** Stops the recorded serve process and starts the declared serve command; answers the new process's pid. */
-  restart(serve: readonly string[]): Promise<number | null>;
+  /** Stops the recorded serve process and starts the declared serve command; answers the new process's identity (pid and kernel start time). */
+  restart(serve: readonly string[]): Promise<ServeProcess>;
 }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 /**
  * One pass: fetch main, read its declaration, and when it moved past the served commit, check it
- * out, install and build it, and restart the serve — recording the served commit and URL; a
- * failure at any of those steps records the failed commit and its reason and leaves the previous
- * build serving. A failed tip waits for the next one, like the deploy watch. When the served
- * commit is still main but nothing answers it (a reboot, a crashed serve), the build the checkout
- * already holds is served again. No declaration, no action.
+ * out, install and build it, and restart the serve — recording the served commit and URL only
+ * once the new serve answers, so one that never answers (a port it cannot bind, a command that
+ * fails) is recorded as the failure it is, with the process it spawned still tracked for the next
+ * restart to stop. A failure at checkout, install or build records the failed commit and its
+ * reason and leaves the previous build serving. A failed tip waits for the next one, like the
+ * deploy watch. When the served commit is still main but nothing answers it (a reboot, a crashed
+ * serve), the build the checkout already holds is served again and the record is written with the
+ * new process's pid, so the next restart stops the process that actually holds the port. No
+ * declaration, no action.
  */
-export async function serveOnce(file: string, ports: ServePorts, log: (line: string) => void = line => console.error(line)): Promise<'absent' | 'unchanged' | 'served' | 'failed' | 'restarted'> {
+export async function serveOnce(file: string, ports: ServePorts, log: (line: string) => void = line => console.error(line), options: { answerTimeoutMs?: number } = {}): Promise<'absent' | 'unchanged' | 'served' | 'failed' | 'restarted'> {
+  const answerTimeoutMs = options.answerTimeoutMs ?? serveAnswerTimeoutMs;
   const tip = await ports.fetch();
   let declaration: ServeDeclaration | null = null;
   try { declaration = await ports.declaration(); } catch (error) { log(`[graphyard-serve] ${message(error)}`); }
@@ -77,22 +97,43 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   const record = readServeRecord(file);
   if (record?.commit === tip && (record.url ?? url) === url) {
     if (await answering(url)) return 'unchanged';
-    try { await ports.restart(declaration.serve); log(`[graphyard-serve] ${tip.slice(0, 12)} serves again at ${url}`); return 'restarted'; }
-    catch (error) { log(`[graphyard-serve] serving ${tip.slice(0, 12)} again failed: ${message(error)}`); return 'failed'; }
+    let served: ServeProcess | null = null;
+    try {
+      served = await ports.restart(declaration.serve);
+      if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the restarted serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
+      await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started });
+      log(`[graphyard-serve] ${tip.slice(0, 12)} serves again at ${url}`);
+      return 'restarted';
+    } catch (error) {
+      const reason = message(error);
+      log(`[graphyard-serve] serving ${tip.slice(0, 12)} again failed: ${reason}`);
+      await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null });
+      return 'failed';
+    }
   }
   if (record?.failed === tip) return 'unchanged';
   try {
     await ports.checkout(tip);
     await ports.install();
     await ports.build(declaration);
-    const pid = await ports.restart(declaration.serve);
-    await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid });
+  } catch (error) {
+    const reason = message(error);
+    log(`[graphyard-serve] the build of ${tip.slice(0, 12)} failed, so ${(record?.commit ?? 'nothing').slice(0, 12)} keeps serving: ${reason}`);
+    await writeServeRecord(file, { commit: record?.commit ?? null, url: record?.url ?? url, failed: tip, reason, pid: record?.pid ?? null, started: record?.started ?? null });
+    return 'failed';
+  }
+  // The restart stopped the previous serve, so the new one must answer before the commit is recorded as served.
+  let served: ServeProcess | null = null;
+  try {
+    served = await ports.restart(declaration.serve);
+    if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
+    await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started });
     log(`[graphyard-serve] serving ${tip.slice(0, 12)} at ${url}`);
     return 'served';
   } catch (error) {
     const reason = message(error);
-    log(`[graphyard-serve] the build of ${tip.slice(0, 12)} failed, so ${(record?.commit ?? 'nothing').slice(0, 12)} keeps serving: ${reason}`);
-    await writeServeRecord(file, { commit: record?.commit ?? null, url: record?.url ?? url, failed: tip, reason, pid: record?.pid ?? null });
+    log(`[graphyard-serve] ${reason}, so nothing serves`);
+    await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null });
     return 'failed';
   }
 }
