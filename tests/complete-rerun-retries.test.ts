@@ -63,6 +63,8 @@ async function worktree(rerunPlan: unknown[], baseFail: unknown[] = []) {
   await symlink(fileURLToPath(new URL('../../', import.meta.resolve('tsx'))), join(root, 'node_modules'));
   await writeFile(join(root, '.gitignore'), 'node_modules\n');
   await writeFile(join(root, 'tests', 'helpers', 'run-tests.ts'), runner);
+  // The refusal's named files exist here, as a worktree a trial failed on holds them (GY-2979).
+  for (const file of ['tests/docs-current-model.test.ts', 'tests/flaky.test.ts', 'tests/broken-elsewhere.test.ts', 'tests/own.test.ts']) await writeFile(join(root, file), '');
   if (baseFail.length) await writeFile(join(root, 'base-fail.json'), JSON.stringify(baseFail));
   git(root, 'init', '-b', 'main');
   git(root, 'config', 'user.email', 'test@example.com');

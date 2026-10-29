@@ -12,6 +12,7 @@ import { defaultChildRun } from './child-runner.js';
 import type { UserSystemctl } from './master/loop-restart.js';
 import { herdrServerUnit } from './herdr-host.js';
 import { installIdFor } from './install/types.js';
+import { readServeRecord, serveRecordPath } from './serve-app.js';
 
 /**
  * The prerequisites docs/setup-from-zero.md depends on that `graphyard doctor` can check from this
@@ -27,6 +28,7 @@ export const setupSteps = {
   releaseFiling: 'issue GRAPHYARD_RELEASE_TOKEN to an operator agent holding no capability, scoped to this repository (graphyard operator-agent setup FILE --token-stdin)',
   loopCode: 'rerun graphyard up --agent from this checkout (docs/setup-from-zero.md step 10, start the master)',
   unitOverrides: 'docs/setup-from-zero.md#troubleshooting-manual-steps (remove the drop-in)',
+  serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
 } as const;
 
 export interface SetupCheck { id: string; status: 'pass' | 'fail'; detail: string; step: string }
@@ -250,6 +252,21 @@ async function unitOverridesChecks(root: string, systemctl: UserSystemctl, platf
 }
 const userManager: UserSystemctl = (args, timeoutMs = 30_000) => defaultChildRun('systemctl', ['--user', ...args], { timeoutMs });
 
+/**
+ * GY-2976: the declared serve's line. A repository whose main declares .graphyard/serve.json and
+ * whose deploy pass has run carries a serve record; the URL it names must answer. A serve that is
+ * not answering is one FAIL line naming the URL, so doctor names the product that stopped being
+ * served; a repository that declares nothing records no line at all.
+ */
+async function serveCheck(root: string): Promise<SetupCheck | null> {
+  const record = readServeRecord(serveRecordPath(root));
+  if (!record?.url) return null;
+  const answered = await fetch(record.url, { signal: AbortSignal.timeout(5_000) }).then(() => true, () => false);
+  const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'serve', status, step: setupSteps.serve, detail });
+  return answered ? check('pass', `${record.url} answers${record.commit ? ` at ${record.commit.slice(0, 12)}` : ''}`)
+    : check('fail', `the declared serve does not answer ${record.url}${record.failed ? `; the build of ${record.failed.slice(0, 12)} failed last: ${(record.reason ?? '').slice(0, 200)}` : ''}`);
+}
+
 /** Every setup-from-zero line for this machine and installation, in checklist order. */
 export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<SetupCheck[]> {
   const env = input.env ?? process.env, status = input.status;
@@ -270,5 +287,7 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push(...await unitOverridesChecks(input.root, input.systemctl ?? userManager, input.platform ?? process.platform));
   const releaseFiling = input.releaseFiling ?? await readReleaseFiling(input.root, env);
   if (releaseFiling) lines.push(releaseFilingCheck(releaseFiling, status?.repository ?? null));
+  const serve = await serveCheck(input.root);
+  if (serve) lines.push(serve);
   return lines;
 }
