@@ -6,6 +6,7 @@ import { resolve } from 'node:path';
 import { spawnSync } from 'node:child_process';
 import type { Work } from '../model.js';
 import { controlPlaneRestartWindowMs, restartTolerantApi, setupLine, supervise, systemdContainment } from '../supervisor.js';
+import { resumeExitWindowMs, resumeLaunchVariable } from '../master/session-resume.js';
 import { attributeConflicts, hasConflictMarkers, parseLocalScopeDiff, regenerateManagedBlocks } from '../sync.js';
 import { resolveTimingBaseline, timedTestFile, timingBaselinePath } from '../model/timing-companion.js';
 import { environmentBlocker, environmentFailure } from '../worker-sandbox.js';
@@ -186,6 +187,8 @@ export const workspaceCommands = defineCommands([
       process.exitCode = await supervise(args[separator + 1], args.slice(separator + 2), epoch, renew, {
           detached: !foreground,
           ...(scoped ? { containment: scoped } : {}),
+          // A resume launch that exits at once (its session gone) keeps the lease for the fresh relaunch (GY-2971).
+          ...(process.env[resumeLaunchVariable] === '1' ? { earlyExitKeepsLeaseMs: resumeExitWindowMs } : {}),
         });
     },
   },

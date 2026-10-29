@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from '../src/master.js';
 import { dispatchedFile } from '../src/master/dispatch-reservation.js';
 import { itemLine } from '../src/cli/master-status.js';
+import { supervise } from '../src/supervisor.js';
 import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
@@ -21,11 +22,11 @@ const finding = 'BLOCKING: parking.ts compacts the vehicle array, so stored inde
 
 /** A Herdr world: every pane gets its own id, and a `--resume` launch exits at once when `resumeExits` is set. */
 function world(resumeExits = false) {
-  const typed = new Map<string, string>(), commands: string[] = [];
+  const typed = new Map<string, string>(), commands: string[] = [], tabs: string[][] = [];
   let now = Date.now(), panes = 0;
   const json = (result: unknown) => JSON.stringify({ result });
-  return { commands, bounds: (log: string[]) => ({ clock: () => now, wait: (ms: number) => { now += ms; }, log: (line: string) => log.push(line) }), run: (_command: string, args: string[]): string => {
-    if (args[0] === 'tab' && args[1] === 'create') { panes++; return json({ root_pane: { pane_id: `w1V:p${panes}`, tab_id: `w1V:t${panes}` } }); }
+  return { commands, tabs, bounds: (log: string[]) => ({ clock: () => now, wait: (ms: number) => { now += ms; }, log: (line: string) => log.push(line) }), run: (_command: string, args: string[]): string => {
+    if (args[0] === 'tab' && args[1] === 'create') { panes++; tabs.push(args); return json({ root_pane: { pane_id: `w1V:p${panes}`, tab_id: `w1V:t${panes}` } }); }
     if (args[0] === 'pane' && args[1] === 'run') { typed.set(args[2], args[3]); commands.push(args[3]); return ''; }
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     const pane = args[1] === 'process-info' ? args[3] : args[2], command = typed.get(pane);
@@ -83,7 +84,7 @@ async function fixture() {
     const dispatched = await dispatchWork(root, { ...work, epoch: epoch - 1 }, profile, [], herdr.run, [work], prepare, async (_root, _key, claimed) => { released.push(claimed); }, 5_000, at,
       { start: herdr.bounds(log), probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
     const launches = herdr.commands.map(command => expandTypedCommand(command));
-    return { dispatched, launches, log, released, claims, path, record: await readAttemptLaunch(root, work.key) };
+    return { dispatched, launches, tabs: herdr.tabs, log, released, claims, path, record: await readAttemptLaunch(root, work.key) };
   };
   return { root, limited, dispatch };
 }
@@ -185,5 +186,20 @@ test('unit:rework-resumes-with-findings-and-falls-back — a CHANGES_REQUESTED r
     assert.equal(second.dispatched.resumedFrom, null);
     assert.ok(second.log.some(line => /GY-1 attempt 2 launches a fresh session: the resume of attempt 1's session failed at start \(exited\)/.test(line)), second.log.join('\n'));
     assert.equal(second.record?.resumedFrom, null);
+    const tab = (pane: number) => second.tabs[pane - 1];
+    assert.ok(tab(1).includes('GRAPHYARD_RESUME_LAUNCH=1') && !tab(2).includes('GRAPHYARD_RESUME_LAUNCH=1'), 'only the resume launch\'s supervisor is told to keep the lease on an early exit');
+  }
+  {
+    // The resume launch's `watch` supervisor: a runtime exiting in its first minute surrenders nothing, so the
+    // launcher's relaunch holds the same lease; any other launch's early exit still releases it.
+    const { resumeExitWindowMs } = await import('../src/master/session-resume.js');
+    const exitAtOnce = async (earlyExitKeepsLeaseMs?: number) => {
+      const surrendered: string[] = [];
+      await supervise(process.execPath, ['-e', 'process.exit(1)'], 2, async () => ({ updatedAt: new Date().toISOString(), lease: { epoch: 2, expiresAt: new Date(Date.now() + 120_000).toISOString() } }) as never,
+        { detached: false, intervalMs: 20, graceMs: 25, session: { visible: () => null, surrender: async cause => { surrendered.push(cause); } }, ...(earlyExitKeepsLeaseMs ? { earlyExitKeepsLeaseMs } : {}) });
+      return surrendered;
+    };
+    assert.deepEqual(await exitAtOnce(resumeExitWindowMs), [], 'a resume that exits at once keeps the lease');
+    assert.equal((await exitAtOnce()).length, 1, 'a fresh launch that exits releases it, as before');
   }
 });

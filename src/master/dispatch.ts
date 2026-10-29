@@ -25,7 +25,7 @@ import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, ty
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
-import { carryTranscript, freshLaunch, readAttemptLaunch, resumePlan, type AttemptLaunch } from './session-resume.js';
+import { carryTranscript, freshLaunch, readAttemptLaunch, resumeLaunchVariable, resumePlan, type AttemptLaunch } from './session-resume.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -431,7 +431,7 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
       // A worker never reaches the operator's keyring, minted credential or not (GY-999, GY-1039): one
       // launched without a minter has no GitHub credential at all, never the host's login.
       const open = async () => {
-        const created = createdHerdrTab(await herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
+        const created = createdHerdrTab(await herdrJson(plan.resume ? [...tabArgs.slice(0, -1), '--env', `${resumeLaunchVariable}=1`, '--no-focus'] : tabArgs, run)); pane = created.pane; tabId = created.tab;
         return startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...plan.args, ...sessionHarness.args], prompt, run,
           { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ...confinementCredential, ...(coordinatorRoot ? { coordinatorRoot } : {}) });
       };

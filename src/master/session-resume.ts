@@ -24,6 +24,9 @@ export const resumeForms: Record<string, { fresh: (id: string) => string[]; resu
   claude: { fresh: id => ['--session-id', id], resume: id => ['--resume', id] },
 };
 
+/** Set on a resume launch's tab: its `watch` supervisor leaves the lease to the launcher when the runtime exits within `resumeExitWindowMs`. */
+export const resumeLaunchVariable = 'GRAPHYARD_RESUME_LAUNCH', resumeExitWindowMs = 60_000;
+
 export type ResumePlan = { resume: true; from: number; session: string; args: string[] } | { resume: false; session: string | null; args: string[]; why: string | null };
 /** A fresh launch's arguments: the runtime's own, plus the session id it records when it has a form for one. */
 export function freshLaunch(kind: string | undefined, why: string | null): Extract<ResumePlan, { resume: false }> {
