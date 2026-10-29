@@ -6,7 +6,6 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from '../src/master.js';
 import { dispatchedFile } from '../src/master/dispatch-reservation.js';
-import { readAttemptLaunch } from '../src/master/session-resume.js';
 import { itemLine } from '../src/cli/master-status.js';
 import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
@@ -39,6 +38,9 @@ function world(resumeExits = false) {
     return json({});
   } };
 }
+
+/** Imported per case, so a tree without the module fails each case rather than the file's load. */
+const readAttemptLaunch = async (root: string, key: string) => (await import('../src/master/session-resume.js')).readAttemptLaunch(root, key);
 
 async function fixture() {
   const holder = await temporaryDirectory('session-resume'), root = join(holder, 'repository'), credentials = join(holder, 'credentials');
