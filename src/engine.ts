@@ -936,11 +936,13 @@ export class Engine {
         const proofNames: string[] = [...new Set<string>(data.criteria.flatMap((ac: { proofs: string[] }) => ac.proofs))];
         for (const proof of proofNames.filter(p => p.startsWith('e2e:'))) {
           // GY-1708: resolveScenario persists a shipped revision (capacity-limit-redispatch) so create
-          // accepts e2e: proofs without a separate e2e sync. Only Graphyard's own repository install
+          // pins a shipped scenario without a separate e2e sync. Only Graphyard's own repository install
           // ships them; another managed repository registers its cases with e2e sync (GY-2964).
+          // GY-2973: an unregistered scenario pins nothing — the case is the item's own deliverable
+          // (the trial refuses a head that lacks e2e/cases/NAME.json and runs the case it adds), and
+          // the scenario registers when the merged head is synced, as case sync already does.
           const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id }, this.repository);
-          demand(scenario, `Register E2E scenario ${proof.slice(4)} before creating work that requires it`);
-          scenarioRequirements.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
+          if (scenario) scenarioRequirements.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
         }
         const created = now.toISOString();
         const { reason: _reason, ...intent } = data;
@@ -1370,8 +1372,9 @@ export class Engine {
       const pinned = work.scenarioRequirements.find(s => s.proof === proof);
       if (pinned) { pins.push(pinned); continue; }
       const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id }, this.repository);
-      demand(scenario, `Register E2E scenario ${proof.slice(4)} first`);
-      pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
+      // GY-2973: an unregistered scenario pins nothing; the case is the item's own deliverable, and
+      // the trial refuses the head while it lacks e2e/cases/NAME.json.
+      if (scenario) pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
     }
     work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
     work.criteria = revised;
