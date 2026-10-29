@@ -18,7 +18,7 @@ import { writeReviewBinding } from './review-post.js';
 import type { FleetProbe } from './fleet.js';
 /** The most threads one pull-request-era launch listed, and the most comment IDs one thread's record kept; bounds the fields old ledger records still carry. */
 const listedThreadLimit = 100, threadAliasLimit = 50;
-import { carriedApproval, declaredPostDeploy, implementerIdentities, type Work } from './model.js';
+import { carriedApproval, declaredPostDeploy, implementerIdentities, pinnedCases, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { sessionLiveness, type RuntimeSession, type SessionHandle } from './model/sessions.js';
@@ -672,6 +672,16 @@ export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
     + 'it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. ';
 }
 /**
+ * GY-2975: what a review brief says about a criterion whose proof pins one case: run the head on one
+ * other case the item's own commands accept, and request changes when only the pinned case works.
+ * Empty when no criterion pins one, so every other review request stays byte-identical.
+ */
+export function singleCaseReviewSection(criteria?: readonly ReviewCriterion[]) {
+  const flagged = (criteria ?? []).filter(criterion => pinnedCases(criterion.text).length === 1).map(criterion => criterion.id);
+  if (!flagged.length) return '';
+  return `${flagged.join(', ')} ${flagged.length === 1 ? 'checks' : 'check'} one case: a head can pass by tuning to that case. For each, run the head once on one other case its own commands accept — another seed or input — quote both results, and request changes when the head works only on the pinned case. `;
+}
+/**
  * The criteria-only review rule (GY-166). GY-164 took 19 attempts: its reviewer confirmed both
  * criteria met around round 16 and kept requesting changes for new edge cases. The reviewer judges
  * the item's acceptance criteria; anything worth fixing is BLOCKING and fixed on the same head,
@@ -699,6 +709,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + reviewRoundSection(binding.sha, history)
     + criteriaRuleSection(binding.key, binding.sha, criteria)
     + postDeployReviewSection(criteria)
+    + singleCaseReviewSection(criteria)
     + findingClassificationSection()
     + simplicityParagraph
     + blockingStandardSection
@@ -738,6 +749,7 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + (context?.round ?? '')
     + criteriaRuleSection(binding.key, binding.head, criteria)
     + postDeployReviewSection(criteria)
+    + singleCaseReviewSection(criteria)
     + controlPlaneFindingSection
     + blockingStandardSection
     + repetitionReviewSection(files);

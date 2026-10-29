@@ -9,7 +9,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, grantsAuthorize, unauthorizedProofs } from './model/proof.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof } from './model.js';
+import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, assertReviewerProfiles, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
@@ -950,6 +950,9 @@ export class Engine {
           ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements, evidence: [], observation: null, blocker: null, gates: [], violations: [] };
         // A policy-required post-deployment proof needs an authorized producer as much as a criterion proof does.
         work!.proofGaps = unauthorizedProofs(this.principals, [...proofNames, ...(deploySmokeRequired(data.policy) ? [deploySmokeProof] : [])], data.producerProofs);
+        // GY-2975: the create response and the stored document carry the single-case warning, so the author sees it at once.
+        const warnings = singleCaseWarnings(criteria);
+        if (warnings.length) work!.warnings = warnings;
         await adoptFollowUpWindow(db, work!);
         const inserted = await db.query('INSERT INTO work_items(id,document) VALUES($1,$2) RETURNING number', [work!.id, JSON.stringify(work)]);
         work!.key = `GY-${inserted.rows[0].number}`;
@@ -1382,6 +1385,9 @@ export class Engine {
     work.scenarioRequirements = pins; work.policyRevision++;
     this.refuseRenewedDeferral(work, all);
     work.proofGaps = unauthorizedProofs(this.principals, [...proofs, ...(deploySmokeRequired(work.policy) ? [deploySmokeProof] : [])], work.producerProofs);
+    // GY-2975: a revision rejudges the warning from the revised criteria; none, the field goes.
+    const warnings = singleCaseWarnings(revised);
+    work.warnings = warnings.length ? warnings : undefined;
     work.formalReviewResetRequired = true; work.formalReviewBaseline = undefined;
     // A revision is a hand-off for an item already under way: its timeline counts it, and the
     // lapsed lease it discards (a live one was refused above) ends that attempt at its deadline.
