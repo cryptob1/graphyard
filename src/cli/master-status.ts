@@ -7,13 +7,14 @@ import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
+import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
-/** One open item's line: its stage, who holds it, the head it submitted, and what blocks it. */
-export function itemLine(item: Work, now: number) {
+/** One open item's line: its stage, its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
+export function itemLine(item: Work, now: number, launched: AttemptLaunch | null = null) {
   const lease = item.lease && Date.parse(item.lease.expiresAt) > now ? item.lease : null;
-  return { key: item.key, title: item.title, stage: item.stage, owner: lease?.owner ?? null, head: short(item.candidate?.sha),
+  return { key: item.key, title: item.title, stage: item.stage, attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, head: short(item.candidate?.sha),
     blocker: item.blocker ?? (item.humanRequest && !item.humanRequest.answer ? `waits on a human: ${item.humanRequest.needed}` : null) };
 }
 
@@ -49,13 +50,15 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   // "no test check configured" so a managed repository never looks like it trials with zero tests.
   const trialTests = trialTestGateStatus(root);
   const recorded = state?.controlPlane ?? null;
+  const open = snapshot.work.filter(item => item.stage !== 'done');
+  const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
   return {
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
     masterSession: masterSummary(state?.master ?? emptyMasterSession(), now, masterAgent),
-    items: snapshot.work.filter(item => item.stage !== 'done').map(item => itemLine(item, now)),
+    items: open.map((item, index) => itemLine(item, now, launched[index])),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
     sessions,

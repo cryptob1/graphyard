@@ -25,6 +25,7 @@ import { cycleBaseTip, dependencyDirectories, failureText, shareDependencies, ty
 import { humanOnlyDecisions, installWorkerHarness, prepareSessionHarness, sessionSlotsGrant, submissionPolicyRule } from './harness.js';
 import { withVerificationPath } from './verification-slots.js';
 import { holdRepeatedLimitAccount, repeatedLimitAccount } from './launch-account.js';
+import { carryTranscript, freshLaunch, readAttemptLaunch, resumePlan, type AttemptLaunch } from './session-resume.js';
 import { currentAgents, dispatchedFile, DispatchReservedError, launchedSinceSnapshot, profileLaunchedFile, reclaimableAgent, reserveDispatch } from './dispatch-reservation.js';
 import { projectMemoryDigest, type ProjectMemory } from '../model/project-memory.js';
 import { readProjectMemory } from '../project-memory.js';
@@ -150,6 +151,9 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   let claimedEpoch: number | undefined;
   const startFailures: AccountStartFailure[] = [];
   let closedAgent: string | null = null;
+  // GY-2971: the item's last launch on this host, whose runtime session the next attempt may resume.
+  let resumed: { session: string | null; resumedFrom: number | null; path: string } | null = null;
+  const previous = await readAttemptLaunch(root, work.key);
   // The repository's true root, through the common Git directory: a coordinator checkout that is
   // itself a linked worktree still derives the root every sibling worktree sits under (GY-2959).
   const repositoryRoot = dirname(await sharedGitDirectory(root) ?? root);
@@ -227,17 +231,18 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round, observedAt));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round, observedAt, previous));
               claimedEpoch = epoch;
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
-              await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at }), { mode: 0o600 }).catch(() => {});
+              // It also names the runtime session the next attempt may resume (GY-2971).
+              await writeFile(dispatchedFile(root, work.key), JSON.stringify({ epoch, at, runtime: launch.kind ?? null, account: chosen.account?.name ?? null, ...resumed }), { mode: 0o600 }).catch(() => {});
               // The dispatch record names the runtime and account the session runs on, the preference
               // that ordered the accounts (GY-1772), every account whose runtime failed to start
               // first, so a slot running one runtime under a profile named for another is on the
               // record, not a surprise (GY-417).
               await writeFile(profileLaunchedFile(root, profile.name), JSON.stringify({ key: work.key, epoch, agentName: profile.agentName, at,
-                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, prefer, ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
+                runtime: launch.kind ?? null, account: chosen.account?.name ?? null, prefer, ...(resumed?.resumedFrom ? { resumedFrom: resumed.resumedFrom } : {}), ...(startFailures.length ? { failedAccounts: startFailures } : {}) }), { mode: 0o600 }).catch(() => {});
               // A start on the account clears its own run of consecutive start failures.
               if (chosen.account) await clearAccountStartFailures(config, chosen.account.name).catch(() => {});
               break;
@@ -274,6 +279,8 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   return { work: work.key, epoch: claimedEpoch, profile: profile.name, principal: profile.principal, agentName: profile.agentName, pane: target.pane_id ?? null, approvals: profile.approvals,
     launch: launched?.plan ?? agentLaunchPlan(profile.kind, profile.approvals, profile.agentArgs, profile.environment), ownership: 'worker launcher claimed and is supervising the agent process', harness, dependencies, delivery, sandbox, mergeWriter, pushCredential, ...(reclaimed.length ? { reclaimed } : {}), ...(closedAgent ? { closedAgent } : {}),
     // `awaiting consent` is not a started session: the runtime has not read its request (GY-130).
+    // Whether the attempt resumed the previous attempt's runtime session (GY-2971).
+    resumedFrom: resumed?.resumedFrom ?? null,
     started, consent: { answered: consent.answered, awaiting: consent.awaiting ? { prompt: consent.awaiting.prompt, kind: consent.awaiting.kind, pane: consent.awaiting.pane, attach: consent.awaiting.attach, releaseAt: consent.awaiting.releaseAt, attention: consentHoldAttention(consent.awaiting) } : null },
     // The selection names the preference that ordered the accounts it chose from (GY-1772).
     account: selected?.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped, prefer } : null, relaunched,
@@ -335,10 +342,11 @@ export async function clearAccountStartFailures(config: Pick<MasterConfig, 'cred
 export const describeStartFailures = (failures: readonly AccountStartFailure[], launchedOn: string | null) =>
   `${failures.map(failure => `${failure.account} failed to start: ${failure.reason}`).join('; ')}; launched on ${launchedOn ?? 'no named account'}`;
 /** What a profile's last worker dispatch recorded, as master status reads it (GY-417). */
-export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; failedAccounts: AccountStartFailure[] }
+export interface ProfileLaunchRecord { key: string; epoch: number; agentName: string; at: string; runtime: string | null; account: string | null; /** Which runtimes the dispatch tried first (GY-1772); null on a record written before the preference was recorded. */ prefer: 'fast' | 'strong' | null; failedAccounts: AccountStartFailure[]; /** The attempt whose runtime session this launch resumed (GY-2971). */ resumedFrom?: number }
 const profileLaunchRecordSchema = z.object({
   key: z.string().min(1), epoch: z.number().int().min(1), agentName: z.string().min(1), at: z.string().min(1),
   runtime: z.string().nullable().default(null), account: z.string().nullable().default(null), prefer: z.enum(['fast', 'strong']).nullable().default(null),
+  resumedFrom: z.number().int().min(1).optional(),
   prepareMs: z.unknown().optional().transform(() => undefined), // retired (GY-2876): a record written before parses
   failedAccounts: z.array(z.object({ account: z.string().min(1), kind: z.string().min(1), reason: z.string().min(1), at: z.string().min(1) }).strict()).default([]),
 }).strict();
@@ -356,7 +364,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'control-plane', round: ReworkRound = { mechanical: null, rework: null }, cycle?: string) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'control-plane', round: ReworkRound = { mechanical: null, rework: null }, cycle?: string, previous: AttemptLaunch | null = null) {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -408,21 +416,45 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
         sandbox = verifyWorkerSandbox({ ...launch, args, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, prepared.path, writable, sandboxProbe === 'host' ? undefined : sandboxProbe);
       }
       const tabArgs = ['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', prepared.path, '--label', `${work.key} · ${profile.agentName}`, '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_TOKEN_FILE=${profile.credentialFile}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`, '--env', `GRAPHYARD_HERDR_AGENT_KIND=${launch.kind}`, ...(process.env.XDG_RUNTIME_DIR ? ['--env', `XDG_RUNTIME_DIR=${process.env.XDG_RUNTIME_DIR}`] : []), ...(process.env.DBUS_SESSION_BUS_ADDRESS ? ['--env', `DBUS_SESSION_BUS_ADDRESS=${process.env.DBUS_SESSION_BUS_ADDRESS}`] : []), ...Object.entries(withVerificationPath(sessionHarness.environment, launch.environment)).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'];
-      const created = createdHerdrTab(await herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
+      // GY-2971: the previous attempt's runtime session is resumed when this launch runs on the same
+      // runtime and account and that attempt recorded its id; the brief is the same complete brief, so
+      // only the conversation carries over. Otherwise the launch is fresh, and the log says why.
+      const log = start?.log ?? ((line: string) => process.stderr.write(`${line}\n`));
+      let plan = resumePlan(previous, { kind: launch.kind, account: launch.account });
+      if (plan.resume) {
+        log(`graphyard: ${work.key} attempt ${prepared.epoch} resumes attempt ${plan.from}'s ${launch.kind} session ${plan.session}`);
+        await carryTranscript(launch.kind, launch.environment, plan.session, previous?.path, prepared.path);
+      } else if (plan.why) log(`graphyard: ${work.key} attempt ${prepared.epoch} launches a fresh session: ${plan.why}`);
       // The instruction is the session's own first request, on the runtime's command line under
       // the supervisor, read from the request file in the worktree (GY-121); only a runtime without
       // that contract is prompted after.
       // A worker never reaches the operator's keyring, minted credential or not (GY-999, GY-1039): one
       // launched without a minter has no GitHub credential at all, never the host's login.
-      const started = await startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...sessionHarness.args], prompt, run,
-        { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ...confinementCredential, ...(coordinatorRoot ? { coordinatorRoot } : {}) });
+      const open = async () => {
+        const created = createdHerdrTab(await herdrJson(tabArgs, run)); pane = created.pane; tabId = created.tab;
+        return startAgentSession(profile.agentName, launch.kind!, pane, [...args, ...plan.args, ...sessionHarness.args], prompt, run,
+          { ...delivery, ...start, timeoutMs: start?.timeoutMs ?? agentTimeoutMs ?? launchStartMs(config), directory: prepared.path, cwd: prepared.path, role: sessionHarness.role, prefix: [process.execPath, config.cliPath, 'watch', work.key, String(prepared.epoch), '--'], holdConsent: true, contract: launch.contract, environment: launch.environment, ...confinementCredential, ...(coordinatorRoot ? { coordinatorRoot } : {}) });
+      };
+      let started: Awaited<ReturnType<typeof open>>;
+      try { started = await open(); }
+      catch (error) {
+        // A resume that exits or never comes up within its start bound closes its pane and launches
+        // the same attempt fresh, under the lease it already holds.
+        if (!plan.resume || !(error instanceof SessionStartError)) throw error;
+        await closeFailedLaunch(pane, tabId, run);
+        pane = tabId = undefined;
+        plan = freshLaunch(launch.kind, `the resume of attempt ${plan.from}'s session failed at start (${error.startCase}): ${failureText(error).slice(0, 300)}`);
+        log(`graphyard: ${work.key} attempt ${prepared.epoch} launches a fresh session: ${plan.why}`);
+        started = await open();
+      }
       // A worker stopped on a prompt the launcher does not answer is held for a human rather than
       // closed: its record beside the launch files is what master status raises and what the watch
       // supervisor bounds, releasing the slot once `consentHoldMs` passes with the prompt unanswered.
-      const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane, started.awaiting) : null;
+      const hold = started.awaiting ? consentHold(config, work.key, prepared.epoch, profile.agentName, pane!, started.awaiting) : null;
       if (hold) writeConsentHold(started.files.stem, hold);
       return { target: { name: profile.agentName, pane_id: pane, agent_status: hold ? 'blocked' : 'working', cwd: prepared.path } as HerdrAgent, harness, dependencies: prepared.dependencies ?? null, delivery: started.delivery, sandbox,
-        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const };
+        started: started.started.state, consent: { answered: started.consent, awaiting: hold }, epoch: prepared.epoch, reclaimed: prepared.reclaimed ?? [], mergeWriter, pushCredential: 'none' as const,
+        resumed: { session: plan.session, resumedFrom: plan.resume ? plan.from : null, path: prepared.path } };
     } catch (error) {
       const malformedTab = (error as any)?.herdrTab as string | undefined;
       const failed = error instanceof Error ? error.message : 'Worker launch failed';
