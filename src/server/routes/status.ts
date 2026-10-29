@@ -16,10 +16,11 @@ import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../production-environment.js';
-import { managedDeploy } from '../../deploy-watch.js';
+import { managedDeploy, repositoryToplevel, servingReport } from '../../deploy-watch.js';
 import { graphyardRepository } from '../../scenarios.js';
 import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import { boardFromStatus } from '../../model/board.js';
+import { resolve } from 'node:path';
 import { boundedSnapshot, workDocument } from '../../store/bounded-snapshot.js';
 import { snapshotPage } from '../../store/paged-snapshot.js';
 
@@ -51,12 +52,19 @@ export const statusRoutes = defineRoutes('status', [
       // shared checkout holds is ahead. This process's build and the production watch observe the
       // control plane's own code, never another repository's release, so its header reads from here;
       // an install managing Graphyard itself keeps the production watch's release line.
+      const runner = engine.gitRunner === undefined ? engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd()) : engine.gitRunner;
       const deploy = repository && repository.toLowerCase() !== graphyardRepository
-        ? await managedDeploy(repository, engine.baseBranch, process.env.GRAPHYARD_REPOSITORY_ROOT,
-          engine.gitRunner === undefined ? engine.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd()) : engine.gitRunner)
+        ? await managedDeploy(repository, engine.baseBranch, process.env.GRAPHYARD_REPOSITORY_ROOT, runner)
         : null;
+      // Master status's serving block over the API (GY-2976): what the deploy record naming this
+      // repository, or the repository's declared serve, serves — the served commit, whether it is
+      // main, the URL and the last build failure, with the serve fields null when nothing is
+      // declared. Read from the checkout this process serves from: GRAPHYARD_REPOSITORY_ROOT, else
+      // its own working directory's git toplevel, so a served head reports its own serving.
+      const servingRoot = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : repositoryToplevel(process.cwd());
+      const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs, deploy,
+        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs, deploy, serving,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work

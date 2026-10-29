@@ -1,7 +1,7 @@
 // `graphyard upgrade` (GY-1962): one command moves the CLI checkout, the server, the loop and
 // executors, and the managed repository's generated files to one dated release, in order.
-import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createBackup } from '../backup.js';
@@ -14,6 +14,7 @@ import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
+import { parseServeDeclaration, readServeRecord, serveCheckoutPath, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
@@ -212,6 +213,62 @@ export async function ensureDeployCheckout(checkout: string, source: string, run
   await run('git', ['-C', source, 'worktree', 'add', '--detach', '--quiet', checkout, 'HEAD']);
 }
 
+/** How long an install or build step of the declared serve may run. */
+const serveInstallTimeoutMs = 1_800_000;
+
+/** Whether the process still named `pid` runs from this serve checkout: a pid recorded before a reboot may name another process now, and a kill must never reach one of those. Without /proc (off Linux) the check cannot be made and the recorded pid is trusted. */
+const servesFromCheckout = (pid: number, checkout: string) => {
+  try { return readFileSync(`/proc/${pid}/cmdline`, 'utf8').includes(checkout); } catch { return !existsSync('/proc'); }
+};
+
+/** The ports the deploy unit's serve pass (GY-2976) runs against the managed repository's main: git in the install's own serve checkout, npm ci as the install, the declared build, and the declared serve command spawned detached. */
+export function managedServePorts(input: { root: string; baseBranch: string; run: ChildRun }): ServePorts {
+  const checkout = serveCheckoutPath(input.root);
+  const git = async (...args: string[]) => String(await input.run('git', ['-C', checkout, ...args], { timeoutMs: 120_000 })).trim();
+  const ensureCheckout = async () => {
+    if (existsSync(join(checkout, '.git'))) return;
+    await mkdir(resolve(checkout, '..'), { recursive: true });
+    await input.run('git', ['-C', input.root, 'worktree', 'add', '--detach', '--quiet', checkout, 'HEAD'], { timeoutMs: 120_000 });
+  };
+  return {
+    fetch: async () => {
+      await ensureCheckout();
+      await git('fetch', '--quiet', 'origin', input.baseBranch);
+      return git('rev-parse', `refs/remotes/origin/${input.baseBranch}`);
+    },
+    declaration: async () => {
+      const shown = await git('show', `refs/remotes/origin/${input.baseBranch}:.graphyard/serve.json`).catch(() => null);
+      return shown === null ? null : parseServeDeclaration(shown);
+    },
+    checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); },
+    install: async () => {
+      // npm ci needs a lockfile; a repository without one installs. A repository with no package.json builds without npm.
+      if (!existsSync(join(checkout, 'package.json'))) return;
+      const locked = existsSync(join(checkout, 'package-lock.json'));
+      await input.run('npm', [locked ? 'ci' : 'install', '--no-audit', '--no-fund'], { cwd: checkout, timeoutMs: serveInstallTimeoutMs });
+    },
+    build: async (declaration: ServeDeclaration) => {
+      const [command, ...args] = declaration.build;
+      await input.run(command!, args, { cwd: checkout, timeoutMs: serveInstallTimeoutMs });
+    },
+    restart: async serve => {
+      const record = readServeRecord(serveRecordPath(input.root));
+      if (record?.pid && servesFromCheckout(record.pid, checkout)) {
+        try { process.kill(record.pid, 'SIGTERM'); } catch { /* already gone */ }
+        for (let wait = 0; wait < 20; wait++) {
+          try { process.kill(record.pid, 0); } catch { break; }
+          await new Promise(accept => setTimeout(accept, 100));
+        }
+        try { process.kill(record.pid, 'SIGKILL'); } catch { /* already gone */ }
+      }
+      const [command, ...args] = serve;
+      const child = spawn(command!, args, { cwd: checkout, detached: true, stdio: 'ignore' });
+      child.unref();
+      return child.pid ?? null;
+    },
+  };
+}
+
 /**
  * The repository the deploy watch serves (GY-2955): its checkout's origin's owner/name, null when it
  * names none. The deploy record keeps it, so a control-plane upgrade installed for one repository
@@ -305,7 +362,14 @@ export const upgradeCommands = defineCommands([{
       if (typeof ports === 'string') throw new Error(ports);
       const stopping = new AbortController();
       for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => stopping.abort());
-      return watchMain(deployRecordPath(repoRoot), ports, { intervalMs: master.run.intervalSeconds * 1000, once: flags.includes('--once'), signal: stopping.signal, repository: servedRepository(cliRoot) });
+      // The managed repository's own serving (GY-2976): a main that declares .graphyard/serve.json is
+      // checked out into the install's own serve checkout, built and served by the same unit's pass;
+      // a repository that declares nothing gives the serve pass nothing to do.
+      const intervalMs = master.run.intervalSeconds * 1000, once = flags.includes('--once');
+      return Promise.all([
+        watchMain(deployRecordPath(repoRoot), ports, { intervalMs, once, signal: stopping.signal, repository: servedRepository(cliRoot) }),
+        watchServe(serveRecordPath(repoRoot), managedServePorts({ root: repoRoot, baseBranch: master.baseBranch, run: defaultChildRun }), { intervalMs, once, signal: stopping.signal }),
+      ]).then(() => undefined);
     }
     const toIndex = flags.indexOf('--to');
     const to = toIndex >= 0 ? flags[toIndex + 1] ?? '' : stableChannel;

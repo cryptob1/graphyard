@@ -22,6 +22,16 @@ CI proofs publish via one producer principal; its posted run binding is Graphyar
 
 A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; the serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; `.graphyard/held-cli.json` pins the loop to a dirty checkout's snapshot.
 
+### Serving the managed repository's app
+
+A repository whose main declares `.graphyard/serve.json` gets its merged main built and served on a loopback port after every merge — no shell loop beside the install. The declaration names how to build the app and how to serve it:
+
+```json
+{ "build": ["npm", "run", "build"], "serve": ["npx", "vite", "preview", "--host", "127.0.0.1", "--port", "4400"], "port": 4400 }
+```
+
+(the Open City scaffold's declaration). The install's deploy unit (`graphyard-deploy`) checks each new main out into its own serve checkout under the managed root's local `.graphyard/` — never the coordinator's or a worker's checkout — runs `npm ci` and the declared build, and restarts the declared serve command only when the build passed: a failing build keeps the previous build serving and is recorded, with why, in `.graphyard/served.json`. When the served commit is still main but nothing answers (a reboot, a crashed serve), the pass serves the build the checkout already holds again. `master status`'s serving block and the dashboard's release line name the served commit, whether it is main, the URL and the last build failure; `doctor` prints a FAIL line naming the URL when a declared serve does not answer. A repository that declares no `serve.json` is untouched: nothing runs, nothing is recorded, nothing changes in any report.
+
 ### Deployment incident
 
 `/healthz` `commit` behind tip: `install --logs` shows failures; redeploy ([manual fallback](#manual-fallback)). The serving environment name comes from `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`. `/api/github/*` is not served.

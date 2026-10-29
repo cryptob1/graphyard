@@ -1,0 +1,76 @@
+{
+  "id": "served-app-link",
+  "title": "The dashboard links to the served app master status reports",
+  "description": "On the served head, the serving read the dashboard uses — master status's serving block over the API — reports the declared serve's fields: the URL, the served commit, whether it is main, and the last build failure, all null when nothing is declared. A command step first clears, then writes, the serve record the deploy unit's pass writes, so the read and the rendering are judged on the served head itself, and the dashboard page shows the Served line with a link when a URL is present.",
+  "tags": ["api", "dashboard", "serve"],
+  "target": "any",
+  "required": false,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "no leftover serve record, so the head reads as declaring nothing",
+      "run": "rm -f .graphyard/served.json",
+      "timeoutSeconds": 30
+    },
+    {
+      "kind": "http",
+      "name": "with nothing declared the serve fields are null",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        { "path": "serving", "type": "object" },
+        { "path": "serving.serve", "type": "null" },
+        { "path": "serving.commit", "type": "null" },
+        { "path": "serving.atMain", "type": "null" }
+      ]
+    },
+    {
+      "kind": "command",
+      "name": "the serve record a served main writes",
+      "run": "mkdir -p .graphyard && printf '{\"commit\":\"%s\",\"url\":\"http://127.0.0.1:4397\",\"failed\":null,\"reason\":null,\"pid\":null,\"at\":\"2026-01-01T00:00:00.000Z\"}\\n' \"$(git rev-parse refs/remotes/origin/main 2>/dev/null || git rev-parse refs/heads/main 2>/dev/null || git rev-parse HEAD)\" > .graphyard/served.json",
+      "timeoutSeconds": 30
+    },
+    {
+      "kind": "http",
+      "name": "the serving block reports the declared serve",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        { "path": "serving.unconfigured", "equals": false },
+        { "path": "serving.commit", "type": "string" },
+        { "path": "serving.atMain", "equals": true },
+        { "path": "serving.serve.url", "equals": "http://127.0.0.1:4397" },
+        { "path": "serving.serve.failure", "type": "null" }
+      ]
+    },
+    {
+      "kind": "browser",
+      "name": "sign in to the dashboard",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the release line links the served app",
+      "action": "expectText",
+      "text": "Served · 127.0.0.1:4397",
+      "exact": false
+    }
+  ]
+}

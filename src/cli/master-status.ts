@@ -5,7 +5,7 @@ import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary, emptyMasterSession, masterSummary, profileHealth, readDaemonState } from '../master-daemon.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
-import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
+import { servingReport } from '../deploy-watch.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 
@@ -28,17 +28,21 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     return { work: [] as Work[], now: new Date().toISOString() };
   }), observeHerdrAgents(), inspectWorkerCredentials(root, master.workers), readDaemonState(root, master).catch(() => null)]);
   const now = Date.parse(snapshot.now) || Date.now();
-  const deploy = readDeployRecord(deployRecordPath(root));
-  const main = await Promise.resolve(run('git', ['-C', root, 'rev-parse', `refs/remotes/origin/${master.baseBranch}`])).then(out => String(out).trim(), () => null);
   // The managed repository's release health reads only what its own deployment records as served,
   // and only a record that names this repository as the one it serves. The control plane's deploy
   // unit writes the same file for the revision its loop restarts onto; for an install managing a
   // different repository that record names the control plane's code, not the game's, and neither it
   // nor the control plane's own build revision (state.release, the Graphyard build this loop
-  // loaded) ever stands in as the game's release health (GY-2951, GY-2955).
-  const serving = deploy && deploy.repository?.toLowerCase() === master.repository.toLowerCase()
-    ? { unconfigured: false, commit: short(deploy.tip), main: short(main), atMain: !!deploy.tip && deploy.tip === main, failedDeploy: deploy.failed ? { tip: short(deploy.failed), reason: deploy.reason, restoring: short(deploy.restore ?? null) } : null }
-    : { unconfigured: true, commit: null, main: short(main), atMain: null, failedDeploy: null };
+  // loaded) ever stands in as the game's release health (GY-2951, GY-2955). What the repository's
+  // declared serve serves (GY-2976) is its own serving truth instead: the served commit, whether it
+  // is main, the URL and the last build failure (servingReport reads main's tip from the checkout's
+  // remote-tracking ref; the deploy unit fetches it).
+  const report = await servingReport(root, master.repository, master.baseBranch, args => Promise.resolve(run('git', ['-C', root, ...args])).then(String));
+  const serving = {
+    unconfigured: report.unconfigured, commit: short(report.commit), main: short(report.main), atMain: report.atMain,
+    failedDeploy: report.failedDeploy ? { tip: short(report.failedDeploy.tip), reason: report.failedDeploy.reason, restoring: short(report.failedDeploy.restoring) } : null,
+    pending: report.pending, serve: report.serve,
+  };
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const masterAgent = state?.master.agentName ? runtime.agents.find(agent => agent.name === state.master.agentName || (!!state.master.pane && agent.pane_id === state.master.pane)) : undefined;
   const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;

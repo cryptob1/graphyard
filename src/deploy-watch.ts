@@ -2,11 +2,13 @@
 // base tip is checked out, built, restarted, health-checked and pinned; a failing one is rolled back
 // to the previous tip, unless it may have migrated the database, and the watch waits for the next tip.
 // The master loop restarts itself onto the tip this records (daemon/run.ts restartCause).
+import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { GitRunner } from './merge-writer/local-observation.js';
+import { serveRecordPath, readServeRecord } from './serve-app.js';
 
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
@@ -167,4 +169,63 @@ export async function managedDeploy(repository: string, baseBranch: string, root
     }
   }
   return { repository, configured, tip: configured ? record!.tip : null, at: configured ? record!.at : null, main, pending };
+}
+
+/** The git toplevel of a directory, or null when it is not in a checkout — the server's fallback serving root (its own working directory). */
+export const repositoryToplevel = (directory: string): string | null => {
+  try { return execFileSync('git', ['rev-parse', '--show-toplevel'], { cwd: directory, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; }
+};
+
+/** A git read that answers its stdout and throws when the read fails, so a missing ref is a caught throw, never a silent answer. */
+export type GitRead = (args: readonly string[]) => Promise<string>;
+
+/**
+ * What serves the managed repository now (GY-2976): the deploy record naming it as the one it
+ * serves, or — when main declares `.graphyard/serve.json` and the deploy unit's serve pass has run
+ * — what that pass serves: the served commit, whether it is main, how far main is ahead, the last
+ * build failure, and the declared serve's URL (null while nothing is declared). The serve record
+ * is the repository's own serving truth, so it stands even beside an unconfigured deploy record;
+ * the URL and the failure are the declared serve's alone.
+ */
+export interface ServingReport {
+  /** Nothing serves this repository: no deploy record names it and no serve pass has served or failed. */
+  unconfigured: boolean;
+  /** The served commit (the declared serve's when one is recorded, else the deploy record's); null when nothing serves. */
+  commit: string | null;
+  /** The base branch's tip as the shared checkout holds it; null when it cannot be read. */
+  main: string | null;
+  /** Whether the served commit is main; null when either is unreadable. */
+  atMain: boolean | null;
+  /** The last failure: the declared serve's build failure, else a configured deploy's failed tip. */
+  failedDeploy: { tip: string | null; reason: string | null; restoring: string | null } | null;
+  /** Merged changes the base branch holds since the served commit; null when unreadable. */
+  pending: number | null;
+  /** The declared serve's URL and its last build failure; null when the repository declares no serve. */
+  serve: { url: string | null; failure: { commit: string; reason: string | null } | null } | null;
+}
+
+export async function servingReport(root: string | null | undefined, repository: string, baseBranch: string, git?: GitRead | null): Promise<ServingReport> {
+  const record = root ? readDeployRecord(deployRecordPath(root)) : null;
+  const serve = root ? readServeRecord(serveRecordPath(root)) : null;
+  const configured = !!(record && record.tip && record.repository?.toLowerCase() === repository.toLowerCase());
+  const commit = serve?.commit ?? (configured ? record!.tip : null);
+  const failed = serve?.failed ? { tip: serve.failed, reason: serve.reason }
+    : !serve && configured && record!.failed ? { tip: record!.failed, reason: record!.reason } : null;
+  let main: string | null = null, pending: number | null = null;
+  if (root && git) {
+    for (const ref of [`refs/remotes/origin/${baseBranch}`, `refs/heads/${baseBranch}`]) {
+      try { const sha = (await git(['rev-parse', '--verify', ref])).trim(); if (/^[0-9a-f]{40}$/.test(sha)) { main = sha; break; } } catch { /* the ref is absent here */ }
+    }
+    if (commit && main) {
+      try { const count = (await git(['rev-list', '--count', `${commit}..${main}`])).trim(); pending = /^\d+$/.test(count) ? Number(count) : null; } catch { /* unreadable */ }
+    }
+  }
+  return {
+    unconfigured: !commit,
+    commit, main,
+    atMain: commit && main ? commit === main : null,
+    failedDeploy: failed ? { tip: failed.tip, reason: failed.reason, restoring: !serve && configured ? record!.restore ?? null : null } : null,
+    pending,
+    serve: serve ? { url: serve.url ?? null, failure: serve.failed ? { commit: serve.failed, reason: serve.reason } : null } : null,
+  };
 }
