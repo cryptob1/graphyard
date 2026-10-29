@@ -16,3 +16,6 @@ test-results/
 /report.*.json
 /.graphyard-collector-test-*/
 /.graphyard-reporter-test-*/
+
+# The golden eval writes a hand run's result files here; never commit them.
+eval/results/

@@ -192,12 +192,14 @@ export async function executeSlowTickReceiptRuns(options: { runs?: number; root?
     try { await symlink(await nearestNodeModules(root), join(tree, 'node_modules')); } catch (error: any) { throw new Error(`the pinned source could not use this install's node_modules: ${error.message}`); }
     const artifactDirectory = stateRoot;
     const reservation = await reserveTestPorts();
+    // The tree sits inside this checkout without its own .git, so the pinned source would read this
+    // checkout's graphyard.json, which a later schema may outgrow; it reads the tree's own instead.
     const records: SlowTickReceiptRun[] = [];
     try {
       for (let index = 1; index <= runs; index++) {
         const startedMs = Date.now();
         const run = spawnSync(process.execPath, ['--import', import.meta.resolve('tsx'), '--test', '--test-reporter=tap', pinnedProofFile],
-          { cwd: tree, encoding: 'utf8', env: isolatedTestEnvironment({ ...process.env, TMPDIR: childTmp }, testPortEnvironment(reservation.base)), maxBuffer: 64 * 1024 * 1024, timeout: 300_000 });
+          { cwd: tree, encoding: 'utf8', env: isolatedTestEnvironment({ ...process.env, TMPDIR: childTmp }, { ...testPortEnvironment(reservation.base), GRAPHYARD_REPOSITORY_ROOT: tree }), maxBuffer: 64 * 1024 * 1024, timeout: 300_000 });
         const endedMs = Date.now();
         const tap = String(run.stdout ?? '');
         await writeFile(join(artifactDirectory, runLogName(index)), tap);

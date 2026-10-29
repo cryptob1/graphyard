@@ -338,7 +338,8 @@ export function restartTolerantApi(api: ControlPlaneApi, until: () => number, op
  */
 export const setupLine = (subject: string, epoch: number) => `graphyard: starting supervision of ${subject} epoch ${epoch}`;
 // The deadline uses elapsed local time and server-reported duration, not synchronized clocks.
-export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; attemptBoundMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession } = {}) {
+export async function supervise(command: string, args: string[], epoch: number, renew: () => Promise<Renewal>, options: { intervalMs?: number; graceMs?: number; safetyMarginMs?: number; retryMs?: number; retryMaxMs?: number; startupWindowMs?: number; attemptBoundMs?: number; detached?: boolean; containment?: Containment; platform?: NodeJS.Platform; session?: SupervisedSession;
+  /** GY-2971: an agent that exits within this many ms of its spawn leaves the lease to its launcher, which relaunches the same attempt fresh. */ earlyExitKeepsLeaseMs?: number } = {}) {
   let deadline = 0, granted = 0, attempts = 0;
   /** One renewal attempt, sequenced: a beat the supervisor already gave up on never moves the deadline. */
   const heartbeatAttempt = () => {
@@ -532,14 +533,16 @@ export async function supervise(command: string, args: string[], epoch: number, 
           captureTrackedRoot(child.pid, supervisedPids, processRecord(child.pid));
         }
         child.on('error', error => { console.error(error.message); stop(1); });
-        child.on('exit', (code, signal) => { endedOnItsOwn(`the agent process exited (${signal ?? `code ${code}`}) while its lease was live`); stop(code ?? 1); });
+        const spawnedAt = performance.now(), releases = () => performance.now() - spawnedAt >= (options.earlyExitKeepsLeaseMs ?? 0);
+        child.on('exit', (code, signal) => { if (releases()) endedOnItsOwn(`the agent process exited (${signal ?? `code ${code}`}) while its lease was live`); stop(code ?? 1); });
         timer = setInterval(async () => {
           if (pending || stopping) return;
           pending = true;
           const surrenderOrphaned = async (cause: string) => {
             clearInterval(timer);
-            console.error(`Graphyard worker supervision has nothing left to supervise: ${cause}. Releasing the lease and stopping.`);
-            await surrenderAssignment(cause);
+            const release = releases();
+            console.error(`Graphyard worker supervision has nothing left to supervise: ${cause}. ${release ? 'Releasing the lease and stopping' : 'Leaving the lease to its launcher and stopping'}.`);
+            if (release) await surrenderAssignment(cause);
             stop(1);
           };
           try {

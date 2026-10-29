@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { completeCommand, rerunFailingCases } from '../src/cli/complete.js';
 import type { CliContext } from '../src/cli/context.js';
@@ -57,8 +58,11 @@ if (failing.length) {
  */
 async function worktree(rerunPlan: unknown[], baseFail: unknown[] = []) {
   const root = await temporaryDirectory('complete-retry');
-  await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { test: 'node rerun-runner.mjs' } }));
-  await writeFile(join(root, 'rerun-runner.mjs'), runner);
+  await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { test: 'node --import tsx tests/helpers/run-tests.ts' } }));
+  await mkdir(join(root, 'tests', 'helpers'), { recursive: true });
+  await symlink(fileURLToPath(new URL('../../', import.meta.resolve('tsx'))), join(root, 'node_modules'));
+  await writeFile(join(root, '.gitignore'), 'node_modules\n');
+  await writeFile(join(root, 'tests', 'helpers', 'run-tests.ts'), runner);
   if (baseFail.length) await writeFile(join(root, 'base-fail.json'), JSON.stringify(baseFail));
   git(root, 'init', '-b', 'main');
   git(root, 'config', 'user.email', 'test@example.com');

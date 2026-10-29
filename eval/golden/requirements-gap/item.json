@@ -1,0 +1,9 @@
+{
+  "title": "Set the retention window",
+  "description": "config/retention.js still exports null. Set retentionDays from the product handbook's value.",
+  "type": "feature",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "config/retention.js exports retentionDays equal to the product handbook's value and node --test passes.", "proofs": ["unit:retention-days"] }
+  ]
+}

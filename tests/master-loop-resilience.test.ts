@@ -358,7 +358,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const run = calls.find(call => call[0] === 'pane' && call[1] === 'run')!;
     // GY-93: the role file is followed by the launch authorization it leaves out, then the request;
     // GY-121: both are read from the files in the worktree that the short typed line references.
-    assert.match(typedRuntime(run[3]), new RegExp(` -- claude --permission-mode bypassPermissions --setting-sources user --settings ${workerFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} --append-system-prompt-file "\\$GY\\.role" "\\$\\(cat "\\$GY\\.request"\\)"$`));
+    assert.match(typedRuntime(run[3]), new RegExp(` -- claude --permission-mode bypassPermissions --session-id [0-9a-f-]{36} --setting-sources user --settings ${workerFile.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} --append-system-prompt-file "\\$GY\\.role" "\\$\\(cat "\\$GY\\.request"\\)"$`));
     const typedWorker = expandTypedCommand(run[3]);
     assert.equal(roleOf(typedWorker.args), launchAuthorization.replace(/\s+/g, ' ')); assert.match(typedWorker.args.at(-1)!, /^Implement GY-69: /);
     const workerSettings = JSON.parse(await readFile(workerFile, 'utf8'));

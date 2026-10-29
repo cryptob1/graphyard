@@ -33,6 +33,8 @@ export interface ChildRunOptions {
   /** Where each stream goes. `inherit` passes it to this process's own; the default captures both. */
   stdout?: 'capture' | 'inherit';
   stderr?: 'capture' | 'inherit';
+  /** Start the child in its own process group and signal the whole group at the timeout, so a grandchild holding the output open cannot outlive the bound (GY-2974). */
+  group?: boolean;
 }
 /**
  * The dependency every runtime-calling helper takes. A test hands in a synchronous stub that
@@ -78,7 +80,7 @@ export function runChild(command: string, args: string[], options: ChildRunOptio
   const startupTimeoutMs = options.startupTimeoutMs ?? defaultChildStartupTimeoutMs;
   return new Promise<string>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
-    try { child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', options.stdout === 'inherit' ? 'inherit' : 'pipe', options.stderr === 'inherit' ? 'inherit' : 'pipe'] }); }
+    try { child = spawn(command, args, { cwd: options.cwd, env: options.env, detached: !!options.group, stdio: ['ignore', options.stdout === 'inherit' ? 'inherit' : 'pipe', options.stderr === 'inherit' ? 'inherit' : 'pipe'] }); }
     catch (error) { reject(new ChildProcessError(command, args, { stdout: '', stderr: '', status: null, signal: null, timedOut: false, cause: error })); return; }
     const out: Buffer[] = [], err: Buffer[] = [];
     let outBytes = 0, errBytes = 0, timedOut = false, startupTimedOut = false, settled = false, spawnFailure: unknown;
@@ -86,7 +88,8 @@ export function runChild(command: string, args: string[], options: ChildRunOptio
     const overflow = (stream: string) => { spawnFailure ??= new Error(`${stream} exceeded ${maxBuffer} bytes`); child.kill('SIGKILL'); };
     child.stdout?.on('data', (chunk: Buffer) => { outBytes += chunk.length; if (outBytes > maxBuffer) overflow('stdout'); else out.push(chunk); });
     child.stderr?.on('data', (chunk: Buffer) => { errBytes += chunk.length; if (errBytes > maxBuffer) overflow('stderr'); else err.push(chunk); });
-    const kill = () => { child.kill('SIGTERM'); killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* already gone */ } }, childKillGraceMs); killTimer.unref?.(); };
+    const signal = (name: NodeJS.Signals) => { try { if (options.group && child.pid) process.kill(-child.pid, name); else child.kill(name); } catch { /* already gone */ } };
+    const kill = () => { signal('SIGTERM'); killTimer = setTimeout(() => signal('SIGKILL'), childKillGraceMs); killTimer.unref?.(); };
     const timer = setTimeout(() => { timedOut = true; kill(); }, timeoutMs);
     // GY-2437: a caller that can tell the child has begun its work (`started`) refuses one that has
     // not at the startup bound, instead of holding its own window open for the full timeout.

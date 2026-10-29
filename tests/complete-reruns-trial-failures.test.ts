@@ -1,8 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
-import { readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { completeCommand, trialFailureTests } from '../src/cli/complete.js';
 import type { CliContext } from '../src/cli/context.js';
@@ -17,11 +18,14 @@ import type { CliContext } from '../src/cli/context.js';
 const head = 'a'.repeat(40);
 const refused = (reason: string) => ({ state: 'refused', head: 'b'.repeat(40), refusal: { kind: 'merge', reason } });
 
-/** A worktree whose `npm test` is a runner recording its file arguments to `rerun.log`, failing those a `rerun-fail` control file lists. */
+/** A worktree whose suite runner (tests/helpers/run-tests.ts) is a stub recording its file arguments to `rerun.log`, failing those a `rerun-fail` control file lists. */
 async function worktree(fail: string[] = []) {
   const root = await temporaryDirectory('complete-rerun');
-  await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { test: 'node rerun-runner.mjs' } }));
-  await writeFile(join(root, 'rerun-runner.mjs'), `
+  await writeFile(join(root, 'package.json'), JSON.stringify({ name: 'fixture', private: true, scripts: { test: 'node --import tsx tests/helpers/run-tests.ts' } }));
+  await mkdir(join(root, 'tests', 'helpers'), { recursive: true });
+  await symlink(fileURLToPath(new URL('../../', import.meta.resolve('tsx'))), join(root, 'node_modules'));
+  await writeFile(join(root, '.gitignore'), 'node_modules\n');
+  await writeFile(join(root, 'tests', 'helpers', 'run-tests.ts'), `
 import { appendFileSync, existsSync, readFileSync } from 'node:fs';
 const files = process.argv.slice(2);
 appendFileSync('rerun.log', JSON.stringify(files) + '\\n');
