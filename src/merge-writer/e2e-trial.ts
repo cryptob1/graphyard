@@ -59,10 +59,16 @@ async function serveByCommand(serve: E2eServe, worktree: string, env: Record<str
   let exited: string | null = null;
   child.on('error', error => { exited = error.message; });
   child.on('close', (code, signal) => { exited = `the serve command ended (${signal ? `signal ${signal}` : `status ${code}`})`; });
-  const gone = new Promise(accept => child.once('exit', accept));
-  // The group is asked to stop first, so a serve command can stop what it started (a database) and remove its files; what is left after the grace is killed.
+  // stdout/stderr stay open while any descendant that inherited them still runs (the shell may exit first under dash).
+  const whenClosed = (stream: NodeJS.ReadableStream | null) =>
+    !stream || (stream as NodeJS.ReadableStream & { closed?: boolean }).closed
+      ? Promise.resolve()
+      : new Promise<void>(accept => stream.once('close', () => accept()));
+  const descendantsGone = Promise.all([whenClosed(child.stdout), whenClosed(child.stderr)]);
+  // SIGTERM the group so the serve command can stop what it started and remove its files; wait for
+  // descendants (not the shell alone) to finish that cleanup before SIGKILL past the grace.
   const close = async () => {
-    try { process.kill(-child.pid!, 'SIGTERM'); await Promise.race([gone, new Promise(accept => setTimeout(accept, closeGraceMs))]); } catch { /* already gone */ }
+    try { process.kill(-child.pid!, 'SIGTERM'); await Promise.race([descendantsGone, new Promise(accept => setTimeout(accept, closeGraceMs))]); } catch { /* already gone */ }
     try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ }
   };
   for (;;) {

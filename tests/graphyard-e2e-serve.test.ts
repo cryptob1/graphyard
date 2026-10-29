@@ -34,7 +34,12 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
     env: { ...trialEnvironment(process.env), TMPDIR: scratch, GRAPHYARD_E2E_TOKEN: token } });
   let output = '';
   child.stdout.on('data', chunk => { output += chunk; }); child.stderr.on('data', chunk => { output += chunk; });
-  const exited = new Promise(accept => child.once('exit', accept));
+  // stdout/stderr stay open while any descendant that inherited them still runs (the shell may exit first).
+  const whenClosed = (stream: NodeJS.ReadableStream | null) =>
+    !stream || (stream as NodeJS.ReadableStream & { closed?: boolean }).closed
+      ? Promise.resolve()
+      : new Promise<void>(accept => stream.once('close', () => accept()));
+  const descendantsGone = Promise.all([whenClosed(child.stdout), whenClosed(child.stderr)]);
   try {
     const deadline = Date.now() + serve.readySeconds * 1000;
     let answered = false;
@@ -55,7 +60,8 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
     assert.equal(outcome?.verdict, 'passed', JSON.stringify(outcome?.failingStep ?? outcome));
 
     process.kill(-child.pid!, 'SIGTERM');
-    await exited;
+    // Wait for the serving process to finish cleanup (not the shell's exit), then observe removal.
+    await Promise.race([descendantsGone, new Promise(accept => setTimeout(accept, 20_000))]);
     assert.deepEqual(readdirSync(scratch).filter(name => name.startsWith('graphyard-e2e-serve-')), [], 'stopping the command removes its database directory');
   } finally {
     try { process.kill(-child.pid!, 'SIGKILL'); } catch { /* already gone */ }
