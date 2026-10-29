@@ -210,7 +210,7 @@ test('integration:local-runtime-restart — the supervised process starts the cl
     // Mutations wait for startup validation (a retryable 503 until then).
     let created!: Response;
     for (let attempt = 0; attempt < 120; attempt++) {
-      created = await fetch(`${url}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${admin.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'gy-1500-restart' }, body: JSON.stringify({ title: 'Survives a restart', criteria: [{ id: 'AC-1', text: 'Kept', proofs: ['unit:kept'] }] }) });
+      created = await fetch(`${url}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${admin.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'gy-1500-restart' }, body: JSON.stringify({ type: 'chore', title: 'Survives a restart', criteria: [{ id: 'AC-1', text: 'Kept', proofs: ['unit:kept'] }] }) });
       if (created.status !== 503) break;
       await new Promise(accept => setTimeout(accept, 250));
     }
