@@ -81,11 +81,23 @@ export function completionBody(args: readonly string[], headOf: () => string): {
  * refuses `trial failed: tests <file, …>` (merge-writer/executor.ts); a conflict, a failed build
  * step or a trial that reached no verdict, a revert refusal and no refusal at all name no test
  * files, so none is re-run for them.
+ * GY-2979: since GY-2960 an entry is a label, `FILE: case title`, and a first failing case rides
+ * after the files, its own commas splitting into prose — so an entry names a file only when the
+ * text before its ': ' is a path to an existing test file of `root`, the tree the rerun would run;
+ * anything else — a title fragment, an entry naming no file — names none.
  */
-export function trialFailureTests(refusal: { kind: string; reason: string } | null | undefined): string[] {
+const testFilePath = /^tests\/[\w./-]+$/;
+export function trialFailureTests(refusal: { kind: string; reason: string } | null | undefined, root?: string): string[] {
   const prefix = `${trialFailurePrefix}: tests `;
   if (refusal?.kind !== 'merge' || !refusal.reason.startsWith(prefix)) return [];
-  return [...new Set(refusal.reason.slice(prefix.length).split(',').map(name => name.trim()).filter(Boolean))];
+  const files = new Set<string>();
+  for (const entry of refusal.reason.slice(prefix.length).split(',')) {
+    const path = (entry.split(': ')[0] ?? '').trim();
+    if (!testFilePath.test(path)) continue;
+    if (root && !existsSync(join(root, path))) continue;
+    files.add(path);
+  }
+  return [...files];
 }
 /** The rerun runs under the trial's own bound: its failing files are a subset of what the trial ran (GY-2517). */
 export const rerunBound = { ms: trialTimeoutMinutes * 60_000 };
@@ -279,7 +291,7 @@ export const completeCommand: CliCommand = {
     // before anything is pushed or submitted, so a head that still fails them no longer costs the
     // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape
     // names files; every other item runs nothing.
-    const failing = trialFailureTests(work.mergeLedger?.refusal);
+    const failing = trialFailureTests(work.mergeLedger?.refusal, context.repositoryRoot());
     let rerun: { flaked: RerunCase[]; baseFailures: RerunCase[] } = { flaked: [], baseFailures: [] };
     if (failing.length) {
       console.error(`complete re-runs the merge trial's failing tests on this head before submitting: ${failing.join(', ')}`);
