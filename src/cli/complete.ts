@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { parseArgs } from 'node:util';
 import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -86,14 +87,32 @@ export function trialFailureTests(refusal: { kind: string; reason: string } | nu
   return [...new Set(refusal.reason.slice(prefix.length).split(',').map(name => name.trim()).filter(Boolean))];
 }
 /** The rerun runs under the trial's own bound: its failing files are a subset of what the trial ran (GY-2517). */
-export const rerunTrialTimeoutMs = trialTimeoutMinutes * 60_000;
+export const rerunBound = { ms: trialTimeoutMinutes * 60_000 };
+const boundText = (ms: number) => ms % 60_000 === 0 ? `${ms / 60_000} min` : `${Math.round(ms / 1000)} s`;
 /**
- * GY-2517: re-run `files` in the worktree exactly the way `npm test` runs them — the runner the
- * trial used — and answer whether they passed, with the output captured so the caller prints it.
+ * GY-2974: the command that runs exactly `files` in `root`. `npm test -- FILES` ran the whole suite
+ * wherever the test script already globs every file (Open City's GY-101 hung 24 minutes on it), so
+ * the files go straight to a runner: Graphyard's own suite runner, which runs just the files it is
+ * given under the suite's isolation, else node's test runner, through tsx when the tree installs it.
+ */
+export function rerunCommand(root: string, files: readonly string[]): [string, string[]] {
+  if (existsSync(join(root, 'tests', 'helpers', 'run-tests.ts'))) return [process.execPath, ['--import', 'tsx', 'tests/helpers/run-tests.ts', ...files]];
+  return [process.execPath, [...(existsSync(join(root, 'node_modules', 'tsx')) ? ['--import', 'tsx'] : []), '--test', ...files]];
+}
+/**
+ * GY-2517: re-run `files` in the worktree and answer whether they passed, with the output captured
+ * so the caller prints it. The run is its own process group, killed whole at the bound (GY-2974):
+ * a rerun past it refuses, naming the bound, instead of holding complete open.
  */
 export async function rerunTrialFiles(root: string, files: readonly string[], run: ChildRun = defaultChildRun): Promise<{ ok: boolean; output: string }> {
-  try { return { ok: true, output: await run('npm', ['test', '--', ...files], { cwd: root, timeoutMs: rerunTrialTimeoutMs }) }; }
-  catch (error: any) { return { ok: false, output: `${error.stdout ?? ''}${error.stderr ?? ''}` || (error instanceof Error ? error.message : String(error)) }; }
+  const [command, args] = rerunCommand(root, files);
+  // A NODE_TEST_CONTEXT inherited from an enclosing test run makes node's runner report to it instead of running the files.
+  const { NODE_TEST_CONTEXT: _, ...env } = process.env;
+  try { return { ok: true, output: await run(command, args, { cwd: root, env, timeoutMs: rerunBound.ms, group: true }) }; }
+  catch (error: any) {
+    if (error?.timedOut) throw new Error(`complete refused: the rerun of ${files.join(', ')} exceeded ${boundText(rerunBound.ms)} and was killed`);
+    return { ok: false, output: `${error.stdout ?? ''}${error.stderr ?? ''}` || (error instanceof Error ? error.message : String(error)) };
+  }
 }
 
 /** One failing case a rerun's output names: the case, where the run locates it, and the timing the runner reported. */
