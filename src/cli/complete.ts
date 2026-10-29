@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
 import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -97,7 +98,9 @@ const boundText = (ms: number) => ms % 60_000 === 0 ? `${ms / 60_000} min` : `${
  */
 export function rerunCommand(root: string, files: readonly string[]): [string, string[]] {
   if (existsSync(join(root, 'tests', 'helpers', 'run-tests.ts'))) return [process.execPath, ['--import', 'tsx', 'tests/helpers/run-tests.ts', ...files]];
-  return [process.execPath, [...(existsSync(join(root, 'node_modules', 'tsx')) ? ['--import', 'tsx'] : []), '--test', ...files]];
+  let tsx = true;
+  try { createRequire(join(root, 'package.json')).resolve('tsx'); } catch { tsx = false; }
+  return [process.execPath, [...(tsx ? ['--import', 'tsx'] : []), '--test', ...files]];
 }
 /**
  * GY-2517: re-run `files` in the worktree and answer whether they passed, with the output captured
