@@ -1,0 +1,39 @@
+{
+  "id": "single-case-criterion-warned",
+  "title": "A criterion checking one seed is warned at create",
+  "description": "POST /api/work creates a chore whose only criterion checks seed 42 alone: status 200 with a warning naming AC-1 in the response and on GET of the item; a second create naming seeds 42, 7 and 1 carries no warning.",
+  "tags": ["api", "work"],
+  "target": "uat",
+  "required": false,
+  "steps": [
+    {
+      "kind": "http", "name": "create the single-seed chore", "method": "POST", "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}} single seed",
+        "description": "Created by the single-case-criterion-warned E2E case.",
+        "type": "chore", "priority": 3,
+        "criteria": [{ "id": "AC-1", "text": "The campaign completes every mission on seed 42", "proofs": ["manual:e2e-case-single-seed"] }],
+        "policy": { "checks": ["test"], "review": true }
+      },
+      "status": 200,
+      "expect": [{ "path": "warnings", "equals": ["AC-1 checks one case; a head can pass it by tuning to that case — name at least three, or say why one is enough."] }],
+      "save": { "id": "id", "key": "key" }
+    },
+    {
+      "kind": "http", "name": "read the item", "method": "GET", "path": "/api/work/{{id}}", "status": 200,
+      "expect": [{ "path": "warnings", "equals": ["AC-1 checks one case; a head can pass it by tuning to that case — name at least three, or say why one is enough."] }]
+    },
+    {
+      "kind": "http", "name": "create the three-seed chore", "method": "POST", "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}} three seeds",
+        "description": "Created by the single-case-criterion-warned E2E case.",
+        "type": "chore", "priority": 3,
+        "criteria": [{ "id": "AC-1", "text": "The campaign completes every mission on seeds 42, 7 and 1", "proofs": ["manual:e2e-case-three-seeds"] }],
+        "policy": { "checks": ["test"], "review": true }
+      },
+      "status": 200,
+      "expect": [{ "path": "warnings", "exists": false }]
+    }
+  ]
+}

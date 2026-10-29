@@ -161,6 +161,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <details className="panel item-details-fold" aria-label="Details"><summary>Details</summary>
       {item.description ? <p className="item-description">{item.description}</p> : <p className="muted">No description.</p>}
       <section className="requirements" aria-label="Requirements"><h2>Requirements <small>{item.criteria.length} · {proofs.filter(p => p.status === 'passed').length} of {proofs.length} proofs passed</small></h2>
+        {(item.warnings ?? []).map(warning => <p className="amber" key={warning}>{warning}</p>)}
         {item.criteria.map(ac => { const own = proofs.filter(p => p.criterion === ac.id); const met = own.length > 0 && own.every(p => p.status === 'passed');
           return <div className={`criterion ${met ? 'criterion-met' : 'criterion-pending'}`} key={ac.id}>
             <details className="criterion-full"><summary><span className="criterion-mark" title={met ? 'Met' : 'Pending'}>{met ? '✓' : '○'}</span> <span className="mono">{ac.id}</span> <span className="criterion-text" title={ac.text}>{oneLine(ac.text)}</span></summary><p>{ac.text}</p></details>
