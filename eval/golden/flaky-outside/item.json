@@ -1,0 +1,9 @@
+{
+  "title": "Add the greeting export",
+  "description": "The library does arithmetic only. Add greet(name) beside the rest of the lib.",
+  "type": "feature",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "lib/greet.js exports greet(name) returning 'Hello, <name>!'; node --test test/greet.test.js passes.", "proofs": ["unit:greet"] }
+  ]
+}

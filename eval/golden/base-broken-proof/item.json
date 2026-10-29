@@ -1,0 +1,9 @@
+{
+  "title": "Cart total ignores the discount",
+  "description": "The cart's total() sums the items but drops the discount, so its proof fails on the base commit. Fix the total so the proof passes without weakening it.",
+  "type": "bug",
+  "priority": 1,
+  "criteria": [
+    { "id": "AC-1", "text": "node --test passes: total() applies the discount after summing the items, and the discount test in test/cart.test.js passes unchanged.", "proofs": ["unit:cart-total"] }
+  ]
+}

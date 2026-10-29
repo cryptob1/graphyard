@@ -1,0 +1,9 @@
+{
+  "title": "Add slugify to the notes library",
+  "description": "The notes library parses notes but offers no slug helper. Add one beside the existing parse code, following the library's plain-JS style.",
+  "type": "feature",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "lib/notes.js exports slugify(title): lowercase, runs of spaces and underscores become single hyphens, and both ends are trimmed of hyphens; node --test passes.", "proofs": ["unit:slugify"] }
+  ]
+}

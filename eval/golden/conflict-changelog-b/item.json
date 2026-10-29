@@ -1,0 +1,9 @@
+{
+  "title": "Record the import fix in the changelog",
+  "description": "The Unreleased section of CHANGELOG.md should carry the import fix entry this release ships.",
+  "type": "bug",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "CHANGELOG.md's Unreleased section carries an 'Import fix' entry naming UTF-8 headers, and node --test passes.", "proofs": ["unit:changelog-import"] }
+  ]
+}

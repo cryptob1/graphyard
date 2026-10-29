@@ -23,6 +23,19 @@ Worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates sh
 
 A merge trial whose failing tests fail on the base tip too: no rework, no filed item; the writer holds the head (`base failure`) on one attention entry naming the test; retried on the then tip after 30 min.
 
+### Golden eval
+
+`eval/golden/` holds ten fixed items, each a small scaffold repository snapshot (`scaffold.tar`, under 1 MB) beside its `item.json` (criteria and proofs). They cover the fault classes the benchmark runs hit: a plain feature, a bug whose proof fails on the base, two items that touch the same file (merge conflict), a proof that fails on the item's first head (rework), an item longer than one attempt bound, a docs budget, a review that should request changes, a requirements gap a worker must report blocked, a flaky test outside the item, and a user-facing item with an e2e case.
+
+Run it by hand before and after a change to dispatch, briefs, sessions or the merge trial — it spends fleet time, so it is not part of `npm test` or the merge trial:
+
+```sh
+node --import tsx scripts/eval-golden.ts --release SHA --runs 2 --repo OWNER/SCRATCH-REPO --port 4390
+node --import tsx scripts/eval-golden.ts --compare eval/results/OLD.json eval/results/NEW.json
+```
+
+Run it from a checkout of the release `--release` names. The first command creates a scratch compose install with its own port and Herdr instance, files and releases the ten items once per run against fresh copies of their scaffolds (start the scratch install's loop as usual so items dispatch), waits up to `--bound-minutes` (90) per item, writes `eval/results/SHA.json` — one row per item per run with outcome, attempts, rework rounds and claim→done minutes — and removes the scratch install whatever the outcome. The second prints the comparison: one line per flipped row (its outcome left or reached done, or its attempts moved by more than one) before the totals. A flip names a behaviour change the diff between the two releases caused; totals alone hide it. Run one release at a time: each run creates and removes its own scratch install.
+
 ## Documentation
 
 `docs/README.md`, `docs/protocol.md`: generated in full from each page's `<!-- page: Section | order | summary -->` line by `npm run docs:check -- --write`; [`GRAPHYARD_GENERATED_FILES`](coordination.md#generated-files) exempts them from the regression guard. One topic per page: a documented command exists, its links resolve, and the page stays current (`tests/docs-glossary.test.ts`, `scripts/check-docs.mjs`).

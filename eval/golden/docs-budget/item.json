@@ -1,0 +1,9 @@
+{
+  "title": "Trim the guide under its 400-word budget",
+  "description": "docs/guide.md outgrew its budget. Trim it to the budget without losing the Setup, Run and Troubleshoot sections.",
+  "type": "chore",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "node scripts/budget.mjs exits zero: docs/guide.md holds at most 400 words and keeps its Setup, Run and Troubleshoot sections.", "proofs": ["unit:docs-budget"] }
+  ]
+}

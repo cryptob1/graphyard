@@ -1,0 +1,9 @@
+{
+  "title": "Record the export tool in the changelog",
+  "description": "The Unreleased section of CHANGELOG.md should carry the export tool entry this release ships.",
+  "type": "feature",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "CHANGELOG.md's Unreleased section carries an 'Export tool' entry naming CSV export, and node --test passes.", "proofs": ["unit:changelog-export"] }
+  ]
+}

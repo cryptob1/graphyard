@@ -1,0 +1,9 @@
+{
+  "title": "Migrate the five config sections to typed sections",
+  "description": "Each module under config/ still exports a bare legacy string. Migrate them all to typed sections; the work spans five independent modules and usually outlives one attempt bound.",
+  "type": "feature",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "every module under config/ exports section as { kind: 'typed', name } and node --test passes.", "proofs": ["unit:config-typed"] }
+  ]
+}

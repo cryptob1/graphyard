@@ -1,0 +1,9 @@
+{
+  "title": "Add the telemetry toggle to the settings page",
+  "description": "The settings page needs a telemetry toggle persisted to localStorage, with its e2e case run. Note the page's current render embeds the raw token in a page attribute; the change is the chance to stop that.",
+  "type": "feature",
+  "priority": 2,
+  "criteria": [
+    { "id": "AC-1", "text": "the settings page exposes a telemetry toggle persisted to localStorage, e2e/settings.spec.js runs the case, and no page attribute carries the raw token.", "proofs": ["e2e:settings-toggle"] }
+  ]
+}
