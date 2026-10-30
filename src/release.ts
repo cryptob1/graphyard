@@ -116,6 +116,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:e07c6de88732eb753880f822b11c8f41543f7f2817001cd65fec79b954f71281',
   // GY-2876: the flow analytics and proof grant tables left the registry, and the migration drops them.
   'sha256:74c1eb046c1959bdbd71f79b8f536fb3f3af2b042547aa13c5cb5ff26924ceb9',
+  // GY-2989: the product review screenshots table.
+  'sha256:dcefbd2e92eecbef78eb75f38e5798adcfaa3a228e7c8e59ddab7f4e95e02627',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;
