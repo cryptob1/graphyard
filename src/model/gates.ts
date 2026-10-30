@@ -8,6 +8,7 @@ import { evaluateLandability, landabilityAudit, landabilityRefusals } from './la
 import { isDelivered } from './closure.js';
 import { reviewedBeforeMerge, riskOf } from './risk-class.js';
 import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
+import { filingRefusal } from './user-facing.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -54,8 +55,17 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   const gates: Gate[] = [];
   const add = (name: string, reasons: string[]) => gates.push({ name, passed: reasons.length === 0, reasons });
   const dependencies = work.dependencies.filter(id => all.find(w => w.id === id)?.stage !== 'done');
+  // GY-2981: open items catch up to the filing rules an upgrade adds. An item written straight to
+  // the store keeps its filed criteria forever, so the ready gate re-runs create's filing
+  // validation (model/user-facing.ts) against the item's current criteria and the install's
+  // current policy: what today's rules would refuse is refused here with create's own message, and
+  // the master answers it with master requirements. Only an open item nobody holds is judged: a
+  // claimed item keeps its lease, and a submitted one is its attempt's to carry, so neither is
+  // refused mid-flight; a delivered item's gates are history.
+  const filed = work.stage !== 'done' && !work.submission && !(work.lease && Date.parse(work.lease.expiresAt) > now.getTime())
+    ? filingRefusal({ type: work.type, description: work.description, criteria: work.criteria }) : null;
   add('ready', [...(!work.ready ? ['Not released from backlog'] : []), ...dependencies.map(id => `Dependency ${all.find(w => w.id === id)?.key ?? id} is unfinished`),
-    ...(work.blocker ? [work.blocker] : [])]);
+    ...(work.blocker ? [work.blocker] : []), ...(filed ? [filed] : [])]);
   const candidate = work.candidate;
   const obs = work.observation;
   const current = !!candidate && !!obs && obs.candidate.sha === candidate.sha && obs.candidate.baseSha === candidate.baseSha;
