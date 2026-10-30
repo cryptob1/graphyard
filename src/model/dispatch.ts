@@ -225,7 +225,7 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
 export function dispatchRequestsFor(work: Pick<Work, 'autoDispatch'>, sha: string): DispatchRequest[] {
   const state = work.autoDispatch;
   if (!state) return [];
-  return [...(state.review ? [state.review] : []), state.product ? [state.product] : [], ...state.producers, ...state.history].flat().filter(request => request.sha === sha);
+  return [...(state.review ? [state.review] : []), ...(state.product ? [state.product] : []), ...state.producers, ...state.history].filter(request => request.sha === sha);
 }
 
 /**

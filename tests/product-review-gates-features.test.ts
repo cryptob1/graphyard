@@ -126,7 +126,7 @@ test('unit:product-review-gates-features — an approval carries to a head only 
   assert.equal(productReviewCarries(unreadable, policy), false);
 });
 
-test('unit:product-review-gates-features — the loop launches the product review like the code review once the head\'s preview serves, one session per request', async () => {
+test('unit:product-review-gates-features — the loop launches the product review like the code review, with no preview to wait for, one session per head', async () => {
   const host = await temporaryDirectory('product-review-loop');
   const credentialDirectory = await temporaryDirectory('product-review-credentials');
   try {
@@ -138,7 +138,11 @@ test('unit:product-review-gates-features — the loop launches the product revie
     await saveReviewerProfile(host, { name: 'product-reviewer', agentName: 'product-reviewer', kind: 'claude' });
     const config = await loadMasterConfig(host);
 
+    // No previewable application, no passed trial: the repository GY-2989's rework named, where the
+    // old served-wait deadlocked against the review gate it waits behind. The launch happens all the
+    // same — the reviewer walks the served app against the head's diff.
     const item = feature('GY-20');
+    item.preview = null; item.gates = [];
     // The request is raised beside the code review's the moment the head is eligible.
     reconcileAutoDispatch(item, [item], new Date());
     assert.equal(item.autoDispatch?.product?.state, 'requested', 'a user-facing feature requests its product review');
@@ -159,11 +163,13 @@ test('unit:product-review-gates-features — the loop launches the product revie
       launchProductReview: async (work: Work, request: { sha: string }) => { launches.push({ work: work.key, sha: request.sha }); agents.push({ name: 'product-reviewer' }); return { agentName: 'product-reviewer', pane: null }; },
       persist: async () => {},
     };
-    // Before the head serves (no preview running, no passed trial), the product review waits; with the preview up, the launch happens.
-    const waiting = { ...item, preview: { ...item.preview!, state: 'starting' } } as Work;
-    const heldTick = await runDispatchTick(config, emptyDispatchCursor(config), { ...effects, snapshot: async () => ({ work: [waiting], now: at }) } as never, Date.now);
+    // While a code-review session is still judging the head, the launch waits for it — one session
+    // per head in the review ledger — and the wait is never counted as a launch refusal.
+    const codeReviewRecord = { id: randomUUID(), key: 'GY-20', pr: 0, sha: H, baseSha: B, policyRevision: 1, profile: 'code-reviewer', agentName: 'code-reviewer', pane: null, sessionDirectory: '/s', requestedAt: at, tokenExpiresAt: at, requestId: 'code-review-request', state: 'pending' };
+    const heldTick = await runDispatchTick(config, emptyDispatchCursor(config), { ...effects, reconcileReviews: async () => ({ reviews: [codeReviewRecord] }) } as never, Date.now);
     assert.deepEqual(heldTick.launched, []);
-    assert.ok(heldTick.waiting.some(entry => /waits for its head to serve/.test(entry.reason)), 'the launch waits for the head to serve');
+    assert.equal(heldTick.refused.length, 0, 'a pending session on the head is a wait, never a refusal');
+    assert.ok(heldTick.waiting.some(entry => /one session per head/.test(entry.reason)), 'the launch waits for the session already judging the head');
     const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects as never, Date.now);
     assert.deepEqual(tick.launched.map(entry => [entry.work, entry.reason]), [['GY-20', 'product review']]);
     assert.deepEqual(launches, [{ work: 'GY-20', sha: H }]);
@@ -171,13 +177,6 @@ test('unit:product-review-gates-features — the loop launches the product revie
     const again = await runDispatchTick(config, emptyDispatchCursor(config), effects as never, Date.now);
     assert.equal(again.launched.length, 0, 'one product review request is answered by one session');
     assert.equal(launches.length, 1);
-    // A head whose merge trial passed serves too, even with no preview at all: the trial built and ran it.
-    const trialLaunches: unknown[] = [];
-    const trialled = feature('GY-26');
-    trialled.preview = null; trialled.gates = [{ name: 'test', passed: true, reasons: [] }];
-    reconcileAutoDispatch(trialled, [trialled], new Date());
-    const trialTick = await runDispatchTick(config, emptyDispatchCursor(config), { ...effects, agents: () => [], snapshot: async () => ({ work: [trialled], now: at }), launchProductReview: async (_work: Work, request: { sha: string }) => { trialLaunches.push(request.sha); return { agentName: 'product-reviewer', pane: null }; } } as never, Date.now);
-    assert.deepEqual(trialLaunches, [H], 'a trial-passed head launches its product review');
 
     // The verdict settles the request the way a control-plane verdict does: recorded on the item,
     // then reconciled. An approval satisfies it and passes the gate.
@@ -203,7 +202,7 @@ test('unit:product-review-gates-features — the loop launches the product revie
   } finally { await rm(host, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }).catch(() => {}); }
 });
 
-test('unit:product-review-gates-features — the product prompt walks the preview and the served app and names the three verdicts and the screenshot lines', () => {
+test('unit:product-review-gates-features — the product prompt walks the preview and the served app when one runs, and the served app against the diff when none does', () => {
   const prompt = reviewPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard' }, { key: 'GY-23', pr: 0, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { head: H, baseTip: B, product: true, previewUrl: 'https://graphyard.example/preview/GY-23/' });
   assert.match(prompt, /product reviewer/);
   assert.match(prompt, /https:\/\/graphyard\.example\/preview\/GY-23\//);
@@ -211,4 +210,10 @@ test('unit:product-review-gates-features — the product prompt walks the previe
   assert.match(prompt, /serving\.serve\.url/);
   assert.match(prompt, /--event REJECT/);
   assert.match(prompt, /Screenshot: /);
+  // The fallback a repository with no previewable application gets (GY-2989 rework): the served app,
+  // walked against the head's diff — the only way its user-facing features reach a product review.
+  const fallback = reviewPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard' }, { key: 'GY-24', pr: 0, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { head: H, baseTip: B, product: true });
+  assert.match(fallback, /not separately previewed/);
+  assert.match(fallback, new RegExp(`git diff ${B} ${H}`));
+  assert.match(fallback, /agent-browser/);
 });

@@ -1225,14 +1225,18 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       }
     }
   };
-  /** The product reviewer's launch: the same session machinery as a code review, with the product prompt and a product launch registration; the preview must be up to walk. */
+  /** The product reviewer's launch: the same session machinery as a code review, with the product prompt and a product launch registration. */
   const dispatchProductReview = async (item: Work, request: DispatchRequest) => {
-    // The head is walkable once its preview serves (previewable applications) or its merge trial has
-    // passed (a command-served head was built and run by that trial); before either, the review waits.
-    const served = item.preview?.state === 'running' || item.gates.find(gate => gate.name === 'test')?.passed === true;
     if (!session('review', item, request, reviews)) { /* settled, or waiting to relaunch */ }
     else if (!herdr) wait('review', item, request, 'Herdr session inventory is unavailable');
-    else if (!served) wait('review', item, request, `the product review of ${item.key} waits for its head to serve (preview: ${item.preview?.state ?? 'none'}, trial: ${item.gates.find(gate => gate.name === 'test')?.passed ? 'passed' : 'pending'})`);
+    // The review ledger starts one session per head: a code review still under way on this head is
+    // answered first, and the product review launches once it settles — its verdict, or the rework
+    // that replaces the head, settles this request beside it. There is no other wait: the trial a
+    // head serves by cannot run while the review gate holds for this very review, and a repository
+    // with no previewable application never serves the head at all. The reviewer walks the served
+    // app against the head's diff instead, as the product prompt's fallback names.
+    else if (reviews.some(record => record.state === 'pending' && record.key === item.key && record.sha === request.sha && record.requestId !== request.id))
+      wait('review', item, request, `the product review of ${item.key} waits for the reviewer session already judging ${request.sha.slice(0, 12)}; the ledger starts one session per head`);
     else if (spent('review')) wait('review', item, request, capacityWait('review'));
     else if (!effects.launchProductReview) wait('review', item, request, 'this dispatcher launches no product reviews');
     else if (!retryable(request)) wait('review', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[request.id].nextAt}`}`);
@@ -1256,9 +1260,14 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           }
         } catch (error) {
           const answered = answeredByPendingReview(error, request);
-          if (answered?.answered) {
-            wakeSettlement(item, answered.answered.at);
-            wait('review', item, request, `product reviewer session ${answered.agentName} already answered with ${answered.answered.state}; ${launchWaitWording.settles}`, answered.answered.at);
+          if (answered) {
+            // A session on this head met between the guard and the launch (the code review's, usually)
+            // or one that already answered: neither is a refusal — the request settles with that
+            // session's verdict, so the launch waits rather than counting failures against itself.
+            if (answered.answered) wakeSettlement(item, answered.answered.at);
+            wait('review', item, request, answered.answered
+              ? `product reviewer session ${answered.agentName} already answered with ${answered.answered.state}; ${launchWaitWording.settles}`
+              : `a reviewer session on ${request.sha.slice(0, 12)} is already answering ${item.key} (one session per head); the product review launches once it settles`, answered.answered?.at);
           }
           else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[request.id]; wait('review', item, request, message(error)); }
           else if (!outOfCapacity('review', item, request, error)) refuse('review', item, request, error);

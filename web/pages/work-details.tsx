@@ -55,7 +55,7 @@ export function ProductReviewPanel({ item }: { item: Work }) {
         <div><dt>Reviewer</dt><dd>{review.reviewer} · {new Date(review.at).toLocaleString()}</dd></div>
       </dl>
       <p className="product-findings" style={{ whiteSpace: 'pre-wrap' }}>{review.findings}</p>
-      {review.screenshots.length > 0 && <ul className="proof-markers product-screenshots">{review.screenshots.map(shot => <li key={shot}>{/^https?:\/\//.test(shot) ? <a href={shot} target="_blank" rel="noopener noreferrer">{shot} ↗</a> : <span className="mono">{shot}</span>}</li>)}</ul>}
+      {review.screenshots.length > 0 && <ul className="proof-markers product-screenshots">{review.screenshots.map(shot => <li key={shot}><a href={shot} target="_blank" rel="noopener noreferrer">{shot} ↗</a></li>)}</ul>}
     </> : <p className="muted">A user-facing feature is product-reviewed before it merges: a reviewer walks the head's preview and the served app and approves it, asks for changes, or rejects it.</p>}
   </section>;
 }

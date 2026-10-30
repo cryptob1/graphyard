@@ -191,7 +191,7 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
     const baseSha = launch!.baseTip;
     const inserted = await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4) RETURNING seq', [work!.id, actor.id, product ? productReviewVerdictEvent : reviewVerdictEvent, JSON.stringify({ key: work!.key, launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, event: data.event, body: data.body, submittedAt, postMerge: launch!.postMerge, product, source: 'control-plane', baseSha })]);
     const reviewId = Number(inserted.rows[0]?.seq);
-    const verdict: ControlPlaneVerdict = { reviewer: launch!.reviewer, sha: data.sha, state, body: data.body, submittedAt: submittedAt, source: 'control-plane', reviewId, baseSha };
+    const verdict: ControlPlaneVerdict = { reviewer: launch!.reviewer, sha: data.sha, state, body: data.body, submittedAt, source: 'control-plane', reviewId, baseSha };
     // The verdict stands where GitHub's review would: `exactApproval` finds an APPROVED of the exact
     // candidate head by someone other than its author, and the review gate reads a change request.
     // Every verdict carries its body; a change request also carries its BLOCKING findings, as a

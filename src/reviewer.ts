@@ -986,10 +986,10 @@ export async function launchReview(root: string, work: Work, profileName: string
   if (product && postMerge) throw new Error('A product review judges a candidate head, never a delivered merge commit');
   const plane = !!postMerge || work.observation?.source === 'control-plane';
   if (product && !plane) throw new Error(`${work.key} was not observed by the control plane; a product review launches for a control-plane head`);
-  // The reviewer walks the head where it serves: its preview when one runs, else the app as served
-  // once the merge trial has passed (the trial built and ran a command-served head).
-  const served = work.preview?.state === 'running' || work.gates.find(gate => gate.name === 'test')?.passed === true;
-  if (product && !served) throw new Error(`${work.key}'s head is not walkable yet (preview ${work.preview?.state ?? 'none'}, trial pending); a product review launches once the head serves`);
+  // No preview is required: the product prompt walks the head's preview when one runs, and otherwise
+  // walks the app as currently served against the head's diff — a repository with no previewable
+  // application must still reach its product review (GY-2989 rework: the trial a head would serve
+  // by cannot run while the review gate holds for this very review).
   // A GitHub-backed launch (token mint, commit and thread reads) is deferred while the gh login is rate-limited, before any record is reserved.
   if (!config.reviewer && !plane) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.

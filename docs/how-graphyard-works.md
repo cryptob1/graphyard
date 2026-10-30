@@ -6,7 +6,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 ## One trip to Done
 
 1. **Ready**: released, unblocked, criteria name proofs.
-2. **Build**: a worker claims lease and worktree, submits the exact commit.
+2. **Build**: worker claims lease and worktree, submits the exact commit, pushes nothing.
 3. **Review**: a [sensitive](#the-one-review-rule) commit waits for one independent approval; a user-facing feature also waits for its product review.
 4. **Test**: the merge writer trial-merges onto base, runs build and tests.
 5. **Acceptance**: roster producers report the criteria's proofs.
@@ -14,7 +14,7 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## From intent to work items
 
-The master files items (`master create`) and releases backlog itself (`master release`); an item of any size is dispatched whole.
+The master files items (`master create`) and releases backlog itself (`master release`); an item of any size is dispatched whole. Review follow-ups are ordinary backlog items.
 
 ## The one review rule
 
