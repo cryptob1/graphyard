@@ -17,7 +17,7 @@
       "path": "/api/work",
       "body": {
         "title": "E2E case {{case}} run {{run}}",
-        "description": "Created by the product-review-verdict-shown E2E case.",
+        "description": "No user-facing change: created by the product-review-verdict-shown E2E case to carry a recorded product review.",
         "type": "feature",
         "priority": 3,
         "criteria": [
