@@ -1,0 +1,124 @@
+{
+  "id": "product-review-verdict-shown",
+  "title": "A feature item shows its product review verdict, findings and screenshots for its exact head",
+  "description": "A user-facing feature is product-reviewed before it merges (GY-2989). The case records a product review — a change request with findings and screenshots, bound to the head it judged — on a feature item through the same route an operator or the loop uses, reads it back on the API, and opens the item in the dashboard, where the Product review panel shows the verdict, the findings and every screenshot named, beside the head it binds.",
+  "tags": ["api", "dashboard", "product-review"],
+  "target": "uat",
+  "required": true,
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create the user-facing feature",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}}",
+        "description": "Created by the product-review-verdict-shown E2E case.",
+        "type": "feature",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "The feature is product-reviewed before it merges",
+            "proofs": ["manual:product-review-recorded"]
+          }
+        ],
+        "policy": { "checks": ["test"], "review": true }
+      },
+      "status": 200,
+      "save": { "id": "id", "key": "key" }
+    },
+    {
+      "kind": "http",
+      "name": "record the product review: a change request with findings and screenshots, on the head it judged",
+      "method": "POST",
+      "path": "/api/work/{{id}}/product-review",
+      "body": {
+        "reviewer": "product-reviewer",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "verdict": "changes-requested",
+        "findings": "The export button hides the summary a reader came for\nScreenshot: preview-export-flow-1.png",
+        "screenshots": ["preview-export-flow-1.png"]
+      },
+      "status": 200
+    },
+    {
+      "kind": "http",
+      "name": "the item answers its product review bound to the head",
+      "method": "GET",
+      "path": "/api/work/{{id}}",
+      "status": 200,
+      "expect": [
+        { "path": "productReview.verdict", "equals": "changes-requested" },
+        { "path": "productReview.reviewer", "equals": "product-reviewer" },
+        { "path": "productReview.sha", "equals": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+        { "path": "productReview.findings", "type": "string" },
+        { "path": "productReview.screenshots.0", "equals": "preview-export-flow-1.png" }
+      ]
+    },
+    {
+      "kind": "browser",
+      "name": "sign in to the dashboard",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "unfold the backlog group and open the item",
+      "action": "click",
+      "text": "Backlog",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "text": "E2E case {{case}} run {{run}}",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the product review panel shows the verdict",
+      "action": "expectText",
+      "text": "Product review"
+    },
+    {
+      "kind": "browser",
+      "name": "the verdict reads as a change request",
+      "action": "expectText",
+      "text": "Changes requested"
+    },
+    {
+      "kind": "browser",
+      "name": "the findings the reviewer gave are shown",
+      "action": "expectText",
+      "text": "The export button hides the summary a reader came for"
+    },
+    {
+      "kind": "browser",
+      "name": "the screenshot the verdict named is shown",
+      "action": "expectText",
+      "text": "preview-export-flow-1.png"
+    },
+    {
+      "kind": "browser",
+      "name": "the verdict binds the exact head it judged",
+      "action": "expectText",
+      "text": "aaaaaaaa",
+      "exact": false
+    }
+  ]
+}

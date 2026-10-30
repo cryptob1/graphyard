@@ -134,9 +134,9 @@ const configFile = 'graphyard.json';
 type Source = 'environment' | 'graphyard.json' | 'default';
 let inForce: { policy: RepositoryPolicy; source: Source } | null = null;
 
-/** The `risk`, `e2e` and `release` sections of a parsed graphyard.json. */
+/** The `risk`, `e2e`, `release` and `product` sections of a parsed graphyard.json. */
 export const policySections = (config: Record<string, unknown> | null | undefined) =>
-  Object.fromEntries(['risk', 'e2e', 'release'].filter(key => config?.[key] !== undefined).map(key => [key, config![key]]));
+  Object.fromEntries(['risk', 'e2e', 'release', 'product'].filter(key => config?.[key] !== undefined).map(key => [key, config![key]]));
 
 /**
  * The deployment value an installer sets from a parsed graphyard.json (null when the repository has

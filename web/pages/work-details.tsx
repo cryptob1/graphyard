@@ -51,7 +51,7 @@ export function ProductReviewPanel({ item }: { item: Work }) {
   return <section className="panel" aria-label="Product review"><h2>Product review <small>{review ? productWords[review.verdict] : 'not reviewed yet'}</small></h2>
     {review ? <>
       <dl className="facts">
-        <div><dt>Head</dt><dd><span className="mono">{review.sha.slice(0, 8)}</span> · {bindsHead ? 'the current head' : 'an earlier head; the current one is reviewed afresh unless only non-UI files changed'}</dd></div>
+        <div><dt>Head</dt><dd><span className="mono">{review.sha.slice(0, 8)}</span>{bindsHead ? ' · the current head' : item.candidate ? ' · an earlier head; the current one is reviewed afresh unless only non-UI files changed' : ''}</dd></div>
         <div><dt>Reviewer</dt><dd>{review.reviewer} · {new Date(review.at).toLocaleString()}</dd></div>
       </dl>
       <p className="product-findings" style={{ whiteSpace: 'pre-wrap' }}>{review.findings}</p>

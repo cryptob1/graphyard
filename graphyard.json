@@ -98,5 +98,10 @@
       "url": "http://127.0.0.1:4391/healthz?ready",
       "readySeconds": 120
     }
+  },
+  "product": {
+    "ui": [
+      "web/"
+    ]
   }
 }

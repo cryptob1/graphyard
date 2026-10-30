@@ -2,7 +2,7 @@
 // checks that a change is correct; a product review judges in the whole app's context that it is a
 // good idea: a reviewer session walks the head's preview and the served app and approves, requests
 // changes, or rejects. Bugs, chores and "No user-facing change" items owe none.
-import { repositoryPolicy } from './repository-policy.js';
+import { repositoryPolicy, type RepositoryPolicy } from './repository-policy.js';
 import type { Work } from './work.js';
 import { optsOutOfE2e } from './user-facing.js';
 
@@ -44,12 +44,12 @@ const short = (sha: string) => sha.slice(0, 12);
  * read the delta between the two heads and every path it names is non-UI under the repository's
  * `product.ui` policy. A repository that declares no UI globs reviews every new head afresh.
  */
-export function productReviewCarries(work: Work): boolean {
+export function productReviewCarries(work: Work, policy: RepositoryPolicy = repositoryPolicy()): boolean {
   const review = work.productReview;
   if (!review || review.verdict !== 'approved' || !work.candidate || review.sha === work.candidate.sha) return false;
   const delta = work.observation?.headDelta;
   if (!delta) return false;
-  const ui = repositoryPolicy().product?.ui ?? [];
+  const ui = policy.product?.ui ?? [];
   if (!ui.length) return false;
   const compiled = ui.map(glob => productGlob(glob));
   return delta.every(path => !compiled.some(pattern => pattern.test(path)));
@@ -72,11 +72,11 @@ function productGlob(glob: string): RegExp {
  * earlier approval carried across a non-UI delta. Changes requested and rejects bind their exact
  * head — a new head answers them by being reviewed afresh, never by carrying.
  */
-export function standingProductReview(work: Work): { review: ProductReview; carried: boolean } | null {
+export function standingProductReview(work: Work, policy: RepositoryPolicy = repositoryPolicy()): { review: ProductReview; carried: boolean } | null {
   const review = work.productReview;
   if (!review || !work.candidate) return null;
   if (review.sha === work.candidate.sha) return { review, carried: false };
-  return productReviewCarries(work) ? { review, carried: true } : null;
+  return productReviewCarries(work, policy) ? { review, carried: true } : null;
 }
 
 /**
@@ -88,6 +88,9 @@ export function standingProductReview(work: Work): { review: ProductReview; carr
 export function productReviewRefusal(work: Work): string | null {
   if (!needsProductReview(work)) return null;
   const candidate = work.candidate, observation = work.observation;
+  // A product review is launched and posted through the control plane, so only a head it observed
+  // owes one here; a GitHub-observed head is held by its own review rule.
+  if (observation?.source !== 'control-plane') return null;
   if (!candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha) return null;
   const standing = standingProductReview(work);
   if (!standing) return 'Product review of the current commit is required';
