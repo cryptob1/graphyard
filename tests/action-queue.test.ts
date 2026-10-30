@@ -797,12 +797,21 @@ test('integration:typed-next-action — the gate evaluator and the action comput
     assert.equal(action!.refusal, failing.reasons[0]);
     assert.equal(action!.kind, refusalAction(probe, failing.name, failing.reasons[0]));
   }
-  // An unfinished dependency belongs to the other item: this one names no action at all.
-  const dependency = evaluated({ ready: true, id: 'work-3', key: 'GY-3' });
-  const dependent = { ...evaluated({ ready: true, dependencies: ['work-3'] }) };
+  // An unfinished dependency belongs to the other item: this one names no action at all. Both
+  // fixtures here opt out of the e2e filing rule, so the dependency is the ready gate's only word;
+  // an item with a filing refusal of its own answers that first (GY-2981).
+  const dependency = evaluated({ ready: true, id: 'work-3', key: 'GY-3', description: 'No user-facing change: dependency fixture' });
+  const dependent = { ...evaluated({ ready: true, dependencies: ['work-3'], description: 'No user-facing change: dependent fixture' }) };
   Object.assign(dependent, evaluate(dependent, [dependent, dependency], new Date(at)));
   assert.match(dependent.gates.find(gate => gate.name === 'ready')!.reasons[0], /Dependency GY-3 is unfinished/);
   assert.equal(nextAction(dependent, [dependent, dependency], new Date(at)), null);
   assert.equal(nextAction(dependency, [dependent, dependency], new Date(at))!.kind, 'dispatch', 'the dependency is the one that gets dispatched');
+  // A filing refusal is the item's own beside a dependency: it is answered while the dependency ships.
+  const both = evaluated({ ready: true, dependencies: ['work-3'] });
+  Object.assign(both, evaluate(both, [both, dependency], new Date(at)));
+  const own = nextAction(both, [both, dependency], new Date(at));
+  assert.equal(own!.kind, 'attention', 'the filing refusal is this item\'s own');
+  assert.match(own!.refusal!, /owes an end-to-end proof/);
+  assert.match(own!.needsHuman!.resolve!, /graphyard master requirements GY-2/);
 });
 

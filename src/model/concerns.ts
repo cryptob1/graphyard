@@ -1,5 +1,6 @@
 import { resourceConflicts } from '../coordination.js';
 import { actionJudgment, type NextAction, type NextActionKind } from './action-kinds.js';
+import { isFilingRefusal } from './user-facing.js';
 import type { Work } from './work.js';
 
 /**
@@ -28,6 +29,10 @@ export function humanNeeded(action: NextAction): HumanNeeded | null {
   if (actionJudgment[action.kind] !== 'in-step') return null;
   // A rework the loop owes is applied by the loop itself (GY-1387, GY-2874); the hand command is the fallback.
   if (action.kind === 'request-rework') return { decision: `a new head for ${action.key}`, resolve: `graphyard master rework ${action.key} REASON` };
+  // GY-2981: a filing refusal the ready gate raised is answered by requirements, which adds the
+  // criterion the item's creation rules now demand — it never weakens the item to fit them.
+  if (action.inputs.kind === 'attention' && isFilingRefusal(action.inputs.detail))
+    return { decision: `filing ${action.key} under today's rules`, resolve: `graphyard master requirements ${action.key} FILE REASON` };
   // A gate refusing something no executor step answers — an exhausted reviewer roster, an
   // unverified branch protection — names what has to be decided in the refusal itself.
   const detail = action.inputs.kind === 'attention' ? action.inputs.detail : action.reason;

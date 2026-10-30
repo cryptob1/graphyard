@@ -5,6 +5,7 @@ import { ciCheckRefusalPattern, mergeWriterPushPattern, mergeWriterTrialPattern 
 import { formatAge, statusDuration, type StatusDuration } from './duration.js';
 import { humanRequestBlocker } from './human-request.js';
 import { deliveryOutcome } from './format.js';
+import { isFilingRefusal } from './user-facing.js';
 
 /**
  * Plain-English status for people who have never read the Graphyard docs. Every sentence is
@@ -42,6 +43,9 @@ export function plainReason(reason: string, gate: string, now = Date.now(), work
     [/^Not released from backlog$/, () => 'Not released for work yet'],
     [/^Dependency (\S+) is unfinished$/, m => `Waiting for ${m[1]} to ship first`],
     [/^Split into child items: (\S+) is not delivered$/, m => `Split into smaller items; waiting for ${m[1]} to ship first`],
+    // GY-2981: the filing rules the ready gate applies to an item an upgrade predates.
+    [/^(?:a feature|a bug) item a user can see owes an end-to-end proof/, () => 'The change owes an end-to-end proof that it works; the master agent adds it to the requirements', true],
+    [/ has no way to serve a head/, () => 'Its end-to-end proof needs a served head, and the repository does not say how to serve one yet', true],
     [/^Worker has not submitted implementation for this attempt$/, () => 'The work has not been handed in yet'],
     [/^Pull request has not been independently observed$/, () => 'Graphyard has not seen the pull request on GitHub yet'],
     [/^No workspace registered$/, () => 'The builder has not said where the code lives yet'],
@@ -200,6 +204,9 @@ export function plainStatus(work: Work, now: number): PlainStatus {
   if (phase === 'needs-worker') {
     const dependency = reasons(ready).find(r => r.raw.startsWith('Dependency '));
     if (dependency) return make(dependency.text, 'waiting', dependency.text);
+    // GY-2981: a filing refusal holds the item from every worker, so it is stuck on its filing — never waiting for one.
+    const filing = reasons(ready).find(r => isFilingRefusal(r.raw));
+    if (filing) return make(`Stuck: ${lowerFirst(filing.text)}`, 'stuck', filing.text);
     // GY-1698: a follow-up waiting for its observation window is not waiting for a worker.
     const window = observationWindowHold(work, new Date(now));
     if (window) return make(`Waiting for its observation window — the reading it owes can first exist at ${window.notBefore}`, 'waiting', `Nothing can be observed before ${window.notBefore}`);
