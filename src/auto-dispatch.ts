@@ -1227,9 +1227,12 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   };
   /** The product reviewer's launch: the same session machinery as a code review, with the product prompt and a product launch registration; the preview must be up to walk. */
   const dispatchProductReview = async (item: Work, request: DispatchRequest) => {
+    // The head is walkable once its preview serves (previewable applications) or its merge trial has
+    // passed (a command-served head was built and run by that trial); before either, the review waits.
+    const served = item.preview?.state === 'running' || item.gates.find(gate => gate.name === 'test')?.passed === true;
     if (!session('review', item, request, reviews)) { /* settled, or waiting to relaunch */ }
     else if (!herdr) wait('review', item, request, 'Herdr session inventory is unavailable');
-    else if (item.preview?.state !== 'running') wait('review', item, request, `the product review of ${item.key} waits for its head's preview to serve (state: ${item.preview?.state ?? 'none'})`);
+    else if (!served) wait('review', item, request, `the product review of ${item.key} waits for its head to serve (preview: ${item.preview?.state ?? 'none'}, trial: ${item.gates.find(gate => gate.name === 'test')?.passed ? 'passed' : 'pending'})`);
     else if (spent('review')) wait('review', item, request, capacityWait('review'));
     else if (!effects.launchProductReview) wait('review', item, request, 'this dispatcher launches no product reviews');
     else if (!retryable(request)) wait('review', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[request.id].nextAt}`}`);

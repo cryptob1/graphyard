@@ -153,11 +153,11 @@ test('unit:product-review-gates-features — the loop launches the product revie
       launchProductReview: async (work: Work, request: { sha: string }) => { launches.push({ work: work.key, sha: request.sha }); agents.push({ name: 'product-reviewer' }); return { agentName: 'product-reviewer', pane: null }; },
       persist: async () => {},
     };
-    // Before the preview serves, the product review waits; with it up, the launch happens.
+    // Before the head serves (no preview running, no passed trial), the product review waits; with the preview up, the launch happens.
     const waiting = { ...item, preview: { ...item.preview!, state: 'starting' } } as Work;
     const heldTick = await runDispatchTick(config, emptyDispatchCursor(config), { ...effects, snapshot: async () => ({ work: [waiting], now: at }) } as never, Date.now);
     assert.deepEqual(heldTick.launched, []);
-    assert.ok(heldTick.waiting.some(entry => /waits for its head's preview to serve/.test(entry.reason)), 'the launch waits for the preview');
+    assert.ok(heldTick.waiting.some(entry => /waits for its head to serve/.test(entry.reason)), 'the launch waits for the head to serve');
     const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects as never, Date.now);
     assert.deepEqual(tick.launched.map(entry => [entry.work, entry.reason]), [['GY-20', 'product review']]);
     assert.deepEqual(launches, [{ work: 'GY-20', sha: H }]);
@@ -165,6 +165,13 @@ test('unit:product-review-gates-features — the loop launches the product revie
     const again = await runDispatchTick(config, emptyDispatchCursor(config), effects as never, Date.now);
     assert.equal(again.launched.length, 0, 'one product review request is answered by one session');
     assert.equal(launches.length, 1);
+    // A head whose merge trial passed serves too, even with no preview at all: the trial built and ran it.
+    const trialLaunches: unknown[] = [];
+    const trialled = feature('GY-26');
+    trialled.preview = null; trialled.gates = [{ name: 'test', passed: true, reasons: [] }];
+    reconcileAutoDispatch(trialled, [trialled], new Date());
+    const trialTick = await runDispatchTick(config, emptyDispatchCursor(config), { ...effects, agents: () => [], snapshot: async () => ({ work: [trialled], now: at }), launchProductReview: async (_work: Work, request: { sha: string }) => { trialLaunches.push(request.sha); return { agentName: 'product-reviewer', pane: null }; } } as never, Date.now);
+    assert.deepEqual(trialLaunches, [H], 'a trial-passed head launches its product review');
 
     // The verdict settles the request the way a control-plane verdict does: recorded on the item,
     // then reconciled. An approval satisfies it and passes the gate.

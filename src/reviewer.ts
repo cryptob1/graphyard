@@ -760,13 +760,17 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
  * screenshots, which the item shows beside it.
  */
 function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, _checkout?: SessionCheckout) {
-  return `You are the independent Graphyard product reviewer for ${config.repository}. Work item ${binding.key} is a user-facing feature: its head ${plane.head} (judged against base ${plane.baseTip}, policy revision ${binding.policyRevision}) was observed by the control plane, and its built preview serves at ${plane.previewUrl}. `
-    + `Judge the feature as a product, in the whole app's context — not only whether the diff is correct: walk it with agent-browser. Open the preview at ${plane.previewUrl} and use the feature and the flows around it; also open the app as currently served (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served) and compare what a user sees there today. `
+  const walk = plane.previewUrl
+    ? `Walk it with agent-browser: open the head's built preview at ${plane.previewUrl} and use the feature and the flows around it; also open the app as currently served (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served) and compare what a user sees there today. `
+    : `The head itself is not separately previewed, so walk the app as currently served with agent-browser (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served), use the flows the feature belongs to, and read the head's diff (git diff ${plane.baseTip} ${plane.head}) beside what you see. `;
+  return `You are the independent Graphyard product reviewer for ${config.repository}. Work item ${binding.key} is a user-facing feature: its head ${plane.head} (judged against base ${plane.baseTip}, policy revision ${binding.policyRevision}) was observed by the control plane. `
+    + `Judge the feature as a product, in the whole app's context — not only whether the diff is correct. `
+    + walk
     + `Then judge: is this a good idea? Does it make the app better for the person using it — discoverable where they would look, worded as they would word it, and no more than it needs? A feature that passes every test and still makes the app worse is rejected. `
     + `Post exactly one verdict, only through Graphyard, with the body on standard input: node ${config.cliPath ?? launcherPath} review post --event EVENT <<'EOF' … EOF. `
     + `--event APPROVE when the feature should ship as it stands; --event REQUEST_CHANGES when it should ship after concrete changes, each named on its own "BLOCKING: SCREEN OR FLOW — FINDING" line; --event REJECT when it should not ship at all, with the reason in the body — the master closes the item unmerged on it, or files a reshaped one. `
     + `Open the body by naming the head you judged, and name each screenshot you captured on its own "Screenshot: PATH-OR-URL" line: the item shows your verdict, findings and screenshots together. `
-    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not claim Graphyard work, and do not submit evidence. '
+    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
     + `Posting that verdict is granted to this session's role, not a permission to request: post it as soon as you have judged the feature, without asking for confirmation. `
     + `review post sends it to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR. `
     + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
@@ -982,7 +986,10 @@ export async function launchReview(root: string, work: Work, profileName: string
   if (product && postMerge) throw new Error('A product review judges a candidate head, never a delivered merge commit');
   const plane = !!postMerge || work.observation?.source === 'control-plane';
   if (product && !plane) throw new Error(`${work.key} was not observed by the control plane; a product review launches for a control-plane head`);
-  if (product && work.preview?.state !== 'running') throw new Error(`${work.key}'s preview is ${work.preview?.state ?? 'not started'}; a product review walks the head's preview, so it launches only while that preview serves`);
+  // The reviewer walks the head where it serves: its preview when one runs, else the app as served
+  // once the merge trial has passed (the trial built and ran a command-served head).
+  const served = work.preview?.state === 'running' || work.gates.find(gate => gate.name === 'test')?.passed === true;
+  if (product && !served) throw new Error(`${work.key}'s head is not walkable yet (preview ${work.preview?.state ?? 'none'}, trial pending); a product review launches once the head serves`);
   // A GitHub-backed launch (token mint, commit and thread reads) is deferred while the gh login is rate-limited, before any record is reserved.
   if (!config.reviewer && !plane) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.
@@ -1154,7 +1161,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, previewUrl: `${config.url}${work.preview!.path}/` } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
