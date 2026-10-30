@@ -44,6 +44,11 @@ export function standingVerdict(work: Work): StandingVerdict | null {
   const agent = observation.agentReview;
   if (agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && agentVerdictBindsRequest(work, agent))
     return { reviewer: agent.profile ?? agent.provider, at: agent.completedAt ?? observation.at, reason: `${agent.profile ?? agent.provider} requested changes on ${agent.sha.slice(0, 12)}: ${agent.reason}` };
+  // A product review's change request reworks the head exactly as a code review's does (GY-2989),
+  // its findings riding the rework brief.
+  const product = work.productReview;
+  if (product && product.verdict === 'changes-requested' && product.sha === candidate.sha)
+    return { reviewer: product.reviewer, at: product.at, reason: `the product review requested changes on ${product.sha.slice(0, 12)}: ${product.findings}` };
   return null;
 }
 

@@ -80,7 +80,7 @@ test('unit:product-review-gates-features — a feature head with passing proofs 
   assert.equal(judged.stage, 'merge');
 });
 
-test('unit:product-review-gates-features — changes requested returns the item to rework with the findings; a reject is owed to the master and never merges', () => {
+test('unit:product-review-gates-features — changes requested returns the item to rework with the findings; a reject is owed to the master and never merges', async () => {
   const changes = { ...feature('GY-14'), productReview: review('changes-requested') } as Work;
   assert.match(productReviewRefusal(changes)!, /^Product review requested changes on/);
   assert.match(productReviewRefusal(changes)!, /not where a user would look/, 'the findings ride the refusal');
@@ -88,6 +88,12 @@ test('unit:product-review-gates-features — changes requested returns the item 
   const action = nextAction({ ...changes, gates }, [changes], new Date());
   assert.equal(action?.kind, 'request-rework', 'a product change request reworks, as a code review change request does');
   assert.match(action?.reason ?? '', /not where a user would look/);
+  // The loop's own routine rework names it too: the head goes back to a worker with the findings.
+  const { neededRework } = await import('../src/daemon/rework.js');
+  const routine = neededRework(changes);
+  assert.ok(routine, 'a standing product change request reworks the head');
+  assert.match(routine.reason, /product review requested changes/);
+  assert.match(routine.reason, /not where a user would look/);
 
   const rejected = { ...feature('GY-15'), productReview: review('rejected', H, 'This duplicates the export flow and makes the page worse.') } as Work;
   assert.match(productReviewRefusal(rejected)!, /^Product review rejected/);

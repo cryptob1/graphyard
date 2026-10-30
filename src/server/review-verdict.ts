@@ -282,7 +282,7 @@ export async function recordProductReviewByHand(services: Services, actor: Princ
     demand(!implementerIdentities(work!).includes(data.reviewer), independenceRefusal(data.reviewer, 'implemented', work!.key), 403);
     if (work!.candidate) demand(work!.candidate.sha.toLowerCase() === data.sha, `${work!.key}'s candidate is ${work!.candidate.sha.slice(0, 12)}, not ${data.sha.slice(0, 12)}; a product review names the head it judged`, 409);
     const submittedAt = now.toISOString();
-    const productReview: ProductReview = { sha: data.sha, baseSha: data.baseSha, verdict: data.verdict, reviewer: data.reviewer, findings: data.findings, screenshots: [...data.screenshots, ...productScreenshots(data.findings)].slice(0, 50), at: submittedAt };
+    const productReview: ProductReview = { sha: data.sha, baseSha: data.baseSha, verdict: data.verdict, reviewer: data.reviewer, findings: data.findings, screenshots: [...new Set([...data.screenshots, ...productScreenshots(data.findings)])].slice(0, 50), at: submittedAt };
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, productReviewVerdictEvent, JSON.stringify({ key: work!.key, reviewer: data.reviewer, sha: data.sha, baseSha: data.baseSha, verdict: data.verdict, by: actor.id })]);
     work!.productReview = productReview;
     if (work!.stage !== 'done') {

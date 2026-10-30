@@ -2,7 +2,11 @@
   "id": "product-review-verdict-shown",
   "title": "A feature item shows its product review verdict, findings and screenshots for its exact head",
   "description": "A user-facing feature is product-reviewed before it merges (GY-2989). The case records a product review — a change request with findings and screenshots, bound to the head it judged — on a feature item through the same route an operator or the loop uses, reads it back on the API, and opens the item in the dashboard, where the Product review panel shows the verdict, the findings and every screenshot named, beside the head it binds.",
-  "tags": ["api", "dashboard", "product-review"],
+  "tags": [
+    "api",
+    "dashboard",
+    "product-review"
+  ],
   "target": "uat",
   "required": true,
   "steps": [
@@ -20,13 +24,23 @@
           {
             "id": "AC-1",
             "text": "The feature is product-reviewed before it merges",
-            "proofs": ["manual:product-review-recorded"]
+            "proofs": [
+              "manual:product-review-recorded"
+            ]
           }
         ],
-        "policy": { "checks": ["test"], "review": true }
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
       },
       "status": 200,
-      "save": { "id": "id", "key": "key" }
+      "save": {
+        "id": "id",
+        "key": "key"
+      }
     },
     {
       "kind": "http",
@@ -39,7 +53,9 @@
         "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
         "verdict": "changes-requested",
         "findings": "The export button hides the summary a reader came for\nScreenshot: preview-export-flow-1.png",
-        "screenshots": ["preview-export-flow-1.png"]
+        "screenshots": [
+          "preview-export-flow-1.png"
+        ]
       },
       "status": 200
     },
@@ -50,11 +66,26 @@
       "path": "/api/work/{{id}}",
       "status": 200,
       "expect": [
-        { "path": "productReview.verdict", "equals": "changes-requested" },
-        { "path": "productReview.reviewer", "equals": "product-reviewer" },
-        { "path": "productReview.sha", "equals": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
-        { "path": "productReview.findings", "type": "string" },
-        { "path": "productReview.screenshots.0", "equals": "preview-export-flow-1.png" }
+        {
+          "path": "productReview.verdict",
+          "equals": "changes-requested"
+        },
+        {
+          "path": "productReview.reviewer",
+          "equals": "product-reviewer"
+        },
+        {
+          "path": "productReview.sha",
+          "equals": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "path": "productReview.findings",
+          "type": "string"
+        },
+        {
+          "path": "productReview.screenshots.0",
+          "equals": "preview-export-flow-1.png"
+        }
       ]
     },
     {
@@ -93,7 +124,8 @@
       "kind": "browser",
       "name": "the product review panel shows the verdict",
       "action": "expectText",
-      "text": "Product review"
+      "text": "Product review",
+      "exact": false
     },
     {
       "kind": "browser",
@@ -105,7 +137,8 @@
       "kind": "browser",
       "name": "the findings the reviewer gave are shown",
       "action": "expectText",
-      "text": "The export button hides the summary a reader came for"
+      "text": "The export button hides the summary a reader came for",
+      "exact": false
     },
     {
       "kind": "browser",
