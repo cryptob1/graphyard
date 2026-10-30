@@ -35,6 +35,9 @@ const alone = async (ports: MergePorts, items: readonly Work[]) => {
  */
 export async function mergeBatch(ports: MergePorts, items: readonly Work[]): Promise<BatchResult[]> {
   if (items.length < 2) return alone(ports, items);
+  // GY-2984: a bug item's proofs are judged on the base tip alone, so it is never batched.
+  const bugs = items.filter(work => work.type === 'bug');
+  if (bugs.length) return [...await alone(ports, bugs), ...await mergeBatch(ports, items.filter(work => work.type !== 'bug'))];
   const at = () => new Date(ports.now()).toISOString();
   const results: BatchResult[] = [], batch: { work: Work; head: string; baseTip: string; mergeSha: string }[] = [], files = new Set<string>();
   const baseTip = await ports.fetch();
