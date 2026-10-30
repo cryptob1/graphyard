@@ -131,6 +131,8 @@ export interface MergeTrialRun extends TrialRun {
   base?: { tip: string; files: string[]; tests: string[]; cases: string[];
     /** GY-2954: the crashed process the base run's output names — the run's database died under it — bounded. */ crash?: string;
     /** GY-2954: the first failing case's assertion text in the base run's TAP, bounded. */ assertion?: string };
+  /** GY-2984: a bug item's proofs that every one passed on the base tip too, with that tip: the head reproduces no bug. */
+  notReproduced?: { proofs: string[]; tip: string };
 }
 /** GY-1834: the flake a trial record carries, bounded as the record's schema bounds it: every name `parseFailedTests` keeps (≤ 500 characters) fits. */
 export const trialFlaked = (flaked: { files: readonly string[]; tests: readonly string[] }, at: string): TrialFlaked =>
@@ -189,7 +191,7 @@ export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<Mer
 export const keyReusedRefusal = (error: unknown) => /Idempotency key reused with different input/.test(error instanceof Error ? error.message : String(error));
 
 /** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3). */
-export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> | null }): string | null {
+export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> & Pick<MergeTrialRun, 'notReproduced'> | null }): string | null {
   if (trial.conflict?.length) return `${trialFailurePrefix}: the merge conflicts in ${trial.conflict.slice(0, 20).join(', ')}`;
   const run = trial.run;
   if (!run) return `${trialFailurePrefix}: the trial reached no verdict`;
@@ -206,6 +208,8 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
     if (run.failingCase) return `${trialFailurePrefix}: tests ${files}: ${run.failingCase}`;
     return `${trialFailurePrefix}: tests ${files}`;
   }
+  // GY-2984: a bug fix whose proofs already pass on the base proves no bug.
+  if (run.notReproduced) return `${trialFailurePrefix}: not reproduced: ${run.notReproduced.proofs.join(', ')} ${run.notReproduced.proofs.length > 1 ? 'pass' : 'passes'} on the base tip ${run.notReproduced.tip}`;
   return null;
 }
 /**
@@ -403,6 +407,8 @@ export interface MergeTrialInput extends RunTrialInput {
   proofFiles: readonly string[];
   /** GY-1834: false skips the rerun of failing files and their run on the base tip; on by default. */
   attribute?: boolean;
+  /** GY-2984: the item is a bug: a passing trial runs its proofs on the base tip, and at least one must fail there. */
+  bug?: boolean;
   /** The tip the merge was made on, where the base run of GY-1834 runs: a fast-forwarded head's first parent is its own earlier commit, never the tip. Absent, the merge commit's first parent. */
   baseTip?: string;
   /**
@@ -479,17 +485,44 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   // The bound E2E cases' counts ride the same proofs map the acceptance gate reads (GY-2965).
   const e2eCounts = Object.fromEntries((verdict.e2e ?? []).map(entry => [entry.proof, { executed: entry.executed, failed: entry.failed }]));
   const first: MergeTrialRun = { ...verdict, files, proofs: { ...counted(), ...e2eCounts }, ...(leftover ? { leftover } : {}) };
-  if (input.attribute === false) return first;
   // A rerun's attempts start their TAP afresh like the trial's, so each run reads only its own answering attempt.
   const rerunAttempt = () => { epoch++; tap = ''; };
   // A rerun of failing test files (or a run on the base tip) re-runs no E2E case: the head's bound cases were judged by the first attempt, whose counts stand.
   const rerunInput = { ...input, e2eProofs: [] as const };
-  // The proof files the selection discovered are held like those the input named.
-  return attributeFailures(first, tap, { ...rerunInput, proofFiles: discovered ?? input.proofFiles }, inner, async (sha, failing) => {
+  const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = []) => {
     only = failing;
-    try { const rerun = await runTrial({ ...rerunInput, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
+    try { const rerun = await runTrial({ ...rerunInput, e2eProofs, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
     catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap } : null; }
-  });
+  };
+  const ownProofFiles = discovered ?? input.proofFiles;
+  // The proof files the selection discovered are held like those the input named.
+  const attributed = input.attribute === false ? first : await attributeFailures(first, tap, { ...rerunInput, proofFiles: ownProofFiles }, inner, retest);
+  if (!input.bug || !(input.proofs.length || input.e2eProofs?.length) || attributed.build !== 'pass' || attributed.tests.failed.length || trialFailureReason({ run: attributed })) return attributed;
+  return reproduceOnBase(attributed, input, ownProofFiles, inner, retest);
+}
+
+/**
+ * GY-2984: a bug item's passing trial runs its proofs' files on the base tip (`input.baseTip`, else
+ * the merge commit's first parent), its E2E proofs' bound cases served from that tip. When every proof
+ * ran there and none of its cases failed, the head is `notReproduced`. A proof file or case new on the
+ * head, a proof with no case on the base or a base run that reached no verdict counts as failing there: nothing is refused.
+ */
+async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proofFiles: readonly string[], git: ChildRun,
+  retest: (sha: string, files: string[], e2eProofs?: readonly string[]) => Promise<{ run: TrialRun; tap: string } | null>): Promise<MergeTrialRun> {
+  let tip: string, files: string[];
+  try {
+    tip = input.baseTip ?? String(await git('git', ['-C', input.root, 'rev-parse', `${input.mergeSha}^1`])).trim().toLowerCase();
+    files = proofFiles.length ? listed(String(await git('git', ['-C', input.root, 'ls-tree', '--name-only', tip, '--', ...proofFiles]))) : [];
+  } catch { return run; }
+  if (proofFiles.length && !files.length) return run;
+  const e2eProofs = input.e2eProofs ?? [];
+  const onBase = await retest(tip, files, e2eProofs).catch(() => null);
+  if (!onBase || onBase.run.build !== 'pass') return run;
+  const passes = ({ executed, failed }: { executed: number; failed: number }) => executed > 0 && failed === 0;
+  const passing = input.proofs.every(proof => passes(countProofCases(onBase.tap, proof)))
+    && e2eProofs.every(proof => { const ran = onBase.run.e2e?.find(entry => entry.proof === proof); return !!ran && passes(ran); });
+  const proofs = [...input.proofs, ...e2eProofs];
+  return passing ? { ...run, notReproduced: { proofs, tip } } : run;
 }
 
 /**
@@ -641,8 +674,8 @@ export interface MergePorts {
   fetch(): Promise<string>;
   /** The trial merge of `head` onto `baseTip` in the object store (trial.ts `trialMerge`): a commit, or the conflict; `item` names the merge commit's subject. */
   merge(head: string, baseTip: string, item?: { key: string; title?: string | null }): Promise<MergeOutcomeOfTrial>;
-  /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted. */
-  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'>, baseTip?: string, onStep?: (step: string) => void): Promise<MergeTrialRun>;
+  /** The build and tests on `mergeSha` (`runMergeTrial`), `files` being what the merge changes against `baseTip`, with the item's proofs counted; a bug item's proofs also run on `baseTip` (GY-2984). */
+  trial(mergeSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }, baseTip?: string, onStep?: (step: string) => void): Promise<MergeTrialRun>;
   /**
    * GY-1718: the preview of a passing trial's `mergeSha` (preview.ts `runPreview`), the repository's
    * required and uat cases run against it served; null when the merge needs none (`previewSkip`).
