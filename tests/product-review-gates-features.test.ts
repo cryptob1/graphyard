@@ -207,6 +207,83 @@ test('unit:product-review-gates-features — the loop launches the product revie
   } finally { await rm(host, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }).catch(() => {}); }
 });
 
+test('unit:product-review-gates-features — the loop drives each verdict from a stubbed product reviewer: an approval lets the head merge, a change request returns it to rework with the findings, a reject leaves it unmerged and owed to the master, and a bug launches none', async () => {
+  const host = await temporaryDirectory('product-review-verdicts');
+  const credentialDirectory = await temporaryDirectory('product-review-verdict-credentials');
+  try {
+    const { execFileSync } = await import('node:child_process');
+    execFileSync('git', ['init', '-q', host]);
+    execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: host });
+    const status = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
+    await setupMaster(host, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: '/bin/true', credentialDirectory, herdrWorkspace: 'wP' }, status as typeof fetch);
+    await saveReviewerProfile(host, { name: 'product-reviewer', agentName: 'product-reviewer', kind: 'claude' });
+    const config = await loadMasterConfig(host);
+    const { neededRework } = await import('../src/daemon/rework.js');
+
+    /**
+     * One loop round for one item: the tick launches the stubbed product reviewer, which posts its
+     * verdict as a launched session does (recorded on `work.productReview`, the item re-evaluated);
+     * the next tick then reads the item as the loop would.
+     */
+    async function drive(item: Work, verdict: ProductReview['verdict'] | null) {
+      reconcileAutoDispatch(item, [item], new Date());
+      const launches: string[] = [];
+      const effects = {
+        snapshot: async () => ({ work: [item], now: at }),
+        agents: () => [],
+        credentials: async () => ({}),
+        reconcileReviews: async () => ({ reviews: [] }),
+        reconcileProducers: async () => ({ producers: [] }),
+        launchReview: async () => { throw new Error('no code review is launched here'); },
+        launchProducer: async () => { throw new Error('no producer is launched here'); },
+        launchProductReview: async (work: Work, request: { sha: string }) => {
+          launches.push(request.sha);
+          if (verdict) {
+            work.productReview = review(verdict, request.sha);
+            reconcileAutoDispatch(work, [work], new Date());
+            work.gates = evaluate(work, [work], new Date()).gates;
+          }
+          return { agentName: 'product-reviewer', pane: null };
+        },
+        persist: async () => {},
+      };
+      const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects as never, Date.now);
+      const next = await runDispatchTick(config, emptyDispatchCursor(config), effects as never, Date.now);
+      return { tick, next, launches, action: nextAction(item, [item], new Date()), rework: neededRework(item) };
+    }
+
+    const held = feature('GY-30');
+    assert.equal(reviewGate(held).passed, false, 'before its verdict the head is held');
+    const approvedItem = feature('GY-31');
+    const approved = await drive(approvedItem, 'approved');
+    assert.deepEqual(approved.launches, [H], 'the stubbed reviewer is launched once for the head');
+    assert.equal(approved.next.launched.length, 0, 'a judged head launches no second reviewer');
+    assert.equal(reviewGate(approvedItem).passed, true, 'an approval lets the head merge');
+    assert.equal(approved.rework, null, 'an approval returns nothing to a worker');
+    assert.notEqual(approved.action?.kind, 'request-rework');
+
+    const changes = feature('GY-32');
+    const changed = await drive(changes, 'changes-requested');
+    assert.deepEqual(changed.launches, [H]);
+    assert.equal(reviewGate(changes).passed, false, 'a change request holds the head');
+    assert.equal(changed.action?.kind, 'request-rework', 'the loop returns the head to rework');
+    assert.match(changed.rework?.reason ?? '', /product review requested changes on aaaaaaaaaaaa: The wording on the settings screen is not where a user would look/, 'with the findings');
+
+    const rejected = feature('GY-33');
+    const refused = await drive(rejected, 'rejected');
+    assert.deepEqual(refused.launches, [H]);
+    assert.equal(reviewGate(rejected).passed, false, 'a rejected head never merges');
+    assert.equal(refused.action?.kind, 'attention', 'it is owed to the master');
+    assert.match(refused.action?.reason ?? '', /closes the item unmerged/);
+    assert.equal(refused.rework, null, 'a reject is not reworked');
+
+    const bug = { ...feature('GY-34'), type: 'bug' } as Work;
+    const fixed = await drive(bug, null);
+    assert.deepEqual(fixed.launches, [], 'a bug launches no product reviewer');
+    assert.equal(reviewGate(bug).passed, true, 'and merges without one');
+  } finally { await rm(host, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }).catch(() => {}); }
+});
+
 test('unit:product-review-gates-features — the product prompt walks the preview and the served app when one runs, and the served app against the diff when none does', () => {
   const prompt = reviewPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard' }, { key: 'GY-23', pr: 0, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { head: H, baseTip: B, product: true, previewUrl: 'https://graphyard.example/preview/GY-23/' });
   assert.match(prompt, /product reviewer/);
