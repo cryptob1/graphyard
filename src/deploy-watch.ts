@@ -9,7 +9,7 @@ import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { GitRunner } from './merge-writer/local-observation.js';
-import { serveRecordPath, readServeRecord } from './serve-app.js';
+import { serveRecordPath, readServeRecord, type ServeCheck } from './serve-app.js';
 
 /**
  * What the deploy last served, the tip that failed and is skipped until the base moves past it, and,
@@ -210,8 +210,8 @@ export interface ServingReport {
   failedDeploy: { tip: string | null; reason: string | null; restoring: string | null } | null;
   /** Merged changes the base branch holds since the served commit; null when unreadable. */
   pending: number | null;
-  /** The declared serve's URL and its last build failure; null when the repository declares no serve. */
-  serve: { url: string | null; failure: { commit: string; reason: string | null } | null } | null;
+  /** The declared serve's URL, its last build failure, and the served commit's required cases' verdict (null while they have not run against it); null when the repository declares no serve. */
+  serve: { url: string | null; failure: { commit: string; reason: string | null } | null; check: ServeCheck | null } | null;
 }
 
 export async function servingReport(root: string | null | undefined, repository: string, baseBranch: string, git?: GitRead | null): Promise<ServingReport> {
@@ -236,6 +236,6 @@ export async function servingReport(root: string | null | undefined, repository:
     atMain: commit && main ? commit === main : null,
     failedDeploy: failed ? { tip: failed.tip, reason: failed.reason, restoring: !serve && configured ? record!.restore ?? null : null } : null,
     pending,
-    serve: serve ? { url: serve.url ?? null, failure: serve.failed ? { commit: serve.failed, reason: serve.reason } : null } : null,
+    serve: serve ? { url: serve.url ?? null, failure: serve.failed ? { commit: serve.failed, reason: serve.reason } : null, check: serve.check ?? null } : null,
   };
 }

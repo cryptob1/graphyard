@@ -1,0 +1,102 @@
+{
+  "id": "served-app-verified",
+  "title": "The release line names the served commit verified, and the failing case once one is broken",
+  "description": "On a served static fixture app with a required case, the serving read the dashboard uses — master status's serving block over the API — reports the check the serve pass records for the exact commit it served, and the release line names the served commit and 'verified', then the failing case and its step once that case is broken. The command steps write the records the pass writes after running the fixture's required case, first passing, then broken.",
+  "tags": ["api", "dashboard", "serve"],
+  "target": "any",
+  "required": false,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "no leftover serve record, so the head reads as declaring nothing",
+      "run": "rm -f .graphyard/served.json",
+      "timeoutSeconds": 30
+    },
+    {
+      "kind": "http",
+      "name": "with nothing declared the serving block names no check",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        { "path": "serving.serve", "type": "null" }
+      ]
+    },
+    {
+      "kind": "command",
+      "name": "the record the pass writes after the served fixture's required case passed",
+      "run": "mkdir -p .graphyard && printf '{\"commit\":\"%s\",\"url\":\"http://127.0.0.1:4399\",\"failed\":null,\"reason\":null,\"pid\":null,\"check\":{\"verified\":true,\"case\":null,\"step\":null,\"reason\":null},\"at\":\"2026-01-01T00:00:00.000Z\"}\\n' 1234567890abcdef1234567890abcdef12345678 > .graphyard/served.json",
+      "timeoutSeconds": 30
+    },
+    {
+      "kind": "http",
+      "name": "the serving block reports the verification for that exact commit",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        { "path": "serving.commit", "equals": "1234567890abcdef1234567890abcdef12345678" },
+        { "path": "serving.serve.check.verified", "equals": true },
+        { "path": "serving.serve.check.case", "type": "null" }
+      ]
+    },
+    {
+      "kind": "browser",
+      "name": "sign in to the dashboard",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the release line names the served commit verified",
+      "action": "expectText",
+      "text": "Serving 12345678 · verified",
+      "exact": false
+    },
+    {
+      "kind": "command",
+      "name": "the record the pass writes once that fixture case is broken",
+      "run": "printf '{\"commit\":\"%s\",\"url\":\"http://127.0.0.1:4399\",\"failed\":null,\"reason\":null,\"pid\":null,\"check\":{\"verified\":false,\"case\":\"fixture-home\",\"step\":\"step 2 expect text \\\\\"the change\\\\\"\",\"reason\":\"expected status 200, got 404\"},\"at\":\"2026-01-01T00:00:01.000Z\"}\\n' 1234567890abcdef1234567890abcdef12345678 > .graphyard/served.json",
+      "timeoutSeconds": 30
+    },
+    {
+      "kind": "http",
+      "name": "the serving block names the failing case and its step",
+      "method": "GET",
+      "path": "/api/status",
+      "status": 200,
+      "expect": [
+        { "path": "serving.serve.check.verified", "equals": false },
+        { "path": "serving.serve.check.case", "equals": "fixture-home" },
+        { "path": "serving.serve.check.step", "equals": "step 2 expect text \"the change\"" }
+      ]
+    },
+    {
+      "kind": "browser",
+      "name": "the dashboard again, now serving the broken record",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "name": "the release line names the failing case and its step",
+      "action": "expectText",
+      "text": "failing fixture-home: step 2",
+      "exact": false
+    }
+  ]
+}
