@@ -386,7 +386,7 @@ export interface DispatchEffects {
   reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
-  /** GY-2989: the product review of a user-facing feature, launched like a review once the head's preview serves. A dispatcher wired without it waits the request instead. */
+  /** GY-2989: the product review of a user-facing feature, launched like a review on the same reviewer lanes. A dispatcher wired without it waits the request instead. */
   launchProductReview?: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   /**
@@ -1174,7 +1174,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   };
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
     // A product review (GY-2989) launches like a review on the same reviewer lanes — one session per
-    // key, reviewer concurrency and capacity — once the head's preview serves to walk.
+    // head, reviewer concurrency and capacity.
     if (review.kind === 'product') return dispatchProductReview(item, review);
     // A normal-risk control-plane head merges on its trial (model/gates.ts, GY-1525): its review comes after the merge.
     if (reviewedAfterMerge(item)) wait('review', item, review, postMergeWaitReason);

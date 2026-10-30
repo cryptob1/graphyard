@@ -20,7 +20,7 @@ The master files items (`master create`) and releases backlog itself (`master re
 
 A head whose merge delta touches a `graphyard.json` `risk.sensitive` path (generic default; unknown delta: sensitive) waits for one independent approval before the merge writer merges it. Any other head merges on its passing trial and is reviewed after the merge; a blocking finding becomes a follow-up item.
 
-A user-facing feature (a `feature` carrying an `e2e:` proof, not opted out) also waits for its product review: a reviewer session walks the head's preview and the served app, then approves, requests changes (rework, with the findings), or rejects — a reject is closed by the master, never merged. Bugs, chores and "No user-facing change" items skip it; a new head is reviewed afresh unless only non-UI files changed. Its verdict, findings and screenshots show on the item.
+A user-facing feature (a `feature` carrying an `e2e:` proof, not opted out) also waits for its product review: a reviewer session walks the head's preview — or, where no preview runs, the app as currently served against the head's diff — then approves, requests changes (rework, with the findings), or rejects — a reject is closed by the master, never merged. Bugs, chores and "No user-facing change" items skip it; a new head is reviewed afresh unless only non-UI files changed. Its verdict, findings and screenshots show on the item.
 
 ## Who holds which authority
 

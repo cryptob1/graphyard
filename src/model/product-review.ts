@@ -1,7 +1,8 @@
 // Concern: GY-2989 — the product review a user-facing feature owes before its merge. Code review
 // checks that a change is correct; a product review judges in the whole app's context that it is a
-// good idea: a reviewer session walks the head's preview and the served app and approves, requests
-// changes, or rejects. Bugs, chores and "No user-facing change" items owe none.
+// good idea: a reviewer session walks the head's preview — or the served app against the head's
+// diff where no preview runs — and approves, requests changes, or rejects. Bugs, chores and "No
+// user-facing change" items owe none.
 import { repositoryPolicy, type RepositoryPolicy } from './repository-policy.js';
 import type { Work } from './work.js';
 import { optsOutOfE2e } from './user-facing.js';
