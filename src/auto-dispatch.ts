@@ -386,6 +386,8 @@ export interface DispatchEffects {
   reconcileReviews: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ reviews: ReviewRecord[]; released?: { pane: string; agentName: string }[] }>;
   reconcileProducers: (work: Work[], agents: HerdrAgent[] | null) => Promise<{ producers: ProducerRecord[] }>;
   launchReview: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
+  /** GY-2989: the product review of a user-facing feature, launched like a review once the head's preview serves. A dispatcher wired without it waits the request instead. */
+  launchProductReview?: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   /**
    * The GitHub logins that have reviewed the request's head, read with the loop's own access outside
@@ -1171,6 +1173,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     return turn;
   };
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
+    // A product review (GY-2989) launches like a review on the same reviewer lanes — one session per
+    // key, reviewer concurrency and capacity — once the head's preview serves to walk.
+    if (review.kind === 'product') return dispatchProductReview(item, review);
     // A normal-risk control-plane head merges on its trial (model/gates.ts, GY-1525): its review comes after the merge.
     if (reviewedAfterMerge(item)) wait('review', item, review, postMergeWaitReason);
     else if (!session('review', item, review, reviews)) { /* settled, or waiting to relaunch */ }
@@ -1220,6 +1225,45 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       }
     }
   };
+  /** The product reviewer's launch: the same session machinery as a code review, with the product prompt and a product launch registration; the preview must be up to walk. */
+  const dispatchProductReview = async (item: Work, request: DispatchRequest) => {
+    if (!session('review', item, request, reviews)) { /* settled, or waiting to relaunch */ }
+    else if (!herdr) wait('review', item, request, 'Herdr session inventory is unavailable');
+    else if (item.preview?.state !== 'running') wait('review', item, request, `the product review of ${item.key} waits for its head's preview to serve (state: ${item.preview?.state ?? 'none'})`);
+    else if (spent('review')) wait('review', item, request, capacityWait('review'));
+    else if (!effects.launchProductReview) wait('review', item, request, 'this dispatcher launches no product reviews');
+    else if (!retryable(request)) wait('review', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[request.id].nextAt}`}`);
+    else {
+      const { profile, reason } = selectReviewerProfile(config, 'control-plane');
+      const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
+      const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
+      const busy = () => wait('review', item, request, `product review: ${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}`);
+      if (!profile) wait('review', item, request, `product review: ${reason!}`);
+      else if (!withRoom().length) busy();
+      else {
+        try {
+          const launched = await launchInTurns(request, withRoom(), candidate => room(candidate, reviews).free > 0, candidate => {
+            const handle = launchedSessionHandle('review', request, `${item.key}: product review ${request.sha.slice(0, 12)}`, config.hostId, undefined, candidate.kind, config.herdrWorkspace);
+            return registeredLaunch(record(item), handle, withinBound(handle, withLaunchedRuntime(handle, () => effects.launchProductReview!(item, request, candidate, inventory(), observedAt))), result => coordinates(candidate, request, result), attachTo);
+          }, effects.holdAccount ? exhaustedAtLaunch('review', item, request) : undefined);
+          if (!launched) busy();
+          else {
+            delete cursor.failures[request.id]; delete cursor.capacity.review;
+            tick.launched.push({ kind: 'review', work: item.key, requestId: request.id, sha: request.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}), reason: 'product review' });
+          }
+        } catch (error) {
+          const answered = answeredByPendingReview(error, request);
+          if (answered?.answered) {
+            wakeSettlement(item, answered.answered.at);
+            wait('review', item, request, `product reviewer session ${answered.agentName} already answered with ${answered.answered.state}; ${launchWaitWording.settles}`, answered.answered.at);
+          }
+          else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[request.id]; wait('review', item, request, message(error)); }
+          else if (!outOfCapacity('review', item, request, error)) refuse('review', item, request, error);
+        }
+        await persist();
+      }
+    }
+  };
   // Settled into a value, so a failure is rethrown once the pass ends and never left unhandled; a
   // pass that fails still waits for these reviewers, so none is left launching into the next tick.
   const deferred = snapshot.work.filter(work => work.stage !== 'done' && botReads.has(work.autoDispatch?.review?.id ?? ''))
@@ -1242,6 +1286,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
         const review = item.autoDispatch!.review;
         if (review?.state === 'requested' && review.provider === 'github' && !botReads.has(review.id)) await inReviewTurn(item, review);
+        const product = item.autoDispatch!.product;
+        if (product?.state === 'requested' && product.kind === 'product') await inReviewTurn(item, product);
         for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
           // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
           // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
@@ -1432,6 +1478,8 @@ export function dispatchEffects(root: string, config: MasterConfig | (() => Mast
     // Each launch's reads of its own pane are watched: a runtime that exited on its provider's
     // limit notice is failed over below rather than counted as a refusal.
     launchReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision } }).catch(error => { throw watch.classify(error); }); },
+    // The product review (GY-2989): the same session machinery, with the product prompt and a product launch registration.
+    launchProductReview: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchReview(root, work, profile.name, agents, observedAt, { run: watch.run, start: watch.start, requestId: request.id, request: { sha: request.sha, baseSha: request.baseSha, policyRevision: request.policyRevision }, product: true }).catch(error => { throw watch.classify(error); }); },
     launchProducer: (work, request, profile, agents, observedAt) => { const watch = watchInstantExit(run, deps.now); return launchProducer(root, work, request, profile, agents, observedAt, { run: watch.run, start: watch.start }).catch(error => { throw watch.classify(error); }); },
     // Post-merge reviews (GY-1525): launched like a review of the delivered merge commit; the follow-ups
     // are filed as the master's operator-agent identity, the one that may create work, never the coordinator's.

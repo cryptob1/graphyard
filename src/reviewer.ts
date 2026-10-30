@@ -647,7 +647,7 @@ export async function coordinationCheckout(root: string, config: MasterConfig, k
  * `review post` command needs none. A post-merge review judges the delivered merge commit against
  * its first parent, and says what becomes of its findings.
  */
-export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string } }
+export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string }; product?: boolean; previewUrl?: string }
 /** A criterion as the review prompt reads it; `proofs` marks a declared post-deploy verification (GY-1660). */
 export type ReviewCriterion = { id: string; text: string; proofs?: readonly string[] };
 /**
@@ -752,8 +752,29 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + blockingStandardSection
     + repetitionReviewSection(files);
 }
+/**
+ * The product review's request (GY-2989): the whole app in context, walked, not the diff. The
+ * session uses agent-browser on the head's preview (the loop serves the built head there while the
+ * item's preview runs) and on the app as currently served, uses the feature and the flows around
+ * it, and judges whether it is a good idea and improves the experience. The verdict names its
+ * screenshots, which the item shows beside it.
+ */
+function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, _checkout?: SessionCheckout) {
+  return `You are the independent Graphyard product reviewer for ${config.repository}. Work item ${binding.key} is a user-facing feature: its head ${plane.head} (judged against base ${plane.baseTip}, policy revision ${binding.policyRevision}) was observed by the control plane, and its built preview serves at ${plane.previewUrl}. `
+    + `Judge the feature as a product, in the whole app's context — not only whether the diff is correct: walk it with agent-browser. Open the preview at ${plane.previewUrl} and use the feature and the flows around it; also open the app as currently served (its address is the serving.serve.url field of GET $GRAPHYARD_URL/api/status, when one is served) and compare what a user sees there today. `
+    + `Then judge: is this a good idea? Does it make the app better for the person using it — discoverable where they would look, worded as they would word it, and no more than it needs? A feature that passes every test and still makes the app worse is rejected. `
+    + `Post exactly one verdict, only through Graphyard, with the body on standard input: node ${config.cliPath ?? launcherPath} review post --event EVENT <<'EOF' … EOF. `
+    + `--event APPROVE when the feature should ship as it stands; --event REQUEST_CHANGES when it should ship after concrete changes, each named on its own "BLOCKING: SCREEN OR FLOW — FINDING" line; --event REJECT when it should not ship at all, with the reason in the body — the master closes the item unmerged on it, or files a reshaped one. `
+    + `Open the body by naming the head you judged, and name each screenshot you captured on its own "Screenshot: PATH-OR-URL" line: the item shows your verdict, findings and screenshots together. `
+    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not claim Graphyard work, and do not submit evidence. '
+    + `Posting that verdict is granted to this session's role, not a permission to request: post it as soon as you have judged the feature, without asking for confirmation. `
+    + `review post sends it to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR. `
+    + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
+    + autonomousSession('post the verdict yourself, APPROVE, REQUEST_CHANGES or REJECT, as soon as you have judged the feature', 'record a blocker as a final line starting BLOCKED:');
+}
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. `plane.baseTip` is the diff base the session judges — for a candidate review the head's merge base with the base branch (GY-2948), for a post-merge review the merge commit's first parent — and anchors the memory digest too: the digest's "changes since" window reaches past that base to the tip, so it names items merged between the two, which a reviewer judging against the merge base still wants in mind. */
 function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null) {
+  if (plane.product) return productReviewPrompt(config, binding, plane, checkout);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
   const subject = plane.postMerge
     ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
@@ -945,6 +966,8 @@ export async function launchReview(root: string, work: Work, profileName: string
   verificationMaps?: (root: string, baseBranch: string) => Promise<VerificationMap[]>;
   /** A post-merge review (GY-1525 AC-4): the delivered merge commit, judged against its first parent (read from the coordinator checkout when not given). */
   postMerge?: { mergeSha: string; baseTip?: string };
+  /** GY-2989: a product review — the session walks the head's preview and the served app and judges the feature as a product. Control-plane mode only. */
+  product?: boolean;
   /** How a control-plane launch is registered with the control plane (POST /api/work/:id/review-launch); the coordinator credential by default. */
   registerLaunch?: (work: Work, launch: ControlPlaneLaunchInput) => Promise<{ launch: string }>;
 } = {}) {
@@ -955,7 +978,11 @@ export async function launchReview(root: string, work: Work, profileName: string
   // commit, is reviewed without GitHub — no reviewer App, no token, no threads; the verdict posts to
   // the API as the launch's one-time token.
   const postMerge = dependencies.postMerge;
+  const product = !!dependencies.product;
+  if (product && postMerge) throw new Error('A product review judges a candidate head, never a delivered merge commit');
   const plane = !!postMerge || work.observation?.source === 'control-plane';
+  if (product && !plane) throw new Error(`${work.key} was not observed by the control plane; a product review launches for a control-plane head`);
+  if (product && work.preview?.state !== 'running') throw new Error(`${work.key}'s preview is ${work.preview?.state ?? 'not started'}; a product review walks the head's preview, so it launches only while that preview serves`);
   // A GitHub-backed launch (token mint, commit and thread reads) is deferred while the gh login is rate-limited, before any record is reserved.
   if (!config.reviewer && !plane) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
   // The App is narrowed once, for the launch closure below as much as for this line.
@@ -1107,7 +1134,7 @@ export async function launchReview(root: string, work: Work, profileName: string
       // principal, head, base tip and token hash. A launch it refuses starts nothing.
       let registered: { launch: string } | null = null;
       if (plane) {
-        try { registered = await (dependencies.registerLaunch ?? registerControlPlaneLaunch(config))(work, { reviewer: reviewerIdentity, head: binding.sha, baseTip: binding.baseSha, tokenHash: verdictTokenHash!, expiresAt: minted.expiresAt, postMerge: !!postMerge }); }
+        try { registered = await (dependencies.registerLaunch ?? registerControlPlaneLaunch(config))(work, { reviewer: reviewerIdentity, head: binding.sha, baseTip: binding.baseSha, tokenHash: verdictTokenHash!, expiresAt: minted.expiresAt, postMerge: !!postMerge, ...(product ? { product: true } : {}) }); }
         catch (error) { await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
       }
       const writable = await sessionWritable(root, config, checkout.directory);
@@ -1127,7 +1154,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, previewUrl: `${config.url}${work.preview!.path}/` } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -1167,7 +1194,7 @@ export async function launchReview(root: string, work: Work, profileName: string
 }
 
 /** What a control-plane launch registers with the control plane (server/review-verdict.ts `reviewLaunchBodySchema`). */
-export interface ControlPlaneLaunchInput { reviewer: string; head: string; baseTip: string; tokenHash: string; expiresAt: string; postMerge: boolean }
+export interface ControlPlaneLaunchInput { reviewer: string; head: string; baseTip: string; tokenHash: string; expiresAt: string; postMerge: boolean; product?: boolean }
 /** The paths the earlier round's findings named (GY-1988), de-duplicated and bounded, for the session's binding. */
 function earlierBindingPaths(findings: readonly string[] | undefined): string[] {
   return [...new Set((findings ?? []).map(finding => findingLocation(finding)?.path).filter((path): path is string => !!path))].slice(0, 10);

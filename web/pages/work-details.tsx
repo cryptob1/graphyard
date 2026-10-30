@@ -1,5 +1,5 @@
 import { useEffect } from 'react';
-import { deploySmokeRequired, isClosed, type Work } from '../../src/model';
+import { deploySmokeRequired, isClosed, needsProductReview, type Work } from '../../src/model';
 import { sessionSummary } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanRequestRow } from '../../src/model/human-request';
@@ -38,6 +38,27 @@ const withoutPr = (sentence: string) => sentence.replace(/\s*(?:of|on|in)?\s*PR 
 const oneLine = (text: string) => { const first = text.split(/(?<=[.;:])\s/)[0]; return first.length > 90 ? `${first.slice(0, 88).replace(/\s+\S*$/, '')}…` : first; };
 
 const previewWords: Record<ItemPreviewState, string> = { starting: 'Starting', running: 'Running', failed: 'Failed', cleaned: 'Cleaned up' };
+const productWords: Record<string, string> = { approved: 'Approved', 'changes-requested': 'Changes requested', rejected: 'Rejected' };
+/**
+ * The product review (GY-2989): a user-facing feature is judged in the whole app's context before
+ * it merges. The panel shows the standing verdict, the reviewer's findings and every screenshot the
+ * verdict named, bound to the exact head it judged.
+ */
+export function ProductReviewPanel({ item }: { item: Work }) {
+  const review = item.productReview;
+  if (!review && !needsProductReview(item)) return null;
+  const bindsHead = !!item.candidate && review?.sha === item.candidate.sha;
+  return <section className="panel" aria-label="Product review"><h2>Product review <small>{review ? productWords[review.verdict] : 'not reviewed yet'}</small></h2>
+    {review ? <>
+      <dl className="facts">
+        <div><dt>Head</dt><dd><span className="mono">{review.sha.slice(0, 8)}</span> · {bindsHead ? 'the current head' : 'an earlier head; the current one is reviewed afresh unless only non-UI files changed'}</dd></div>
+        <div><dt>Reviewer</dt><dd>{review.reviewer} · {new Date(review.at).toLocaleString()}</dd></div>
+      </dl>
+      <p className="product-findings" style={{ whiteSpace: 'pre-wrap' }}>{review.findings}</p>
+      {review.screenshots.length > 0 && <ul className="proof-markers product-screenshots">{review.screenshots.map(shot => <li key={shot}>{/^https?:\/\//.test(shot) ? <a href={shot} target="_blank" rel="noopener noreferrer">{shot} ↗</a> : <span className="mono">{shot}</span>}</li>)}</ul>}
+    </> : <p className="muted">A user-facing feature is product-reviewed before it merges: a reviewer walks the head's preview and the served app and approves it, asks for changes, or rejects it.</p>}
+  </section>;
+}
 const caseMarks = { pass: marker.passed, fail: marker.failed, unrun: marker.unmeasured } as const;
 /**
  * The item's local preview (GY-1902): its link while it runs, its state and why it ended, the
@@ -178,6 +199,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       </dl> : <p className="muted">No pull request yet.</p>}
     </section>
     {item.preview && <PreviewPanel preview={item.preview}/>}
+    <ProductReviewPanel item={item}/>
     <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}

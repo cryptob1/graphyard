@@ -5,6 +5,7 @@ import { demand, implementerIdentities, type Principal, type Work } from '../mod
 import type { ControlPlaneReviewLaunch, ControlPlaneVerdict } from '../model/post-merge-review.js';
 import { reviewEvents, verdictStateOf } from '../review-post.js';
 import { blockingFindings } from '../review-cap.js';
+import { productVerdicts, type ProductReview } from '../model/product-review.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import type { Services } from './routes.js';
@@ -40,12 +41,23 @@ const hex64 = z.string().regex(/^[0-9a-f]{64}$/);
 // still a 400, never a weakened check.
 const identifier = z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*(?:\[bot\])?$/);
 const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
-export const reviewLaunchBodySchema = z.object({ reviewer: identifier, head: sha, baseTip: sha, tokenHash: hex64, expiresAt: instant, postMerge: z.boolean().default(false) }).strict();
+export const reviewLaunchBodySchema = z.object({ reviewer: identifier, head: sha, baseTip: sha, tokenHash: hex64, expiresAt: instant, postMerge: z.boolean().default(false), product: z.boolean().default(false) }).strict();
 export const reviewVerdictBodySchema = z.object({ event: z.enum(reviewEvents), body: z.string().trim().min(1).max(65_536), sha, token: hex64 }).strict();
+/** The hand-recorded product review (GY-2989): the operator or the loop's coordinator records one itself, without a launched session. */
+export const productReviewBodySchema = z.object({
+  reviewer: identifier, sha, baseSha: sha,
+  verdict: z.enum(productVerdicts),
+  findings: z.string().trim().min(1).max(65_536),
+  screenshots: z.array(z.string().trim().min(1).max(2000)).max(50).default([]),
+}).strict();
 /** GY-2078: the loop's withdrawal of one control-plane review verdict — which review, and the request the re-review is asked by. */
 export const reviewWithdrawBodySchema = z.object({ reviewId: z.number().int().safe().positive(), reason: z.string().trim().min(1).max(8000) }).strict();
 /** The events each route appends with its own payload; the document save beside each is `<event>.recorded`. */
 export const reviewLaunchEvent = 'review.launch', reviewVerdictEvent = 'review.verdict', independenceRefusedEvent = 'review.independence-refused';
+/** The event a product review's verdict is appended with (GY-2989). */
+export const productReviewVerdictEvent = 'product-review.verdict';
+/** The screenshots a product verdict names, one `Screenshot:` line each (product-review.ts shows them on the item). */
+export const productScreenshots = (body: string) => body.split('\n').map(line => line.trim()).filter(line => /^Screenshot:/i.test(line)).map(line => line.replace(/^Screenshot:\s*/i, '').trim()).filter(Boolean);
 /** The event a control-plane review's withdrawal is appended with (GY-2078). */
 export const reviewWithdrawnEvent = 'review.withdrawn';
 /** How long a registered launch's token stays valid at most, whatever expiry the launcher asks. */
@@ -109,6 +121,7 @@ export async function recordReviewLaunch(services: Services, actor: Principal, i
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     if (data.postMerge) {
+      demand(!data.product, 'A product review is of a candidate head, never of a delivered merge commit', 409);
       demand(work!.stage === 'done' && work!.delivery?.mergeSha.toLowerCase() === data.head, `${work!.key} was not delivered as ${data.head.slice(0, 12)}; a post-merge review is launched on the delivered merge commit`, 409);
       demand(work!.postMergeReview === 'owed', `${work!.key} owes no post-merge review${work!.postMergeReview === 'reviewed' ? ': its verdict is recorded' : ''}`, 409);
     } else {
@@ -123,7 +136,7 @@ export async function recordReviewLaunch(services: Services, actor: Principal, i
     // One launch stands per item: a relaunch replaces the earlier registration and withdraws its token.
     const withdraw = work!.reviewLaunch ? [work!.reviewLaunch.tokenHash] : [];
     const expiresAt = new Date(Math.min(Date.parse(data.expiresAt), now.getTime() + launchTokenBoundMs)).toISOString();
-    const launch: ControlPlaneReviewLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, head: data.head, baseTip: data.baseTip, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt, postMerge: data.postMerge, verdict: null };
+    const launch: ControlPlaneReviewLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, head: data.head, baseTip: data.baseTip, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt, postMerge: data.postMerge, ...(data.product ? { product: true } : {}), verdict: null };
     work!.reviewLaunch = launch;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, reviewLaunchEvent, JSON.stringify({ key: work!.key, ...launch })]);
     await save(db, work!, actor.id, `${reviewLaunchEvent}.recorded`, now, { launch: launch.id, reviewer: launch.reviewer, head: launch.head, postMerge: launch.postMerge });
@@ -165,20 +178,26 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
       return { refusal: { reason, status: 403 } };
     }
     const state = verdictStateOf(data.event), submittedAt = now.toISOString();
+    // A product launch's verdict is the item's product review (GY-2989): approved, changes requested
+    // or rejected, recorded on `work.productReview` — never as a code review on the observation.
+    const product = !!launch!.product;
+    if (product) demand(data.event !== 'COMMENT', 'A product review is approved, changes requested or rejected; it posts no COMMENT', 409);
+    else demand(data.event !== 'REJECT', 'REJECT is a product review verdict; a code review posts APPROVE, REQUEST_CHANGES or COMMENT', 409);
+    const productVerdict: ProductReview['verdict'] | null = product ? data.event === 'APPROVE' ? 'approved' : data.event === 'REQUEST_CHANGES' ? 'changes-requested' : 'rejected' : null;
     // Every verdict carries the base its session judged (GY-2948 AC-2): the launch's baseTip, the
     // head's merge base with the base branch, so the verdict itself — in the ledger event, the
     // observation.reviews entry and the launch's verdict record — says which commits were in scope,
     // even after a relaunch replaces the launch record.
     const baseSha = launch!.baseTip;
-    const inserted = await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4) RETURNING seq', [work!.id, actor.id, reviewVerdictEvent, JSON.stringify({ key: work!.key, launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, event: data.event, body: data.body, submittedAt, postMerge: launch!.postMerge, source: 'control-plane', baseSha })]);
+    const inserted = await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4) RETURNING seq', [work!.id, actor.id, product ? productReviewVerdictEvent : reviewVerdictEvent, JSON.stringify({ key: work!.key, launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, event: data.event, body: data.body, submittedAt, postMerge: launch!.postMerge, product, source: 'control-plane', baseSha })]);
     const reviewId = Number(inserted.rows[0]?.seq);
-    const verdict: ControlPlaneVerdict = { reviewer: launch!.reviewer, sha: data.sha, state, body: data.body, submittedAt, source: 'control-plane', reviewId, baseSha };
+    const verdict: ControlPlaneVerdict = { reviewer: launch!.reviewer, sha: data.sha, state, body: data.body, submittedAt: submittedAt, source: 'control-plane', reviewId, baseSha };
     // The verdict stands where GitHub's review would: `exactApproval` finds an APPROVED of the exact
     // candidate head by someone other than its author, and the review gate reads a change request.
     // Every verdict carries its body; a change request also carries its BLOCKING findings, as a
     // GitHub change request's observation does (github.ts).
     const observation = work!.observation;
-    if (observation) {
+    if (!product && observation) {
       if (work!.formalReviewResetRequired && !work!.formalReviewBaseline && work!.candidate) {
         work!.formalReviewBaseline = {
           pr: work!.candidate.pr,
@@ -190,14 +209,15 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
       observation.reviewIds = [...(observation.reviewIds ?? []), reviewId];
     }
     work!.reviewLaunch = { ...launch!, verdict };
+    if (product) work!.productReview = { sha: launch!.head, baseSha, verdict: productVerdict!, reviewer: launch!.reviewer, findings: data.body, screenshots: productScreenshots(data.body), at: submittedAt };
     if (launch!.postMerge) work!.postMergeReview = 'reviewed';
     change = { withdraw: [launch!.tokenHash] };
     if (work!.stage !== 'done') {
       engine.evaluate(work!, all, now);
       await (engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
     }
-    await save(db, work!, actor.id, `${reviewVerdictEvent}.recorded`, now, { launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, reviewId, postMerge: launch!.postMerge });
-    return { result: { recorded: true, key: work!.key, launch: launch!.id, reviewId, state, sha: data.sha, reviewer: launch!.reviewer, stage: work!.stage, postMerge: launch!.postMerge } };
+    await save(db, work!, actor.id, `${product ? productReviewVerdictEvent : reviewVerdictEvent}.recorded`, now, { launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, reviewId, postMerge: launch!.postMerge, product });
+    return { result: { recorded: true, key: work!.key, launch: launch!.id, reviewId, state: product ? productVerdict : state, sha: data.sha, reviewer: launch!.reviewer, stage: work!.stage, postMerge: launch!.postMerge, product } };
   }));
   // The token is spent only once the verdict or the refusal is committed (a failed save leaves the session its retry).
   applyRegistryChange(services, change, Date.now());
@@ -240,5 +260,36 @@ export async function withdrawReviewVerdict(services: Services, actor: Principal
       await save(db, work!, actor.id, `${reviewWithdrawnEvent}.recorded`, now, { reviewId: data.reviewId, sha: review!.sha, reviewer: review!.reviewer });
     }
     return { withdrawn: true, key: work!.key, reviewId: data.reviewId, sha: review!.sha, state: review!.state };
+  }));
+}
+
+/**
+ * GY-2989: the operator's or the loop's coordinator hand-recorded product review — the same record
+ * a launched product reviewer's verdict writes, without a launch, for a review given outside a
+ * session. The reviewer must be independent of the item, and a head the item already holds as its
+ * candidate is the only head a review may name against it; a fresh item records the named head, the
+ * one its preview was walked on. One product review stands per item: the newest verdict replaces the
+ * standing one.
+ */
+export async function recordProductReviewByHand(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  demand(actor.role === 'admin' || actor.role === 'coordinator', 'Only an admin or the loop\'s coordinator records a product review by hand', 403);
+  const data = productReviewBodySchema.parse(body);
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
+  return services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
+    const all = await lockedWork(db, [id]);
+    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    demand(!implementerIdentities(work!).includes(data.reviewer), independenceRefusal(data.reviewer, 'implemented', work!.key), 403);
+    if (work!.candidate) demand(work!.candidate.sha.toLowerCase() === data.sha, `${work!.key}'s candidate is ${work!.candidate.sha.slice(0, 12)}, not ${data.sha.slice(0, 12)}; a product review names the head it judged`, 409);
+    const submittedAt = now.toISOString();
+    const productReview: ProductReview = { sha: data.sha, baseSha: data.baseSha, verdict: data.verdict, reviewer: data.reviewer, findings: data.findings, screenshots: [...data.screenshots, ...productScreenshots(data.findings)].slice(0, 50), at: submittedAt };
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, productReviewVerdictEvent, JSON.stringify({ key: work!.key, reviewer: data.reviewer, sha: data.sha, baseSha: data.baseSha, verdict: data.verdict, by: actor.id })]);
+    work!.productReview = productReview;
+    if (work!.stage !== 'done') {
+      services.engine.evaluate(work!, all, now);
+      await (services.engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+    }
+    await save(db, work!, actor.id, `${productReviewVerdictEvent}.recorded`, now, { reviewer: data.reviewer, sha: data.sha, verdict: data.verdict });
+    return { recorded: true, key: work!.key, verdict: data.verdict, sha: data.sha, reviewer: data.reviewer, stage: work!.stage };
   }));
 }

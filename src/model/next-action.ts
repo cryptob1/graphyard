@@ -274,6 +274,11 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
   { gate: 'build', match: /conflict/i, kind: 'request-rework' },
   // review
   { gate: 'review', match: /^Outstanding change requests/, kind: 'request-rework' },
+  // A product review's change request reworks exactly as a code review's does; its reject is a
+  // judgment no executor runs — the master closes the item unmerged or files a reshaped one
+  // (GY-2989) — and its missing review is asked for like any other.
+  { gate: 'review', match: /^Product review requested changes/, kind: 'request-rework' },
+  { gate: 'review', match: /^Product review rejected/, kind: 'attention' },
   // An approval whose mechanical nits await the worker bot's round (GY-971): that round is a rework.
   { gate: 'review', match: /^Approval (\d+ )?of [0-9a-f]+ names \d+ findings? classified mechanical/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },

@@ -6,7 +6,7 @@ import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
-import { recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
+import { recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
@@ -69,6 +69,15 @@ export const workRoutes = defineRoutes('work', [
       await refuseLead(context, id, action);
       const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'review-launch' ? recordReviewLaunch(context.services, context.actor, target, data, key) : recordReviewVerdict(context.services, context.actor, target, data, key);
+    },
+  },
+  // A product review recorded by hand (GY-2989): the operator's or the loop's own verdict on a
+  // user-facing feature, judged on the preview, without a launched session.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/product-review$/,
+    async handle(context, [id]) {
+      await refuseLead(context, id, 'product-review');
+      return recordProductReviewByHand(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
     },
   },
   // The merge writer's ledger (GY-1524): intent, trial, pushed, reconciled and refused, recorded by the

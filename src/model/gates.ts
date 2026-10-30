@@ -9,6 +9,7 @@ import { isDelivered } from './closure.js';
 import { reviewedBeforeMerge, riskOf } from './risk-class.js';
 import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
 import { filingRefusal } from './user-facing.js';
+import { productReviewRefusal } from './product-review.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
 declare module './work.js' {
@@ -108,7 +109,11 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   // request is attention for the post-merge pass, never a merge gate (GY-1525).
   const changeRequestHold = changesRequested && beforeMerge
     ? ['Outstanding change requests must be resolved through a new review'] : [];
-  add('review', [...riskRefusal, ...changeRequestHold, ...(mechanicalHold ? [mechanicalHold] : [])]);
+  // A user-facing feature owes its product review before the merge, whichever side the risk class
+  // puts the code review on (GY-2989): an approval of the exact head (or one carried across a
+  // non-UI delta) lets it pass; a change request reworks; a reject never merges.
+  const productHold = productReviewRefusal(work);
+  add('review', [...riskRefusal, ...changeRequestHold, ...(mechanicalHold ? [mechanicalHold] : []), ...(productHold ? [productHold] : [])]);
   // GY-2010: gates never read GitHub. The merge writer's ledger stands for the test and merge
   // gates for every observed candidate — including a document that still carries pull-request-era
   // checks, PR numbers and mergeability. Those fields load; they do not refuse progression.

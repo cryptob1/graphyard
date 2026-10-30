@@ -4,6 +4,7 @@ import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerPro
 import { carriedApproval } from './carry.js';
 import { behindBaseHold } from './behind-base.js';
 import { automatableOutcomes, dispatchIneligibility, producerGroupDecisions, type ProducerGroup } from './mechanical-proofs.js';
+import { needsProductReview, standingProductReview } from './product-review.js';
 
 /**
  * Automatic dispatch at submit.
@@ -20,7 +21,7 @@ import { automatableOutcomes, dispatchIneligibility, producerGroupDecisions, typ
  * and the gates still decide from evidence and verdicts alone.
  */
 
-export const dispatchKinds = ['review', 'producer'] as const;
+export const dispatchKinds = ['review', 'producer', 'product'] as const;
 export type DispatchKind = typeof dispatchKinds[number];
 export const dispatchStates = ['requested', 'satisfied', 'cancelled'] as const;
 export type DispatchState = typeof dispatchStates[number];
@@ -38,6 +39,8 @@ export interface DispatchRequest {
 export interface AutoDispatch {
   review: DispatchRequest | null;
   producers: DispatchRequest[];
+  /** GY-2989: the product review a user-facing feature owes before its merge, one per head. Absent on records written before it existed. */
+  product?: DispatchRequest | null;
   /** Resolved requests, newest last, bounded; the events ledger holds the complete sequence. */
   history: DispatchRequest[];
 }
@@ -103,6 +106,27 @@ export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): 
 }
 
 /**
+ * Why the current head does or does not need a launched product reviewer (GY-2989): a user-facing
+ * feature's head owes one until a product review approves it, carries one across a non-UI delta,
+ * or is answered by a change request (rework) or a reject (the master closes the item). Only a
+ * head the control plane observed itself launches one — the session judges the preview and the
+ * served app, not a pull request.
+ */
+export type ProductReviewState = 'required' | 'not-required' | 'approved' | 'carried' | 'changes-requested' | 'rejected';
+export function productReviewNeed(work: Work): { needed: boolean; reason: string; state: ProductReviewState } {
+  if (!needsProductReview(work)) return { needed: false, state: 'not-required', reason: `${work.type} items and items without an e2e: proof owe no product review` };
+  const candidate = work.candidate, observation = work.observation;
+  if (observation?.source !== 'control-plane' || !candidate || !observation || observation.candidate.sha !== candidate.sha || observation.candidate.baseSha !== candidate.baseSha)
+    return { needed: false, state: 'not-required', reason: 'a product review launches for a head the control plane observed itself' };
+  const standing = standingProductReview(work);
+  if (standing?.review.verdict === 'approved') return standing.carried
+    ? { needed: false, state: 'carried', reason: `product review of ${short(standing.review.sha)} carried: only non-UI files changed since` }
+    : { needed: false, state: 'approved', reason: `product approved ${short(candidate.sha)}` };
+  if (standing) return { needed: false, state: standing.review.verdict, reason: `product review ${standing.review.verdict === 'changes-requested' ? 'requested changes' : 'rejected'} on ${short(candidate.sha)}; ${standing.review.verdict === 'changes-requested' ? 'the next head is reviewed afresh' : 'the item is owed to the master'}` };
+  return { needed: true, state: 'required', reason: `product review of ${short(candidate.sha)} is required before this user-facing feature merges` };
+}
+
+/**
  * The handle ids the sessions this item is currently asking for may record for themselves.
  *
  * A launched reviewer or producer holds no lease, and its handle is keyed on the dispatch request
@@ -111,7 +135,7 @@ export function reviewNeed(work: Work, all: Work[] = [work], now = new Date()): 
  * opening handle creation to every credential that can read the item.
  */
 export const liveDispatchHandleIds = (work: Work): string[] =>
-  [work.autoDispatch?.review ?? null, ...(work.autoDispatch?.producers ?? [])]
+  [work.autoDispatch?.review ?? null, work.autoDispatch?.product ?? null, ...(work.autoDispatch?.producers ?? [])]
     .filter((request): request is DispatchRequest => !!request && request.state === 'requested')
     .map(request => request.id);
 
@@ -145,6 +169,7 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
   const ineligible = dispatchIneligibility(work);
   if (ineligible) {
     if (state.review) { resolve(state.review, 'cancelled', ineligible); state.review = null; }
+    if (state.product) { resolve(state.product, 'cancelled', ineligible); state.product = null; }
     for (const request of state.producers) resolve(request, 'cancelled', ineligible);
     state.producers = [];
   } else {
@@ -156,6 +181,16 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
     // answered: nothing reviewed it. (A request raised before GY-115 is the only way to hold one.)
     if (state.review && !need.needed) { resolve(state.review, need.state === 'proofs-pending' || need.state === 'proof-failed' ? 'cancelled' : 'satisfied', need.reason); state.review = null; }
     if (!state.review && need.needed) state.review = open({ kind: 'review', provider: 'github', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: need.reason });
+    // Product review (GY-2989): one live request per head, raised beside the code review's. A
+    // verdict on the head resolves it; a carried approval satisfies it; a change request or a
+    // reject cancels it — no session is asked for a head those verdicts have already answered.
+    if (state.product && !binds(state.product, work)) { resolve(state.product, 'cancelled', staleReason(state.product)); state.product = null; }
+    const productNeed = productReviewNeed(work);
+    if (state.product && !productNeed.needed) {
+      resolve(state.product, productNeed.state === 'approved' || productNeed.state === 'carried' ? 'satisfied' : 'cancelled', productNeed.reason);
+      state.product = null;
+    }
+    if (!state.product && productNeed.needed) state.product = open({ kind: 'product', sha: candidate.sha, baseSha: candidate.baseSha, policyRevision: work.policyRevision, pr: candidate.pr, reason: productNeed.reason });
     // GY-1528: a control-plane candidate's proofs are judged by the merge writer's trial, so no
     // producer is asked for it and a request standing from before is withdrawn.
     if (work.observation?.source === 'control-plane') {
@@ -190,7 +225,7 @@ export function reconcileAutoDispatch(work: Work, all: Work[], now: Date): Dispa
 export function dispatchRequestsFor(work: Pick<Work, 'autoDispatch'>, sha: string): DispatchRequest[] {
   const state = work.autoDispatch;
   if (!state) return [];
-  return [...(state.review ? [state.review] : []), ...state.producers, ...state.history].filter(request => request.sha === sha);
+  return [...(state.review ? [state.review] : []), state.product ? [state.product] : [], ...state.producers, ...state.history].flat().filter(request => request.sha === sha);
 }
 
 /**

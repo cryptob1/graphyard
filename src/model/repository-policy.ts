@@ -41,6 +41,10 @@ export const repositoryPolicySchema = z.object({
   review: z.unknown().optional(),
   e2e: z.object({ pendingOutcomes: z.enum(pendingOutcomeRules).optional(), serve: e2eServeSchema.optional() }).strict().optional(),
   release: z.object({ onFailure: z.enum(releaseFailureActions).optional(), revertUnmatched: z.boolean().optional() }).strict().optional(),
+  // GY-2989: the paths whose change is user-facing, so a product review of one head carries to a
+  // later one only when nothing here changed between them. A repository that declares none reviews
+  // every new head afresh.
+  product: z.object({ ui: z.array(glob).min(1).max(200) }).strict().optional(),
 }).strict();
 export type RepositoryPolicyInput = z.infer<typeof repositoryPolicySchema>;
 /** The policy in force: every section resolved, the declared one or its default. */
@@ -48,6 +52,7 @@ export interface RepositoryPolicy {
   risk: { sensitive: SensitiveEntry[]; declared: boolean };
   e2e: { pendingOutcomes: typeof pendingOutcomeRules[number]; serve: E2eServe | null };
   release: { onFailure: typeof releaseFailureActions[number]; revertUnmatched: boolean };
+  product: { ui: string[] } | null;
 }
 
 const anywhere = (rule: string, ...globs: string[]) => globs.map(glob => ({ rule, glob }));
@@ -74,6 +79,7 @@ export const defaultRepositoryPolicy: RepositoryPolicy = {
   risk: { sensitive: [...genericSensitiveRules], declared: false },
   e2e: { pendingOutcomes: 'non-blocking', serve: null },
   release: { onFailure: 'revert', revertUnmatched: true },
+  product: null,
 };
 
 /** The policy in force for a declaration: each section it declares, every other section's default. */
@@ -89,6 +95,7 @@ export function resolveRepositoryPolicy(input: unknown): RepositoryPolicy {
       onFailure: declared.release?.onFailure ?? defaultRepositoryPolicy.release.onFailure,
       revertUnmatched: declared.release?.revertUnmatched ?? defaultRepositoryPolicy.release.revertUnmatched,
     },
+    product: declared.product ?? null,
   };
 }
 

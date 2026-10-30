@@ -670,6 +670,14 @@ export class Engine {
     observation.reviews = [...recorded];
     observation.reviewIds = observation.reviews.map(r => r.id).filter((id): id is number => typeof id === 'number' && Number.isSafeInteger(id) && id > 0);
     if (work.candidate.pr) observation.candidate.pr = work.candidate.pr;
+    // GY-2989: when a product review approved an earlier head, the paths between it and this head
+    // decide whether that approval carries (product-review.ts). One diff, read outside the
+    // transaction; a read that fails leaves it unset, and the head is reviewed afresh.
+    const approved = work.productReview?.verdict === 'approved' ? work.productReview : null;
+    if (approved && approved.sha !== work.candidate.sha) {
+      const delta = await this.gitRunner!(['diff', '--name-only', approved.sha, work.candidate.sha]);
+      if (delta.status === 0) observation.headDelta = delta.stdout.split('\n').map(line => line.trim()).filter(Boolean);
+    }
     return observation;
   }
   /**
