@@ -489,36 +489,40 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
   const rerunAttempt = () => { epoch++; tap = ''; };
   // A rerun of failing test files (or a run on the base tip) re-runs no E2E case: the head's bound cases were judged by the first attempt, whose counts stand.
   const rerunInput = { ...input, e2eProofs: [] as const };
-  const retest = async (sha: string, failing: string[]) => {
+  const retest = async (sha: string, failing: string[], e2eProofs: readonly string[] = []) => {
     only = failing;
-    try { const rerun = await runTrial({ ...rerunInput, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
+    try { const rerun = await runTrial({ ...rerunInput, e2eProofs, mergeSha: sha, changedFiles: failing, run, onAttempt: rerunAttempt }); return { run: rerun, tap }; }
     catch (error) { return error instanceof TrialCleanupError && error.verdict ? { run: error.verdict, tap } : null; }
   };
   const ownProofFiles = discovered ?? input.proofFiles;
   // The proof files the selection discovered are held like those the input named.
   const attributed = input.attribute === false ? first : await attributeFailures(first, tap, { ...rerunInput, proofFiles: ownProofFiles }, inner, retest);
-  if (!input.bug || !input.proofs.length || input.e2eProofs?.length || attributed.build !== 'pass' || attributed.tests.failed.length || trialFailureReason({ run: attributed })) return attributed;
+  if (!input.bug || !(input.proofs.length || input.e2eProofs?.length) || attributed.build !== 'pass' || attributed.tests.failed.length || trialFailureReason({ run: attributed })) return attributed;
   return reproduceOnBase(attributed, input, ownProofFiles, inner, retest);
 }
 
 /**
  * GY-2984: a bug item's passing trial runs its proofs' files on the base tip (`input.baseTip`, else
- * the merge commit's first parent). When every proof ran there and none of its cases failed, the head
- * is `notReproduced`. A proof file new on the head, an E2E proof (the caller skips those), a proof
- * with no case on the base or a base run that reached no verdict counts as failing there: nothing is refused.
+ * the merge commit's first parent), its E2E proofs' bound cases served from that tip. When every proof
+ * ran there and none of its cases failed, the head is `notReproduced`. A proof file or case new on the
+ * head, a proof with no case on the base or a base run that reached no verdict counts as failing there: nothing is refused.
  */
 async function reproduceOnBase(run: MergeTrialRun, input: MergeTrialInput, proofFiles: readonly string[], git: ChildRun,
-  retest: (sha: string, files: string[]) => Promise<{ run: TrialRun; tap: string } | null>): Promise<MergeTrialRun> {
+  retest: (sha: string, files: string[], e2eProofs?: readonly string[]) => Promise<{ run: TrialRun; tap: string } | null>): Promise<MergeTrialRun> {
   let tip: string, files: string[];
   try {
     tip = input.baseTip ?? String(await git('git', ['-C', input.root, 'rev-parse', `${input.mergeSha}^1`])).trim().toLowerCase();
     files = proofFiles.length ? listed(String(await git('git', ['-C', input.root, 'ls-tree', '--name-only', tip, '--', ...proofFiles]))) : [];
   } catch { return run; }
   if (proofFiles.length && !files.length) return run;
-  const onBase = await retest(tip, files).catch(() => null);
+  const e2eProofs = input.e2eProofs ?? [];
+  const onBase = await retest(tip, files, e2eProofs).catch(() => null);
   if (!onBase || onBase.run.build !== 'pass') return run;
-  const passing = input.proofs.every(proof => { const { executed, failed } = countProofCases(onBase.tap, proof); return executed > 0 && failed === 0; });
-  return passing ? { ...run, notReproduced: { proofs: [...input.proofs], tip } } : run;
+  const passes = ({ executed, failed }: { executed: number; failed: number }) => executed > 0 && failed === 0;
+  const passing = input.proofs.every(proof => passes(countProofCases(onBase.tap, proof)))
+    && e2eProofs.every(proof => { const ran = onBase.run.e2e?.find(entry => entry.proof === proof); return !!ran && passes(ran); });
+  const proofs = [...input.proofs, ...e2eProofs];
+  return passing ? { ...run, notReproduced: { proofs, tip } } : run;
 }
 
 /**
