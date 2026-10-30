@@ -281,10 +281,20 @@ test('unit:managed-repo-main-served-after-merge — the dashboard release line l
   assert.match(text(served), new RegExp(`Serving ${'a'.repeat(8)} .* Served \\u00b7 127\\.0\\.0\\.1:4400`));
 
   // The last build failure is named beside the commit that still serves, and the link stands.
+  // The required cases' verdict (GY-2983) names itself between them: not yet run while no check
+  // is recorded, verified once every required case passed, the failing case and step once one broke.
   const failing = markup({ serving: { ...serving, commit: 'b'.repeat(40), atMain: false, pending: 2,
     failedDeploy: { tip: 'c'.repeat(40), reason: 'the build was told to fail', restoring: null },
     serve: { url, failure: { commit: 'c'.repeat(40), reason: 'the build was told to fail' } } }, deploy: null });
-  assert.match(text(failing), /Serving b{8} · 2 merged changes not carried yet · build of c{8} failed: the build was told to fail · Served · 127\.0\.0\.1:4400/);
+  assert.match(text(failing), /Serving b{8} · 2 merged changes not carried yet · not yet run · build of c{8} failed: the build was told to fail · Served · 127\.0\.0\.1:4400/);
+
+  const verified = markup({ serving: { ...serving, commit: 'b'.repeat(40), atMain: false, pending: 2,
+    serve: { url, failure: null, check: { verified: true, case: null, step: null, reason: null } } }, deploy: null });
+  assert.match(text(verified), /Serving b{8} · 2 merged changes not carried yet · verified · Served · 127\.0\.0\.1:4400/);
+
+  const brokenCase = markup({ serving: { ...serving, commit: 'b'.repeat(40), atMain: false, pending: 2,
+    serve: { url, failure: null, check: { verified: false, case: 'fixture-home', step: 'step 1 GET /ready', reason: 'expected status 200, got 404' } } }, deploy: null });
+  assert.match(text(brokenCase), /Serving b{8} · 2 merged changes not carried yet · failing fixture-home: step 1 GET \/ready · Served · 127\.0\.0\.1:4400/);
 
   // Nothing served yet (the first build failed): no served commit is claimed, the failure is named, the URL links.
   const unserved = markup({ serving: { ...serving, unconfigured: true, commit: null, atMain: null, pending: null,

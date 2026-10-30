@@ -3,7 +3,10 @@
 // and the declared build, and restarts the declared serve command on the declared loopback port —
 // only when the build passed, so the previous build keeps serving through a failing one. It
 // records the served commit, the URL and the last build failure in .graphyard/served.json, which
-// master status, the dashboard and doctor read. A repository that declares nothing is untouched.
+// master status, the dashboard and doctor read. Once a new commit serves, the pass runs that
+// commit's own required E2E cases against the served URL (GY-2983) and records the verdict for
+// that exact commit beside it: a failing case is the release health the master acts on, never a
+// reason to stop serving or roll back. A repository that declares nothing is untouched.
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -29,8 +32,10 @@ export function parseServeDeclaration(source: string, file = '.graphyard/serve.j
   return parsed.data;
 }
 
-/** What the serve pass last did: the commit whose build serves, the URL it answers, the commit whose build last failed and why, and the serve process it tracks (pid and kernel start time, so a pid reused after a reboot is never mistaken for it). */
-export interface ServeRecord { commit: string | null; url: string | null; failed: string | null; reason: string | null; pid?: number | null; started?: string | null; at: string }
+/** The served commit's required cases, as the pass ran them against the URL it serves; `case`, `step` and `reason` name the first required case that failed, and are null when verified. */
+export interface ServeCheck { verified: boolean; case: string | null; step: string | null; reason: string | null }
+/** What the serve pass last did: the commit whose build serves, the URL it answers, the commit whose build last failed and why, the serve process it tracks (pid and kernel start time, so a pid reused after a reboot is never mistaken for it), and the required cases' verdict on the served commit (null while they have not run against it). */
+export interface ServeRecord { commit: string | null; url: string | null; failed: string | null; reason: string | null; pid?: number | null; started?: string | null; check?: ServeCheck | null; at: string }
 /** The serve process a restart left running. */
 export interface ServeProcess { pid: number | null; started: string | null }
 export const serveRecordPath = (root: string) => join(root, '.graphyard', 'served.json');
@@ -39,8 +44,9 @@ export function readServeRecord(file: string): ServeRecord | null {
   try { return JSON.parse(readFileSync(file, 'utf8')) as ServeRecord; } catch { return null; }
 }
 async function writeServeRecord(file: string, record: Omit<ServeRecord, 'at'>) {
+  const cut = (reason: string | null | undefined) => reason?.slice(0, 2000) ?? null;
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(`${file}.tmp`, `${JSON.stringify({ ...record, reason: record.reason?.slice(0, 2000) ?? null, at: new Date().toISOString() }, null, 2)}\n`);
+  await writeFile(`${file}.tmp`, `${JSON.stringify({ ...record, reason: cut(record.reason), check: record.check ? { ...record.check, reason: cut(record.check.reason) } : null, at: new Date().toISOString() }, null, 2)}\n`);
   await rename(`${file}.tmp`, file);
 }
 
@@ -71,6 +77,8 @@ export interface ServePorts {
   build(declaration: ServeDeclaration): Promise<void>;
   /** Stops the recorded serve process and starts the declared serve command; answers the new process's identity (pid and kernel start time). */
   restart(serve: readonly string[]): Promise<ServeProcess>;
+  /** Once a new commit serves: runs that commit's own required E2E cases against the served URL and answers their verdict; the pass records it for that exact commit. A case that fails here neither stops serving nor rolls back. */
+  check?(url: string): Promise<ServeCheck>;
 }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -101,13 +109,14 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
     try {
       served = await ports.restart(declaration.serve);
       if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the restarted serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
-      await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started });
+      // The same commit serves again, so the verdict its cases earned still stands.
+      await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check: record?.check ?? null });
       log(`[graphyard-serve] ${tip.slice(0, 12)} serves again at ${url}`);
       return 'restarted';
     } catch (error) {
       const reason = message(error);
       log(`[graphyard-serve] serving ${tip.slice(0, 12)} again failed: ${reason}`);
-      await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null });
+      await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null, check: null });
       return 'failed';
     }
   }
@@ -119,7 +128,7 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   } catch (error) {
     const reason = message(error);
     log(`[graphyard-serve] the build of ${tip.slice(0, 12)} failed, so ${(record?.commit ?? 'nothing').slice(0, 12)} keeps serving: ${reason}`);
-    await writeServeRecord(file, { commit: record?.commit ?? null, url: record?.url ?? url, failed: tip, reason, pid: record?.pid ?? null, started: record?.started ?? null });
+    await writeServeRecord(file, { commit: record?.commit ?? null, url: record?.url ?? url, failed: tip, reason, pid: record?.pid ?? null, started: record?.started ?? null, check: record?.check ?? null });
     return 'failed';
   }
   // The restart stopped the previous serve, so the new one must answer before the commit is recorded as served.
@@ -127,13 +136,25 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   try {
     served = await ports.restart(declaration.serve);
     if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
-    await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started });
+    await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check: null });
     log(`[graphyard-serve] serving ${tip.slice(0, 12)} at ${url}`);
+    // A served commit is live-verified (GY-2983): its own required cases run against the URL it
+    // serves, and the verdict is recorded for that exact commit. A case that fails is the release
+    // health the master acts on — the commit keeps serving, and the next pass waits for the next tip.
+    if (ports.check) {
+      try {
+        const check = await ports.check(url);
+        await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check });
+        log(`[graphyard-serve] ${tip.slice(0, 12)} ${check.verified ? 'is verified: every required case passed' : `fails its required case ${check.case}: ${check.step}`}`);
+      } catch (error) {
+        log(`[graphyard-serve] the required cases of ${tip.slice(0, 12)} could not run against ${url}: ${message(error)}`);
+      }
+    }
     return 'served';
   } catch (error) {
     const reason = message(error);
     log(`[graphyard-serve] ${reason}, so nothing serves`);
-    await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null });
+    await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null, check: null });
     return 'failed';
   }
 }

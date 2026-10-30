@@ -14,7 +14,9 @@ import { redeployArguments } from '../install/index.js';
 import { defineCommands } from './registry.js';
 import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
-import { parseServeDeclaration, readServeRecord, serveCheckoutPath, serveRecordPath, watchServe, type ServeDeclaration, type ServeRecord, type ServePorts } from '../serve-app.js';
+import { caseDirectory, loadCases } from '../e2e/case.js';
+import { runCases } from '../e2e/runner.js';
+import { parseServeDeclaration, readServeRecord, serveCheckoutPath, serveRecordPath, watchServe, type ServeCheck, type ServeDeclaration, type ServeRecord, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
@@ -284,6 +286,23 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
       child.unref();
       const pid = child.pid ?? null;
       return { pid, started: pid ? startedAt(pid) : null };
+    },
+    // The served commit is live-verified (GY-2983): the required cases the served commit itself
+    // declares under e2e/cases/ run against the URL it serves, in its own serve checkout, and the
+    // pass records the verdict for that exact commit. No cases, nothing to fail. A malformed case
+    // file refuses the whole read and the pass records nothing, so a broken case directory reads
+    // as not yet run rather than as a verdict no case earned. The cases' bearer token is
+    // GRAPHYARD_TOKEN; a case that needs the install's own credentials declares secrets, which the
+    // runner resolves from the install's e2e-secrets env as in every other run.
+    check: async url => {
+      const cases = existsSync(join(checkout, caseDirectory)) ? await loadCases(checkout) : [];
+      const required = cases.filter(entry => entry.definition.required);
+      if (!required.length) return { verified: true, case: null, step: null, reason: null };
+      const report = await runCases(required, { url, token: process.env.GRAPHYARD_TOKEN ?? '', root: checkout });
+      const failing = report.cases.find(outcome => outcome.verdict === 'failed' || outcome.verdict === 'flaky');
+      return failing
+        ? { verified: false, case: failing.id, step: failing.failingStep ? `step ${failing.failingStep.index + 1} ${failing.failingStep.name}` : null, reason: failing.failingStep?.reason ?? null }
+        : { verified: true, case: null, step: null, reason: null };
     },
   };
 }

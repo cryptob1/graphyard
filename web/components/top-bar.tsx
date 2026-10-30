@@ -9,13 +9,14 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
 /**
  * The board's one release line (GY-1979). A repository that declares `.graphyard/serve.json`
  * (GY-2976) renders what the deploy unit's serve pass last served — "Serving <commit>" with the
- * merged changes main holds since it, the last build failure, and a link to the declared URL —
- * or "No serve yet" with the failure when the first build has not passed. Elsewhere a managed
- * install (GY-2964) names its repository's own serving, which only a deploy record naming it can:
- * "Serving <commit>" with the merged changes main holds since it, or "No deploy configured · main
- * <tip>" — never the control plane's own commit, which serves Graphyard's code, not the managed
- * repository's. Elsewhere it reads the production watch's report on status (`production`), the
- * same view the board reads (src/model/release.ts): the commit production serves, whether it is
+ * merged changes main holds since it, the last build failure, a link to the declared URL, and the
+ * served commit's required cases' verdict (GY-2983): "verified", "failing <case>: <step>" once a
+ * required case is broken, or "not yet run" while the pass has recorded no verdict. Elsewhere a
+ * managed install (GY-2964) names its repository's own serving, which only a deploy record naming
+ * it can: "Serving <commit>" with the merged changes main holds since it, or "No deploy configured
+ * · main <tip>" — never the control plane's own commit, which serves Graphyard's code, not the
+ * managed repository's. Elsewhere it reads the production watch's report on status (`production`),
+ * the same view the board reads (src/model/release.ts): the commit production serves, whether it is
  * healthy, and how many merged changes it does not carry yet. Health is the watch's own: an open
  * deployment incident is an unhealthy release; a pending count is lag, not ill health. Where
  * nothing has observed production (no watch configured, a failed provider read, an unknown serving
@@ -26,7 +27,7 @@ const shortSha = (sha: string) => <span className="mono" title={sha}>{sha.slice(
  */
 export function ReleaseLine({ status }: { status?: Dashboard['status'] }) {
   // The declared serve's serving, read from master status's serving block over the API.
-  const serving = status?.serving as { commit?: unknown; main?: unknown; pending?: unknown; failedDeploy?: { tip?: unknown; reason?: unknown } | null | undefined; serve?: { url?: unknown; failure?: { commit?: unknown; reason?: unknown } | null } | null | undefined } | null | undefined;
+  const serving = status?.serving as { commit?: unknown; main?: unknown; pending?: unknown; failedDeploy?: { tip?: unknown; reason?: unknown } | null | undefined; serve?: { url?: unknown; failure?: { commit?: unknown; reason?: unknown } | null; check?: { verified?: unknown; case?: unknown; step?: unknown } | null } | null | undefined } | null | undefined;
   const declared = serving?.serve && typeof serving.serve === 'object' ? serving.serve : null;
   if (declared) {
     const commit = typeof serving!.commit === 'string' && serving!.commit ? serving!.commit : null;
@@ -34,12 +35,16 @@ export function ReleaseLine({ status }: { status?: Dashboard['status'] }) {
     const pending = typeof serving!.pending === 'number' ? serving!.pending : null;
     const failureCommit = declared.failure && typeof declared.failure.commit === 'string' ? declared.failure.commit : null;
     const failure = failureCommit ? { commit: failureCommit, reason: typeof declared.failure?.reason === 'string' ? declared.failure.reason : '' } : null;
+    const check = declared.check && typeof declared.check === 'object' ? declared.check : null;
     const url = typeof declared.url === 'string' && declared.url ? declared.url : null;
     let host = url ?? '';
     try { host = url ? new URL(url).host : ''; } catch { /* the declared text stands */ }
     return <p className="release-line" data-release-line={commit ? 'serving' : 'unserved'}>
       {commit
-        ? <>Serving {shortSha(commit)}{pending !== null && pending > 0 && <> · {pending} merged {pending === 1 ? 'change' : 'changes'} not carried yet</>}</>
+        ? <>Serving {shortSha(commit)}{pending !== null && pending > 0 && <> · {pending} merged {pending === 1 ? 'change' : 'changes'} not carried yet</>}
+          {check && check.verified === true && <> · verified</>}
+          {check && check.verified === false && typeof check.case === 'string' && <> · failing {check.case}{typeof check.step === 'string' && check.step ? <>: {check.step}</> : null}</>}
+          {!check && <> · not yet run</>}</>
         : <>No serve yet{main && <> · main {shortSha(main)}</>}</>}
       {failure && <> · build of {shortSha(failure.commit)} failed: {failure.reason.slice(0, 140)}</>}
       {url && <> · <a href={url}>Served · {host}</a></>}
