@@ -235,7 +235,7 @@ export function releaseClosedRequests(records: LedgerRecord[], work: Work[], now
     if (live(record)) continue;
     const item = work.find(candidate => candidate.key === record.key);
     if (record.requestId && !record.requestClosedAt) {
-      const open = !!item && item.stage !== 'done' && [item.autoDispatch?.review ?? null, ...(item.autoDispatch?.producers ?? [])].some(request => !!request && request.id === record.requestId && request.state === 'requested');
+      const open = !!item && item.stage !== 'done' && [item.autoDispatch?.review ?? null, item.autoDispatch?.product ?? null, ...(item.autoDispatch?.producers ?? [])].some(request => !!request && request.id === record.requestId && request.state === 'requested');
       if (!open) { record.requestClosedAt = now.toISOString(); released++; }
     }
     const current = !!item && item.stage !== 'done' && !item.observation?.merged && item.candidate?.sha === record.sha;

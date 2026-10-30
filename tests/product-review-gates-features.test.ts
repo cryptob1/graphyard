@@ -284,6 +284,19 @@ test('unit:product-review-gates-features — the loop drives each verdict from a
   } finally { await rm(host, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }).catch(() => {}); }
 });
 
+test('unit:product-review-gates-features — a failed product reviewer attempt stays pinned in the review ledger while its product request is open, so its retries stay counted', async () => {
+  const { releaseClosedRequests } = await import('../src/reviewer.js');
+  const item = feature('GY-40');
+  reconcileAutoDispatch(item, [item], new Date());
+  const request = item.autoDispatch!.product!;
+  const attempt = { id: randomUUID(), key: 'GY-40', pr: 0, sha: H, baseSha: B, policyRevision: 1, profile: 'product-reviewer', agentName: 'product-reviewer', pane: null, sessionDirectory: '/s', requestedAt: at, tokenExpiresAt: at, requestId: request.id, state: 'failed' as const };
+  assert.equal(releaseClosedRequests([attempt] as never, [item], new Date()), 0, 'the request is still requested: its failed attempt is kept');
+  assert.equal((attempt as { requestClosedAt?: string }).requestClosedAt, undefined);
+  item.productReview = review('approved');
+  reconcileAutoDispatch(item, [item], new Date());
+  assert.equal(releaseClosedRequests([attempt] as never, [item], new Date()), 1, 'once the verdict settles the request, the attempt may be reaped');
+});
+
 test('unit:product-review-gates-features — the product prompt walks the preview and the served app when one runs, and the served app against the diff when none does', () => {
   const prompt = reviewPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard' }, { key: 'GY-23', pr: 0, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { head: H, baseTip: B, product: true, previewUrl: 'https://graphyard.example/preview/GY-23/' });
   assert.match(prompt, /product reviewer/);

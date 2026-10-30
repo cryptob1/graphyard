@@ -160,9 +160,9 @@ export function waitDueAt(work: Work, wait: ActionWait, all: Work[], now: Date):
  */
 function sessionObligations(work: Work): { at: string; role: 'review' | 'proof' }[] {
   const head = work.candidate?.sha ?? null;
-  const requests = [work.autoDispatch?.review, ...(work.autoDispatch?.producers ?? [])]
+  const requests = [work.autoDispatch?.review, work.autoDispatch?.product, ...(work.autoDispatch?.producers ?? [])]
     .filter(request => !!request && request.state === 'requested' && request.sha === head)
-    .map(request => ({ at: request!.requestedAt, role: request!.kind === 'review' ? 'review' as const : 'proof' as const }));
+    .map(request => ({ at: request!.requestedAt, role: request!.kind === 'producer' ? 'proof' as const : 'review' as const }));
   const sessions = (work.sessions ?? []).filter(handle => handle.state === 'running' && (handle.kind === 'review' || handle.kind === 'proof') && (!handle.head || handle.head === head))
     .map(handle => ({ at: handle.startedAt, role: handle.kind as 'review' | 'proof' }));
   return [...requests, ...sessions].filter(entry => Number.isFinite(Date.parse(entry.at)));
