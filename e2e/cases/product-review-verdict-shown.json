@@ -17,7 +17,7 @@
       "path": "/api/work",
       "body": {
         "title": "E2E case {{case}} run {{run}}",
-        "description": "No user-facing change: created by the product-review-verdict-shown E2E case to carry a recorded product review.",
+        "description": "No user-facing change: created by the product-review-verdict-shown E2E case to carry a recorded verdict.",
         "type": "feature",
         "priority": 3,
         "criteria": [
@@ -125,7 +125,8 @@
       "name": "the product review panel shows the verdict",
       "action": "expectText",
       "text": "Product review",
-      "exact": false
+      "exact": false,
+      "role": "heading"
     },
     {
       "kind": "browser",
@@ -144,7 +145,9 @@
       "kind": "browser",
       "name": "the screenshot the verdict named is shown",
       "action": "expectText",
-      "text": "preview-export-flow-1.png"
+      "text": "preview-export-flow-1.png",
+      "role": "link",
+      "exact": false
     },
     {
       "kind": "browser",
