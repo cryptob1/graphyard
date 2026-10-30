@@ -170,6 +170,11 @@ test('unit:product-review-gates-features — the loop launches the product revie
     assert.deepEqual(heldTick.launched, []);
     assert.equal(heldTick.refused.length, 0, 'a pending session on the head is a wait, never a refusal');
     assert.ok(heldTick.waiting.some(entry => /one session per head/.test(entry.reason)), 'the launch waits for the session already judging the head');
+    // A failed launch keeps its failure while the request stands, so its retry backs off and is
+    // bounded like a code review's — never relaunched every cycle as if fresh.
+    const failing = emptyDispatchCursor(config);
+    await runDispatchTick(config, failing, { ...effects, launchProductReview: async () => { throw new Error('reviewer runtime unavailable'); } } as never, Date.now);
+    assert.ok(failing.failures[item.autoDispatch!.product!.id], 'the product request\'s launch failure is kept across the tick');
     const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects as never, Date.now);
     assert.deepEqual(tick.launched.map(entry => [entry.work, entry.reason]), [['GY-20', 'product review']]);
     assert.deepEqual(launches, [{ work: 'GY-20', sha: H }]);

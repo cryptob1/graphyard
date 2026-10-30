@@ -1411,7 +1411,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     for (const entry of tick.waiting) if (entry.work === key && entry.answeredAt) entry.reason = bounded(`${entry.reason}; waking its observation failed: ${failed}`, cursorTextLimit);
   }
   // A failure for a request the control plane resolved is history the cursor need not keep.
-  const live = new Set([...snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]), ...owed.map(item => postMergeRequest(item).id)]);
+  const live = new Set([...snapshot.work.flatMap(work => [...(work.autoDispatch?.review ? [work.autoDispatch.review.id] : []), ...(work.autoDispatch?.product ? [work.autoDispatch.product.id] : []), ...(work.autoDispatch?.producers ?? []).map(request => request.id)]), ...owed.map(item => postMergeRequest(item).id)]);
   for (const id of Object.keys(cursor.failures)) if (!live.has(id)) delete cursor.failures[id];
   for (const id of Object.keys(cursor.abandoned)) if (!live.has(id)) delete cursor.abandoned[id];
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;

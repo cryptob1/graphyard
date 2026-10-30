@@ -55,11 +55,11 @@ export function ProductReviewPanel({ item, token }: { item: Work; token: string 
         <div><dt>Reviewer</dt><dd>{review.reviewer} · {new Date(review.at).toLocaleString()}</dd></div>
       </dl>
       <p className="product-findings" style={{ whiteSpace: 'pre-wrap' }}>{review.findings}</p>
-      {review.screenshots.length > 0 && <div className="product-screenshots">{review.screenshots.map(shot => <ProductScreenshot key={shot} item={item} name={shot} token={token}/>)}</div>}
+      {review.screenshots.length > 0 && <div className="product-screenshots">{review.screenshots.map(shot => <ProductScreenshot key={`${review.sha}:${review.at}:${shot}`} item={item} name={shot} token={token}/>)}</div>}
     </> : <p className="muted">A user-facing feature is product-reviewed before it merges: a reviewer walks the head's preview — or the served app against the head's diff where no preview runs — and approves it, asks for changes, or rejects it.</p>}
   </section>;
 }
-/** One screenshot of the product review: a link to an image hosted elsewhere, or the uploaded image the control plane keeps, read with the session's token. */
+/** One screenshot of the product review: a link to an image hosted elsewhere, or the uploaded image the control plane keeps, read with the session's token. Keyed by the review's head and time, so a fresh verdict reusing a name mounts afresh and reads its own image. */
 function ProductScreenshot({ item, name, token }: { item: Work; name: string; token: string }) {
   const linked = /^https?:\/\//i.test(name);
   const [src, setSrc] = useState<string | null>(null), [failed, setFailed] = useState(false);
