@@ -64,7 +64,7 @@ test('unit:deploy-unit-watches-main — install --plan lists graphyard-deploy.se
   let schema: number | null = 7;
   const migrates: Record<string, number> = {};
   const ports: DeployWatchPorts = {
-    ...gitWatchPorts(checkout, 'main', defaultChildRun),
+    ...gitWatchPorts(checkout, defaultChildRun),
     build: async sha => { steps.push(`build ${sha.slice(0, 7)}`); },
     restart: async sha => { steps.push(`restart ${sha.slice(0, 7)}`); served = sha; },
     health: async sha => {
@@ -159,7 +159,7 @@ test('unit:deploy-prunes-old-images — one upgrade --watch pass whose health ch
   };
   let healthy = true;
   const ports: DeployWatchPorts = {
-    ...gitWatchPorts(checkout, 'main', defaultChildRun),
+    ...gitWatchPorts(checkout, defaultChildRun),
     build: async () => {}, restart: async () => {}, pin: async () => {},
     health: async () => { if (!healthy) throw new Error('/healthz answered 503'); },
     prune: keep => pruneImages(docker, keep, () => {}),

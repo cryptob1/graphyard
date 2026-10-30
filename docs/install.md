@@ -56,7 +56,7 @@ Dispatch a [small item](onboarding.md#4-prove-the-first-change); the merge write
 
 ## Upgrading an existing installation
 
-`graphyard upgrade [--to VERSION|stable] [--plan]`: needs a clean checkout with `DATABASE_URL` and `GRAPHYARD_URL`; backs up, redeploys a build stamped from the target (`install --source-root DIR`), restarts the loop, waits for a healthy `/healthz`; refuses older schemas; failures name step and rollback (migrated: roll-forward).
+`graphyard upgrade [--to VERSION] [--plan]`: needs a clean checkout with `DATABASE_URL` and `GRAPHYARD_URL`; backs up, redeploys Graphyard's `origin/main` or `VERSION` (`install --source-root DIR`), restarts the loop, waits for a healthy `/healthz`; refuses older schemas; failures name step and rollback (migrated: roll-forward).
 
 ## Failure handling
 

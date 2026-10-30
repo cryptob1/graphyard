@@ -45,7 +45,7 @@ test('unit:cli-checkout-moves-after-server-serves — a deploy pass builds and r
   });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
-  const tree = gitWatchPorts(checkout, 'main', defaultChildRun);
+  const tree = gitWatchPorts(checkout, defaultChildRun);
   const samples: string[] = [];
   const ports: DeployWatchPorts = {
     ...tree,
@@ -116,7 +116,7 @@ appendFileSync(process.env.GRAPHYARD_TEST_REDEPLOY_LOG, JSON.stringify({ args: p
     await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
     const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
     const repoRoot = await temporaryDirectory('deploy-build-repo'), file = deployRecordPath(repoRoot);
-    const ports = await watchPorts({ cliRoot: checkout, repoRoot, repository: 'owner/project', baseBranch: 'main', url, run: defaultChildRun });
+    const ports = await watchPorts({ cliRoot: checkout, repoRoot, repository: 'owner/project', url, run: defaultChildRun });
     if (typeof ports === 'string') throw new Error(ports);
     ports.prune = async () => {};
     try {

@@ -10,8 +10,6 @@ import type { InstallRecord } from '../src/install/secrets.js';
 import type { Transport } from '../src/install/transport.js';
 import { cliChangesOf, liveEffects, resolveTarget, runUpgrade, upgradePlan, type UpgradeInputs } from '../src/cli/upgrade.js';
 import { checkoutRelease, imageRepository } from '../src/release.js';
-// @ts-expect-error Dependency-free gate script.
-import { judge } from '../scripts/upgrade-from-stable.mjs';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const previousVersion = '2026.10.18.1', version = '2026.10.18.2';
@@ -165,8 +163,6 @@ test('unit:upgrade-serves-stamped-release — graphyard upgrade of an installed 
     assert.equal(checkoutRelease(cliRoot).revision, candidate);
     assert.notDeepEqual(upgraded, installed);
     assert.deepEqual(upgraded, { version, commit: candidate }, `after graphyard upgrade --to ${version} the compose install's /healthz reports ${JSON.stringify(upgraded)}`);
-    const verdict = judge({}, { health: await servedHealth(port) }, { version, sha: candidate }).find((check: { name: string }) => check.name === 'health-reports-candidate');
-    assert.equal(verdict.ok, true, verdict.detail);
     assert.deepEqual(docker.builds.at(-1)!.slice(0, 5), ['build', '--build-arg', `GRAPHYARD_VERSION=${version}`, '--build-arg', `GRAPHYARD_BUILD_REVISION=${candidate}`]);
   } finally { await docker.stop(); }
 
@@ -177,16 +173,4 @@ test('unit:upgrade-serves-stamped-release — graphyard upgrade of an installed 
   await writeFile(join(cliRoot, 'README.md'), 'modified\n');
   const dirtyPlan = composeAdapter.plan({ image: `${imageRepository}:${version}`, sourceRoot: cliRoot, workdir: '/w', port: 4310 } as unknown as AdapterContext, { database: false, app: false } as AdapterObservation);
   assert.doesNotMatch(dirtyPlan.find(action => action.id === 'provider.image')?.command ?? '', /--build-arg/);
-});
-
-test('unit:upgrade-gate-still-refuses-wrong-health — health-reports-candidate fails an upgrade whose /healthz does not report the candidate\'s version and commit', async () => {
-  const sha = execFileSync('git', ['-C', repositoryRoot, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim();
-  const healthCheck = (health: unknown) => judge({}, { health }, { version, sha }).find((check: { name: string }) => check.name === 'health-reports-candidate');
-  for (const health of [{ version: 'unreleased unknown', commit: null }, { version, commit: null }, { version, commit: 'f'.repeat(40) }, { version: '2026.10.18.1', commit: sha }, {}]) {
-    const verdict = healthCheck(health);
-    assert.equal(verdict.ok, false, `${JSON.stringify(health)} must fail the gate`);
-    assert.match(verdict.detail, new RegExp(`not ${version.replaceAll('.', '\\.')} at ${sha}`));
-  }
-  assert.equal(healthCheck({ version, commit: sha.toUpperCase() }).ok, true);
-
 });

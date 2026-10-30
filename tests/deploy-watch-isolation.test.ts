@@ -40,7 +40,7 @@ test('unit:deploy-health-expects-deployed-commit — a checkout whose HEAD anoth
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   const moveTo = a;
   const ports: DeployWatchPorts = {
-    ...gitWatchPorts(checkout, 'main', defaultChildRun),
+    ...gitWatchPorts(checkout, defaultChildRun),
     build: async () => {}, pin: async () => {}, prune: async () => {},
     // The other install's rollback moves the shared HEAD once the restart has stamped the image.
     restart: async sha => { version = `unreleased ${sha.slice(0, 12)}`; git(checkout, 'checkout', '-q', '--detach', moveTo); },

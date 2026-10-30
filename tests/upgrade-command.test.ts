@@ -58,14 +58,14 @@ test('unit:upgrade-command-plan — the plan lists the ordered steps without act
   git(cli, 'init', '--quiet'); await mkdir(join(cli, 'src'));
   await writeFile(join(cli, 'src/release.ts'), 'export const schemaVersion = 3;\n'); git(cli, 'add', '.'); git(cli, 'commit', '--quiet', '-m', 'old'); git(cli, 'tag', '2026.9.1');
   await writeFile(join(cli, 'src/release.ts'), releaseSource(['null', 'null', 'null', 'null', "'sha256:59c9'"])); git(cli, 'commit', '--quiet', '-am', 'new');
-  git(cli, 'tag', '2026.10.17'); git(cli, 'tag', '2026.10.17.1'); git(cli, 'tag', 'stable');
+  git(cli, 'tag', '2026.10.17'); git(cli, 'tag', '2026.10.17.1');
   const head = git(cli, 'rev-parse', 'HEAD'); git(cli, 'checkout', '--quiet', '--detach', '2026.9.1');
-  assert.deepEqual(resolveTarget(cli, 'stable'), { version: '2026.10.17.1', revision: head, schema: 4 });
+  assert.deepEqual(resolveTarget(cli, '2026.10.17.1'), { version: '2026.10.17.1', revision: head, schema: 4 });
   const old = resolveTarget(cli, '2026.9.1');
   assert.equal(old.schema, 3);
   assert.throws(() => upgradePlan(inputs({ target: old })), /older than the database's \(4\)/);
   assert.equal(git(cli, 'rev-parse', 'HEAD'), old.revision, 'planning never moves the checkout');
-  assert.throws(() => resolveTarget(cli, 'latest'), /dated release/);
+  assert.throws(() => resolveTarget(cli, 'stable'), /dated release/);
   assert.equal(schemaAt('nothing here'), null);
   assert.deepEqual(cliChangesOf(cli), []);
   await writeFile(join(cli, 'src/release.ts'), 'export const schemaVersion = 9;\n'); await writeFile(join(cli, 'scratch.txt'), 'untracked');

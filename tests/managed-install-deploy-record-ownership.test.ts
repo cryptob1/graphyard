@@ -53,7 +53,7 @@ async function managedGame(label: string) {
 
 /** The ports of one watch pass against `checkout`, scripted past the git half, health always passing. */
 const ports = (checkout: string): DeployWatchPorts => ({
-  ...gitWatchPorts(checkout, 'main', defaultChildRun),
+  ...gitWatchPorts(checkout, defaultChildRun),
   build: async () => {}, restart: async () => {}, health: async () => {}, pin: async () => {}, prune: async () => {},
   schema: async () => null, database: async () => null,
 });

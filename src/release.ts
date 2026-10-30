@@ -13,8 +13,8 @@ export const packageVersion = (() => {
 
 /** A date version: YYYY.M.D for a day's first promotion, YYYY.M.D.N for the next ones. */
 export const datedVersionPattern = /^(\d{4})\.([1-9]\d?)\.([1-9]\d?)(?:\.([1-9]\d*))?$/;
-/** The channel tag (git and image) that always names the latest promoted release. */
-export const stableChannel = 'stable';
+/** Graphyard's own base branch: every install follows its tip, whatever base branch the managed repository uses. */
+export const graphyardBaseBranch = 'main';
 export const imageRepository = 'ghcr.io/cryptob1/graphyard';
 
 /**

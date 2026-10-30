@@ -6,7 +6,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createBackup } from '../backup.js';
 import { Store } from '../store.js';
-import { checkoutRelease, compareDateVersions, datedVersionPattern, imageRepository, installationRoot, stableChannel, type Release } from '../release.js';
+import { checkoutRelease, compareDateVersions, datedVersionPattern, graphyardBaseBranch, imageRepository, installationRoot, type Release } from '../release.js';
 import { repositoryFromRemote } from '../onboarding.js';
 import { installDirectory, readInstallRecord, type InstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
@@ -116,22 +116,18 @@ export function schemaAt(source: string): number | null {
   return fixed ? Number(fixed[1]) : null;
 }
 
-/** The dated release `--to` names (default stable), from the CLI checkout's fetched tags. */
-export function resolveTarget(cliRoot: string, to: string): UpgradeTarget {
-  if (to !== stableChannel && !datedVersionPattern.test(to)) throw new Error(`Use upgrade --to VERSION (a dated release such as 2026.10.17) or --to ${stableChannel}`);
+/** The dated release `--to` names, or without one Graphyard's fetched origin/main tip, from the CLI checkout's refs. */
+export function resolveTarget(cliRoot: string, to?: string): UpgradeTarget {
+  if (to !== undefined && !datedVersionPattern.test(to)) throw new Error('Use upgrade --to VERSION (a dated release such as 2026.10.17), or no --to for Graphyard\'s main');
+  const ref = to === undefined ? `refs/remotes/origin/${graphyardBaseBranch}` : `refs/tags/${to}`;
   let revision: string;
-  try { revision = git(cliRoot, 'rev-parse', '--verify', '--quiet', `refs/tags/${to}^{commit}`); }
-  catch { throw new Error(`The CLI checkout has no ${to} tag; run git -C ${JSON.stringify(cliRoot)} fetch --tags origin (upgrade without --plan fetches them)`); }
-  const version = to === stableChannel ? checkoutReleaseAt(cliRoot, revision) : to;
+  try { revision = git(cliRoot, 'rev-parse', '--verify', '--quiet', `${ref}^{commit}`); }
+  catch { throw new Error(`The CLI checkout has no ${ref}; run git -C ${JSON.stringify(cliRoot)} fetch --tags origin ${graphyardBaseBranch} (upgrade without --plan fetches it)`); }
+  const version = to ?? releaseOfCommit(cliRoot, revision).version;
   let source = '';
   try { source = git(cliRoot, 'show', `${revision}:src/release.ts`); } catch {}
   return { version, revision, schema: schemaAt(source) };
 }
-const checkoutReleaseAt = (cliRoot: string, revision: string) => {
-  const tags = git(cliRoot, 'tag', '--points-at', revision).split('\n').filter(tag => datedVersionPattern.test(tag));
-  if (!tags.length) throw new Error(`The ${stableChannel} tag names ${revision.slice(0, 12)}, which carries no dated release`);
-  return tags.sort(compareDateVersions).at(-1)!;
-};
 
 async function databaseSchemaOf(url: string | null): Promise<number | null> {
   if (process.env.DATABASE_URL) { const store = new Store(process.env.DATABASE_URL); try { return await store.schema(); } finally { await store.close(); } }
@@ -183,11 +179,14 @@ export async function healthVerdict(response: Pick<Response, 'ok' | 'status' | '
   if (body.version !== version) throw new Error(`/healthz reports ${String(body.version)}, not ${version}`);
 }
 
-/** The git half of the deploy unit's ports: fetch origin's base branch, read HEAD, check a commit out detached. */
-export function gitWatchPorts(cliRoot: string, baseBranch: string, run: ChildRun): Pick<DeployWatchPorts, 'fetch' | 'head' | 'checkout'> {
+/**
+ * The git half of the deploy unit's ports: fetch Graphyard's own main (GY-2982) — never the managed
+ * repository's base branch, which Graphyard's origin may not have — read HEAD, check a commit out detached.
+ */
+export function gitWatchPorts(cliRoot: string, run: ChildRun): Pick<DeployWatchPorts, 'fetch' | 'head' | 'checkout'> {
   const git = async (...args: string[]) => String(await run('git', ['-C', cliRoot, ...args])).trim();
   return {
-    fetch: async () => { await git('fetch', '--quiet', 'origin', baseBranch); return git('rev-parse', `refs/remotes/origin/${baseBranch}`); },
+    fetch: async () => { await git('fetch', '--quiet', 'origin', graphyardBaseBranch); return git('rev-parse', `refs/remotes/origin/${graphyardBaseBranch}`); },
     head: () => git('rev-parse', 'HEAD'),
     checkout: async commit => { await git('checkout', '--detach', '--quiet', commit); },
   };
@@ -332,7 +331,7 @@ export async function pruneImages(run: ChildRun, keep: string[], log: (line: str
  * coordinator pin advanced when one exists, and older per-commit images pruned; or the line naming
  * why an install on another provider has none.
  */
-export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; baseBranch: string; url: string; run: ChildRun; herdrInstance?: boolean }): Promise<DeployWatchPorts | string> {
+export async function watchPorts(input: { cliRoot: string; repoRoot: string; repository: string; url: string; run: ChildRun; herdrInstance?: boolean }): Promise<DeployWatchPorts | string> {
   const { cliRoot, repoRoot, url } = input, directory = installDirectory(installIdFor(input.repository));
   const recorded = await readInstallRecord(directory).catch(() => null);
   // GY-2941: an installation whose own Herdr instance master.json names redeploys with --herdr-instance, though its record predates the field.
@@ -349,7 +348,7 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
       image: install.provider === 'compose' ? `graphyard-local:${commit.slice(0, 12)}` : install.deployment?.image ?? `graphyard-local:${install.installId}`, backupFile: join(directory, 'backups', `before-${commit.slice(0, 12)}-${Date.now()}.json`) };
   };
   const step = (commit: string, id: UpgradeStepId) => upgradePlan(inputsFor(commit)).steps.find(entry => entry.id === id)!;
-  const tree = gitWatchPorts(cliRoot, input.baseBranch, input.run);
+  const tree = gitWatchPorts(cliRoot, input.run);
   return {
     ...tree,
     build: async commit => {
@@ -378,10 +377,11 @@ export const renderPlan = (plan: UpgradePlan) => [`upgrade ${plan.from.version} 
 export const upgradeCommands = defineCommands([{
   name: 'upgrade',
   help: [
-    '  upgrade [--to VERSION|stable] [--plan]',
+    '  upgrade [--to VERSION] [--plan]',
     '                                Move the CLI checkout (then npm ci), back up the database,',
     '                                redeploy the server, restart loop and executors, refresh the',
-    '                                generated files, and check /healthz, to one dated release;',
+    '                                generated files, and check /healthz, to Graphyard\'s main tip',
+    '                                (or the dated release VERSION);',
     '                                --plan prints the steps only; a failure names its step and rollback',
     '  upgrade --watch [--once] [--checkout DIR]',
     '                                The deploy unit (graphyard-deploy.service): fetch origin and, for',
@@ -395,7 +395,7 @@ export const upgradeCommands = defineCommands([{
       // GY-2942: the unit names the install's own checkout; one without it deploys from the launcher's.
       const checkoutIndex = flags.indexOf('--checkout'), cliRoot = checkoutIndex >= 0 ? resolve(flags[checkoutIndex + 1] ?? '') : installationRoot;
       if (cliRoot !== installationRoot) await ensureDeployCheckout(cliRoot, installationRoot, defaultChildRun);
-      const ports = await watchPorts({ cliRoot, repoRoot, repository: master.repository, baseBranch: master.baseBranch, url: master.url, run: defaultChildRun, herdrInstance: !!master.herdrInstance });
+      const ports = await watchPorts({ cliRoot, repoRoot, repository: master.repository, url: master.url, run: defaultChildRun, herdrInstance: !!master.herdrInstance });
       if (typeof ports === 'string') throw new Error(ports);
       const stopping = new AbortController();
       for (const signal of ['SIGTERM', 'SIGINT'] as const) process.once(signal, () => stopping.abort());
@@ -409,9 +409,9 @@ export const upgradeCommands = defineCommands([{
       ]).then(() => undefined);
     }
     const toIndex = flags.indexOf('--to');
-    const to = toIndex >= 0 ? flags[toIndex + 1] ?? '' : stableChannel;
+    const to = toIndex >= 0 ? flags[toIndex + 1] ?? '' : undefined;
     const cliRoot = installationRoot, repoRoot = context.repositoryRoot();
-    if (!flags.includes('--plan')) git(cliRoot, 'fetch', '--tags', '--force', 'origin');
+    if (!flags.includes('--plan')) git(cliRoot, 'fetch', '--tags', '--force', 'origin', graphyardBaseBranch);
     const repository = repositoryFromRemote(git(repoRoot, 'remote', 'get-url', 'origin'));
     const directory = repository ? installDirectory(installIdFor(repository)) : null;
     const url = process.env.GRAPHYARD_URL || context.connection?.url ? context.base : null;
