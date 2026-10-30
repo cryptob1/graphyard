@@ -2,11 +2,11 @@ import { demand, type Principal } from '../../model.js';
 import { RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
-import { defineRoutes, parseJson, type RouteContext } from '../routes.js';
+import { defineRoutes, parseJson, Sent, type RouteContext } from '../routes.js';
 import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
-import { recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
+import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
 import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
@@ -67,7 +67,7 @@ export const workRoutes = defineRoutes('work', [
     method: 'POST', path: /^\/api\/work\/([^/]+)\/(review-launch|review-verdict)$/,
     async handle(context, [id, action]) {
       await refuseLead(context, id, action);
-      const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      const data = await parseJson(context, action === 'review-verdict' ? productScreenshotBodyLimit : undefined), key = context.idempotencyKey(), target = decodeURIComponent(id);
       return action === 'review-launch' ? recordReviewLaunch(context.services, context.actor, target, data, key) : recordReviewVerdict(context.services, context.actor, target, data, key);
     },
   },
@@ -77,7 +77,17 @@ export const workRoutes = defineRoutes('work', [
     method: 'POST', path: /^\/api\/work\/([^/]+)\/product-review$/,
     async handle(context, [id]) {
       await refuseLead(context, id, 'product-review');
-      return recordProductReviewByHand(context.services, context.actor, decodeURIComponent(id), await parseJson(context), context.idempotencyKey());
+      return recordProductReviewByHand(context.services, context.actor, decodeURIComponent(id), await parseJson(context, productScreenshotBodyLimit), context.idempotencyKey());
+    },
+  },
+  // The screenshots a product review uploaded, served to any reader of the item (its panel fetches them).
+  {
+    method: 'GET', path: /^\/api\/work\/([^/]+)\/product-review\/screenshots\/([^/]+)$/,
+    async handle({ res, services }, [id, name]) {
+      const shot = await readProductScreenshot(services, decodeURIComponent(id), decodeURIComponent(name));
+      res.writeHead(200, { 'Content-Type': shot.mediaType, 'Content-Length': shot.bytes.length, 'X-Content-Type-Options': 'nosniff', 'Content-Security-Policy': "default-src 'none'; sandbox", 'Cache-Control': 'no-store' });
+      res.end(shot.bytes);
+      return Sent;
     },
   },
   // The merge writer's ledger (GY-1524): intent, trial, pushed, reconciled and refused, recorded by the

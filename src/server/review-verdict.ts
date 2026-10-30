@@ -42,13 +42,24 @@ const hex64 = z.string().regex(/^[0-9a-f]{64}$/);
 const identifier = z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*(?:\[bot\])?$/);
 const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
 export const reviewLaunchBodySchema = z.object({ reviewer: identifier, head: sha, baseTip: sha, tokenHash: hex64, expiresAt: instant, postMerge: z.boolean().default(false), product: z.boolean().default(false) }).strict();
-export const reviewVerdictBodySchema = z.object({ event: z.enum(reviewEvents), body: z.string().trim().min(1).max(65_536), sha, token: hex64 }).strict();
+/**
+ * A screenshot a product reviewer captured (GY-2989), uploaded with the verdict: the name its body's
+ * `Screenshot:` line gives it and the image itself, kept by the control plane and served on the item
+ * (`GET /api/work/:id/product-review/screenshots/:name`), so the panel shows what the reviewer saw.
+ */
+export const productScreenshotBytesMax = 2 * 1024 * 1024, productScreenshotsMax = 5;
+const screenshotUpload = z.object({ name: z.string().trim().min(1).max(1000), mediaType: z.enum(['image/png', 'image/jpeg']), bytes: z.string().min(4).max(Math.ceil(productScreenshotBytesMax / 3) * 4) }).strict();
+type ScreenshotUpload = z.infer<typeof screenshotUpload>;
+/** The body limit of a route that may carry screenshots: every one at its largest, base64, with room for the rest. */
+export const productScreenshotBodyLimit = productScreenshotsMax * Math.ceil(productScreenshotBytesMax / 3) * 4 + 200_000;
+export const reviewVerdictBodySchema = z.object({ event: z.enum(reviewEvents), body: z.string().trim().min(1).max(65_536), sha, token: hex64, screenshots: z.array(screenshotUpload).max(productScreenshotsMax).optional() }).strict();
 /** The hand-recorded product review (GY-2989): the operator or the loop's coordinator records one itself, without a launched session. */
 export const productReviewBodySchema = z.object({
   reviewer: identifier, sha, baseSha: sha,
   verdict: z.enum(productVerdicts),
   findings: z.string().trim().min(1).max(65_536),
-  screenshots: z.array(z.string().trim().min(1).max(2000)).max(50).default([]),
+  /** Each an http(s) link to an image hosted elsewhere, or an image uploaded with the verdict. */
+  screenshots: z.array(z.union([z.url({ protocol: /^https?$/ }).max(2000), screenshotUpload])).max(productScreenshotsMax).default([]),
 }).strict();
 /** GY-2078: the loop's withdrawal of one control-plane review verdict — which review, and the request the re-review is asked by. */
 export const reviewWithdrawBodySchema = z.object({ reviewId: z.number().int().safe().positive(), reason: z.string().trim().min(1).max(8000) }).strict();
@@ -58,6 +69,27 @@ export const reviewLaunchEvent = 'review.launch', reviewVerdictEvent = 'review.v
 export const productReviewVerdictEvent = 'product-review.verdict';
 /** The screenshots a product verdict names, one `Screenshot:` line each (product-review.ts shows them on the item). */
 export const productScreenshots = (body: string) => body.split('\n').map(line => line.trim()).filter(line => /^Screenshot:/i.test(line)).map(line => line.replace(/^Screenshot:\s*/i, '').trim()).filter(Boolean);
+const linked = (name: string) => /^https?:\/\//i.test(name);
+/**
+ * Keep a product verdict's uploaded screenshots in place of the item's earlier ones, and answer the
+ * names the review records: each upload, and each `Screenshot:` line or listed link that is an
+ * http(s) URL. A line naming a local file not uploaded is dropped — nobody could open it.
+ */
+async function keepProductScreenshots(db: pg.PoolClient, workId: string, uploads: ScreenshotUpload[], named: string[]): Promise<string[]> {
+  await db.query('DELETE FROM product_review_screenshots WHERE work_id=$1', [workId]);
+  for (const upload of uploads) {
+    const bytes = Buffer.from(upload.bytes, 'base64');
+    demand(bytes.length > 0 && bytes.length <= productScreenshotBytesMax && bytes.toString('base64') === upload.bytes, `Screenshot ${upload.name} must be canonical base64 of at most ${productScreenshotBytesMax} bytes`, 400);
+    await db.query('INSERT INTO product_review_screenshots(work_id,name,media_type,bytes) VALUES($1,$2,$3,$4) ON CONFLICT (work_id,name) DO UPDATE SET media_type=EXCLUDED.media_type, bytes=EXCLUDED.bytes', [workId, upload.name, upload.mediaType, bytes]);
+  }
+  return [...new Set([...uploads.map(upload => upload.name), ...named.filter(linked)])];
+}
+/** One stored screenshot of an item's product review, for its panel; 404 when none is kept by that name. */
+export async function readProductScreenshot(services: Services, id: string, name: string): Promise<{ mediaType: string; bytes: Buffer }> {
+  const row = (await services.engine.store.pool.query('SELECT s.media_type, s.bytes FROM product_review_screenshots s JOIN work_items w ON w.id=s.work_id WHERE (w.id::text=$1 OR w.document->>\'key\'=$1) AND s.name=$2', [id, name])).rows[0];
+  demand(row, 'No such product review screenshot', 404);
+  return { mediaType: row.media_type, bytes: row.bytes };
+}
 /** The event a control-plane review's withdrawal is appended with (GY-2078). */
 export const reviewWithdrawnEvent = 'review.withdrawn';
 /** How long a registered launch's token stays valid at most, whatever expiry the launcher asks. */
@@ -181,6 +213,7 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
     // A product launch's verdict is the item's product review (GY-2989): approved, changes requested
     // or rejected, recorded on `work.productReview` — never as a code review on the observation.
     const product = !!launch!.product;
+    demand(product || !data.screenshots?.length, 'Only a product review uploads screenshots', 409);
     if (product) demand(data.event !== 'COMMENT', 'A product review is approved, changes requested or rejected; it posts no COMMENT', 409);
     else demand(data.event !== 'REJECT', 'REJECT is a product review verdict; a code review posts APPROVE, REQUEST_CHANGES or COMMENT', 409);
     const productVerdict: ProductReview['verdict'] | null = product ? data.event === 'APPROVE' ? 'approved' : data.event === 'REQUEST_CHANGES' ? 'changes-requested' : 'rejected' : null;
@@ -209,7 +242,7 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
       observation.reviewIds = [...(observation.reviewIds ?? []), reviewId];
     }
     work!.reviewLaunch = { ...launch!, verdict };
-    if (product) work!.productReview = { sha: launch!.head, baseSha, verdict: productVerdict!, reviewer: launch!.reviewer, findings: data.body, screenshots: productScreenshots(data.body), at: submittedAt };
+    if (product) work!.productReview = { sha: launch!.head, baseSha, verdict: productVerdict!, reviewer: launch!.reviewer, findings: data.body, screenshots: await keepProductScreenshots(db, work!.id, data.screenshots ?? [], productScreenshots(data.body)), at: submittedAt };
     if (launch!.postMerge) work!.postMergeReview = 'reviewed';
     change = { withdraw: [launch!.tokenHash] };
     if (work!.stage !== 'done') {
@@ -282,7 +315,9 @@ export async function recordProductReviewByHand(services: Services, actor: Princ
     demand(!implementerIdentities(work!).includes(data.reviewer), independenceRefusal(data.reviewer, 'implemented', work!.key), 403);
     if (work!.candidate) demand(work!.candidate.sha.toLowerCase() === data.sha, `${work!.key}'s candidate is ${work!.candidate.sha.slice(0, 12)}, not ${data.sha.slice(0, 12)}; a product review names the head it judged`, 409);
     const submittedAt = now.toISOString();
-    const productReview: ProductReview = { sha: data.sha, baseSha: data.baseSha, verdict: data.verdict, reviewer: data.reviewer, findings: data.findings, screenshots: [...new Set([...data.screenshots, ...productScreenshots(data.findings)])].slice(0, 50), at: submittedAt };
+    const uploads = data.screenshots.filter((entry): entry is ScreenshotUpload => typeof entry !== 'string');
+    const named = [...data.screenshots.filter((entry): entry is string => typeof entry === 'string'), ...productScreenshots(data.findings)];
+    const productReview: ProductReview = { sha: data.sha, baseSha: data.baseSha, verdict: data.verdict, reviewer: data.reviewer, findings: data.findings, screenshots: await keepProductScreenshots(db, work!.id, uploads, named), at: submittedAt };
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, productReviewVerdictEvent, JSON.stringify({ key: work!.key, reviewer: data.reviewer, sha: data.sha, baseSha: data.baseSha, verdict: data.verdict, by: actor.id })]);
     work!.productReview = productReview;
     if (work!.stage !== 'done') {

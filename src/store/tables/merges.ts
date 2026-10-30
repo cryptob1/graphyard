@@ -30,5 +30,17 @@ export const itemPreviewFiles = defineTable({
 CREATE INDEX IF NOT EXISTS item_preview_files_work ON item_preview_files(work_id);`,
 });
 
+/**
+ * GY-2989: the screenshots a product reviewer uploaded with the item's standing product review,
+ * served on the item's Product review panel; each fresh verdict replaces the item's set.
+ */
+export const productReviewScreenshots = defineTable({
+  name: 'product_review_screenshots', orderBy: 'work_id,name',
+  ddl: `CREATE TABLE IF NOT EXISTS product_review_screenshots (
+  work_id uuid NOT NULL REFERENCES work_items(id), name text NOT NULL, media_type text NOT NULL, bytes bytea NOT NULL,
+  PRIMARY KEY(work_id, name)
+);`,
+});
+
 /** The merge writer's tables, registered after the work tables they reference. */
-export const mergesTables = [changeNumbers, itemPreviewFiles];
+export const mergesTables = [changeNumbers, itemPreviewFiles, productReviewScreenshots];

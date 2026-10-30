@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { deploySmokeRequired, isClosed, needsProductReview, type Work } from '../../src/model';
 import { sessionSummary } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
@@ -44,7 +44,7 @@ const productWords: Record<string, string> = { approved: 'Approved', 'changes-re
  * it merges. The panel shows the standing verdict, the reviewer's findings and every screenshot the
  * verdict named, bound to the exact head it judged.
  */
-export function ProductReviewPanel({ item }: { item: Work }) {
+export function ProductReviewPanel({ item, token }: { item: Work; token: string }) {
   const review = item.productReview;
   if (!review && !needsProductReview(item)) return null;
   const bindsHead = !!item.candidate && review?.sha === item.candidate.sha;
@@ -55,9 +55,27 @@ export function ProductReviewPanel({ item }: { item: Work }) {
         <div><dt>Reviewer</dt><dd>{review.reviewer} · {new Date(review.at).toLocaleString()}</dd></div>
       </dl>
       <p className="product-findings" style={{ whiteSpace: 'pre-wrap' }}>{review.findings}</p>
-      {review.screenshots.length > 0 && <ul className="proof-markers product-screenshots">{review.screenshots.map(shot => <li key={shot}><a href={shot} target="_blank" rel="noopener noreferrer">{shot} ↗</a></li>)}</ul>}
+      {review.screenshots.length > 0 && <div className="product-screenshots">{review.screenshots.map(shot => <ProductScreenshot key={shot} item={item} name={shot} token={token}/>)}</div>}
     </> : <p className="muted">A user-facing feature is product-reviewed before it merges: a reviewer walks the head's preview — or the served app against the head's diff where no preview runs — and approves it, asks for changes, or rejects it.</p>}
   </section>;
+}
+/** One screenshot of the product review: a link to an image hosted elsewhere, or the uploaded image the control plane keeps, read with the session's token. */
+function ProductScreenshot({ item, name, token }: { item: Work; name: string; token: string }) {
+  const linked = /^https?:\/\//i.test(name);
+  const [src, setSrc] = useState<string | null>(null), [failed, setFailed] = useState(false);
+  useEffect(() => {
+    if (linked) return;
+    let url: string | null = null, active = true;
+    void fetch(`/api/work/${encodeURIComponent(item.id)}/product-review/screenshots/${encodeURIComponent(name)}`, { headers: { Authorization: `Bearer ${token}` } })
+      .then(response => { if (!response.ok) throw new Error(String(response.status)); return response.blob(); })
+      .then(blob => { if (active) setSrc(url = URL.createObjectURL(blob)); }, () => { if (active) setFailed(true); });
+    return () => { active = false; if (url) URL.revokeObjectURL(url); };
+  }, [item.id, name, token, linked]);
+  return <figure className="product-screenshot">
+    {linked ? <><a href={name} target="_blank" rel="noopener noreferrer">Open screenshot ↗</a><figcaption className="mono">{name}</figcaption></>
+      : src ? <><img className="artifact-preview" src={src} alt={`Product review screenshot ${name}`}/><figcaption className="mono">{name}</figcaption></>
+      : <small className="muted">{failed ? `Screenshot ${name} is unavailable` : `Loading screenshot ${name}…`}</small>}
+  </figure>;
 }
 const caseMarks = { pass: marker.passed, fail: marker.failed, unrun: marker.unmeasured } as const;
 /**
@@ -199,7 +217,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       </dl> : <p className="muted">No pull request yet.</p>}
     </section>
     {item.preview && <PreviewPanel preview={item.preview}/>}
-    <ProductReviewPanel item={item}/>
+    <ProductReviewPanel item={item} token={token}/>
     <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}

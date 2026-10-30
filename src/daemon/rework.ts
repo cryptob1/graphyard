@@ -83,6 +83,8 @@ export function observationWakeDue(work: Work, wokenAt: string | null | undefine
 
 /** A rework the item needs: why, and the grounds it binds (head and ground), so one head is reworked once per ground. */
 export interface Rework { reason: string; binding: string }
+/** The longest rework reason the engine accepts (engine.ts `rework`). */
+export const reworkReasonMax = 2000;
 /**
  * The rework one item needs right now, or null: a head nothing can carry forward — a base conflict,
  * a standing change request, a failed or unexercised proof, spent producers or a planned mechanical fix — goes back to a worker. Every blocking review finding reworks
@@ -95,7 +97,13 @@ export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = 
   const sync = syncConflict(work);
   if (sync) return { reason: `${work.key}: ${sync.reason}. Only a sync can resolve it (graphyard sync ${work.key}: merge the base, resolve, push), so the candidate returns to a worker.`, binding: sync.binding };
   const verdict = standingVerdict(work);
-  if (verdict) return { reason: `${work.key}: ${verdict.reason}. The verdict stands against the current head, so the item returns to a worker for the next round.`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
+  if (verdict) {
+    // The engine takes a rework reason of at most reworkReasonMax characters: a long verdict (a product
+    // review's findings may run to 64 KiB) is cut so the sentence around it still fits.
+    const tail = '. The verdict stands against the current head, so the item returns to a worker for the next round.', cut = '… (cut short; the whole verdict is on the item)';
+    const room = reworkReasonMax - work.key.length - 2 - tail.length;
+    return { reason: `${work.key}: ${verdict.reason.length > room ? `${verdict.reason.slice(0, room - cut.length)}${cut}` : verdict.reason}${tail}`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
+  }
   return proofRework(work) ?? exhaustedProofRework(work, exhausted) ?? mechanicalRework(work, mechanical);
 }
 

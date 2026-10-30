@@ -13,7 +13,7 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { evaluate } from '../src/model/gates.js';
 import { sensitiveReviewRefusal, postMergeReviewMark } from '../src/model/post-merge-review.js';
-import { postReview, readReviewBinding, reviewBindingFile, reviewBindingSchema, ReviewPostRefusal, writeReviewBinding, type ReviewPostBinding } from '../src/review-post.js';
+import { postReview, readReviewBinding, reviewBindingFile, reviewBindingSchema, ReviewPostRefusal, screenshotUploads, writeReviewBinding, type ReviewPostBinding } from '../src/review-post.js';
 import { independenceRefusal, headRefusal, reviewLaunchBodySchema, secondVerdictRefusal, tokenRefusal, tokenRegistered } from '../src/server/review-verdict.js';
 import { assertReviewCandidate, bindReviewer, launchReview, readReviewLedger, reviewPrompt, reviewStandard, saveReviewerProfile, staleReviewReason } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
@@ -413,6 +413,37 @@ test('integration:review-verdict-recorded-once — the verdict is appended to ob
   // A github-observed item has no API verdict: its review posts through gh.
   const github = await insert(item('GY-9006', { observation: { at: now(), candidate: { sha: H, baseSha: B, pr: 7, branch: 'b', author: 'w' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false } }));
   assert.equal((await request(tokenOf(coordinator), `work/${github.id}/review-launch`, launchBody(freshToken()))).status, 409);
+});
+
+// ——— GY-2989: a product verdict's screenshots are uploaded with it, kept, and served on the item. ———
+test('integration:product-review-screenshots-served — review post uploads each local screenshot its body names; the control plane keeps the image and serves it on the item, the review records its name, and a long change request still returns the item to rework', async () => {
+  const directory = await temporaryDirectory('product-shots');
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP438AAAAQBAYDFKhhdAAAAAElFTkSuQmCC', 'base64');
+  const shot = join(directory, 'settings-flow.png');
+  writeFileSync(shot, png);
+  const findings = `Reviewed head ${H}.\nBLOCKING: settings — ${'the toggle hides where a reader looks; '.repeat(80)}\nScreenshot: ${shot}\nScreenshot: https://images.example/elsewhere.png`;
+  const uploads = await screenshotUploads(findings);
+  assert.deepEqual(uploads.map(upload => [upload.name, upload.mediaType]), [[shot, 'image/png']], 'a local file is uploaded; a link rides the body only');
+  await assert.rejects(screenshotUploads('Screenshot: /nowhere/missing.png'), ReviewPostRefusal, 'a screenshot that cannot be read is refused before anything posts');
+
+  const work = await insert(item('GY-9010', { criteria: [{ id: 'AC-1', text: 'Shows', proofs: ['e2e:shows'] }], submission: { epoch: 1, pr: 7 } }));
+  const token = freshToken();
+  assert.equal((await request(tokenOf(coordinator), `work/${work.id}/review-launch`, launchBody(token, { product: true }))).status, 200);
+  const posted = await request(token, `work/${work.id}/review-verdict`, { ...verdict(token, 'REQUEST_CHANGES', findings), screenshots: uploads });
+  assert.equal(posted.status, 200, JSON.stringify(posted.body));
+  const reviewed = await stored(work.id);
+  assert.deepEqual(reviewed.productReview!.screenshots, [shot, 'https://images.example/elsewhere.png']);
+  const served = await fetch(`${url}/api/work/${work.id}/product-review/screenshots/${encodeURIComponent(shot)}`, { headers: { Authorization: `Bearer ${tokenOf(admin)}` } });
+  assert.deepEqual([served.status, served.headers.get('content-type')], [200, 'image/png']);
+  assert.deepEqual(Buffer.from(await served.arrayBuffer()), png, 'the panel reads back exactly the image the reviewer saved');
+  // The findings run past the engine's 2,000-character rework reason, and the rework still lands.
+  const { neededRework, reworkReasonMax } = await import('../src/daemon/rework.js');
+  const rework = neededRework(reviewed)!;
+  assert.ok(rework.reason.length <= reworkReasonMax, `${rework.reason.length} characters`);
+  assert.match(rework.reason, /the whole verdict is on the item/);
+  const returned = await request(tokenOf(admin), `work/${work.id}/rework`, { reason: rework.reason, previousWorkerStopped: true, binding: rework.binding });
+  assert.equal(returned.status, 200, JSON.stringify(returned.body));
+  await rm(directory, { recursive: true, force: true });
 });
 
 // ——— GY-1987 AC-1: the reviewer's judging text is what reviewStandard builds, byte for byte. ———

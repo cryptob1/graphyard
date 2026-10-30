@@ -1,7 +1,7 @@
 {
   "id": "product-review-verdict-shown",
   "title": "A feature item shows its product review verdict, findings and screenshots for its exact head",
-  "description": "A user-facing feature is product-reviewed before it merges (GY-2989). The case records a product review — a change request with findings and screenshots, bound to the head it judged — on a feature item through the same route an operator or the loop uses, reads it back on the API, and opens the item in the dashboard, where the Product review panel shows the verdict, the findings and every screenshot named, beside the head it binds.",
+  "description": "A user-facing feature is product-reviewed before it merges (GY-2989). The case records a product review — a change request with findings and screenshots, bound to the head it judged — on a feature item through the same route an operator or the loop uses, reads it back on the API, and opens the item in the dashboard, where the Product review panel shows the verdict, the findings and every screenshot it uploaded, beside the head it binds.",
   "tags": [
     "api",
     "dashboard",
@@ -54,7 +54,11 @@
         "verdict": "changes-requested",
         "findings": "The export button hides the summary a reader came for\nScreenshot: preview-export-flow-1.png",
         "screenshots": [
-          "preview-export-flow-1.png"
+          {
+            "name": "preview-export-flow-1.png",
+            "mediaType": "image/png",
+            "bytes": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP438AAAAQBAYDFKhhdAAAAAElFTkSuQmCC"
+          }
         ]
       },
       "status": 200
@@ -87,6 +91,13 @@
           "equals": "preview-export-flow-1.png"
         }
       ]
+    },
+    {
+      "kind": "http",
+      "name": "the uploaded screenshot is kept and served on the item",
+      "method": "GET",
+      "path": "/api/work/{{id}}/product-review/screenshots/preview-export-flow-1.png",
+      "status": 200
     },
     {
       "kind": "browser",
@@ -143,11 +154,9 @@
     },
     {
       "kind": "browser",
-      "name": "the screenshot the verdict named is shown",
+      "name": "the screenshot the verdict uploaded is shown, its image loaded",
       "action": "expectText",
-      "text": "preview-export-flow-1.png",
-      "role": "link",
-      "exact": false
+      "text": "preview-export-flow-1.png"
     },
     {
       "kind": "browser",

@@ -5,7 +5,7 @@
 // records it on the item's observation (server/review-verdict.ts).
 import { randomUUID } from 'node:crypto';
 import { chmod, readFile, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { extname, join } from 'node:path';
 import { z } from 'zod';
 import type { ChildRun } from './child-runner.js';
 import { blockingFindings, findingLocation } from './review-cap.js';
@@ -93,6 +93,24 @@ export function unchangedCodeFindings(body: string, binding: Pick<ReviewPostBind
   });
 }
 
+/**
+ * The screenshots a product verdict uploads (GY-2989): each "Screenshot: PATH" line naming a local
+ * PNG or JPEG file, read so the control plane keeps the image and the item shows it. A line naming an
+ * http(s) URL is a link and is sent only in the body.
+ */
+export async function screenshotUploads(body: string, read: (path: string) => Promise<Buffer> = readFile) {
+  const named = body.split('\n').map(line => /^\s*Screenshot:\s*(.+?)\s*$/i.exec(line)?.[1]).filter((path): path is string => !!path && !/^https?:\/\//i.test(path));
+  const uploads: Array<{ name: string; mediaType: 'image/png' | 'image/jpeg'; bytes: string }> = [];
+  for (const name of [...new Set(named)]) {
+    const extension = extname(name).toLowerCase();
+    if (!['.png', '.jpg', '.jpeg'].includes(extension)) throw new ReviewPostRefusal(`Screenshot ${name} is not a .png or .jpg file`);
+    let bytes: Buffer;
+    try { bytes = await read(name); } catch { throw new ReviewPostRefusal(`Screenshot ${name} cannot be read; name the file you saved, by its path`); }
+    uploads.push({ name, mediaType: extension === '.png' ? 'image/png' : 'image/jpeg', bytes: bytes.toString('base64') });
+  }
+  return uploads;
+}
+
 /** A correct invocation for this session, printed after every refusal. */
 export function reviewPostExample(cliPath: string, event: ReviewEvent) {
   return [`node ${cliPath} review post --event ${event} <<'EOF'`, 'YOUR JUDGEMENT OF EACH ACCEPTANCE CRITERION, AND EACH FINDING WITH ITS CLASSIFICATION', 'EOF'].join('\n');
@@ -140,10 +158,12 @@ export async function postReview(input: { event: string | undefined; body: strin
     const base = input.environment.GRAPHYARD_URL;
     if (!base) refuse('GRAPHYARD_URL is unset; a control-plane reviewer session is launched with the control plane\'s address');
     const post = dependencies.fetch ?? fetch;
+    let screenshots: Awaited<ReturnType<typeof screenshotUploads>> = [];
+    try { screenshots = await screenshotUploads(body); } catch (error) { refuse((error as Error).message); }
     let response: Response;
     try {
       response = await post(`${base!.replace(/\/$/, '')}/api/work/${encodeURIComponent(bound.key)}/review-verdict`, { method: 'POST', headers: { Authorization: `Bearer ${bound.verdictToken}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
-        body: JSON.stringify({ event, body, sha: bound.head, token: bound.verdictToken }), signal: AbortSignal.timeout(120_000) });
+        body: JSON.stringify({ event, body, sha: bound.head, token: bound.verdictToken, ...(screenshots.length ? { screenshots } : {}) }), signal: AbortSignal.timeout(120_000) });
     } catch (error) { return refuse(`the control plane at ${base} could not be reached (${(error instanceof Error ? error.message : String(error)).split('\n')[0]}); retry the same command`); }
     const answer = await response.json().catch(() => ({})) as { error?: string; reviewId?: number };
     if (response.status === 401) refuse(`this launch's verdict token is spent or expired (${answer?.error ?? 'not accepted'}): a verdict was already posted for it, or the launch expired and the loop launches the review again; post nothing further and stop`);
