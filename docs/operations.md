@@ -28,7 +28,7 @@ Never attest a stop you have not confirmed.
 
 ## Deeper references
 
-[The coordination loop](#master-coordination-loop), [merge bypass](#merge-bypass), [bootstrap mode](#bootstrap-mode-for-a-self-proving-change).
+[The coordination loop](#master-coordination-loop), [bootstrap mode](#bootstrap-mode-for-a-self-proving-change).
 
 ## Resources and disk
 
@@ -88,8 +88,4 @@ The server outlives a dropped Postgres connection (one log line; the next reques
 
 ## Withdrawal and credentials
 
-Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A merge outside the gates is a permanent violation: never bypass; a delivered item with a failed smoke proof stays Done.
-
-## Merge bypass
-
-Admin direct-merge window: `graphyard operator direct-merges on --since ISO REASON`.
+Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A delivered item with a failed smoke proof stays Done.
