@@ -10,7 +10,6 @@ import { artifactKinds, attestationBytes, collectArtifacts, executionAttestation
  * exactly the fabrication a signature is supposed to exclude.
  */
 export const supervisionRequestSchema = z.object({ plan: executionPlanSchema }).strict();
-export type SupervisionRequest = z.infer<typeof supervisionRequestSchema>;
 export type SupervisionResult = { record: ExecutionRecord; attestation: ExecutionAttestation; collection: { artifacts: { name: string; digest: string }[]; reasons: string[] } };
 
 /**

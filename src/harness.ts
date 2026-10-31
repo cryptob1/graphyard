@@ -359,25 +359,9 @@ export async function trustAgyFolder(directory: string, environment: Record<stri
   }
 }
 
-/**
- * Runtimes Graphyard accepts in a profile but cannot yet start unattended: none has both a known
- * flag or variable that suppresses its approval and trust prompts for an interactive session and a
- * command-line way to hand that session its first request (Kimi and Amp take a prompt only in a
- * one-shot mode that exits, so their request would have to be pasted, which a session may rightly
- * refuse). Each is refused before launch, naming the runtime, rather than started into a session
- * that waits for a keypress no one sends (GY-184). A runtime moves out of this list by gaining a
- * recipe above and a request contract in master.ts `launchRequestContracts`.
- */
-export const refusedLaunchKinds = ['kimi', 'amp', 'devin', 'cline', 'omp', 'mastracode', 'kiro', 'droid', 'grok', 'hermes', 'kilo', 'qodercli', 'maki'] as const;
 export class LaunchRefusedError extends Error { constructor(readonly kind: string, message?: string) {
   super(message ?? `Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind} (no-approval flags and a first request on its command line), so the session would stop at its own approval or trust prompt or never receive its instruction. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
 } }
-/** The runtime's launch recipe, or a refusal naming the runtime when there is none. */
-export function assertLaunchRecipe(kind: string): LaunchRecipe {
-  const recipe = nonInteractiveLaunch[kind];
-  if (!recipe) throw new LaunchRefusedError(kind);
-  return recipe;
-}
 /**
  * The launch contract a registry runtime brings with it (model/registry.ts): its own startup
  * arguments and environment are that runtime's no-approval mode, registered by the operator who

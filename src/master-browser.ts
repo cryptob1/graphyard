@@ -649,15 +649,6 @@ export async function submitSudoCode(root: string, value: string, now = new Date
   await atomicPrivateWrite(sudoCodeFile(root), submission);
   return submission.kind;
 }
-/**
- * GY-1459: the local App page tells a waiting drive its step was finished in the operator's own
- * browser, where their live session holds sudo mode, so the drive's Confirm-access wait ends. It
- * replaces a code handed the same instant: the step that code was for is done.
- */
-export async function signalSudoSettled(root: string, now = new Date()) {
-  await mkdir(actionsDirectory(root), { recursive: true, mode: 0o700 });
-  await atomicPrivateWrite(sudoCodeFile(root), { kind: 'settled', at: now.toISOString() } satisfies SudoCodeSubmission);
-}
 /** The handed code, taken once: the file is removed whether it was usable or not. */
 export async function takeSudoCode(root: string, now = new Date()): Promise<SudoCodeSubmission | null> {
   const file = sudoCodeFile(root);

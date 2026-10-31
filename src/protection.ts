@@ -1,7 +1,4 @@
-import { execFileSync } from 'node:child_process';
-
 export type ProtectionRun = (command: string, args: string[], input?: string) => string;
-export const protectionRun: ProtectionRun = (command, args, input) => execFileSync(command, args, { input, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 60_000 });
 
 const unquote = (value: string) => value.trim().replace(/^(['"])(.*)\1$/, '$2');
 /** The lines of the block a `key:` line at `indent` opens, or its inline value. */

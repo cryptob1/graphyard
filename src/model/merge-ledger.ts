@@ -14,7 +14,6 @@ export const mergeLedgerKinds = {
   reconciled: 'merge.reconciled',
   refused: 'merge.refused',
 } as const;
-export type MergeLedgerKind = typeof mergeLedgerKinds[keyof typeof mergeLedgerKinds];
 /**
  * GY-1528: the executor's `merge.trial` record beside the ledger. It moves no state; the fold keeps
  * the newest trial's head and per-proof counts on the state, which the control-plane acceptance
@@ -40,10 +39,7 @@ export const mergeReconciledSchema = z.object({ mergeSha: sha, observedTip: sha 
 /** `merge.refused`: a merge or a revert of `head` was refused, with why. */
 export const mergeRefusedSchema = z.object({ head: sha, reason: z.string().min(1).max(2000), kind: z.enum(['merge', 'revert']) }).strict();
 
-export type MergeIntent = z.infer<typeof mergeIntentSchema>;
-export type MergePushed = z.infer<typeof mergePushedSchema>;
 export type MergeReconciled = z.infer<typeof mergeReconciledSchema>;
-export type MergeRefused = z.infer<typeof mergeRefusedSchema>;
 const proofCounts = z.record(z.string().max(200), z.object({ executed: z.number().int().min(0), failed: z.number().int().min(0) }).passthrough());
 /** GY-1718: the preview of a passing trial (merge-writer/preview.ts) — its result, each required and uat case's verdict, the failing ones named. */
 export const previewVerdictSchema = z.object({

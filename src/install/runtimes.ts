@@ -60,12 +60,6 @@ export function workerProfiles(installId: string, principals: string[], runtimes
   });
 }
 
-export function reviewerProfiles(runtimes: DetectedRuntime[], reviewer: string | null): ReviewerProfileDraft[] {
-  if (!reviewer) return [];
-  const usable = runtimes.filter(runtime => runtime.authenticated);
-  return usable.slice(0, 1).map(runtime => ({ name: `${reviewer}-reviewer`, runtime: runtime.kind, reviewerApp: reviewer, timeoutSeconds: 1800 }));
-}
-
 export function masterRuntime(runtimes: DetectedRuntime[]) {
   return runtimes.find(runtime => runtime.authenticated) ?? null;
 }
