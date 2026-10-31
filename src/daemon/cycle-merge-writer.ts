@@ -520,9 +520,9 @@ const serveRevertState = (state: DaemonState) => state.mergeWriter.serveRevert ?
 
 /**
  * Settles a serve-revert flight: the pushed revert is recorded owing its re-land
- * (`fileOwedRelands` files it this same cycle), a held revert is kept with its reason for master status to name, and anything else —
- * a trial that never settled or a push the base move rejected — is tried again. Answers whether
- * the state changed.
+ * (`fileOwedRelands` files it this same cycle), a held revert is kept with its reason for master
+ * status to name, and anything else — a trial that never settled or a push the base move
+ * rejected — is tried again.
  */
 function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWriterReads, flight: { key: string; head: string; revert: RevertFlight }, settled: RevertSettled) {
   const { state, performed } = cycle;
@@ -537,13 +537,13 @@ function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWriterRead
     // with no flight in flight the queue's repair takes its turn next cycle.
     revertState.retry = { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, baseTip: revert.baseTip, reason: settled.reason.slice(0, 2000), at: at() };
     action('failed', `The revert of ${flight.key}'s merge ${short(revert.mergeSha)} was not pushed: ${settled.reason}; it is tried again once the base tip moves or the hold elapses`);
-    return true;
+    return;
   }
   if (revertState.retry?.serve === revert.serve) revertState.retry = null;
   if (!settled.ok) {
     revertState.held = { serve: revert.serve, culprit: flight.key, reason: settled.reason.slice(0, 2000), at: at() };
     action('failed', `Held: ${settled.reason}`);
-    return true;
+    return;
   }
   revertState.reverts = [...revertState.reverts, { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland: null,
     failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason, at: at() }].slice(-20);
