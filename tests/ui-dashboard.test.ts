@@ -135,7 +135,7 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   assert.equal(shippedLine(pendingPage), servedThisWeek(pending).length);
   assert.ok(!rowsOf(pendingPage, 'moving').includes('GY-18'), 'the pending merge has no row; it is Done');
   // The footer names it only as the latest merge (GY-168), never as shipped.
-  assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · Done · merged /);
+  assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · Done · \d/);
   // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
   const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
   assert.ok(classify(stalled, NOW).byGroup.blocked.some(item => item.key === 'GY-15'));

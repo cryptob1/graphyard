@@ -15,11 +15,12 @@ import { unhandled, type MasterSession } from './session.js';
  * post-deploy (GY-1660), and so is an item of nothing but declared verifications (GY-1685).
  */
 export async function derivedIntent(id: 'create' | 'requirements', args: string[],
-  deps: { coordinator: (path: string) => Promise<any>; mutate: (path: string, data: unknown, requestId?: string, credential?: string) => Promise<any>; token: () => Promise<string> }) {
+  deps: { coordinator: (path: string) => Promise<any>; mutate: (path: string, data: unknown, requestId?: string, credential?: string) => Promise<any>; token: () => Promise<string>; forPerson?: string }) {
   const file = id === 'create' ? args[0] : args[1], reason = args.slice(id === 'create' ? 1 : 2).join(' ').trim();
   if (!file || id === 'requirements' && !args[0]) throw new Error(id === 'create' ? 'Use master create FILE REASON' : 'Use master requirements GY-N FILE REASON');
   if (!reason) throw new Error(`master ${id} needs a REASON; every agent decision is attributable`);
   const input = JSON.parse(await readFile(file, 'utf8'));
+  if (id === 'create' && deps.forPerson && input.owner === undefined) input.owner = deps.forPerson;
   const listed: Work | undefined = id === 'requirements' ? (await deps.coordinator('work-snapshot')).work.find((item: Work) => item.id === args[0] || item.key === args[0]) : undefined;
   // A settled delivery is a summary in the snapshot (GY-422); its requirements are read whole.
   const work = listed && await wholeDocument(listed, deps.coordinator);
@@ -33,7 +34,7 @@ export async function derivedIntent(id: 'create' | 'requirements', args: string[
 /** The master's own intent, applied at once with its operator-agent identity. */
 export async function intentCommand(session: MasterSession): Promise<unknown> {
   const { id, args, print, root, master, masterToken, masterApi, masterMutation, coordinator } = session;
-  if (id === 'create' || id === 'requirements') return print(await derivedIntent(id, args, { coordinator: masterApi, mutate: masterMutation, token: () => agentToken(root, master, 'operatorAgent') }));
+  if (id === 'create' || id === 'requirements') return print(await derivedIntent(id, args, { coordinator: masterApi, mutate: masterMutation, forPerson: master.forPerson, token: () => agentToken(root, master, 'operatorAgent') }));
   // GY-1502: a supervised install's autonomy apply is the promotion's, behind its checks and audit.
   if (id === 'autonomy') assertPromotionRoute(master, args);
   if ((autonomySubcommands as readonly string[]).includes(id ?? '')) return print(await runAutonomyCommand(root, master, id!, args,

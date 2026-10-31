@@ -132,7 +132,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   const release = releaseView(status);
   const serve = serveView(status);
   const held = stepHeld(item, now, null, release);
-  const owner = assignment(item, now);
+  const worker = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
   const proofs = proofPreview(item, work);
   const provider = item.policy.reviewProvider ?? 'github';
@@ -192,7 +192,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
     <div className="item-head">
       <div className="item-title">
-        <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}<span>{item.type.replace(/^./, c => c.toUpperCase())} · priority {item.priority}</span>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
+        <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}{item.owner && <span>Owner · {item.owner}</span>}<span>{item.type.replace(/^./, c => c.toUpperCase())} · priority {item.priority}</span>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
         <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
         {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
       </div>
@@ -242,20 +242,21 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {item.policy.review && <>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}
         <button disabled={busy || provider === 'github' && !codexAvailable} onClick={() => action(item.id, 'reviewpolicy', { provider: provider === 'github' ? 'codex' : 'github', expectedPolicyRevision: item.policyRevision, reason: 'Operator changed review provider through dashboard' })}>Use {provider === 'github' ? 'Codex cloud' : 'formal GitHub'} review</button>
         {provider !== 'github' && item.submission && <button disabled={busy || !codexAvailable} onClick={() => action(item.id, 'rereview')}>Request fresh {item.policy.reviewProvider === 'codex' ? 'Codex' : 'agent'} review</button>}</>}
-      <button disabled={busy || owner.active} onClick={() => setEditingRequirements(v => !v)}>Revise requirements</button>
+      <button disabled={busy || worker.active} onClick={() => setEditingRequirements(v => !v)}>Revise requirements</button>
     </details>}
     {editingRequirements && <RequirementsEditor key={`${item.id}:${item.policyRevision}`} item={item} all={work} api={api} onSaved={async () => { const epoch = sessionEpoch.current; setEditingRequirements(false); await refresh(epoch); }}/>}
     {/* Everything technical, one click down, in the control plane's own vocabulary. */}
     <details className="more-details" aria-label="Technical details"><summary>Technical details</summary>
       <h3>About this item</h3>
       <dl className="facts">
-        <div><dt>Owner</dt><dd className="assignment-details">{owner.active ? owner.label : owner.owner ? owner.text : 'Nobody yet'}</dd></div>
+        <div><dt>Owner</dt><dd>{item.owner ?? 'Nobody yet'}</dd></div>
+        <div><dt>Worker</dt><dd className="assignment-details">{worker.active ? worker.label : worker.owner ? worker.text : 'Nobody yet'}</dd></div>
       </dl>
       {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
       {/* The recorded blocker as its agent wrote it, here and nowhere else (GY-1739): every other line reads its summary. */}
       {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{item.blocker}</span></p>}
       <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span data-plain-stage>{plainStage(item, release, serve)}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
-      <h3>Ownership</h3><p>{owner.text}</p>{owner.owner && <p className="muted">Worker ID: {owner.owner} · assignment {owner.epoch}</p>}<p>{owner.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
+      <h3>Worker assignment</h3><p>{worker.text}</p>{worker.owner && <p className="muted">Worker ID: {worker.owner} · assignment {worker.epoch}</p>}<p>{worker.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
       {postDeployment}
       <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r === item.blocker ? 'The recorded blocker, above' : shortShas(r)}</p>)}</div>)}
       <h3>Coordination</h3>{diagnose(item, work, observedAt, jobs).filter(d => d.message !== item.blocker).map((d, i) => <div className="criterion" key={i}><strong>{shortShas(d.message)}</strong><p>{shortShas(d.next)}</p></div>)}

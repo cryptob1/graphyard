@@ -24,6 +24,7 @@ export const masterCommands = defineCommands([
       '              [--replace-supervisor] Install the operating mode and, in the coordinator',
       "                                checkout, the loop's systemd unit; --replace-supervisor replaces",
       "                                another loop's. PROFILE: the operator's Chrome profile",
+      '  master init --for PERSON --token-stdin   Register a personal master on the shared loop',
       '  master start AGENT_KIND       Launch the dedicated visible Herdr master session',
       '  master worker add FILE        Add an existing or launchable Herdr worker profile',
       '  master reviewer setup [--name NAME]     Register the separate reviewer GitHub App; NAME',

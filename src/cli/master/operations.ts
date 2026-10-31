@@ -43,6 +43,7 @@ export async function operationsCommand(session: MasterSession, effects: Recover
     const work = snapshot.work.find((item: any) => item.id === positionals[0] || item.key === positionals[0]);
     const profile = master.workers.find(item => item.name === positionals[1]);
     if (!work) throw new Error(`Unknown work item ${positionals[0]}`);
+    if ((work.owner ?? null) !== (master.forPerson ?? null)) throw new Error('This master dispatches only its own items');
     if (!profile) throw new Error(`Unknown worker profile ${positionals[1]}`);
     const conflicts = resourceConflicts(work, snapshot.work, Date.parse(snapshot.now)); if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map((conflict: any) => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
     if (profile.credentialFile) {
