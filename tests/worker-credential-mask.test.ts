@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { credentialMaskFor, credentialMaskWords, coordinatorConfinement, readOnlyMountWrapper, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { masterConfigSchema, runtimeLoginHomes } from '../src/master/profiles.js';
-import { prepareConfinedGitPaths } from '../src/master/launch.js';
+import { headlessConfinementWrapper, prepareConfinedGitPaths } from '../src/master/launch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1856: a confined session must not read the operator's credential locations. The read-only
@@ -145,6 +145,9 @@ test('unit:worker-wrapper-masks-credentials — the read-only mount hides the cr
     // The master session carries no mask: it acts as the coordinator identity and reads its credential.
     const master = readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.root, bwrap: 'bwrap' });
     assert.ok(!master.some((word, index) => word === '--tmpfs' && master[index + 1] === f.configHome), 'the master session keeps the coordinator credential readable');
+    // The headless producer run carries the same mask through its runner.
+    const headless = headlessConfinementWrapper(f.root, f.worktree, 'bwrap', f.mask);
+    assert.ok(headless.includes(f.configHome), 'the headless run hides the operator config home too');
   } finally { rmSync(base, { recursive: true, force: true }); }
 });
 

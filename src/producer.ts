@@ -537,7 +537,10 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   // The runner and the name evidence is attributed to come from the registry's choice when it made one.
   // A launch the registry's contract refuses (a tools allowlist with no tools flag) gives its session back.
   let runner: Runner;
-  try { runner = dependencies.runner ?? (registry ? registryRunner(registry.account) : narrowRunner(pi)); }
+  // The install's credential locations are hidden from this run too (GY-1856); the run's own
+  // credential file — the one its environment names — and a registry account's login home stay.
+  const credentialMask = credentialMaskFor(config, { credentialFile: profile.credentialFile, runtimeHomes: registry?.account.home ? [registry.account.home] : [] });
+  try { runner = dependencies.runner ?? (registry ? registryRunner(registry.account, [], credentialMask) : narrowRunner(pi, credentialMask)); }
   catch (error) { await registry?.release(`producer run for ${binding.key} was refused before it started: ${error instanceof Error ? error.message : String(error)}`.slice(0, 400)); throw error; }
   const via = registry ? `${registry.account.fleet.runtime} ${registry.account.fleet.modelId ?? registry.account.fleet.model} on ${registry.account.name}` : `pi ${pi.model} via ${pi.command}`;
   let checkout: Awaited<ReturnType<typeof allocateManagedCheckout>>;

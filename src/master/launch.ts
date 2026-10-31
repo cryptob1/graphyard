@@ -223,7 +223,7 @@ export async function sessionConfinement(kind: string, args: readonly string[], 
  * The spawner that applies these words is src/runner/roles.ts confiningSpawn, which hands them to
  * the runner's own spawn.
  */
-export function headlessConfinementWrapper(root: string, cwd: string | undefined, bwrap: string | null = bwrapOnPath()): readonly string[] {
+export function headlessConfinementWrapper(root: string, cwd: string | undefined, bwrap: string | null = bwrapOnPath(), credentialMask?: CredentialMask): readonly string[] {
   const head = `A headless session cannot be started with the coordinator checkout at ${root} unwritable at the OS level`;
   if (cwd === undefined) throw new Error(`${head}: the run has no working directory to confine around. Graphyard never starts a session unconfined.`);
   if (!bwrap) throw new Error(`${head}: bubblewrap (bwrap) is not installed. Graphyard never starts a session unconfined; install bubblewrap (e.g. apt install bubblewrap).`);
@@ -231,7 +231,7 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
   const gitProblem = checkoutGitProblem(root);
   if (gitProblem) throw new Error(`${head}: the Git directory it writes through cannot be resolved — ${gitProblem}. Graphyard never starts a session unconfined.`);
   prepareConfinedGitPaths(root);
-  return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap });
+  return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap, ...(credentialMask ? { credentialMask } : {}) });
 }
 /** The command that starts a runtime of `kind`: its recipe's `program` (Cursor's `agent`, GY-976), otherwise the kind's own name. */
 export const launchProgram = (kind: string) => nonInteractiveLaunch[kind]?.program ?? kind;
