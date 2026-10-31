@@ -92,3 +92,40 @@ test('unit:five-step-cycle — one cycle records exactly snapshot, close, dispat
   assert.equal(state.master.lastWake, null, 'the idle master session is not woken');
   assert.ok(!('deployment' in state) && !('upgrade' in state) && !('invariants' in state), 'the cursor carries no deployment, upgrade or invariant state');
 });
+
+test('unit:five-step-cycle — merging a head runs exactly one trial for it and none afterwards: the merge and the following cycle together run one trial', async () => {
+  const candidate = { sha: sha('head2'), baseSha: tip, pr: 2, branch: 'graphyard/gy-2-1', author: 'worker' };
+  const work = [item({ id: 'w2', key: 'GY-2', title: 'Submitted', stage: 'build', epoch: 1, submission: { epoch: 1, pr: 2 }, candidate,
+    gates: gates(['ready', 'build', 'review', 'test']),
+    observation: { source: 'control-plane', candidate, files: ['src/app.ts'], checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: false, baseTip: tip, baseTipContained: true, at: iso(start) } })];
+  let trials = 0, now = start;
+  const ports: MergePorts = {
+    baseBranch: 'main', retrials: 3, now: () => now,
+    fetch: async () => tip,
+    merge: async head => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
+    trial: async () => { trials += 1; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 10, logTail: '', files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }; },
+    push: async () => 'pushed',
+    holds: async () => false,
+    record: async () => {},
+  };
+  // The read the per-merge advisory trial (GY-1528) fired after every delivered merge; on a tree
+  // that still runs it, the day below counts two trials where one is owed.
+  const reads = { ...ports, merger: async () => 'control-plane' as const, advisory: async () => { trials += 1; return { build: 'pass' as const, failed: [] }; } } as unknown as MergeWriterReads;
+  const effects: DaemonEffects = {
+    snapshot: async () => ({ work, now: iso(now) }),
+    agents: () => [], herdr: () => ({ agents: [], available: true }),
+    credentials: async () => ({}),
+    closeSession: () => {}, dispatch: async () => { throw new Error('nothing is dispatched'); },
+    mergeWriter: reads,
+    persist: async () => {},
+  };
+  const state = emptyDaemonState(config);
+  await runCycle(config, state, effects, () => now);
+  await mergeWriterIdle(state);
+  // The control plane has observed the delivery, so the following cycle owes the head nothing.
+  now = start + 60_000;
+  work[0] = { ...work[0]!, observation: { ...work[0]!.observation!, merged: true, mergeSha: sha(`merge:${sha('head2')}`) } } as typeof work[0];
+  await runCycle(config, state, effects, () => now);
+  await mergeWriterIdle(state);
+  assert.equal(trials, 1, 'exactly one trial runs for the head, across the merge and the following cycle');
+});

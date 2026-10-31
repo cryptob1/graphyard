@@ -2,19 +2,17 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { advisoryIdle, advisoryStep } from '../src/daemon/cycle-merge-writer.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
-import type { Cycle } from '../src/daemon/cycle.js';
-import type { MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import type { Work } from '../src/model.js';
 
 // GY-2086. The loop used to file "Flaky test" items from a flake ledger and one "Advisory test"
 // chore per failing post-merge budget test; overnight it filed 46 such items nobody asked for and
 // the operator closed them as clutter. Both filers are deleted: a merge trial in which a test fails
-// and then passes on its rerun files no work item, and neither does a failing advisory test after a
-// merge — it may print one log line. A rerun that passes still counts as a pass (the PR gate, the
-// main guard and the merge writer's trial judge on the rerun); nothing replaces the filers.
+// and then passes on its rerun files no work item (nor does anything else the loop sees on its own —
+// the per-merge advisory trial itself is gone with GY-3002). A rerun that passes still counts as a
+// pass (the PR gate, the main guard and the merge writer's trial judge on the rerun); nothing
+// replaces the filers.
 
 const root = fileURLToPath(new URL('..', import.meta.url));
 const start = Date.parse('2030-01-10T00:00:00Z');
@@ -69,47 +67,4 @@ test('unit:no-flake-items — the flake filer is gone: a day of loop cycles over
   assert.deepEqual(reads, [], 'the failed job logs are not read for flake filing either');
   const created = work.filter(entry => !['GY-1', 'GY-2', 'GY-3'].includes(entry.key));
   assert.deepEqual(created, [], 'the loop creates no item of its own for the flakes');
-});
-
-test('unit:no-flake-items — a failing advisory test after a merge files no work item and prints one log line', async () => {
-  const state = emptyDaemonState(config);
-  const filed: string[] = [], advised: string[] = [];
-  const mergeSha = sha(30);
-  const reads = { merger: async () => 'control-plane', advisory: async (sha: string) => { advised.push(sha); return { build: 'pass' as const, failed: ['tests/hotspots.test.ts', 'scripts/ci-tests.mjs advisory'] }; } } as unknown as MergeWriterReads;
-  const effects = { mergeWriter: reads, persist: async () => {}, fileFaultClass: async (input: { title: string }) => { filed.push(input.title); throw new Error(`no work item is filed for a failing advisory test (GY-2086): ${input.title}`); } } as unknown as DaemonEffects;
-  let clock = start;
-  const step = (work: Work[]) => advisoryStep({ state, effects, now: () => clock, performed: [], snapshot: { work } } as unknown as Cycle, null);
-  await step([]);
-  // The merge is delivered after the ledger was first read: the delivery is owed its advisory run.
-  const delivered = { ...item({ id: 'GY-4', key: 'GY-4', stage: 'done' }), mergeLedger: { key: 'GY-4', state: 'reconciled', head: sha(31), baseTip: sha(0), mergeSha, risk: 'normal', intentAt: iso(clock + 30_000), pushedAt: iso(clock + 31_000), observedTip: mergeSha, refusal: null, events: 3 } } as unknown as Work;
-  const work: Work[] = [delivered];
-  await step(work);
-  await advisoryIdle(state);
-  await step(work);
-  assert.deepEqual(advised, [mergeSha], 'the advisory tests ran once on the merge commit');
-  assert.deepEqual(filed, [], 'the failing advisory test files no work item');
-  assert.deepEqual(state.mergeWriter.advisory?.due, [], 'the merge is not held owed by its failure');
-});
-
-test('unit:no-flake-items — a restart mid-run reruns the advisory obligation and still files nothing', async () => {
-  const state: DaemonState = emptyDaemonState(config);
-  const filed: string[] = [], advised: string[] = [];
-  const mergeSha = sha(40);
-  const work: Work[] = [{ ...item({ id: 'GY-5', key: 'GY-5', stage: 'done' }), mergeLedger: { key: 'GY-5', state: 'reconciled', head: sha(41), baseTip: sha(0), mergeSha, risk: 'normal', intentAt: iso(start), pushedAt: iso(start + 1), observedTip: mergeSha, refusal: null, events: 3 } } as unknown as Work];
-  let hang = true;
-  const reads = { merger: async () => 'control-plane', advisory: (sha: string) => { advised.push(sha); return hang ? new Promise<never>(() => {}) : Promise.resolve({ build: 'pass' as const, failed: ['tests/module-budgets.test.ts'] }); } } as unknown as MergeWriterReads;
-  const effects = { mergeWriter: reads, persist: async () => {}, fileFaultClass: async (input: { title: string }) => { filed.push(input.title); throw new Error(`no work item is filed for a failing advisory test (GY-2086): ${input.title}`); } } as unknown as DaemonEffects;
-  let clock = start;
-  const step = (target: DaemonState) => advisoryStep({ state: target, effects, now: () => clock, performed: [], snapshot: { work } } as unknown as Cycle, null);
-  await step(state);
-  assert.deepEqual(advised, [mergeSha], 'the run starts');
-  clock = start + 60_000;
-  // The loop restarts: its persisted state comes back through JSON, the run in flight does not.
-  const restarted = JSON.parse(JSON.stringify(state));
-  hang = false;
-  await step(restarted);
-  await advisoryIdle(restarted);
-  await step(restarted);
-  assert.deepEqual(advised, [mergeSha, mergeSha], 'the interrupted obligation runs again');
-  assert.deepEqual(filed, [], 'and still files no work item');
 });
