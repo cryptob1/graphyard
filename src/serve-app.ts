@@ -142,8 +142,8 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   // GY-2985: what was live before keeps serving beside the new build — the previously served
   // commit, on the port beside the declared one, as BASELINE_URL — so a compare case judges the
   // new build against what users had. Nothing served before (the first serve), no baseline; the
-  // baseline start stops the one the record tracked, so a failed start leaves none to compare
-  // against.
+  // record keeps the baseline it tracked until a new one answers, and the baseline start stops
+  // the tracked process only once its own build can replace it.
   const baselineUrl = `http://127.0.0.1:${declaration.port + 1}`;
   let baseline: ServeBaseline | null = record?.baseline ?? null;
   try {
@@ -151,7 +151,6 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
     if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
     const candidate = record?.commit ?? record?.baseline?.commit ?? null;
     if (candidate && ports.baseline) {
-      baseline = null;
       try {
         const started = await ports.baseline(candidate, declaration);
         if (!(await waitAnswer(baselineUrl, answerTimeoutMs))) throw new Error(`the baseline serve did not answer ${baselineUrl} within ${Math.round(answerTimeoutMs / 1000)}s`);
