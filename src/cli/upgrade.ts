@@ -273,7 +273,9 @@ const answersFromRestart = (port: number, tracked: { pid?: number | null }): boo
     let fds: string[] = [];
     try { fds = readdirSync(`/proc/${name}/fd`); } catch { continue; }
     for (const fd of fds) {
-      const socket = readlinkSync(`/proc/${name}/fd/${fd}`).match(/^socket:\[(\d+)\]$/)?.[1];
+      let link: string;
+      try { link = readlinkSync(`/proc/${name}/fd/${fd}`); } catch { continue; } // closed since the listing
+      const socket = link.match(/^socket:\[(\d+)\]$/)?.[1];
       if (socket && inodes.has(socket)) return true;
     }
   }
