@@ -193,7 +193,6 @@ export function attributeExecution(input: {
  * rather than uploaded, and a candidate that requires one cannot be accepted.
  */
 export const artifactKinds: Record<string, { file: string; mediaType: 'application/json' | 'application/xml' }> = reportAdapter(defaultReportFormat).artifacts;
-export const artifactKindsFor = (format: ReportFormat): Record<string, { file: string; mediaType: 'application/json' | 'application/xml' }> => reportAdapter(format).artifacts;
 /**
  * Which artifacts a collector must read, given the names it is configured to publish.
  * Verification always needs every approved kind the boundary holds: an execution report

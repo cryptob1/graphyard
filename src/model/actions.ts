@@ -90,16 +90,6 @@ export const actionHistoryLimit = 50;
 export { actionRecordLimit };
 /** How long a claim holds a row before another executor may take it. */
 export const actionClaimMs = 120_000;
-/**
- * How often an executor tells the control plane it is still inside the handler.
- *
- * The claim is deliberately short, so a dead executor's row is offered again within two minutes.
- * Handlers are not bounded by that: a dispatch prepares a worktree and waits on a runtime, and a
- * guarded merge chains several provider calls with their own timeouts. An executor that is still
- * running renews at this interval — comfortably inside the lease, so a renewal may be lost and
- * the next one still arrives in time — and one that stopped renews nothing and loses the row.
- */
-export const actionRenewIntervalMs = 30_000;
 
 export const actionId = (kind: NextActionKind, workId: string, binding: string) =>
   createHash('sha256').update(['action', kind, workId, binding].join('\0')).digest('hex').slice(0, 32);

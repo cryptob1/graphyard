@@ -76,31 +76,10 @@ export interface CandidateValidation {
   /** Each required case's verdict, and the cases or suites that failed. */
   cases: { id: string; result: string }[]; failed: string[];
 }
-/**
- * GY-1904: an exact candidate on the plane's ledger (`release.candidate` events, append-only). It
- * names at most `maxCandidateChanges` members, the source commit that holds them all (the member
- * merged last on main) and `identity`, the content address of that source and the membership, so
- * validation and promotion bind to exactly what was cut. A record is written once and never changed;
- * its validation is a separate append (`release.candidate.validation`) a read folds in.
- */
-export interface ExactCandidate {
-  id: string; sequence: number; cutAt: string; cutBy: string; trigger: 'manual' | 'schedule';
-  members: CandidateMember[];
-  sourceSha: string;
-  identity: string;
-  /** The candidate this one follows, or null for the first. */
-  previous: { id: string; sourceSha: string } | null;
-  /** The backlog boundary the first cut fixed and every later one carries: deliveries merged at or before it are history; null when every delivery is backlog. */
-  floor: string | null;
-  /** Delivered changes still waiting after this cut; the next candidate starts with them. */
-  waiting: number;
-  /** The validation run against exactly these members; null until one is recorded. */
-  validation: CandidateValidation | null;
+export interface CandidateValidation {
+  /** The `rc/ID` record the loop cut at the candidate's source and validated. */
+  release: string; sha: string; identity: string; result: 'pass' | 'fail'; at: string; by: string;
+  /** Each required case's verdict, and the cases or suites that failed. */
+  cases: { id: string; result: string }[]; failed: string[];
 }
-export const exactCandidateKind = 'release.candidate';
-export const candidateValidationKind = 'release.candidate.validation';
-/** Pure: the content identity's input — the source commit, then every member as `workId mergeSha`, in membership order. */
-export const candidateIdentityText = (sourceSha: string, members: readonly Pick<CandidateMember, 'workId' | 'mergeSha'>[]) =>
-  [sourceSha, ...members.map(member => `${member.workId} ${member.mergeSha}`)].join('\n');
-/** Pure: the combined source of members in main's merge order — the last member's merge commit, which holds every earlier one. */
-export const candidateSource = (members: readonly Pick<CandidateMember, 'mergeSha'>[]) => members.at(-1)!.mergeSha;
+

@@ -129,36 +129,6 @@ export interface CheckTestsReader {
   checkRun: (sha: string, name: string) => Promise<{ id: number; conclusion: string | null } | null>;
   annotations: (id: number) => Promise<{ message?: string | null }[]>;
 }
-/**
- * The base breakage this observation shows, or null. Read only for an open head that does not
- * contain the base tip, built against a base other than that tip, with a failed required check:
- * anything else is not a base breakage and costs no request. A read that fails judges nothing.
- */
-export async function readBaseBreak(input: { required: string[]; checks: Observation['checks']; head: string; built: string | null; tip: string; at: string }, reader: CheckTestsReader): Promise<BaseBreak | null> {
-  const { required, checks, head, built, tip, at } = input;
-  if (!built || built === tip) return null;
-  const failed = failedRequiredChecks(required, checks);
-  if (!failed.length) return null;
-  const tests = async (sha: string, name: string, known?: { id?: number; result: string }): Promise<CheckTests> => {
-    const run = known?.id !== undefined ? { id: known.id, conclusion: known.result } : await reader.checkRun(sha, name);
-    if (!run) return { sha, conclusion: null, failed: null };
-    const failing = run.conclusion && failedConclusions.includes(run.conclusion) ? parseFailedTests(await reader.annotations(run.id)) : null;
-    return { sha, conclusion: run.conclusion, failed: failing };
-  };
-  try {
-    const readings: BaseBreakReading[] = [];
-    for (const name of failed) {
-      const own = latestCheck(checks.filter(check => check.name === name));
-      const reading = { check: name, head: await tests(head, name, own), built: { sha: built, conclusion: null, failed: null } as CheckTests, tip: { sha: tip, conclusion: null, failed: null } as CheckTests };
-      if (!reading.head.failed?.length) return null;
-      reading.built = await tests(built, name);
-      if (!reading.built.failed?.length) return null;
-      reading.tip = await tests(tip, name);
-      readings.push(reading);
-    }
-    return judgeBaseBreak(failed, readings, at);
-  } catch { return null; }
-}
 
 /** The base breakage recorded on the item's current observation, for exactly its current head and observed base tip. */
 export function currentBaseBreak(work: Pick<Work, 'candidate' | 'observation'>): BaseBreak | null {

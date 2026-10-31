@@ -20,7 +20,6 @@ import { applicationProblems, projectDeliveryShape } from '../project-applicatio
 export const deliveryModes = ['local', 'release-candidate', 'per-pr'] as const;
 export type DeliveryMode = (typeof deliveryModes)[number];
 export const deploymentAdapters = ['railway', 'command'] as const;
-export type DeploymentAdapterName = (typeof deploymentAdapters)[number];
 
 /** One classified check: its name, the command that runs it when one is known, and why it sits where it does. */
 export const gateCheckSchema = z.object({
