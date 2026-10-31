@@ -62,7 +62,7 @@ before(async () => {
   await store.init();
   // A five-second lease is the attempt's own time bound: the expiry below is the bound, in real time.
   engine = new Engine(store, 5, 'owner/expired-real-work');
-  engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
+ engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

@@ -58,7 +58,6 @@ before(async () => {
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, ...workers];
-  engine.submissionObserver = null;
   for (let n = 0; n < 100; n++) {
     const work = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Contended item ${n}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID());
     items.push(await engine.execute(operator, 'ready', work.id, {}, randomUUID()));

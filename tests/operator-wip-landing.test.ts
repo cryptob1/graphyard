@@ -22,26 +22,6 @@ async function repository(branch: string) {
 }
 const remoteHeads = (origin: string) => spawnSync('git', ['-C', origin, 'branch', '--list'], { encoding: 'utf8' }).stdout;
 
-test('unit:complete-pushes-graphyard-branch — a graphyard/ branch is pushed with upstream, any other pushes nothing', async () => {
-  const { pushGraphyardBranch } = await import('../src/cli/complete.js');
-  const { origin, work } = await repository('graphyard/gy-1-1');
-  assert.deepEqual(pushGraphyardBranch(work), { pushed: 'graphyard/gy-1-1' });
-  assert.match(remoteHeads(origin), /graphyard\/gy-1-1/);
-  assert.equal(git(work, 'rev-parse', '--abbrev-ref', 'graphyard/gy-1-1@{upstream}'), 'origin/graphyard/gy-1-1');
-  const other = await repository('feature/x');
-  assert.deepEqual(pushGraphyardBranch(other.work), { pushed: null });
-  assert.equal(remoteHeads(other.origin).trim(), '');
-});
-
-test('unit:complete-pushes-graphyard-branch — a failed push is reported, not thrown', async () => {
-  const { pushGraphyardBranch } = await import('../src/cli/complete.js');
-  const { work } = await repository('graphyard/gy-2-1');
-  git(work, 'remote', 'set-url', 'origin', join(work, 'missing.git'));
-  const result = pushGraphyardBranch(work);
-  assert.equal(result.pushed, null);
-  assert.ok(result.failure);
-});
-
 test('unit:worktree-starts-from-registered-head — the rework start resolves the registered local head with no fetch and no push; nothing registered or missing from the store refuses', async () => {
   const { registeredReworkHead } = await import('../src/master/worktrees.js');
   const { origin, work } = await repository('graphyard/gy-3-1');

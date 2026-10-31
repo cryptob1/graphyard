@@ -75,7 +75,7 @@ before(async () => {
   await pg.initialise(); await pg.start(); await pg.createDatabase('trial_e2e_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/trial_e2e_test`); await store.init();
   engine = new Engine(store, 120, 'owner/project');
-  engine.submissionObserver = null; engine.directMergeEnvironment = null;
+ engine.directMergeEnvironment = null;
 
   fixtureRoot = await temporaryDirectory('trial-e2e-fixture', tmpdir());
   root = join(fixtureRoot, 'repo');

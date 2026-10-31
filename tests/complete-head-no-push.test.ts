@@ -7,12 +7,10 @@ import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { CliContext } from '../src/cli/context.js';
 
-// GY-1925: `complete GY-N EPOCH --head SHA` submits while the control plane is the merge writer and
-// the shared object store already holds the commit, so it attempts no git push — a worker sandbox
-// that cannot push (OpenSSH refuses its user namespace's /etc/ssh) still completes. The
-// pull-request form keeps its push of the graphyard/ (or adopted) branch first and its refusal when
-// that push fails. A pre-push hook that records every attempt and then fails makes "a push would
-// fail" deterministic and "no push was attempted" observable.
+// GY-1925, GY-2999: complete submits a commit — the named one, else the worktree's HEAD — and attempts
+// no git push, so a worker sandbox that cannot push (OpenSSH refuses its user namespace's /etc/ssh)
+// still completes. A pull request number is refused. A pre-push hook that records every attempt and
+// then fails makes "a push would fail" deterministic and "no push was attempted" observable.
 
 const git = (cwd: string, ...args: string[]) => {
   const result = spawnSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' });
@@ -53,4 +51,13 @@ test('unit:complete-head-no-push — complete GY-N EPOCH --head SHA attempts no 
   await completeCommand.run({ ...context, args: ['1', '--head'] } as CliContext, { id: 'id-1', key: 'GY-1' } as never);
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
   assert.equal(existsSync(attempts), false, 'complete --head attempted a git push');
+  // With no --head at all it submits that same HEAD.
+  calls.length = 0;
+  await completeCommand.run({ ...context, args: ['1'] } as CliContext, { id: 'id-1', key: 'GY-1' } as never);
+  assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
+  assert.equal(existsSync(attempts), false, 'complete attempted a git push');
+  // A pull request number is refused, the refusal naming --head, and nothing is submitted.
+  calls.length = 0;
+  await assert.rejects(completeCommand.run({ ...context, args: ['1', '12'] } as CliContext, { id: 'id-1', key: 'GY-1' } as never), /--head/);
+  assert.deepEqual(calls, []);
 });

@@ -172,16 +172,4 @@ test('unit:projection-contract — an open item\'s projection leaves out its per
   assert.ok(!isStandIn(whole));
   assert.deepEqual(whole.observation?.scopeFiles, scopeFiles, 'read whole, the peer carries its scope for the landing check');
 
-  // The submit-time observation hands the provider that whole peer.
-  let focus = await create('Submitting', ['src/submitting/']);
-  focus = await engine.execute(operator, 'ready', focus.id, {}, randomUUID());
-  focus = await engine.execute(worker, 'claim', focus.id, {}, randomUUID());
-  focus = await engine.execute(worker, 'workspace', focus.id, { epoch: focus.epoch, host: 'host-a', path: `/tmp/followups/${focus.id}`, branch: `graphyard/${focus.key.toLowerCase()}-${focus.epoch}` }, randomUUID());
-  let peers: Work[] = [];
-  const stop = new Error('observed');
-  engine.submissionObserver = async (_probe, all) => { peers = all ?? []; throw stop; };
-  try {
-    await assert.rejects(engine.execute(worker, 'submit', focus.id, { epoch: focus.epoch, pr: 7002 }, randomUUID()), error => error === stop);
-  } finally { engine.submissionObserver = null; }
-  assert.deepEqual(peers.find(item => item.id === peer.id)?.observation?.scopeFiles, scopeFiles, 'the landing check saw the peer\'s scope files');
 });

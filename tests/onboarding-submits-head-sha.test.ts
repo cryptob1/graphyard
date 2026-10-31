@@ -53,7 +53,7 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/onboarding_head_test`); await store.init();
   // The control plane is the merge writer: it observes submitted heads from this checkout's own object store.
   engine = new Engine(store, 120, repository);
-  engine.submissionObserver = null; engine.directMergeEnvironment = null;
+ engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   engine.principals = [operator];
   http = server(engine, [{ ...operator, token }]);
