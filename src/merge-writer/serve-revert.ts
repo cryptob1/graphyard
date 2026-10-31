@@ -120,7 +120,7 @@ export interface RelandInput { title: string; type: Work['type']; priority: numb
 /** The most criteria, the most proofs on one and the longest text the create route accepts (model/work.ts, model/policy.ts). */
 const relandCriteriaLimit = 50, criterionProofLimit = 20, criterionTextLimit = 2000;
 const withFailingCase = (carried: RelandInput['criteria'], failingCase: string, proof: string) => {
-  const clause = ` The served app also passes the required case "${failingCase}", fixed at its cause.`;
+  const clause = ` From this head, the served app also passes the required case "${failingCase}", fixed at its cause.`;
   const fits = (criterion: RelandInput['criteria'][number]) => criterion.text.length + clause.length <= criterionTextLimit;
   const host = carried.find(criterion => criterion.proofs.includes(proof) && fits(criterion)) ?? carried.find(criterion => criterion.proofs.length < criterionProofLimit && fits(criterion));
   return carried.map(criterion => criterion !== host ? criterion : { ...criterion, text: `${criterion.text}${clause}`, proofs: [...new Set([...criterion.proofs, proof])] });
@@ -133,7 +133,9 @@ const withFailingCase = (carried: RelandInput['criteria'], failingCase: string, 
  * not carried — the re-land satisfies everything now, it does not re-defer it. An original at the
  * create route's criteria limit has no room for another, so the case joins the first carried
  * criterion its proof and text fit (the one already proving it, if any); the description names the
- * case whatever fits.
+ * case whatever fits. The criterion's text is anchored to the head and leaves the step to the
+ * description: a case or step naming production would otherwise read as a live observation, which
+ * the create route refuses (model/post-merge-proofs.ts).
  */
 export function relandItemFor(original: Work, input: ServeFailure & { mergeSha: string; baseBranch: string }): RelandInput {
   const used = new Set(original.criteria.map(criterion => criterion.id));
@@ -149,7 +151,7 @@ export function relandItemFor(original: Work, input: ServeFailure & { mergeSha: 
       `This item carries ${original.key}'s criteria plus that failing case, and is linked to ${original.key} and the failing serve. Land the change again with the case passing.`,
     ].join('\n\n').slice(0, 20000),
     criteria: carried.length < relandCriteriaLimit
-      ? [...carried, { id: `AC-${next}`, text: `The served app passes the required case "${input.failingCase}"${step}, fixed at its cause rather than skipped or weakened`.slice(0, 2000), proofs: [proof] }]
+      ? [...carried, { id: `AC-${next}`, text: `From this head, the served app passes the required case "${input.failingCase}", fixed at its cause rather than skipped or weakened`, proofs: [proof] }]
       : withFailingCase(carried, input.failingCase, proof),
     dependencies: [original.id],
     reason: `The served commit ${input.serve.slice(0, 12)} failed the required case "${input.failingCase}", so ${original.key}'s merge ${input.mergeSha.slice(0, 12)} was reverted; this re-lands it with the case as a criterion`.slice(0, 2000),

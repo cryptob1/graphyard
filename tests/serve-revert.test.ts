@@ -674,4 +674,11 @@ test('unit:revert-only-the-failing-item — an original at the 50-criterion limi
   const crowded = accepted(full);
   assert.deepEqual(crowded.criteria, full);
   assert.match(crowded.description, /"case-full"/);
+
+  // A case or step naming production is what the served app failed, not a live observation the route refuses.
+  const live = { ...failure, failingCase: 'production-exact-verification', failingStep: 'on the live server in production' };
+  const { reason: _liveReason, ...below } = relandItemFor(original(criteria.slice(0, 2)), live);
+  assert.deepEqual(createSchema.parse(below).criteria[2]!.proofs, ['e2e:production-exact-verification']);
+  const { reason: _fullReason, ...atLimit } = relandItemFor(original(criteria), live);
+  assert.deepEqual(createSchema.parse(atLimit).criteria[0]!.proofs, ['unit:proof-1', 'e2e:production-exact-verification']);
 });
