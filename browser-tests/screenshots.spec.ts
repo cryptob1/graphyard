@@ -4,14 +4,14 @@ import { NOW, boardApi } from './ui-board';
 import { VERIFY_TIMEOUT_MS } from '../web/pages/login';
 
 // GY-161: every page of the dashboard, at desktop and phone width, over the board fixture
-// (browser-tests/ui-board.ts). The images land in browser-tests/screenshots/after/ and are the
+// (browser-tests/ui-board.ts). The images land in test-results/screenshots/after/ (gitignored) and are the
 // "after" half attached to the pull request. tests/ui-dashboard.test.ts checks this list
 // covers every sidebar entry and every page of the registry.
 export const viewports = [{ name: 'desktop', width: 1440, height: 1000 }, { name: 'phone', width: 390, height: 844 }] as const;
 /** Pages opened from another page rather than from the navigation. */
 export const linkedPages = ['item-moving', 'item-needs-you', 'item-blocked', 'needs-you', 'guide'] as const;
 
-const out = 'browser-tests/screenshots/after';
+const out = 'test-results/screenshots/after';
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 async function open(page: Page) {
