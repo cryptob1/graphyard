@@ -97,16 +97,18 @@ export interface ConfinedSession { run: ProcessRunner; close(): Promise<void> }
  * invocation: each `run` is answered by the node host inside it, so an agent leg's browser outlives
  * each invocation (the leg's invocations share one `--session`), and `close` ends the namespace
  * with everything in it. A host that cannot start or that ended answers every waiting invocation
- * with that fact, and the next one starts a fresh host.
+ * with that fact, and the next one starts a fresh host. The host is the namespace's first process,
+ * so every child can read its `/proc/1/environ`: it carries `hostEnvironment` — the trial's own
+ * credential-free environment — never this process's.
  */
-export const confinedSession = (wrapper: readonly string[] = [], base: ProcessRunner = runProcess): ConfinedSession => {
+export const confinedSession = (wrapper: readonly string[] = [], hostEnvironment: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '' }, base: ProcessRunner = runProcess): ConfinedSession => {
   if (!wrapper.length) return { run: base, close: async () => {} };
   let host: ChildProcess | null = null, next = 0, unread = '';
   const pending = new Map<number, (result: ProcessResult) => void>();
   const settleAll = (output: string) => { const waiting = [...pending.values()]; pending.clear(); for (const settle of waiting) settle({ code: null, output, timedOut: false }); };
   const start = (): ChildProcess | null => {
     let begun: ChildProcess;
-    try { begun = spawn(wrapper[0]!, [...wrapper.slice(1), process.execPath, '-e', sessionHost], { stdio: ['pipe', 'pipe', 'pipe'] }); }
+    try { begun = spawn(wrapper[0]!, [...wrapper.slice(1), process.execPath, '-e', sessionHost], { stdio: ['pipe', 'pipe', 'pipe'], env: hostEnvironment }); }
     catch { host = null; settleAll('the confined session host could not start'); return null; }
     begun.stdout!.setEncoding('utf8');
     begun.stdout!.on('data', piece => { unread += piece; let at;

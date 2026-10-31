@@ -171,8 +171,10 @@ async function runGroup(target: E2eServe | Application, proofs: readonly string[
       let report: E2eReport | null = null;
       // GY-2997: one confined session for every step invocation — the masks and the fresh /proc held
       // across them — so an agent leg's browser, opened by one invocation of its shared `--session`,
-      // outlives it; the session's namespace ends when the run does.
-      const steps = confinedSession(input.wrapper ?? []);
+      // outlives it; the session's namespace ends when the run does. The host carries this trial's
+      // credential-free environment: it is the namespace's PID 1, whose /proc/1/environ every child
+      // can read.
+      const steps = confinedSession(input.wrapper ?? [], input.env);
       const suite = projectCaseSuite(input.worktree, token, {
         cases: loaded.map(entry => entry.caseFile),
         // The cases come from the head itself, so they never read the install's secrets; agent-step screenshots stay in the trial's scratch, which the trial removes.
