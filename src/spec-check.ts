@@ -86,10 +86,9 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
   const sessions = profileSessions(profile, agents, (await readReviewLedger(root)).reviews);
   if (!sessions.free) throw new Error(`${profileAtLimit('Reviewer', profile, sessions)}; ${work.key}'s spec check launches when a session ends`);
   const run = dependencies.run;
-  // The base branch tip, as it stands now: what the item's named files look like before any worker starts.
+  // The base branch tip the dispatch cycle last fetched: what the item's named files look like before any worker starts.
   let baseTip: string;
   try {
-    await Promise.resolve(run?.('git', ['-C', root, 'fetch', '--quiet', 'origin', config.baseBranch]));
     baseTip = String(await Promise.resolve(run?.('git', ['-C', root, 'rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}^{commit}`]))).trim();
     if (!/^[0-9a-f]{40}$/.test(baseTip)) throw new Error(`git rev-parse refs/remotes/origin/${config.baseBranch} answered ${baseTip || 'nothing'}`);
   } catch (error) { throw new Error(`Reading the base branch tip for ${work.key}'s spec check failed: ${error instanceof Error ? error.message : String(error)}`); }

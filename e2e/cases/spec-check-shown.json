@@ -3,8 +3,8 @@
   "title": "A feature item shows its spec check: the paraphrase, the gaps and the verdict",
   "description": "A released feature item is checked before a worker starts (GY-2992): a fresh-context reviewer restates the item and names its gaps. The case records a spec check — a gaps verdict with its paraphrase and gaps, bound to the policy revision it judged — on a feature item through the same route an operator or the loop uses, reads it back on the API, and opens the item in the dashboard, where the Spec check panel shows the paraphrase, the gaps and the verdict.",
   "tags": [
-    "api",
     "dashboard",
+    "api",
     "spec-check"
   ],
   "target": "uat",

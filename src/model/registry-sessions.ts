@@ -1,5 +1,4 @@
 import type { Work } from './work.js';
-import { specCheckLaunchLive } from './spec-check.js';
 import { fleetRoles, rolePolicy } from './registry.js';
 import { exhaustedTwin, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRole, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
@@ -37,8 +36,7 @@ export function sessionEnded(session: FleetSession, work: SessionWork | undefine
     if (!lease || Date.parse(lease.expiresAt) <= now) return `${work.key} holds no live lease`;
     return session.principal && lease.owner !== session.principal ? `${work.key} is leased to ${lease.owner}` : null;
   }
-  // A spec checker (GY-2992) is a reviewer session that answers its item's standing spec-check launch.
-  if (session.role === 'reviewer') return (work.autoDispatch?.review?.state === 'requested' || specCheckLaunchLive(work, now)) && age <= reviewSessionMs ? null : `${work.key} has no standing review request or spec-check launch`;
+  if (session.role === 'reviewer') return (work.autoDispatch?.review?.state === 'requested' || Date.parse(work.specCheckLaunch?.expiresAt ?? '') > now) && age <= reviewSessionMs ? null : `${work.key} has no standing review request or spec-check launch`;
   return (work.autoDispatch?.producers ?? []).some(request => request.state === 'requested') && age <= producerSessionMs ? null : `${work.key} has no standing producer request`;
 }
 
