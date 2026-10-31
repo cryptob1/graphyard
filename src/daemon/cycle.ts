@@ -451,13 +451,20 @@ async function dispatchStep(cycle: Cycle) {
   // the item — its report landed or its launch expired — or the item done; the pane then leaves
   // the record, so it closes once. The item is looked up across every owner's scope, as the
   // actions are shared by them all.
+  // GY-2994: a checker that ended while its launch stands — its pane gone, or a BLOCKED: line on
+  // it — posted no report; it closes too, its reason is recorded for master status, and the
+  // launch below relaunches it this cycle rather than when the launch expires an hour on.
   for (const [key, action] of Object.entries(state.actions)) {
     if (!key.startsWith('spec-check:') || !action.pane) continue;
     const item = snapshot.work.find(entry => entry.key === action.work && entry.stage !== 'done');
-    if (item && (Date.parse(snapshot.now) < Date.parse(action.at) || specCheckLaunchLive(item, clock))) continue;
+    if (item && Date.parse(snapshot.now) < Date.parse(action.at)) continue;
+    const ended = item && specCheckLaunchLive(item, clock) ? await specCheckEnded(cycle, action.pane) : null;
+    if (item && specCheckLaunchLive(item, clock) && !ended) continue;
     try {
       await Promise.resolve(effects.closeSession(action.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
-      await record(state, key, { ...action, pane: undefined, at: undefined, detail: `Closed ${action.work}'s spec-check session (${action.pane}): ${item ? 'its launch no longer stands' : 'the item is done'}` }, cycle.now(), effects.persist);
+      if (ended) await record(state, specCheckEndedKey(item!), { kind: 'attention', work: item!.key, principal: null, state: 'failed', attempts: 1, cycle: state.cycle,
+        detail: `${item!.key}'s spec-check session (${action.pane}) ended without a report: ${ended}; it is relaunched` }, cycle.now(), effects.persist);
+      await record(state, key, { ...action, pane: undefined, at: undefined, detail: `Closed ${action.work}'s spec-check session (${action.pane}): ${ended ? `it ended without a report: ${ended}` : item ? 'its launch no longer stands' : 'the item is done'}` }, cycle.now(), effects.persist);
     } catch (error) { await note(cycle, `close:${key}`, 'close', action.work, 'failed', `Could not close ${action.work}'s spec-check session (${action.pane}): ${message(error)}`); }
   }
   // per check, and the report's arrival (or a launch that stands) ends the launching. The key names
@@ -467,7 +474,7 @@ async function dispatchStep(cycle: Cycle) {
   if (effects.launchSpecCheck && !launcher.keys().some(key => key.startsWith('spec-check:'))) for (const item of open) {
     if (!item.ready || item.blocker) continue;
     if (item.lease && Date.parse(item.lease.expiresAt) > clock) continue;
-    if (!needsSpecCheck(item) || specCheckCurrent(item) || specCheckLaunchLive(item, clock)) continue;
+    if (!needsSpecCheck(item) || specCheckCurrent(item) || (specCheckLaunchLive(item, clock) && !state.actions[specCheckEndedKey(item)])) continue;
     const key = `spec-check:${item.id}:${item.policyRevision}:${item.specCheckLaunch?.id ?? ''}`;
     // Only a launch that registered ends the launching: a started one a restart cut off before its
     // registration (resumed as indeterminate) launches again, since a launch registers before any session starts.
@@ -491,6 +498,17 @@ async function dispatchStep(cycle: Cycle) {
   }
   await effects.dispatchTick?.(snapshot);
   await masterSession(cycle, open);
+}
+
+/** The record of a spec-check launch whose session ended without a report (GY-2994): master status names it, and it frees the item for a relaunch. */
+export const specCheckEndedKey = (item: Pick<Work, 'id' | 'specCheckLaunch'>) => `spec-check-ended:${item.id}:${item.specCheckLaunch?.id ?? ''}`;
+
+/** Why a checker's session ended without posting, or null while it runs: Herdr no longer reports its pane, or its pane shows a BLOCKED: line. */
+async function specCheckEnded(cycle: Cycle, pane: string): Promise<string | null> {
+  if (cycle.herdr.available && !cycle.herdr.agents.some(agent => agent.pane_id === pane)) return `Herdr no longer reports pane ${pane}`;
+  const screen = await Promise.resolve(cycle.effects.sessionScreen?.({ pane, agentName: null })).catch(() => null) ?? '';
+  const blocked = [...screen.matchAll(/^[\s⏺●•>*-]*(BLOCKED:\s*\S.*)$/gm)].at(-1);
+  return blocked ? blocked[1].trim().slice(0, 500) : null;
 }
 
 /** One spec check launch on the launcher (GY-2992): the effect starts the reviewer session and registers it on the item, so the next cycle launches no second. */

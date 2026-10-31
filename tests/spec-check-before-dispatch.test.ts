@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { assertDispatchable, masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
+import { assertDispatchable, masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { isRecheck, needsSpecCheck, specCheckRefusal, type SpecVerdict } from '../src/model/spec-check.js';
 import { specCheckReportSection } from '../src/master/dispatch.js';
@@ -44,6 +44,8 @@ function post(item: Work, verdict: SpecVerdict) {
 /** Each item's loop state, kept across its drives as the running loop keeps it. */
 const states = new Map<string, DaemonState>();
 let launches = 0;
+/** The checker panes Herdr reports: each launched pane until the loop closes it. */
+const panes = new Set<string>();
 
 /** Two loop rounds: the stubbed spec checker registers its launch and posts its verdict the way the control plane records them; a verdict that lands in round one is acted on in round two. */
 async function drive(item: Work, verdict: SpecVerdict | null, others: Work[] = [], cycles = 2, people: string[] = []) {
@@ -58,9 +60,9 @@ async function drive(item: Work, verdict: SpecVerdict | null, others: Work[] = [
     const work = [item, ...others];
     const launched: string[] = [], checks: string[] = [], closed: string[] = [];
     const effects: DaemonEffects = {
-      agents: () => [], credentials: async items => Object.fromEntries(items.map(entry => [entry.name, { available: true, reason: null }])),
+      agents: () => [...panes].map(pane => ({ name: pane, pane_id: pane }) as unknown as HerdrAgent), credentials: async items => Object.fromEntries(items.map(entry => [entry.name, { available: true, reason: null }])),
       snapshot: async () => ({ work, now: at }),
-      closeSession: pane => { closed.push(pane); },
+      closeSession: pane => { closed.push(pane); panes.delete(pane); },
       dispatch: async launched_item => { launched.push(launched_item.key); },
       // The stubbed spec checker: one session per owed check — its launch is registered on the
       // item (as the control plane records it), and its report, when it has one, lands at once.
@@ -68,6 +70,7 @@ async function drive(item: Work, verdict: SpecVerdict | null, others: Work[] = [
         checks.push(checked.key); launches += 1;
         checked.specCheckLaunch = { id: `launch-${launches}`, reviewer: 'spec-checker', requester: 'master', tokenHash: 'f'.repeat(64), at, expiresAt: new Date(clock + 3_600_000).toISOString(), policyRevision: checked.policyRevision };
         if (verdict) post(checked, verdict);
+        panes.add(`pane-${launches}`);
         return { pane: `pane-${launches}` };
       },
       persist: async () => {},
