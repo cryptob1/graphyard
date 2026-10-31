@@ -47,12 +47,13 @@ function declaredServe(worktree: string): { serve: E2eServe | null; applications
  * environment, no credential) until `url` answers, waited for at most `readySeconds` and the
  * budget's remainder; never past it. The group is killed on close.
  */
-async function serveByCommand(serve: E2eServe, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void): Promise<Served> {
+async function serveByCommand(serve: E2eServe, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void, wrapper: readonly string[] = []): Promise<Served> {
   const startedAt = Date.now(), deadline = startedAt + Math.min(serve.readySeconds * 1000, budgetMs);
   // An endpoint that answers before the command starts is another application's: its answers would not be the head's.
   const occupied = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(() => true, () => false);
   if (occupied) throw new Error(`${serve.url} already answers before the serve command starts; another application holds it, so the head cannot be served there`);
-  const child = spawn('sh', ['-c', serve.command], { cwd: worktree, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const [file, ...argv] = [...wrapper, 'sh', '-c', serve.command];
+  const child = spawn(file!, argv, { cwd: worktree, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const chunks: Buffer[] = [];
   child.stdout.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
   child.stderr.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
@@ -100,6 +101,8 @@ export async function runTrialE2eCases(input: {
   budgetMs: number;
   holds: (path: string) => Promise<boolean>;
   log: (line: string) => void;
+  /** GY-2997: the trial's confinement words the serve command runs under. */
+  wrapper?: readonly string[];
 }): Promise<TrialE2eCase[]> {
   const cases: TrialE2eCase[] = [];
   const pending: string[] = [];
@@ -140,7 +143,7 @@ async function runGroup(target: E2eServe | Application, proofs: readonly string[
   // The cases' bearer token, handed to a serve command as GRAPHYARD_E2E_TOKEN so the head it serves can accept it.
   const token = `trial-${randomUUID()}`;
   try {
-    if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log);
+    if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log, input.wrapper);
     else if (target.kind === 'static') {
       const build = target.build ? await buildStaticSite(target.build, input.worktree, input.budgetMs, undefined, undefined, input.env) : null;
       if (build) throw new Error(build);
