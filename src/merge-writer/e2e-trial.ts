@@ -4,7 +4,7 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCase, type CaseFile } from '../e2e/case.js';
-import { projectCaseSuite, buildStaticSite } from '../release-project.js';
+import { projectCaseSuite, buildStaticSite, groupBuildShell } from '../release-project.js';
 import type { E2eReport } from '../e2e/runner.js';
 import { serveStaticSite } from './preview.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment } from '../compose-preview.js';
@@ -145,7 +145,7 @@ async function runGroup(target: E2eServe | Application, proofs: readonly string[
   try {
     if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log, input.wrapper);
     else if (target.kind === 'static') {
-      const build = target.build ? await buildStaticSite(target.build, input.worktree, input.budgetMs, undefined, undefined, input.env) : null;
+      const build = target.build ? await buildStaticSite(target.build, input.worktree, input.budgetMs, groupBuildShell(input.budgetMs, input.wrapper), undefined, input.env) : null;
       if (build) throw new Error(build);
       const static_ = await serveStaticSite(join(input.worktree, target.directory), input.mergeSha);
       served = { origin: static_.url, close: () => static_.close() };

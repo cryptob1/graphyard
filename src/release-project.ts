@@ -33,8 +33,10 @@ export type StaticBuildShell = (command: string, cwd: string, signal?: AbortSign
  * killed — an `npm run build`'s descendants with it — and the answer waits until every process
  * holding its output has ended, so no build process outlives the call (GY-1718).
  */
-export const groupBuildShell = (timeoutMs: number): StaticBuildShell => (command, cwd, signal, env) => new Promise(accept => {
-  const child = spawn('sh', ['-c', command], { cwd, env: env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
+export const groupBuildShell = (timeoutMs: number, wrapper: readonly string[] = []): StaticBuildShell => (command, cwd, signal, env) => new Promise(accept => {
+  // GY-2997: a merge trial's build runs under the trial's confinement words.
+  const [file, ...argv] = [...wrapper, 'sh', '-c', command];
+  const child = spawn(file!, argv, { cwd, env: env ?? process.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true });
   const chunks: Buffer[] = [];
   let size = 0, ended: string | null = null;
   const keep = (chunk: Buffer) => { chunks.push(chunk); size += chunk.length; while (size - chunks[0].length >= 4_000_000) size -= chunks.shift()!.length; };

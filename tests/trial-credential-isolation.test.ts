@@ -8,6 +8,8 @@ import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { buildStaticSite, groupBuildShell } from '../src/release-project.js';
+import { trialConfinement, trialHiddenPaths } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-2997: the merge writer's trial children run the merge's code without reaching the deploy key or
@@ -80,4 +82,16 @@ exec sh -c "$1"
   assert.equal(await reads.push(merged.mergeSha, base), 'pushed');
   assert.equal(readFileSync(authenticated, 'utf8').trim(), key, 'the push authenticated with the deploy key');
   assert.equal(execFileSync('git', ['-C', remote, 'rev-parse', 'main'], { encoding: 'utf8' }).trim(), merged.mergeSha);
+});
+
+test(`${proof} — a static application's build in the trial runs under the same confinement: it cannot read the deploy key by its absolute path`, async () => {
+  const host = await temporaryDirectory('trial-credential-static', tmpdir());
+  const key = join(host, '.config', 'graphyard', 'owner-project', 'deploy-key');
+  mkdirSync(dirname(key), { recursive: true });
+  writeFileSync(key, 'fixture-deploy-key\n', { mode: 0o600 });
+  const checkout = await temporaryDirectory('trial-credential-static-checkout', tmpdir());
+  const build = `cat ${key}`;
+  assert.equal(await buildStaticSite(build, checkout, 30_000, groupBuildShell(30_000), undefined, { PATH: process.env.PATH! }), null, 'unconfined, the build reads the key');
+  const confined = await buildStaticSite(build, checkout, 30_000, groupBuildShell(30_000, trialConfinement(trialHiddenPaths(key, { GRAPHYARD_CONFIG_HOME: join(host, '.config', 'graphyard') }), [checkout])), undefined, { PATH: process.env.PATH! });
+  assert.match(confined ?? '', /No such file or directory/, 'confined, the key is not there');
 });
