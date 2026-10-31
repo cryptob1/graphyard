@@ -12,6 +12,8 @@ import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observe
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
+import { readServeRecord, serveRecordPath } from '../serve-app.js';
+import type { RelandInput } from '../merge-writer/serve-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
@@ -156,7 +158,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       end: (session, reason) => endRegistrySessionById(current(), session, reason),
     },
     // The executor merges in this checkout's object store, pushes with the install's deploy key alone and records each step as the coordinator under one key per (step, commits).
-    get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const }); },
+    // GY-2990: it also reads the served commit's required-cases verdict beside the checkout, and
+    // files a reverted item's re-land as the master's operator-agent identity — only while the
+    // live configuration names that identity, like the rework beside it.
+    get mergeWriter() { const config = current();
+      const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const });
+      return { ...reads,
+        serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
+        ...(current().operatorAgent ? { createWork: (input: RelandInput) => asOperatorAgent('work', input) } : {}),
+      };
+    },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     // Rework exists only while the live configuration names the master's operator-agent identity.
     get rework() { return current().operatorAgent ? rework : undefined; },
