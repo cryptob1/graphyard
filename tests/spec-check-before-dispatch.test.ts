@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertDispatchable, masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { needsSpecCheck, specCheckRefusal, type SpecVerdict } from '../src/model/spec-check.js';
+import { isRecheck, needsSpecCheck, specCheckRefusal, type SpecVerdict } from '../src/model/spec-check.js';
 import { specCheckReportSection } from '../src/master/dispatch.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -34,9 +34,9 @@ function feature(key: string, overrides: Partial<Work> = {}): Work {
   } as Work;
 }
 
-/** The checker's report, recorded as the control plane records it: bound to the revision its launch was handed, marked recheck when a gaps verdict already stands. */
+/** The checker's report, recorded as the control plane records it: bound to the revision its launch was handed, marked recheck when it follows a gaps verdict on an earlier revision. */
 function post(item: Work, verdict: SpecVerdict) {
-  const recheck = !!item.specCheck && item.specCheck.verdict === 'gaps';
+  const recheck = isRecheck(item.specCheck, item.specCheckLaunch!.policyRevision);
   item.specCheck = { policyRevision: item.specCheckLaunch!.policyRevision, verdict, paraphrase: PARAPHRASE, gaps: verdict === 'gaps' ? [GAP] : [], reviewer: 'spec-checker', at, ...(recheck ? { recheck: true } : {}) };
   item.specCheckLaunch = null;
 }
@@ -206,4 +206,15 @@ test('unit:spec-check-before-dispatch — a launch a loop restart cut off before
   states.set(item.key, state);
   const { checks } = await drive(item, null);
   assert.deepEqual(checks, ['GY-21'], 'the restarted loop launches the check the cut-off launch never registered');
+});
+
+test('unit:spec-check-before-dispatch — a second gaps report on the same revision is no re-check and keeps the item held', async () => {
+  const item = feature('GY-22');
+  await drive(item, 'gaps');
+  // A hand-recorded (or relaunched) report on the unrevised requirements.
+  item.specCheckLaunch = { id: 'launch-again', reviewer: 'spec-checker', requester: 'master', tokenHash: 'f'.repeat(64), at, expiresAt: new Date(clock + 60_000).toISOString(), policyRevision: item.policyRevision };
+  post(item, 'gaps');
+  assert.equal(item.specCheck!.recheck, undefined, 'only a report after master requirements revised the item is the re-check');
+  assert.match(specCheckRefusal(item)!, /Spec check named gaps/, 'the item stays held until the requirements are revised');
+  assert.equal(isRecheck({ ...item.specCheck!, policyRevision: 1 }, 2), true);
 });

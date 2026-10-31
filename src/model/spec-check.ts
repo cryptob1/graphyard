@@ -56,6 +56,10 @@ export const specCheckCurrent = (work: Pick<Work, 'specCheck' | 'policyRevision'
 export const specCheckLaunchLive = (work: Pick<Work, 'specCheckLaunch'>, now: number): boolean =>
   !!work.specCheckLaunch && Date.parse(work.specCheckLaunch.expiresAt) > now;
 
+/** Whether a report on `policyRevision` is the one re-check: a gaps verdict stands on an earlier revision, which master requirements revised since. A second report on the same revision is no re-check. */
+export const isRecheck = (standing: SpecCheck | null | undefined, policyRevision: number): boolean =>
+  !!standing && standing.verdict === 'gaps' && standing.policyRevision < policyRevision;
+
 /**
  * Why the item is not dispatched to a worker yet, or null. A feature whose check has not reported
  * is held (one whose requirements master revised waits for the one re-check); a first gaps verdict

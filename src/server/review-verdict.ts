@@ -6,7 +6,7 @@ import type { ControlPlaneReviewLaunch, ControlPlaneVerdict } from '../model/pos
 import { reviewEvents, verdictStateOf } from '../review-post.js';
 import { blockingFindings } from '../review-cap.js';
 import { productVerdicts, type ProductReview } from '../model/product-review.js';
-import { needsSpecCheck, specVerdicts, type SpecCheck, type SpecCheckLaunch } from '../model/spec-check.js';
+import { isRecheck, needsSpecCheck, specVerdicts, type SpecCheck, type SpecCheckLaunch } from '../model/spec-check.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import type { Services } from './routes.js';
@@ -402,9 +402,9 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
       reviewer = data.reviewer!;
       if (work!.specCheckLaunch) change = { withdraw: [work!.specCheckLaunch.tokenHash] };
     }
-    // The re-check is a fact of the record: a report that lands while a gaps verdict stands is the
-    // one re-check master requirements' revision ran; its own gaps verdict dispatches.
-    const recheck = !!work!.specCheck && work!.specCheck.verdict === 'gaps';
+    // The re-check is a fact of the record: a report on a revision later than a standing gaps
+    // verdict's is the one re-check master requirements' revision ran; its own gaps verdict dispatches.
+    const recheck = isRecheck(work!.specCheck, policyRevision);
     const specCheck: SpecCheck = { policyRevision, verdict: data.verdict, paraphrase: data.paraphrase, gaps: data.gaps, reviewer, at: now.toISOString(), ...(recheck ? { recheck: true } : {}) };
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, specCheckVerdictEvent, JSON.stringify({ key: work!.key, reviewer, verdict: data.verdict, gaps: data.gaps.length, recheck, policyRevision: specCheck.policyRevision })]);
     work!.specCheck = specCheck;
