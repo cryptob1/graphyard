@@ -13,12 +13,13 @@ import { evaluate } from '../src/model/gates.js';
 import { dueHumanProofs, humanProofRows, physicalCheckRefusal } from '../src/model/human-proof.js';
 import type { HumanRequestRow } from '../src/model/human-request.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
+import { lockedWork } from '../src/store/locked-read.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-2986: a human: proof holds a head until a person's answer on Needs you proves it for that
 // exact commit. Driven over a real control plane: the loop's request, the person's answer.
 
-const H = 'a'.repeat(40), B = 'b'.repeat(40), H2 = 'd'.repeat(40);
+const H = 'a'.repeat(40), B = 'b'.repeat(40), H2 = 'd'.repeat(40), B2 = 'c'.repeat(40);
 const proof = 'human:receipt-prints';
 const text = 'A receipt prints on the shop printer';
 const human: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -108,6 +109,17 @@ test('unit:human-proof-request-and-answer — the head waits at its gate with on
   assert.equal(proven.humanProofs![0].answer!.note, answer.note);
   assert.deepEqual(mergeQueue([proven], {}, Date.now()).due.map(item => item.key), ['GY-9101'], 'the item merges');
   assert.deepEqual(await rows(work.id), [], 'the request is answered');
+
+  // Another item merges: the same head is observed against the new base tip, and the pass still stands.
+  const moved = { sha: H, baseSha: B2, pr: 0, branch: 'graphyard/gy-1-1', author: 'worker-1' };
+  await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [work.id, JSON.stringify({ ...proven, candidate: moved, observation: { ...proven.observation, candidate: moved, baseTip: B2, mergeBase: B2 } })]);
+  const locked = (await store.transaction(db => lockedWork(db, [work.id]))).find(item => item.id === work.id)!;
+  const snapshot = (await store.coordinationSnapshot()).work.find((item: Work) => item.id === work.id)!;
+  for (const read of [await stored(work.id), locked, snapshot]) {
+    const judged = { ...read, ...evaluate(read, [read], new Date()) } as Work;
+    assert.deepEqual(reasons(judged), [], 'the pass binds the commit, not the base tip');
+    assert.equal(proofPreview(read).find(entry => entry.proof === proof)?.status, 'passed');
+  }
 });
 
 test('unit:human-proof-request-and-answer — a fail returns the item to rework with the note; a new head asks again', async () => {
