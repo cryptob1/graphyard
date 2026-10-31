@@ -146,15 +146,16 @@ export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.Proc
 /**
  * GY-2997: the bubblewrap words a trial child runs under: the host as it is, with each hidden path's
  * directory replaced by an empty tmpfs (`credentialMaskWords`), and the trial's own directories that
- * lie under a mask bound back on top so the child still reaches its checkout. The child dies with
- * the runner, so a killed trial leaves nothing behind.
+ * lie under a mask bound back on top so the child still reaches its checkout. The child sees only
+ * its own processes and dies with the runner, so a killed trial leaves nothing behind.
  */
 export function trialConfinement(hidden: readonly string[], reexposed: readonly (string | null)[], bwrap = bwrapOnPath() ?? 'bwrap'): string[] {
   const masks = credentialMaskWords({ configHome: '', extraPaths: hidden, own: [], cli: [] }, []);
   const masked = masks.filter((_, index) => masks[index - 1] === '--tmpfs');
   const inside = (path: string, directory: string) => { const from = relative(directory, path); return from !== '' && !from.startsWith('..') && !isAbsolute(from); };
   const binds = [...new Set(reexposed.filter((path): path is string => !!path && existsSync(path)).map(path => realpathSync(path)))].filter(path => masked.some(directory => inside(path, directory)));
-  return [bwrap, '--die-with-parent', '--dev-bind', '/', '/', ...masks, ...binds.flatMap(path => ['--bind', path, path]), '--'];
+  // Its own PID namespace and a fresh /proc, so no host process's /proc/<pid>/root leads back past the masks.
+  return [bwrap, '--die-with-parent', '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', ...binds.flatMap(path => ['--bind', path, path]), '--'];
 }
 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */

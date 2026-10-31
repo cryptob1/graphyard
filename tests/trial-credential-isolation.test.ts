@@ -39,8 +39,10 @@ const read = file => { try { return 'READ ' + fs.readFileSync(file, 'utf8').trim
 const viaHome = read(path.join(process.env.HOME, '.config/graphyard/owner-project/deploy-key'));
 const absolute = read(${JSON.stringify(key)});
 const coordinator = read(${JSON.stringify(join(config, 'coordinator.token'))});
-console.log('home read: ' + viaHome + '; absolute read: ' + absolute + '; coordinator read: ' + coordinator);
-process.exit([viaHome, absolute, coordinator].some(result => result.startsWith('READ')) ? 1 : 0);
+// Through the merge writer's own mount namespace: its /proc/<pid>/root.
+const viaWriter = read(${JSON.stringify(`/proc/${process.pid}/root${key}`)});
+console.log('home read: ' + viaHome + '; absolute read: ' + absolute + '; coordinator read: ' + coordinator + '; writer root read: ' + viaWriter);
+process.exit([viaHome, absolute, coordinator, viaWriter].some(result => result.startsWith('READ')) ? 1 : 0);
 `);
   gitIn(root, 'add', '-A'); gitIn(root, 'commit', '-q', '-m', 'base');
   const base = gitIn(root, 'rev-parse', 'HEAD');
@@ -75,7 +77,7 @@ exec sh -c "$1"
   assert.ok('mergeSha' in merged, JSON.stringify(merged));
   const work = { id: 'w-2997', key: 'GY-2997', type: 'feature', title: 'isolate the trial', criteria: [{ id: 'AC-1', text: 'no key in the trial', proofs: [proof] }] } as unknown as Work;
   const trial = await reads.trial(merged.mergeSha, merged.files, work, base);
-  assert.match(trial.logTail, /home read: ENOENT; absolute read: ENOENT; coordinator read: ENOENT/, 'both reads of the key, and the coordinator credential, fail inside the trial');
+  assert.match(trial.logTail, /home read: ENOENT; absolute read: ENOENT; coordinator read: ENOENT; writer root read: ENOENT/, 'both reads of the key, the coordinator credential and the merge writer\'s /proc root fail inside the trial');
   assert.deepEqual(trial.tests, { passed: 1, failed: [], files: 1 }, trial.logTail);
 
   // The push child is not the trial's: it reaches the key and origin admits the merge.
