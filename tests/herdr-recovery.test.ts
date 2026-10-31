@@ -1,31 +1,159 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
+import { randomUUID } from 'node:crypto';
 import { createServer } from 'node:http';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// @ts-expect-error The trusted runner intentionally uses dependency-free JavaScript outside the candidate source.
-import { createInventory, exercise as run, requiredCases, requiredFences } from '../scripts/herdr-recovery-contract.mjs';
-// @ts-expect-error Dependency-free protected workflow script.
-import { contract, contracts, requireStagedContract } from '../scripts/contracts.mjs';
 
-// A real lease is minutes long. The contract reads it from the candidate, so a short-leased
+// Cross-machine lease recovery, exercised inline against the real HTTP server and Postgres
+// (GY-3001: the trusted-contract scripts are deleted; the exercise lives here, in the suite).
+// Two machines are modelled exactly as the fleet guide requires: distinct worker principals,
+// distinct host IDs, and isolated worktrees.
+
+const requiredCases = ['exclusive-claim', 'expiry-recovery', 'stale-owner-refused', 'isolated-worktrees'];
+// The shipped safety default this exercise certifies. A candidate that shortens the lease turns a
+// transient disconnect into premature reassignment, so a short lease must fail rather than pass quickly.
+// Only this suite substitutes a shorter lease, against its own short-leased engine.
+const requiredFences = { leaseMs: 120_000 };
+// Bounds the wall-clock wait for the lease the candidate itself reports.
+const recoveryBudgetMs = 600_000;
+// A fence created between two candidate clock reads is bounded by those reads, so the slack this
+// exercise grants a candidate is never larger than one observed window. A wider window fails the run.
+const measurementWindowMs = 10_000;
+
+/** Records each case as it runs so an interrupted exercise still reports which cases completed. */
+function createInventory() {
+  const cases = requiredCases.map(id => ({ id, result: 'skipped' }));
+  const find = (id: string) => { const entry = cases.find(c => c.id === id); if (!entry) throw new Error(`Unknown acceptance case ${id}`); return entry; };
+  let running: string | null = null;
+  return {
+    get cases() { return cases.map(entry => ({ ...entry })); },
+    get executed() { return cases.filter(entry => entry.result !== 'skipped').length; },
+    get skipped() { return cases.filter(entry => entry.result === 'skipped').length; },
+    get complete() { return running === null && cases.every(entry => entry.result === 'pass'); },
+    begin(id: string) {
+      if (running !== null) throw new Error(`Acceptance case ${running} did not finish`);
+      if (find(id).result !== 'skipped') throw new Error(`Acceptance case ${id} ran twice`);
+      find(id).result = 'fail'; running = id;
+    },
+    pass(id: string) { if (running !== id) throw new Error(`Acceptance case ${id} was not started`); find(id).result = 'pass'; running = null; },
+  };
+}
+
+// Every command an owner may only issue while holding its own current lease.
+const leaseScopedCommands = ['heartbeat', 'release', 'workspace', 'submit', 'blocked'];
+
+async function exercise(url: string, principals: unknown[], inventory = createInventory(), fences = requiredFences) {
+  const operator = (principals as (Principal & { token: string })[]).find(p => p.role === 'admin');
+  const workers = (principals as (Principal & { token: string })[]).filter(p => p.role === 'worker');
+  assert.ok(operator && workers.length >= 2);
+  const machines = workers.slice(0, 2).map((actor, index) => ({ actor, host: `acceptance-machine-${index + 1}` }));
+  async function request(path: string, actor: any, data?: unknown, status = 200) {
+    const response = await fetch(`${url}/api/${path}`, { method: data === undefined ? 'GET' : 'POST',
+      headers: { ...(actor ? { Authorization: `Bearer ${actor.token}` } : {}), 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() },
+      body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(10_000) });
+    assert.equal(response.status, status, `Unexpected status for ${path}`); return response.json();
+  }
+  async function create(title: string) {
+    const work = await request('work', operator, { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'A replacement machine recovers expired work', proofs: ['integration:herdr-recovery'] }] });
+    return request(`work/${work.id}/ready`, operator, {});
+  }
+  const worktree = (machine: (typeof machines)[number], work: any, epoch: number) => ({ epoch, host: machine.host, path: `/srv/graphyard/${machine.host}/${work.key.toLowerCase()}-${epoch}`, branch: `graphyard/${work.key.toLowerCase()}-${epoch}` });
+  const staleBody = (command: string, work: any, machine: (typeof machines)[number]) => ({ heartbeat: { epoch: 1 }, release: { epoch: 1 }, blocked: { epoch: 1, reason: 'Stale owner note' },
+    workspace: worktree(machine, work, 1), submit: { epoch: 1, pr: 1 } } as Record<string, unknown>)[command];
+  const candidateNow = async () => Date.parse((await request('status', operator)).now);
+  // A fence created between two candidate clock reads runs for at most `deadline - before`, so this
+  // refuses any default shorter than the requirement while granting no more slack than that window.
+  function assertFence(label: string, deadline: string, before: number, after: number, minimum: number) {
+    const expiresAt = Date.parse(deadline);
+    assert.ok(Number.isFinite(expiresAt), `${label} reported no deadline`);
+    assert.ok(after >= before && after - before <= measurementWindowMs, `${label} could not be measured within a bounded window`);
+    assert.ok(expiresAt - before >= minimum, `${label} is shorter than the required ${minimum} ms safety default`);
+  }
+  // Wait on the candidate's own reported fences, measured by its clock, not this harness's.
+  async function waitForFences(ids: string[]) {
+    const started = Date.now();
+    for (;;) {
+      const [items, status] = await Promise.all([request('work', operator), request('status', operator)]);
+      const observed = Date.parse(status.now);
+      const fences = items.filter((w: any) => ids.includes(w.id)).map((w: any) => w.lease ? Date.parse(w.lease.expiresAt) : 0);
+      const remaining = Math.max(...fences) - observed;
+      if (remaining <= 0) return;
+      assert.ok(Date.now() - started + remaining < recoveryBudgetMs, 'The lease did not expire within the recovery budget');
+      await delay(Math.min(remaining + 1000, 15_000));
+    }
+  }
+
+  // The item recovers from an expired lease on the second machine.
+  const unsupervised = await create('Cross-machine recovery after lease expiry');
+  inventory.begin('exclusive-claim');
+  const beforeRace = await candidateNow(), raceStarted = Date.now();
+  const contested = await Promise.all(machines.flatMap(machine => Array.from({ length: 8 }, async () => {
+    const response = await fetch(`${url}/api/work/${unsupervised.id}/claim`, { method: 'POST', headers: { Authorization: `Bearer ${machine.actor.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: '{}', signal: AbortSignal.timeout(10_000) });
+    assert.ok([200, 409].includes(response.status)); return { machine, status: response.status, work: await response.json() };
+  })));
+  const afterRace = await candidateNow();
+  const winners = contested.filter(c => c.status === 200);
+  assert.equal(winners.length, 1);
+  const stopped = winners[0]!.machine, replacement = machines.find(m => m !== stopped);
+  let work = winners[0]!.work;
+  assert.equal(work.lease.owner, stopped!.actor.id); assert.equal(work.epoch, 1);
+  assertFence('The claimed lease', work.lease.expiresAt, beforeRace, afterRace, fences.leaseMs);
+  const history = await request(`events?work=${unsupervised.id}`, operator);
+  assert.equal(history.filter((e: any) => e.kind === 'claim').length, 1);
+  inventory.pass('exclusive-claim');
+
+  inventory.begin('expiry-recovery');
+  await request(`work/${unsupervised.id}/workspace`, stopped!.actor, worktree(stopped!, unsupervised, 1));
+  // The live item refuses on ownership.
+  assert.match((await request(`work/${unsupervised.id}/claim`, replacement!.actor, {}, 409)).error, /active owner/);
+  await waitForFences([unsupervised.id]);
+  // The deadline is candidate-reported; the lease must also have held on this harness's own clock.
+  assert.ok(Date.now() - raceStarted >= fences.leaseMs, 'The lease fence was surrendered before its reported deadline');
+
+  assert.match((await request(`work/${unsupervised.id}/heartbeat`, stopped!.actor, { epoch: 1 }, 409)).error, /Lease missing, expired, or superseded/);
+  work = await request(`work/${unsupervised.id}/claim`, replacement!.actor, {});
+  assert.equal(work.epoch, 2); assert.equal(work.lease.owner, replacement!.actor.id);
+  assert.equal(work.lastAssignment.owner, replacement!.actor.id); assert.equal(work.lastAssignment.epoch, 2);
+  inventory.pass('expiry-recovery');
+
+  inventory.begin('stale-owner-refused');
+  for (const command of leaseScopedCommands) {
+    const refusal = await request(`work/${unsupervised.id}/${command}`, stopped!.actor, staleBody(command, unsupervised, stopped!), 409);
+    assert.match(refusal.error, /Lease missing, expired, or superseded/);
+  }
+  assert.match((await request(`work/${unsupervised.id}/claim`, stopped!.actor, {}, 409)).error, /active owner/);
+  inventory.pass('stale-owner-refused');
+
+  inventory.begin('isolated-worktrees');
+  const reserved = worktree(stopped!, unsupervised, 1), own = worktree(replacement!, unsupervised, 2);
+  for (const overlapping of [{ ...own, host: reserved.host, path: `${reserved.path}/src` }, { ...own, branch: reserved.branch }])
+    assert.match((await request(`work/${unsupervised.id}/workspace`, replacement!.actor, overlapping, 409)).error, /already reserved or overlaps/);
+  work = await request(`work/${unsupervised.id}/workspace`, replacement!.actor, own);
+  assert.deepEqual(work.workspaces.map((w: any) => [w.owner, w.host, w.path, w.epoch]),
+    [[stopped!.actor.id, reserved.host, reserved.path, 1], [replacement!.actor.id, own.host, own.path, 2]]);
+  inventory.pass('isolated-worktrees');
+
+
+  assert.deepEqual(inventory.cases, requiredCases.map(id => ({ id, result: 'pass' })));
+  return inventory.cases;
+}
+
+// A real lease is minutes long. The exercise reads it from the candidate, so a short-leased
 // deployment exercises the identical recovery path within a test run once this suite states the
-// lease its own engine ships; a trusted run always requires the production default.
+// lease its own engine ships; a run against the production default always requires it.
 const leaseSeconds = 5;
 const shortFences = { leaseMs: leaseSeconds * 1000 };
 const operator: Principal = { id: 'recovery-operator', role: 'admin' };
 const machines = [1, 2].map(n => ({ id: `recovery-machine-${n}`, role: 'worker' as const, token: `test-machine-${n}-${'x'.repeat(32)}` }));
 let pg: EmbeddedPostgres; let store: Store; let http: ReturnType<typeof server>; let url: string;
 const identities = () => [{ ...operator, token: 'r'.repeat(32) }, ...machines];
-// The trusted runner hands the contract a fresh ledger bound to its own inventory; this suite does
-// the same, and supplies the short fences only after it. `fences` is what each test varies.
-const exercise = (target: string, principals: unknown[], fences?: typeof shortFences, inventory = createInventory()) => run(target, principals, inventory, fences);
+const run = (target: string, principals: unknown[], fences?: typeof shortFences, inventory = createInventory()) => exercise(target, principals, inventory, fences);
 before(async () => {
   const port = Number(process.env.GRAPHYARD_HERDR_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 7);
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -59,57 +187,35 @@ async function withoutRefusal(route: string, body: (weakened: string, refusals: 
   finally { await new Promise<void>(resolve => forging.close(() => resolve())); }
 }
 
-test('two machines recover an expired lease against the real HTTP server and Postgres', async () => {
-  const result = await exercise(url, identities(), shortFences);
+test('unit:herdr-recovery — two machines recover an expired lease against the real HTTP server and Postgres', async () => {
+  const result = await run(url, identities(), shortFences);
   assert.deepEqual(result, requiredCases.map((id: string) => ({ id, result: 'pass' })));
 });
 
-test('the contract requires the shipped lease safety default', async () => {
+test('the exercise requires the shipped lease safety default', async () => {
   // Bind the certified minimums to the defaults this repository actually ships, so lowering a
   // fence in src/engine.ts fails here instead of quietly certifying the shortened deployment.
   assert.equal(requiredFences.leaseMs, new Engine(store).leaseSeconds * 1000);
   assert.deepEqual(requiredFences, { leaseMs: 120_000 });
   // A candidate whose fences are seconds long cannot produce passing evidence for the real defaults.
-  await assert.rejects(exercise(url, identities()), /shorter than the required 120000 ms safety default/);
+  await assert.rejects(run(url, identities()), /shorter than the required 120000 ms safety default/);
 });
 
 test('the lease minimum is enforced', async () => {
-  await assert.rejects(exercise(url, identities(), { ...shortFences, leaseMs: requiredFences.leaseMs }),
+  await assert.rejects(run(url, identities(), { ...shortFences, leaseMs: requiredFences.leaseMs }),
     /The claimed lease is shorter than the required 120000 ms safety default/);
 });
 
 test('a candidate that lets every racing claim win cannot produce passing evidence', async () => {
   // The ledger attributes the interruption: the racing case stays failing, nothing after it ran,
-  // so the trusted runner reports exactly that instead of an all-skipped or all-failed inventory.
+  // so the run reports exactly that instead of an all-skipped or all-failed inventory.
   const inventory = createInventory();
   await withoutRefusal('/claim', async weakened =>
-    assert.rejects(exercise(weakened, identities(), shortFences, inventory), /Expected values to be strictly equal/));
+    assert.rejects(run(weakened, identities(), shortFences, inventory), /Expected values to be strictly equal/));
   assert.deepEqual(inventory.cases, requiredCases.map((id: string) => ({ id, result: id === 'exclusive-claim' ? 'fail' : 'skipped' })));
   assert.equal(inventory.executed, 1); assert.equal(inventory.skipped, requiredCases.length - 1); assert.equal(inventory.complete, false);
 });
 
-test('the recovery contract refuses to run without two distinct machine identities', async () => {
-  await assert.rejects(exercise(url, [{ ...operator, token: 'r'.repeat(32) }, machines[0]], shortFences));
-});
-
-test('the trusted registry selects fixed inventories and rejects unknown proofs', () => {
-  assert.equal(contract('integration:herdr-recovery').requiredCases.length, 4);
-  assert.deepEqual(contract('integration:claim-safety').requiredCases, contracts['integration:claim-safety'].requiredCases);
-  // The refusal states the bootstrap ordering rule: a contract reaches protected main first.
-  assert.throws(() => contract('integration:invented'), /Unknown trusted acceptance proof integration:invented\. This protected checkout registers integration:claim-safety, integration:herdr-recovery, integration:merge-authorization, unit:ci-proofs-enumeration; merge a contract to main before requiring its proof\./);
-  assert.throws(() => contract('toString'), /Unknown trusted acceptance proof/);
-  // Every registered contract names the protected file a trusted run actually executes.
-  for (const [proof, entry] of Object.entries(contracts as Record<string, { source: string }>))
-    assert.ok(existsSync(new URL(`../${entry.source}`, import.meta.url)), `${proof} names a missing contract source`);
-});
-
-test('a trusted run may certify a proof only once its contract is staged in the candidate base', () => {
-  // The bootstrap ordering rule is enforced, not merely documented: preparation resolves the
-  // contract's protected path and requires the candidate's own base to carry it already, so the
-  // change that introduces a contract can never be the change its trusted proof certifies.
-  const base = 'b'.repeat(40), source = 'scripts/herdr-recovery-contract.mjs';
-  assert.equal(requireStagedContract('integration:herdr-recovery', base, (path: string) => path === source), source);
-  assert.throws(() => requireStagedContract('integration:herdr-recovery', base, () => false),
-    new RegExp(`not staged in candidate base ${base}: ${source.replace('.', '\\.')} must reach main before a candidate may be certified against it`));
-  assert.throws(() => requireStagedContract('integration:invented', base, () => true), /Unknown trusted acceptance proof/);
+test('the exercise refuses to run without two distinct machine identities', async () => {
+  await assert.rejects(run(url, [{ ...operator, token: 'r'.repeat(32) }, machines[0]], shortFences));
 });

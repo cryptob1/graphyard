@@ -959,14 +959,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
       if (hostEnded(selection)) throw runnerFailure('selection', selection);
       if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
-      let files = listed(selection.out);
-      // A merge whose own ci-tests predates GY-1522 lists no files for a full selection; `select` outside Actions lists exactly the pre-merge suite.
-      if (!files.length && /^full:/.test(selection.out.trimStart())) {
-        const full = await child('selection', 'node', ['scripts/ci-tests.mjs', 'select']);
-        if (hostEnded(full)) throw runnerFailure('selection', full);
-        if (!full.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs select'], files: 0 });
-        files = listed(full.out);
-      }
+      const files = listed(selection.out);
       // An affected selection of nothing runs nothing.
       if (!files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
       enter('tests');

@@ -2,14 +2,8 @@ import { execFileSync } from 'node:child_process';
 import { fingerprint, Vault } from './secrets.js';
 import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js';
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
-import { checkoutRelease, cliRelease, defaultImageFor } from '../release.js';
+import { checkoutRelease } from '../release.js';
 import { localAdapter } from './local.js';
-
-/**
- * The release image an install defaults to: the image published under the CLI's own release, or
- * under package.json's version (.github/workflows/release.yml, on a `vX.Y.Z` tag) from an unreleased checkout.
- */
-export const DEFAULT_IMAGE = defaultImageFor(cliRelease());
 
 export interface AdapterContext {
   provider: Provider;

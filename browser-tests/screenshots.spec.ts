@@ -5,8 +5,7 @@ import { VERIFY_TIMEOUT_MS } from '../web/pages/login';
 
 // GY-161: every page of the dashboard, at desktop and phone width, over the board fixture
 // (browser-tests/ui-board.ts). The images land in browser-tests/screenshots/after/ and are the
-// "after" half attached to the pull request; browser-tests/screenshots/before/ holds the same
-// pages captured from the dashboard as it was. tests/ui-dashboard.test.ts checks this list
+// "after" half attached to the pull request. tests/ui-dashboard.test.ts checks this list
 // covers every sidebar entry and every page of the registry.
 export const viewports = [{ name: 'desktop', width: 1440, height: 1000 }, { name: 'phone', width: 390, height: 844 }] as const;
 /** Pages opened from another page rather than from the navigation. */
@@ -86,10 +85,10 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
 });
 
 // GY-198: the sign-in page in its token-form, verifying and unreachable states, at 1280 px and 375 px wide.
-// The images land in browser-tests/screenshots/login/; tests/ui-login.test.ts checks they are committed.
+// The images land in test-results/screenshots/login/ (gitignored): screenshots never dirty the checkout.
 export const loginWidths = [1280, 375] as const;
 export const loginStates = ['token-form', 'verifying', 'unreachable'] as const;
-const loginOut = 'browser-tests/screenshots/login';
+const loginOut = 'test-results/screenshots/login';
 
 for (const width of loginWidths) test(`the sign-in page is captured in every state at ${width} px`, async ({ page }) => {
   mkdirSync(loginOut, { recursive: true });
