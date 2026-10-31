@@ -619,7 +619,7 @@ export async function mergeWriterStep(cycle: Cycle) {
   const writer = state.mergeWriter;
   writer.timeouts ??= []; // GY-2079: the yields the queue turns over, read plainly below and persisted with the rest.
   const at = () => new Date(now()).toISOString();
-  let changed = false, delivered: { key: string; mergeSha: string } | null = null;
+  let changed = false, delivered = false;
   // GY-2053: the summary names its own motion bound — the configured worst case for one flight — so the owed-decision readers hold a held head through the whole live flight however the install configures retrials.
   const motionBoundMs = mergeWriterFlightBoundMs(cycle.config?.run ?? {});
   if (writer.motionBoundMs !== motionBoundMs) { writer.motionBoundMs = motionBoundMs; changed = true; }
@@ -658,7 +658,7 @@ export async function mergeWriterStep(cycle: Cycle) {
           writer.lastMergeAt = at();
           // GY-2079: this head's trial passed — the yields' evidence that the host completes trials.
           for (const counted of writer.timeouts) if (counted.key !== itemKey) counted.othersPassed = true;
-          delivered = { key: itemKey, mergeSha: outcome.mergeSha };
+          delivered = true;
           action('done', outcome.outcome === 'merged' ? `Merged ${itemKey} head ${head} as ${outcome.mergeSha} onto ${outcome.baseTip} with ${outcome.pushes} push(es); ${reads.baseBranch} observed at ${outcome.observedTip} and the item delivered`
             : `Reconciled ${itemKey} head ${head}: ${reads.baseBranch} already held ${outcome.mergeSha} (observed at ${outcome.observedTip}), so it was delivered without a second push`);
         } else {
