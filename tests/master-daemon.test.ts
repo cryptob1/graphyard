@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { acquireDaemonLock, actionDetailMax, candidateKey, cycleFailureDelay, cycleFailureStart, daemonStatePath, daemonStateSchema, daemonSummary, dispatchKey, emptyDaemonState, noteCycleFailure, profileHealth, pruneDaemonState, readDaemonState, reconcilePendingActions, retainedActions, retriedSnapshot, runCycle, runDaemon, snapshotRetryDelayMs, writeDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -39,6 +40,8 @@ function work(overrides: Partial<Work> = {}): Work {
     createdAt: iso(-4 * hour), updatedAt: iso(0), stageEnteredAt: iso(-2 * hour), ready: true, epoch: 0,
     lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+    specCheck: readySpecCheck(iso(-hour)),
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
   } as Work;
 }

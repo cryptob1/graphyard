@@ -12,7 +12,7 @@ import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } f
 import { supersededByObservation } from '../model/park-withdrawal.js';
 import { loopOwnedRefusal } from '../model/loop-owned.js';
 import { workerPreference } from '../model/worker-preference.js';
-import { loopObservation, loopObservationProofs, observationWindowHold, servingReleaseProof, type Work } from '../model.js';
+import { loopObservation, loopObservationProofs, observationWindowHold, servingReleaseProof, specCheckRefusal, type Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
@@ -119,6 +119,14 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   if (unfinished.length) throw new Error(`Dispatch blocked by unfinished dependencies: ${unfinished.map(dependency => dependency?.key ?? 'unknown').join(', ')}`);
   if (work.lease && Date.parse(work.lease.expiresAt) > now) throw new Error(`Dispatch blocked by active owner ${work.lease.owner}`);
   if (work.submission && !work.reworkRequested) throw new Error('Dispatch requires operator-authorized rework for a submitted item');
+  // GY-2992: a released feature item is not dispatched until its spec check reports — a ready
+  // verdict dispatches, a first gaps verdict holds the item at ready with its report until master
+  // requirements revises it (one re-check runs; a second gaps verdict dispatches, with the report
+  // attached), and a bug, chore or "No user-facing change" item owes none. Judged beside the
+  // lease and submission holds: an attempt's own carry keeps its original refusals, and an item
+  // that would dispatch is held until its check (or its one re-check) reports.
+  const spec = specCheckRefusal(work);
+  if (spec) throw new Error(spec);
   const conflicts = resourceConflicts(work, allWork, now);
   if (conflicts.length) throw new Error(`Dispatch blocked by exclusive resources: ${conflicts.map(conflict => `${conflict.resource} held by ${conflict.key}`).join(', ')}`);
   // GY-1698: the durable loop offers claimable work through this gate, not only through the action
@@ -507,7 +515,7 @@ export const destructivePromptGuidance = 'Never give rm or mv a glob or a variab
 export const externalDirectoryPromptGuidance = 'Your launch already granted the repository tree, so an OpenCode external-directory prompt names a path outside it: Reject it and continue in your worktree. ';
 export function workerPrompt(
   config: Pick<MasterConfig, 'cliPath'> & Partial<Pick<MasterConfig, 'repository' | 'run'>> & { fastGates?: boolean },
-  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment'>>,
+  work: Pick<Work, 'key' | 'title'> & Partial<Pick<Work, 'capacity' | 'humanRequests' | 'description' | 'criteria' | 'candidate' | 'submission' | 'pipeline' | 'lastAssignment' | 'specCheck' | 'policyRevision'>>,
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
@@ -550,6 +558,7 @@ export function workerPrompt(
     + submissionPolicyRule
     + destructivePromptGuidance
     + externalDirectoryPromptGuidance
+    + specCheckReportSection(work)
     + simplicityParagraph
     + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
@@ -561,6 +570,17 @@ export function workerPrompt(
     // GY-1987: the worker judges its own diff by the reviewer's standard (graphyard review self) before it submits, so a blocking finding costs a push, not a review round.
     + `Before complete, run node ${config.cliPath} review self ${work.key}, judge your diff by what it prints and fix each BLOCKING finding first. `
     + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
+}
+
+/**
+ * The item's spec check report, attached when the worker starts on a second gaps verdict (GY-2992):
+ * the re-check after master requirements answered the first one dispatches the item anyway, and the
+ * worker reads what the fresh-context reviewer paraphrased and what it found, not the item text alone.
+ */
+export function specCheckReportSection(work: Partial<Pick<Work, 'specCheck' | 'policyRevision'>>): string {
+  const check = work.specCheck;
+  if (!check || check.verdict !== 'gaps' || check.policyRevision !== work.policyRevision) return '';
+  return `This item's spec check — a fresh-context reviewer's restatement, made before any worker started — found gaps that master requirements has since answered; its report, for context. Paraphrase: ${check.paraphrase} Gaps it named: ${check.gaps.join('; ')}. `;
 }
 
 /**

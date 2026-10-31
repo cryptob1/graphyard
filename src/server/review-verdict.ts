@@ -6,6 +6,7 @@ import type { ControlPlaneReviewLaunch, ControlPlaneVerdict } from '../model/pos
 import { reviewEvents, verdictStateOf } from '../review-post.js';
 import { blockingFindings } from '../review-cap.js';
 import { productVerdicts, type ProductReview } from '../model/product-review.js';
+import { isRecheck, needsSpecCheck, specVerdicts, type SpecCheck, type SpecCheckLaunch } from '../model/spec-check.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import type { Services } from './routes.js';
@@ -327,4 +328,92 @@ export async function recordProductReviewByHand(services: Services, actor: Princ
     await save(db, work!, actor.id, `${productReviewVerdictEvent}.recorded`, now, { reviewer: data.reviewer, sha: data.sha, verdict: data.verdict });
     return { recorded: true, key: work!.key, verdict: data.verdict, sha: data.sha, reviewer: data.reviewer, stage: work!.stage };
   }));
+}
+
+// GY-2992: the spec check a released feature owes before dispatch. The loop's coordinator registers
+// the one launch standing for the item (`work.specCheckLaunch`), and the launched fresh-context
+// reviewer posts its one report — the paraphrase, the gaps, the verdict — as that launch's token,
+// exactly as a control-plane reviewer posts its verdict. The report lands on `work.specCheck`, bound
+// to the policy revision it judged; whether it is the re-check that ran after master requirements
+// answered an earlier gaps verdict is judged here from the standing check, never taken from the poster.
+export const specCheckLaunchEvent = 'spec-check.launch', specCheckVerdictEvent = 'spec-check.verdict';
+
+export const specCheckLaunchBodySchema = z.object({ reviewer: identifier, tokenHash: hex64, expiresAt: instant, policyRevision: z.number().int().min(0) }).strict();
+
+export const specCheckBodySchema = z.object({
+  verdict: z.enum(specVerdicts),
+  paraphrase: z.string().trim().min(1).max(8000),
+  gaps: z.array(z.string().trim().min(1).max(2000)).max(20).default([]),
+  /** A launched session posts as its one-time token; a hand recording (admin or coordinator) names the reviewer instead. */
+  token: hex64.optional(), reviewer: identifier.optional(),
+}).strict()
+  .refine(data => data.verdict === 'gaps' ? data.gaps.length > 0 : data.gaps.length === 0, 'a gaps verdict names at least one gap; a ready verdict names none');
+
+export async function recordSpecCheckLaunch(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  demand(actor.role === 'coordinator', "Only the loop's coordinator identity registers a spec-check launch", 403);
+  const data = specCheckLaunchBodySchema.parse(body);
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
+  let change: RegistryChange | undefined;
+  const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
+    const all = await lockedWork(db, [id]);
+    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    demand(work!.stage !== 'done', `${work!.key} is done; a spec check launches for released work`, 409);
+    demand(needsSpecCheck(work!), `${work!.key} owes no spec check: bugs and chores skip it`, 409);
+    const expiresAt = new Date(Math.min(Date.parse(data.expiresAt), now.getTime() + launchTokenBoundMs)).toISOString();
+    // One launch stands per item: a relaunch replaces the earlier registration and withdraws its token.
+    const withdraw = work!.specCheckLaunch ? [work!.specCheckLaunch.tokenHash] : [];
+    const launch: SpecCheckLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt, policyRevision: data.policyRevision };
+    work!.specCheckLaunch = launch;
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, specCheckLaunchEvent, JSON.stringify({ key: work!.key, ...launch })]);
+    await save(db, work!, actor.id, `${specCheckLaunchEvent}.recorded`, now, { launch: launch.id, reviewer: launch.reviewer });
+    change = { withdraw, register: { reviewer: data.reviewer, tokenHash: data.tokenHash, expiresAt: Date.parse(expiresAt) } };
+    return { registered: true, key: work!.key, launch: launch.id, reviewer: launch.reviewer, expiresAt };
+  }));
+  applyRegistryChange(services, change, Date.now());
+  return result;
+}
+
+export async function recordSpecCheck(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  const data = specCheckBodySchema.parse(body);
+  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
+  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
+  let change: RegistryChange | undefined;
+  const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
+    const all = await lockedWork(db, [id]);
+    const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
+    demand(work!.stage !== 'done', `${work!.key} is done; its spec check is history`, 409);
+    let reviewer: string, policyRevision = work!.policyRevision;
+    if (data.token) {
+      const launch = work!.specCheckLaunch;
+      demand(launch, `${work!.key} has no registered spec-check launch; a report is posted only by the session Graphyard launched`, 409);
+      const offered = Buffer.from(tokenHashOf(data.token), 'hex'), registered = Buffer.from(launch!.tokenHash, 'hex');
+      demand(offered.length === registered.length && timingSafeEqual(offered, registered), tokenRefusal, 403);
+      demand(actor.role === 'reader' && actor.id === launch!.reviewer, `This report is posted as ${actor.id}, not as the registered spec checker ${launch!.reviewer}`, 403);
+      demand(Date.parse(launch!.expiresAt) > now.getTime(), `${work!.key}'s spec-check launch expired at ${launch!.expiresAt}; the loop launches the check again`, 403);
+      reviewer = launch!.reviewer;
+      // The report judged the revision the session was handed: one master requirements revised
+      // meanwhile leaves it stale, and the loop runs the check again.
+      policyRevision = launch!.policyRevision;
+      change = { withdraw: [launch!.tokenHash] };
+    } else {
+      demand(actor.role === 'admin' || actor.role === 'coordinator', 'Only an admin or the loop\'s coordinator records a spec check by hand; a launched session posts as its token', 403);
+      demand(data.reviewer, 'A hand-recorded spec check names its reviewer', 400);
+      reviewer = data.reviewer!;
+      if (work!.specCheckLaunch) change = { withdraw: [work!.specCheckLaunch.tokenHash] };
+    }
+    // The re-check is a fact of the record: a report on a revision later than a standing gaps
+    // verdict's is the one re-check master requirements' revision ran; its own gaps verdict dispatches.
+    const recheck = isRecheck(work!.specCheck, policyRevision);
+    const specCheck: SpecCheck = { policyRevision, verdict: data.verdict, paraphrase: data.paraphrase, gaps: data.gaps, reviewer, at: now.toISOString(), ...(recheck ? { recheck: true } : {}) };
+    await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, specCheckVerdictEvent, JSON.stringify({ key: work!.key, reviewer, verdict: data.verdict, gaps: data.gaps.length, recheck, policyRevision: specCheck.policyRevision })]);
+    work!.specCheck = specCheck;
+    work!.specCheckLaunch = null;
+    services.engine.evaluate(work!, all, now);
+    await (services.engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
+    await save(db, work!, actor.id, `${specCheckVerdictEvent}.recorded`, now, { reviewer, verdict: data.verdict, recheck });
+    return { recorded: true, key: work!.key, verdict: data.verdict, recheck, reviewer, policyRevision: specCheck.policyRevision, stage: work!.stage };
+  }));
+  applyRegistryChange(services, change, Date.now());
+  return result;
 }

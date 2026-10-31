@@ -6,6 +6,7 @@ import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merg
 import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 
 // GY-2877: the loop's cycle is snapshot, close, dispatch, merge writer, persist and nothing else.
 
@@ -21,6 +22,8 @@ const item = (fields: Record<string, unknown>) => ({
   description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }],
   policy: { checks: ['test'], review: true }, revision: 1, policyRevision: 1, createdAt: iso(start), updatedAt: iso(start), stageEnteredAt: iso(start - 60_000),
   ready: true, epoch: 0, lease: null, workspaces: [], submission: null, candidate: null, reworkRequested: false, scenarioRequirements: [], evidence: [],
+  // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+  specCheck: readySpecCheck(new Date().toISOString()),
   observation: null, blocker: null, violations: [], sessions: [], gates: gates(['ready']), stage: 'ready', ...fields,
 }) as unknown as Work;
 

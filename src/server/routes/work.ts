@@ -6,7 +6,7 @@ import { defineRoutes, parseJson, Sent, type RouteContext } from '../routes.js';
 import { answerHumanDecision, answerHumanProof, listHumanRequests, requestHumanProof, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
-import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
+import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict, recordSpecCheck, recordSpecCheckLaunch } from '../review-verdict.js';
 import { mergeRecordFingerprint, recordMergeEvent } from '../merge-record.js';
 import { save } from '../../store.js';
 import { lockedWork } from '../../store/locked-read.js';
@@ -78,6 +78,19 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id]) {
       await refuseLead(context, id, 'product-review');
       return recordProductReviewByHand(context.services, context.actor, decodeURIComponent(id), await parseJson(context, productScreenshotBodyLimit), context.idempotencyKey());
+    },
+  },
+  // The spec check a released feature owes before dispatch (GY-2992): the coordinator registers the
+  // one launch standing for the item, and the launched fresh-context reviewer posts its one report —
+  // paraphrase, gaps, verdict — as that launch's token (an admin or the coordinator may record one
+  // by hand, naming the reviewer, as a product review may be recorded by hand).
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(spec-check-launch|spec-check)$/,
+    async handle(context, [id, action]) {
+      await refuseLead(context, id, action);
+      const data = await parseJson(context), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      return action === 'spec-check-launch' ? recordSpecCheckLaunch(context.services, context.actor, target, data, key)
+        : recordSpecCheck(context.services, context.actor, target, data, key);
     },
   },
   // A real-world check (GY-2986): the loop asks for it on Needs you and a person answers it with a note and any photo.

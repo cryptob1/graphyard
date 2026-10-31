@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { deploySmokeRequired, isClosed, needsProductReview, type Work } from '../../src/model';
+import { deploySmokeRequired, isClosed, needsProductReview, needsSpecCheck, type Work } from '../../src/model';
 import { sessionSummary } from '../../src/model/sessions';
 import { openAgentRequests } from '../../src/model/agent-requests';
 import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, type HumanRequestRow } from '../../src/model/human-request';
@@ -88,6 +88,29 @@ function ProductScreenshot({ item, name, token }: { item: Work; name: string; to
       : src ? <><img className="artifact-preview" src={src} alt={`Product review screenshot ${name}`}/><figcaption className="mono">{name}</figcaption></>
       : <small className="muted">{failed ? `Screenshot ${name} is unavailable` : `Loading screenshot ${name}…`}</small>}
   </figure>;
+}
+const specWords: Record<string, string> = { ready: 'Ready', gaps: 'Gaps' };
+/**
+ * The spec check (GY-2992): a feature item is restated by a fresh-context reviewer and its gaps
+ * named before a worker starts, so design faults surface before code. The panel shows the report —
+ * the paraphrase, the gaps and the verdict — and what the verdict holds or dispatches.
+ */
+export function SpecCheckPanel({ item }: { item: Work }) {
+  const check = item.specCheck;
+  if (!check && !needsSpecCheck(item)) return null;
+  const current = !!check && check.policyRevision === item.policyRevision;
+  return <section className="panel" aria-label="Spec check"><h2>Spec check <small>{check ? specWords[check.verdict] : 'not checked yet'}{check && !current ? ' · of an earlier revision' : ''}</small></h2>
+    {check ? <>
+      <dl className="facts">
+        <div><dt>Reviewer</dt><dd>{check.reviewer} · {new Date(check.at).toLocaleString()}</dd></div>
+        <div><dt>Verdict</dt><dd>{specWords[check.verdict]}{check.recheck ? ' · the re-check after master requirements' : ''}{!current ? ' · a fresh check runs before dispatch' : check.verdict === 'ready' ? ' · the item dispatches' : check.recheck ? ' · the item dispatches with this report attached for the worker' : ' · held at ready until master requirements revises the item'}</dd></div>
+      </dl>
+      <h3>Paraphrase</h3>
+      <p className="spec-paraphrase" style={{ whiteSpace: 'pre-wrap' }}>{check.paraphrase}</p>
+      {check.gaps.length > 0 && <><h3>Gaps</h3><ul className="spec-gaps">{check.gaps.map((gap, index) => <li key={index}>{gap}</li>)}</ul></>}
+    </>
+      : <p className="muted">A feature item is checked before a worker starts: a fresh-context reviewer restates what will be built and how each criterion is proven, and names the gaps — ambiguous criteria, a proof that cannot fail or run, a missing dependency, an unnamed file — so master requirements answers them before code.</p>}
+  </section>;
 }
 const caseMarks = { pass: marker.passed, fail: marker.failed, unrun: marker.unmeasured } as const;
 /**
@@ -230,6 +253,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       </dl> : <p className="muted">No pull request yet.</p>}
     </section>
     {item.preview && <PreviewPanel preview={item.preview}/>}
+    <SpecCheckPanel item={item}/>
     <ProductReviewPanel item={item} token={token}/>
     <HumanChecksPanel item={item} token={token}/>
     <TestCases item={item} api={api}/>

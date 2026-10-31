@@ -7,6 +7,7 @@ import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight } from '../coordination.js';
+import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
@@ -424,7 +425,8 @@ async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<
 /**
  * Dispatch: fill the pipeline from backlog (GY-2991), then each claimable item to a free worker
  * profile, each head nothing can carry forward back to a worker, the reviewer and producer
- * sessions the dispatcher owes, and the master session when absent.
+ * sessions the dispatcher owes, the spec check each released feature owes before any of that
+ * (GY-2992), and the master session when absent.
  */
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
@@ -436,11 +438,42 @@ async function dispatchStep(cycle: Cycle) {
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
   for (const item of claimable) {
     const key = dispatchKey(item);
-    if (launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) continue;
+    if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     const free = health.find(entry => entry.healthy && !taken.has(entry.profile.name));
     if (!free) break;
     taken.add(free.profile.name);
     launcher.submit(key, [free.profile.name], sink => launchWorker(cycle, item, key, free.profile, sink));
+  }
+  // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
+  // session per owed check. The hold itself is assertDispatchable's; the launch runs while the item
+  // is released and unblocked and no check stands and no launch is live on the item — one session
+  // A launched checker's pane closes once a snapshot read after its launch shows no live launch on
+  // the item — its report landed or its launch expired — or the item done; the pane then leaves
+  // the record, so it closes once. The item is looked up across every owner's scope, as the
+  // actions are shared by them all.
+  for (const [key, action] of Object.entries(state.actions)) {
+    if (!key.startsWith('spec-check:') || !action.pane) continue;
+    const item = snapshot.work.find(entry => entry.key === action.work && entry.stage !== 'done');
+    if (item && (Date.parse(snapshot.now) < Date.parse(action.at) || specCheckLaunchLive(item, clock))) continue;
+    try {
+      await Promise.resolve(effects.closeSession(action.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
+      await record(state, key, { ...action, pane: undefined, at: undefined, detail: `Closed ${action.work}'s spec-check session (${action.pane}): ${item ? 'its launch no longer stands' : 'the item is done'}` }, cycle.now(), effects.persist);
+    } catch (error) { await note(cycle, `close:${key}`, 'close', action.work, 'failed', `Could not close ${action.work}'s spec-check session (${action.pane}): ${message(error)}`); }
+  }
+  // per check, and the report's arrival (or a launch that stands) ends the launching. The key names
+  // the revision judged and the last launch, so a revision's re-check, or a relaunch after a
+  // launch expired unreported, is a fresh action. One launch flies at a time: each reads Herdr and
+  // the review ledger afresh, so the reviewer profile's concurrency bounds the checkers.
+  if (effects.launchSpecCheck && !launcher.keys().some(key => key.startsWith('spec-check:'))) for (const item of open) {
+    if (!item.ready || item.blocker) continue;
+    if (item.lease && Date.parse(item.lease.expiresAt) > clock) continue;
+    if (!needsSpecCheck(item) || specCheckCurrent(item) || specCheckLaunchLive(item, clock)) continue;
+    const key = `spec-check:${item.id}:${item.policyRevision}:${item.specCheckLaunch?.id ?? ''}`;
+    // Only a launch that registered ends the launching: a started one a restart cut off before its
+    // registration (resumed as indeterminate) launches again, since a launch registers before any session starts.
+    if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
+    launcher.submit(key, [], sink => launchSpecChecker(cycle, item, key, sink));
+    break;
   }
   if (effects.rework) for (const item of open) {
     const rework = neededRework(item);
@@ -458,6 +491,20 @@ async function dispatchStep(cycle: Cycle) {
   }
   await effects.dispatchTick?.(snapshot);
   await masterSession(cycle, open);
+}
+
+/** One spec check launch on the launcher (GY-2992): the effect starts the reviewer session and registers it on the item, so the next cycle launches no second. */
+async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: DaemonAction[]) {
+  const { state, effects, now } = cycle;
+  const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+  const entry = (outcome: DaemonAction['state'], detail: string, pane?: string | null) => record(state, key, { kind: 'review', work: item.key, principal: null, state: outcome, detail, attempts, cycle: state.cycle, ...(pane ? { pane } : {}) }, now(), effects.persist);
+  await entry('started', `Launching ${item.key}'s spec check`);
+  try {
+    const launched = await effects.launchSpecCheck!(item);
+    sink.push(await entry('done', `Launched ${item.key}'s spec check: a fresh-context reviewer restates the item and names its gaps before a worker starts`, launched?.pane));
+  } catch (error) {
+    sink.push(await entry('failed', `Spec check launch of ${item.key} failed: ${message(error)}; it is retried next cycle`));
+  }
 }
 
 /**

@@ -10,6 +10,7 @@ import { assertDispatchable, dispatchWork, masterConfigSchema, setupMaster, type
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
@@ -23,6 +24,8 @@ function work(key: string, overrides: Partial<Work> = {}): Work {
     id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
     policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-3_600_000), updatedAt: iso(0), stageEnteredAt: iso(0),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+    specCheck: readySpecCheck(new Date().toISOString()),
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
   } as Work;
 }

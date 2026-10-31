@@ -13,6 +13,7 @@ import { environmentBlocked, environmentBlocker, environmentFailure, grantWorker
 import type { Work } from '../src/model.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 
 // GY-134: a Codex worker could not write its worktree's own Git admin directory, so the mandatory
 // `graphyard sync` failed at `git fetch` and the item presented as a ready-gate refusal.
@@ -106,7 +107,9 @@ async function dispatchFixture() {
   const profile: WorkerProfile = { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
   const item = { id: 'id-GY-7', key: 'GY-7', title: 'GY-7', description: '', type: 'feature', priority: 2, dependencies: [], criteria: [], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
-    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] } as unknown as Work;
+    scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
+    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+    specCheck: readySpecCheck(new Date().toISOString()) } as unknown as Work;
   return { ...fixture, profile, item, cleanup: async () => { await rm(fixture.root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
 

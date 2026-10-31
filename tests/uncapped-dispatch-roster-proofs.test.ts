@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import { authorizedForProof, unauthorizedProofs, type Principal, type Work } from '../src/model.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 import { apiRoutes } from '../src/server/index.js';
 import { HumanSignIn } from '../src/server/auth.js';
 import { migration, retiredTables, tables } from '../src/store/schema.js';
@@ -19,7 +20,9 @@ const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.ex
 const ready = (index: number): Work => ({ id: `id-${index}`, key: `GY-${index}`, title: `Ready ${index}`, description: '', type: 'feature', priority: 1, dependencies: [],
   criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1,
   createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
-  scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] }) as unknown as Work;
+  scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
+  // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+  specCheck: readySpecCheck(at) }) as unknown as Work;
 
 test('unit:uncapped-dispatch-roster-proofs — six ready items with six free worker profiles all dispatch in one cycle, nothing is measured, and proof authority is the roster\'s alone', async () => {
   const work = Array.from({ length: 6 }, (_, index) => ready(index + 1)), dispatched: string[] = [], written: DaemonState[] = [];
