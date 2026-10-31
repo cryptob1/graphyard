@@ -269,7 +269,7 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
   for (const name of withheld.filter(name => !['TMPDIR', 'TMP', 'TEMP'].includes(name))) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
   assert.ok(seen.keys.includes('KEPT'));
   assert.deepEqual([seen.global, seen.nosystem], ['/dev/null', '1']);
-  assert.equal(seen.home, '/home/me', 'the home stays');
+  assert.notEqual(seen.home, '/home/me', 'the child\'s home is the trial\'s own fresh one (GY-2997)');
   assert.notEqual(seen.tmpdir, '/var/tmp', 'the host\'s TMPDIR is withheld (GY-1549); the trial\'s own replaces it (GY-1565)');
 });
 

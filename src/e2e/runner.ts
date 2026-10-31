@@ -602,6 +602,8 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
   policy?: RepositoryPolicy;
   /** GY-2217: whether a UAT serves release-candidate outcomes (the deploy loop reads its own environment). True by default: a caller that does not say never pends a case on a guess. */
   uat?: boolean;
+  /** GY-2997: how command and agent steps spawn; the merge trial hands a confined runner. */
+  processRunner?: ProcessRunner;
   /** The run's clock and pause between asks; tests substitute a fake clock (GY-1938). */
   now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) => ({
   name: 'e2e',
@@ -615,7 +617,7 @@ export const e2eSuite = (cases: readonly CaseFile[], token: string, options: { f
     const suspendedPreviews = applicationSuspendedCases(selected, probed.previewsServed);
     const pendingCases = pendingUnder([...contractPendingCases(options.contract, candidate?.pendingOutcomes), ...suspended, ...suspendedPreviews], policy);
     const report = await runCases(selected, { url, token, environment: 'uat', runId: candidate ? `rc-${candidate.id}` : undefined, fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs,
-      root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, pendingCases, policy });
+      root: options.root, retries: releaseRetries, waitUntil: releaseWaitUntil((options.now ?? Date.now)()), now: options.now, sleep: options.sleep, stopOnRequiredFailure: !options.runAll, signal: options.signal, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, pendingCases, policy, processRunner: options.processRunner });
     if (suspended.length) report.suspendedDeliveries = { cases: suspended, merger: probed.merger, repositoryWired: probed.repositoryWired };
     if (suspendedPreviews.length) report.suspendedPreviews = { cases: suspendedPreviews };
     if (!options.signal && probed.merger === 'unreadable') report.deliveryProbe = 'unreadable';
