@@ -328,6 +328,8 @@ export const baseMovedReason = (times: number) => `base moved ${times} times`;
 export const unmovedTipReason = (base: string, baseTip: string) => `push rejected though ${base} still stood at ${baseTip.slice(0, 12)}`;
 /** The refusal of an intent a crash left open whose merge commit the base does not hold: the head is queued again (AC-5). */
 export const unpushedIntentReason = (mergeSha: string, base: string) => `intent ${mergeSha.slice(0, 12)} was never pushed: ${base} does not hold it, so the head is queued again`;
+/** The refusal of an intent on a head the item has since resubmitted (GY-3039): the old head's merge settles nothing, whatever the base holds, and the current head is queued again without being delivered. */
+export const supersededIntentReason = (key: string, head: string, candidate: string | null) => `${key}'s intent for ${head.slice(0, 12)} is superseded by submitted head ${candidate ? candidate.slice(0, 12) : 'none'}: the old head is refused and the current head queued again`;
 
 // ---- The push --------------------------------------------------------------------------------------
 
@@ -825,6 +827,16 @@ export async function reconcileIntents(ports: MergePorts, work: readonly Work[],
     const item = work.find(entry => entry.key === state.key);
     if (!item) continue;
     const mergeSha = state.mergeSha!;
+    const head = state.head!;
+    const current = item.candidate?.sha.toLowerCase() ?? null;
+    // GY-3039: the item has a new head while this intent is still open. The old merge settles as
+    // refused whatever the base holds — reconciling it would deliver the newer head — so the queue
+    // unblocks and the current head is trialled fresh.
+    if (current !== head) {
+      await ports.record(item, { kind: 'refused', head, reason: supersededIntentReason(state.key, head, current) });
+      outcomes.push({ key: state.key, mergeSha, outcome: 'requeued' });
+      continue;
+    }
     if (await ports.holds(mergeSha)) {
       if (state.state === 'intent') await ports.record(item, { kind: 'pushed', mergeSha, pushedAt: new Date(ports.now()).toISOString() });
       await ports.record(item, { kind: 'reconciled', mergeSha, observedTip });
