@@ -13,7 +13,7 @@ CLI `src/cli/`, routes `src/server/routes/`, rules `src/model/`, tables `src/sto
 npm ci && npm run build && npm test
 ```
 
-Worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by file count and runs affected tests. Trusted CI runs only protected source: land a harness and `scripts/contracts.mjs` entry before requiring its proof.
+Worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by file count and runs affected tests.
 
 ### Verification maps
 

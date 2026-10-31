@@ -7,13 +7,13 @@ import { NOW, boardApi } from './ui-board';
 // spent until the same day — stays readable. At 1440px the page is at most half the height it
 // rendered before the declutter (one row per account, one launch line, spent accounts collapsed),
 // and at 390px the accounts table stacks into one card per account with no sideways scroll. Both
-// widths are captured to browser-tests/screenshots/after/fleet-settings-declutter-<width>.png.
+// widths are captured to test-results/screenshots/after/fleet-settings-declutter-<width>.png (gitignored).
 
 const hour = 3_600_000, minute = 60_000, host = 'agent-host-1';
 const at = (offset: number) => new Date(NOW + offset).toISOString();
 /** The Agents page's rendered height at 1440px over this fleet before GY-1325, measured on main 8974038c72. */
 const heightBefore = 3_238;
-const out = 'browser-tests/screenshots/after';
+const out = 'test-results/screenshots/after';
 
 const runtimes: Record<string, string> = { claude: 'opus', codex: 'gpt', opencode: 'glm', pi: 'glm', cursor: 'gpt', muse: 'opus' };
 const names = ['claude-a', 'claude-b', 'claude-c', 'claude-d', 'codex-a', 'codex-b', 'codex-c', 'opencode-a', 'opencode-b', 'opencode-c', 'pi-a', 'pi-b', 'pi-c', 'cursor-a', 'cursor-b', 'muse-a', 'muse-b'];

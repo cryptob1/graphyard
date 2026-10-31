@@ -462,7 +462,7 @@ export async function runMergeTrial(input: MergeTrialInput): Promise<MergeTrialR
     catch (error) { if (own === epoch) tap += `${childOutput(error)}\n`; throw error; }
   };
   const run: ChildRun = async (command, args, options) => {
-    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && (args[1] === 'affected' || args[1] === 'select')) { const files = await proofFiles(options); return widened(String(await inner(command, args, options)), files); }
+    if (command === 'node' && args[0] === 'scripts/ci-tests.mjs' && args[1] === 'affected') { const files = await proofFiles(options); return widened(String(await inner(command, args, options)), files); }
     const at = command === 'node' ? args.indexOf(runner) : -1;
     if (at >= 0) {
       return capture(() => inner(command, [...args.slice(0, at + 1), '--test-reporter=tap', '--test-reporter-destination=stdout', ...args.slice(at + 1)], options));

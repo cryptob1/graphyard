@@ -3,14 +3,15 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import { dependencyMap, listTestFiles, selectAffected, selectForRun, shardFiles } from '../scripts/ci-tests.mjs';
+import { dependencyMap, listTestFiles, selectAffected, shardFiles } from '../scripts/ci-tests.mjs';
 import { nestedFirst, nestedPortGap, nodeTestArgs, runTests } from './helpers/run-tests.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-499: the required `test` check ran the whole suite on one runner in about fifteen minutes, on
-// every rework round, base refresh and queue tip. It is now an aggregate over a matrix of shard jobs
-// balanced by file count, and a pull request's own run executes only the test files its change
-// affects. One case per proof: unit:ci-sharded, unit:affected-tests-selected.
+// every rework round and base refresh. It is now an aggregate over shards balanced by file count,
+// and the merge writer's trial executes only the test files its change affects — every file for
+// the install, the runner or configuration, nothing for documentation. One case per proof:
+// unit:ci-sharded, unit:affected-tests-selected, unit:ci-shards.
 
 test('unit:ci-sharded — shards balanced by file count, every file on exactly one (GY-2009: Actions ci.yml gate removed; merge writer trial shards tests)', async () => {
   assert.ok(!existsSync(new URL('../.github/workflows/ci.yml', import.meta.url)), 'ci.yml is gone');
@@ -60,23 +61,16 @@ test('unit:affected-tests-selected — a pull request runs only the tests that r
     // A change to one module selects exactly the tests that import it, transitively.
     assert.deepEqual(selectAffected(['src/leaf.ts'], map, tests), { mode: 'affected', reason: '1 of 3 test files are affected by 1 changed file(s)', files: ['tests/middle.test.ts'] });
     assert.deepEqual(selectAffected(['src/other.ts', 'tests/middle.test.ts'], map, tests).files, ['tests/middle.test.ts', 'tests/other.test.ts']);
-    assert.deepEqual(selectAffected(['docs/guide.md'], map, tests).files, ['tests/guide.test.ts'], 'a file a test reads by path is in the map');
+    // Documentation selects nothing, even a file a test reads by path: no test executes prose.
+    assert.deepEqual(selectAffected(['docs/guide.md'], map, tests), { mode: 'affected', reason: '1 changed file(s) are documentation only', files: [] });
+    assert.deepEqual(selectAffected(['docs/guide.md', 'docs/orphan.md'], map, tests).files, []);
     // The full suite, with the reason, for anything the map cannot place.
     const full = (changed: string[]) => { const selection = selectAffected(changed, map, tests); assert.equal(selection.mode, 'full', changed.join(', ')); assert.deepEqual(selection.files, tests); return selection.reason; };
     assert.equal(full(['src/unused.ts']), 'src/unused.ts is not in the dependency map');
-    assert.equal(full(['docs/orphan.md']), 'docs/orphan.md is not in the dependency map');
     assert.equal(full(['src/types.ts']), 'src/types.ts is not in the dependency map', 'a type-only import is no runtime dependency');
     for (const changed of ['package.json', 'package-lock.json', 'tests/helpers/shared.ts', 'tsconfig.json', 'vite.config.ts', '.github/workflows/ci.yml', 'scripts/ci-tests.mjs'])
       assert.match(full(['src/leaf.ts', changed]), /changes the install, the test runner or configuration$/, changed);
     assert.equal(selectAffected(null, map, tests).mode, 'full');
-
-    // Only a pull request's own run narrows; merge-queue tips and pushes to main run everything.
-    const run = (overrides: Partial<Parameters<typeof selectForRun>[0]>) => selectForRun({ event: 'pull_request', headSubject: 'Add a leaf', queued: false, changed: ['src/leaf.ts'], map, tests, ...overrides });
-    assert.deepEqual(run({}).files, ['tests/middle.test.ts']);
-    assert.equal(run({ event: 'push' }).mode, 'full');
-    assert.equal(run({ headSubject: 'Graphyard speculative tip for GY-7 behind main' }).reason, 'the head is a merge-queue speculative tip');
-    assert.equal(run({ queued: true }).reason, 'the head is published as a merge-queue tip');
-    assert.equal(run({ queued: null }).mode, 'full', 'unreadable queue refs are treated as a tip');
   } finally { await rm(root, { recursive: true, force: true }); }
 
   // On this repository: a test that imports a module is selected by a change to it, a module
@@ -88,7 +82,17 @@ test('unit:affected-tests-selected — a pull request runs only the tests that r
   assert.ok(direct.files.length < tests.length, `${direct.files.length} of ${tests.length}`);
   const own = selectAffected(['tests/ci-shards.test.ts'], map, tests);
   assert.equal(own.mode, 'affected'); assert.ok(own.files.includes('tests/ci-shards.test.ts'), 'a changed test file selects itself');
-  assert.equal(selectAffected(['README.missing.md'], map, tests).mode, 'full');
+  assert.equal(selectAffected(['scripts/missing.mjs'], map, tests).mode, 'full');
+  assert.deepEqual(selectAffected(['README.missing.md'], map, tests).files, [], 'documentation selects nothing, mapped or not');
+});
+
+test('unit:ci-shards — a changed src file maps to its affected tests and a docs-only change to none', () => {
+  const tests = listTestFiles(), map = dependencyMap(undefined, tests);
+  const direct = selectAffected(['src/tmp-reclaim.ts'], map, tests);
+  assert.equal(direct.mode, 'affected');
+  assert.ok(direct.files.includes('tests/ci-shards.test.ts'), 'imported through tests/helpers/run-tests.ts');
+  assert.ok(direct.files.length < tests.length, `${direct.files.length} of ${tests.length}`);
+  assert.deepEqual(selectAffected(['docs/guide.md'], map, tests).files, [], 'a docs-only change selects no test');
 });
 
 test('a test run started inside another test run reserves its ports above the parent\'s window, so a sibling file\'s Postgres keeps its port', async () => {
