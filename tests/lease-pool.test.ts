@@ -104,6 +104,8 @@ test('unit:lease-pool-isolated — renewal, claim, complete, blocked and defer o
       const claim = await timed(() => http.post(rival, `work/${open.id}/claim`, {}));
       assert.equal(claim.value.status, 200, JSON.stringify(claim.value.body)); assert.ok(claim.ms < 2000, `claim completed in ${Math.round(claim.ms)} ms`);
       const head = 'a'.repeat(40);
+      const number = await http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 });
+      assert.match(number.body.error, /never a pull request number[^]*--head/, 'the HTTP route refuses a pull request number');
       engine.gitRunner = async args => ({ status: 0, stdout: args[0] === 'diff' ? '' : head, stderr: '' });
       const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, head }));
       assert.equal(complete.value.status, 200, JSON.stringify(complete.value.body)); assert.ok(complete.ms < 2000, `complete completed in ${Math.round(complete.ms)} ms`);

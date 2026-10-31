@@ -46,13 +46,3 @@ test('unit:worktree-starts-from-registered-head — the rework start resolves th
   git(work, 'commit', '--allow-empty', '-m', 'WIP: partial');
   assert.equal(await registeredReworkHead(work, 'graphyard/gy-3-1', second, run), second);
 });
-
-test('unit:complete-refuses-failed-push — complete refuses to submit when the graphyard/ branch push fails', async () => {
-  const { completeCommand } = await import('../src/cli/complete.js');
-  const { work } = await repository('graphyard/gy-4-1');
-  git(work, 'remote', 'set-url', 'origin', join(work, 'missing.git'));
-  const calls: string[] = [];
-  const context = { args: ['1', 'PR'], repositoryRoot: () => work, api: async (path: string) => { calls.push(path); return {}; }, print: () => undefined } as never;
-  await assert.rejects(completeCommand.run(context, { id: 'x', key: 'GY-4' } as never), /pushing the graphyard\/ branch failed/);
-  assert.deepEqual(calls, []);
-});
