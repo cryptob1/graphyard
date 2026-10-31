@@ -144,6 +144,7 @@ img.mark{width:26px;height:26px}
 .row-key{font-size:var(--type-small);color:var(--text-2)}
 .row-main{display:flex;flex-direction:column;gap:var(--space-1);min-width:0}
 .work-row h3{margin:0;font-size:var(--type-item);font-weight:500;line-height:1.4}
+.row-owner{font-size:var(--type-tiny);color:var(--text-3)}
 .row-sub,.work-row .status-line{margin:0;font-size:var(--type-small);line-height:1.5;color:var(--text-2);overflow-wrap:anywhere}
 .group-needs-you .row-sub{color:color-mix(in srgb,var(--needs-you) 70%,var(--text))}.group-blocked .row-sub{color:color-mix(in srgb,var(--blocked) 75%,var(--text))}
 .row-who,.row-time{font-size:var(--type-small);color:var(--text-2)}

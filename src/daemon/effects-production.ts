@@ -46,6 +46,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const rework: DaemonEffects['rework'] = (work, reason, binding) => asOperatorAgent(`work/${work.id}/rework`, { reason, previousWorkerStopped: true, ...(binding ? { binding } : {}) });
+  const askHumanProof: DaemonEffects['askHumanProof'] = (work, proof) => mutate(`work/${work.id}/human-proof-request`, { proof, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha,
+    ...(work.preview?.state === 'running' && work.preview.sha === work.candidate!.sha ? { url: `${current().url}${work.preview.path}/` } : {}) }, `human-proof:${work.id}:${proof}:${work.candidate!.sha}:${work.policyRevision}`);
   // GY-2991: the loop releases backlog itself, under the same identity, to keep the pipeline full.
   const release: DaemonEffects['release'] = (work, reason) => asOperatorAgent(`work/${work.id}/ready`, { expectedRevision: work.revision, reason });
   // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
@@ -149,6 +151,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       cursor ??= await readDispatchCursor(root, current());
       return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run }));
     })().finally(() => { ticking = null; }),
+    personalMasterSession: config => ({
+      ...masterSessionEffects(root, () => config, run),
+      end: (session, reason) => endRegistrySessionById(config, session, reason),
+      exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
+    }),
     masterSession: {
       ...masterSessionEffects(root, current, run),
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,
@@ -173,6 +180,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     // Rework and backlog release exist only while the live configuration names the master's operator-agent identity.
     get rework() { return current().operatorAgent ? rework : undefined; },
+    askHumanProof,
     get release() { return current().operatorAgent ? release : undefined; },
     // The release this process loaded: the checkout its code comes from, read once at startup.
     loadedRelease: readRelease(loopCodeRoot(current().cliPath, root)),

@@ -1,6 +1,6 @@
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { loadMasterConfig, setupMaster } from '../master.js';
+import { atomicPrivateWrite, loadMasterConfig, loadStoredMasterConfig, setupMaster } from '../master.js';
 import { recordedMasterUrl } from '../master/config.js';
 import { initialFleetProposal } from './master-registry.js';
 import { readSecretFromStdin, type CliContext } from './context.js';
@@ -15,9 +15,18 @@ import { readSecretFromStdin, type CliContext } from './context.js';
  */
 export async function masterInit(context: CliContext, root: string) {
   const { args, base, connection, print } = context;
-  const { values } = parseArgs({ args, options: { url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'dispatch-interval': { type: 'string' }, 'reviewer-profile': { type: 'string' }, 'producer-timeout': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' }, 'replace-supervisor': { type: 'boolean' } }, allowPositionals: false });
+  const { values } = parseArgs({ args, options: { for: { type: 'string' }, url: { type: 'string' }, 'token-stdin': { type: 'boolean' }, 'no-auto-merge': { type: 'boolean' }, 'auto-merge': { type: 'boolean' }, 'merge-method': { type: 'string' }, 'cli-path': { type: 'string' }, 'host-id': { type: 'string' }, 'herdr-workspace': { type: 'string' }, interval: { type: 'string' }, 'proof-workflow': { type: 'string' }, 'deployment-url': { type: 'string' }, 'deployment-sha-field': { type: 'string' }, 'smoke-workflow': { type: 'string' }, 'dispatch-interval': { type: 'string' }, 'reviewer-profile': { type: 'string' }, 'producer-timeout': { type: 'string' }, 'browser-profile': { type: 'string' }, 'browser-executable': { type: 'string' }, 'replace-supervisor': { type: 'boolean' } }, allowPositionals: false });
   if (!values['token-stdin']) throw new Error('Use master init --token-stdin so the coordinator credential is not stored in shell history');
   const masterToken = await readSecretFromStdin(10_000); if (!masterToken) throw new Error('Master coordinator credential is required; setup made no changes');
+  if (values.for) {
+    const config = await loadStoredMasterConfig(root);
+    const response = await fetch(`${config.url}/api/principals`, { headers: { Authorization: `Bearer ${masterToken}` } });
+    if (!response.ok || !(await response.json()).principals?.some((person: any) => person.id === values.for && person.sessionKind === 'human')) throw new Error('--for must name a person principal (sessionKind: human)');
+    // Register another dispatch scope on the existing loop, preserving its identities and supervisor.
+    config.people = [...new Set([...(config.people ?? []), values.for])];
+    await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), config);
+    return print({ person: values.for, people: config.people, loop: 'shared' });
+  }
   if (values['auto-merge'] && values['no-auto-merge']) throw new Error('Pass --auto-merge or --no-auto-merge, not both');
   const method = values['merge-method']; if (method && !['merge', 'squash', 'rebase'].includes(method)) throw new Error('Merge method must be merge, squash, or rebase');
   const run = { ...(values.interval ? { intervalSeconds: Number(values.interval) } : {}), ...(values['proof-workflow'] ? { proofWorkflow: values['proof-workflow'] } : {}), ...(values['deployment-url'] ? { deploymentUrl: values['deployment-url'] } : {}), ...(values['deployment-sha-field'] ? { deploymentShaField: values['deployment-sha-field'] } : {}), ...(values['smoke-workflow'] ? { smokeWorkflow: values['smoke-workflow'] } : {}),

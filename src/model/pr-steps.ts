@@ -5,6 +5,7 @@ import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterTrialPattern } from './gates.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
+import { noServe, plainStage, type ServeView } from './plain-stage.js';
 
 /**
  * The four item states the dashboard draws (GY-1979): Todo (not started — no lease and nothing
@@ -15,7 +16,8 @@ import { plainReason, statusSince } from './plain-status.js';
  */
 export const stateIds = ['todo', 'doing', 'checking', 'done'] as const;
 export type StateId = typeof stateIds[number];
-export const stateLabel: Record<StateId, string> = { todo: 'Todo', doing: 'Doing', checking: 'Checking', done: 'Done' };
+/** The bar's segments in the plain stage words (GY-2988): the third folds Testing, In review and Merging. */
+export const stateLabel: Record<StateId, string> = { todo: 'Not started', doing: 'Building', checking: 'Testing, review, merge', done: 'Done' };
 
 /**
  * The recorded flow's own steps (GY-161): Build, Validate, Test, Review, Prove, Merge, in the
@@ -39,7 +41,7 @@ export interface PrSteps {
   steps: PrStep[];
   /** The current state: todo, doing or checking while it moves, done once merged; null for work closed without merging. */
   current: StateId | null;
-  /** The current state in plain words, naming what it waits on: "Checking · 1 of 2 checks done". */
+  /** The item's plain stage (GY-2988), naming what it waits on while it moves: "In review · 1 of 2 checks done". */
   label: string;
   /** What the current state waits on, without the state's name. */
   detail: string;
@@ -152,23 +154,22 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
 
 /**
  * The four states for one item (GY-1979). Todo while nothing is handed in and no worker holds it;
- * Doing while a worker holds it and has not handed in; Checking from the hand-in until the merge,
- * its label naming which folded gate it waits on; Done once merged — a merged item is Done whether
- * or not the release serves it yet, and the board's release line carries that deployment. Work
- * closed without merging has no current state, and nobody acts.
+ * Doing while a worker holds it and has not handed in; Checking from the hand-in until the merge;
+ * Done once merged. The label leads with the item's plain stage (GY-2988) and, while it moves,
+ * names what it waits on. Work closed without merging has no current state, and nobody acts.
  */
-export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
+export function prSteps(work: Work, now: number, release: ReleaseView = noRelease, serve: ServeView = noServe): PrSteps {
+  const plain = plainStage(work, release, serve);
   const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, who: string): PrSteps => ({
     steps: stateIds.map(id => ({ id, label: stateLabel[id], state: state(id) })), current,
-    label: current && current !== 'done' ? `${stateLabel[current]} · ${detail}` : detail, detail, who,
+    label: current && current !== 'done' ? `${plain} · ${detail}` : detail, detail, who,
   });
   // Closed without merging (src/model/closure.ts): no state is done or current, and nobody acts.
   if (isClosed(work)) return make(() => 'pending', null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
   if (work.stage === 'done') {
-    // Done means merged (GY-1979): whether or not the release serves it yet. "Live" only once the
-    // release is observed serving it; the board's release line carries the deployment either way.
-    return servedFor(work, release) ? make(() => 'done', 'done', 'Live', 'Nobody — it is live')
-      : make(() => 'done', 'done', 'Merged', 'Nobody — it has merged');
+    // The plain stage names how far a merged item got: Merged, not live yet / Live* / Done (GY-2988).
+    return servedFor(work, release) ? make(() => 'done', 'done', plain, 'Nobody — it is live')
+      : make(() => 'done', 'done', plain, 'Nobody — it has merged');
   }
   if (!work.submission) {
     const { detail, who } = waitsOn('build', undefined, work, now, release);

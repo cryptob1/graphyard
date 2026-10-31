@@ -84,7 +84,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   // What is left: one plain line per unmet requirement, grouped by state, each group naming who clears it.
   // Checking folds review, proof and merge (GY-1979), so one group carries all five lines.
   const groups = whatIsLeft(item, NOW);
-  assert.deepEqual(groups.map(group => [group.label, group.who, group.current]), [['Checking', 'Reviewer agent', true]]);
+  assert.deepEqual(groups.map(group => [group.label, group.who, group.current]), [['Testing, review, merge', 'Reviewer agent', true]]);
   for (const name of ['review', 'acceptance', 'merge']) {
     const gate = item.gates.find(entry => entry.name === name)!;
     for (const line of plainLines(gate, item, NOW)) assert.ok(groups[0].lines.includes(line), `${name}: ${line}`);
@@ -92,7 +92,7 @@ test('unit:item-page-sections — below the summary the item page shows What is 
   assert.deepEqual(groups.flatMap(group => group.lines), ['Waiting for someone else to approve the latest code', 'The proof unit:item-page-sections has not passed yet', 'The proof unit:item-page-technical-collapsed has not passed yet', 'Graphyard is re-reading the latest code', 'The pull request conflicts with the main branch']);
   const left = html.slice(html.indexOf('aria-label="What is left"'), html.indexOf('aria-label="Requirements"'));
   assert.match(left, /<small>5 things<\/small>/);
-  assert.match(left, /<section class="left-step" aria-label="Checking state"><h3>Checking <small>\u00b7 cleared by Reviewer agent<\/small><\/h3>/);
+  assert.match(left, /<section class="left-step" aria-label="Testing, review, merge state"><h3>Testing, review, merge <small>\u00b7 cleared by Reviewer agent<\/small><\/h3>/);
   // The folded gates are all listed at once; there is no later state left to collapse.
   assert.doesNotMatch(left, /later-steps/);
   assert.equal(left.match(/<li>/g)?.length, 5, 'one line per unmet requirement');
@@ -211,25 +211,25 @@ test('What is left names who clears each state from the refusal itself: exhauste
     gate('review', ['Every configured reviewer profile is exhausted for this candidate (reviewer-a); add reviewer capacity or select another review provider'])] } as unknown as Work;
   const work = [...all, exhausted];
   const [current] = whatIsLeft(exhausted, NOW);
-  assert.deepEqual([current.label, current.who], ['Checking', 'Master agent']);
+  assert.deepEqual([current.label, current.who], ['Testing, review, merge', 'Master agent']);
   assert.equal(prSteps(exhausted, NOW).who, 'Master agent');
   assert.equal(nextActor(exhausted, groupWithin(exhausted, work, NOW), NOW).who, 'Master agent');
-  assert.match(page(exhausted, work), /<h3>Checking <small>· cleared by Master agent<\/small><\/h3>/);
+  assert.match(page(exhausted, work), /<h3>Testing, review, merge <small>· cleared by Master agent<\/small><\/h3>/);
   // Branch protection not verified, as a later step: the master agent, not the builder.
   const protection = { ...base, gates: [gate('ready', []), gate('build', []), gate('test', []), gate('acceptance', []), gate('review', ['Independent approval of the current commit is required']),
     gate('merge', ['Required Graphyard check and merge-queue branch protection have not been verified'])] } as unknown as Work;
   // The folded gates list their lines under one state; the state's clearer is the bar's own reading,
   // and every line still says what is wrong. Checking names the reviewer first in line.
-  assert.deepEqual(whatIsLeft(protection, NOW).map(group => [group.label, group.who]), [['Checking', 'Reviewer agent']]);
+  assert.deepEqual(whatIsLeft(protection, NOW).map(group => [group.label, group.who]), [['Testing, review, merge', 'Reviewer agent']]);
   // A conflict with the base and unresolved review threads are the builder's to clear on a new head.
   const threads = { ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', ['Branch protection requires conversation resolution and 2 review threads are unresolved on 594f711015d0: a on b:1; c on d:2. GitHub blocks the merge until each is resolved'])] } as unknown as Work;
-  assert.deepEqual(whatIsLeft(threads, NOW).map(group => [group.label, group.who]), [['Checking', 'Reviewer agent']]);
+  assert.deepEqual(whatIsLeft(threads, NOW).map(group => [group.label, group.who]), [['Testing, review, merge', 'Reviewer agent']]);
   // A review refusal no launched reviewer can answer (src/model/next-action.ts reviewStandstill): the action the control
   // plane computed from it names who moves the item — proofs first, a fresh reading, or an escalation — never the reviewer.
   const standstill = (kind: string) => ({ ...protection, gates: [...protection.gates.filter(entry => entry.name !== 'merge'), gate('merge', [])],
     nextAction: { kind, gate: 'review', refusal: 'Independent approval of the current commit is required', reason: 'standstill', llmRole: null } }) as unknown as Work;
   assert.deepEqual(['dispatch', 'resync', 'attention', 'request-review'].map(kind => prSteps(standstill(kind), NOW).who), ['Prover agent', 'Graphyard (automatic)', 'Master agent', 'Reviewer agent']);
-  assert.deepEqual(whatIsLeft(standstill('dispatch'), NOW).map(group => [group.label, group.who]), [['Checking', 'Prover agent']]);
+  assert.deepEqual(whatIsLeft(standstill('dispatch'), NOW).map(group => [group.label, group.who]), [['Testing, review, merge', 'Prover agent']]);
   // A blocker recorded before the hand-in fails the ready gate: the item is Blocked, and only the
   // master agent clears it — the What is left group and Who acts next both say so.
   const blocker = 'Needs the staging database credentials';
@@ -238,11 +238,11 @@ test('What is left names who clears each state from the refusal itself: exhauste
       gate('review', ['Independent approval of the current commit is required']), gate('test', []), gate('acceptance', []), gate('merge', ['The merge writer has not observed the current candidate'])] } as unknown as Work;
   const blockedAll = [...all, blocked];
   const [held] = whatIsLeft(blocked, NOW);
-  assert.deepEqual([held.label, held.who], ['Todo', 'Master agent']);
+  assert.deepEqual([held.label, held.who], ['Not started', 'Master agent']);
   // Its one plain sentence, never its recorded text, which only Technical details carries (GY-1739).
   assert.ok(held.lines.includes('A fault blocks it; the master agent clears it.') && !held.lines.some(line => line.includes(blocker)), 'the blocker reads as its summary');
   assert.equal(nextActor(blocked, groupWithin(blocked, blockedAll, NOW), NOW).who, 'Master agent');
-  assert.match(page(blocked, blockedAll), /<h3>Todo <small>· cleared by Master agent<\/small><\/h3>/);
+  assert.match(page(blocked, blockedAll), /<h3>Not started <small>· cleared by Master agent<\/small><\/h3>/);
   // A parked human-only decision is also a ready-gate blocker, but it is yours: the panel agrees
   // with "Who acts next" and the request card.
   const request = { id: 'hr-1', kind: 'money-or-accounts' as const, needed: 'A Railway workspace for the staging proof', reason: 'The proof needs a paid workspace', requestedBy: 'graphyard-codex-1', at: at(-minute), epoch: 1, answer: null };
@@ -250,21 +250,21 @@ test('What is left names who clears each state from the refusal itself: exhauste
   const parked = { ...blocked, blocker: parkedBlocker, humanRequest: request, lease: null,
     gates: [gate('ready', [parkedBlocker]), ...blocked.gates.filter(entry => entry.name !== 'ready')] } as unknown as Work;
   const parkedAll = [...all, parked];
-  assert.deepEqual(whatIsLeft(parked, NOW).map(group => [group.label, group.who])[0], ['Todo', 'You']);
+  assert.deepEqual(whatIsLeft(parked, NOW).map(group => [group.label, group.who])[0], ['Not started', 'You']);
   assert.equal(nextActor(parked, groupWithin(parked, parkedAll, NOW), NOW).who, 'You');
-  assert.match(page(parked, parkedAll), /<h3>Todo <small>· cleared by You<\/small><\/h3>/);
+  assert.match(page(parked, parkedAll), /<h3>Not started <small>· cleared by You<\/small><\/h3>/);
   // An item not yet released from the backlog: only the master agent releases it, not the builder
   // assignment the Build step would otherwise name.
   const unreleased = { ...blocked, blocker: null, ready: false, lease: null,
     gates: [gate('ready', ['Not released from backlog']), ...blocked.gates.filter(entry => entry.name !== 'ready')] } as unknown as Work;
   const unreleasedAll = [...all, unreleased];
-  assert.deepEqual(whatIsLeft(unreleased, NOW).map(group => [group.label, group.who])[0], ['Todo', 'Master agent']);
+  assert.deepEqual(whatIsLeft(unreleased, NOW).map(group => [group.label, group.who])[0], ['Not started', 'Master agent']);
   assert.equal(nextActor(unreleased, groupWithin(unreleased, unreleasedAll, NOW), NOW).who, 'Master agent');
   // A split parent with an undelivered child (GY-1739 review): its ready reason is no recorded
   // blocker, so it reads as the wait for that child, never as a fault the master agent clears.
   const split = { ...blocked, blocker: null, children: ['GY-99'], lease: null,
     gates: [gate('ready', ['Split into child items: GY-99 is not delivered']), ...blocked.gates.filter(entry => entry.name !== 'ready')] } as unknown as Work;
   const [splitHeld] = whatIsLeft(split, NOW);
-  assert.deepEqual([splitHeld.label, splitHeld.who, splitHeld.lines[0]], ['Todo', 'Nobody yet', 'Split into smaller items; waiting for GY-99 to ship first']);
+  assert.deepEqual([splitHeld.label, splitHeld.who, splitHeld.lines[0]], ['Not started', 'Nobody yet', 'Split into smaller items; waiting for GY-99 to ship first']);
   assert.ok(!splitHeld.lines.some(line => /fault|master agent/i.test(line)), 'a split-child wait is not summarised as a recorded blocker');
 });

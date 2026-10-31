@@ -73,7 +73,8 @@ export const coordinationRelevance = (keep: number) => `LATERAL jsonb_to_record(
  */
 const relevantEvidence = `((entry->>'sha' = r.head AND entry->>'baseSha' IS NOT DISTINCT FROM r.base)
     OR entry->>'id' = ANY(r.carried) OR entry->>'sha' = ANY(r.requested) OR ${object("entry->'reading'")}
-    OR entry->>'proof' LIKE 'manual:post-deploy/%')`;
+    OR entry->>'proof' LIKE 'manual:post-deploy/%'
+    OR (entry->>'sha' = r.head AND entry->>'proof' LIKE 'human:%'))`;
 
 /**
  * One document as the coordination view reads it: the pipeline timeline dropped, its rework-round

@@ -266,7 +266,7 @@ export function coordinationProjection(document: Work): Work {
   // The loop's own post-deploy readings (`reading`, GY-1779) stay whatever head the item carries: its readings step and loopObservation read them here.
   const relevant = (entry: any) => {
     const sha = text(entry?.sha);
-    return (sha !== null && head !== null && sha === head && text(entry?.baseSha) === base) || carried.has(text(entry?.id)!) || (sha !== null && requested.has(sha)) || isObject(entry?.reading) || (typeof entry?.proof === 'string' && entry.proof.startsWith('manual:post-deploy/'));
+    return (sha !== null && head !== null && sha === head && text(entry?.baseSha) === base) || carried.has(text(entry?.id)!) || (sha !== null && requested.has(sha)) || isObject(entry?.reading) || (typeof entry?.proof === 'string' && (entry.proof.startsWith('manual:post-deploy/') || (sha === head && entry.proof.startsWith('human:'))));
   };
   const { pipeline, evidence, observation, queueHistory, actionQueue, autoDispatch, sessions, ...rest } = doc;
   const out: Record<string, any> = { ...rest };

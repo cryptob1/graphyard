@@ -2,6 +2,7 @@ import { z } from 'zod';
 import { hostDoableAsk, hostDoableRefusal, parkRefusal as classifiedParkRefusal, type HostDoableAsk } from './park-refusal.js';
 import { shortAskIssues } from './human-ask.js';
 import type { HumanAnswer } from './human-answer.js';
+import { humanProofRows } from './human-proof.js';
 import type { Work } from './work.js';
 
 // ------------------------------------------------------------
@@ -223,11 +224,18 @@ export const parkRule: HumanOnlyRule = {
   open: (subject, now) => openHumanRequests([subject.work], now),
 };
 
+/** A real-world check (GY-2986): an agent holding an admin credential has touched no device, so only a declared human session answers. */
+export const humanProofRule: HumanOnlyRule = {
+  kind: 'human-proof',
+  refuse: parkRule.refuse,
+  open: (subject, now) => humanProofRows(subject.work, parkRule.refuse({ id: 'an agent identity', role: 'operator-agent', sessionKind: 'ai' })!, now),
+};
+
 /**
  * Every rule, in the order the surface lists them. Enforcement reads this table and so does the
  * page: adding a rule here is the one change a new human-only action needs.
  */
-export const humanOnlyRules: HumanOnlyRule[] = [parkRule];
+export const humanOnlyRules: HumanOnlyRule[] = [parkRule, humanProofRule];
 export const humanOnlyRule = (kind: string, rules: readonly HumanOnlyRule[] = humanOnlyRules) => rules.find(rule => rule.kind === kind) ?? null;
 /**
  * Why this session may not answer a row of that rule, or null when it may. A rule this reader

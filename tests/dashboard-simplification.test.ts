@@ -159,7 +159,10 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Validation', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents']);
-  assert.deepEqual(tabs(dashboard(), 'work'), [], 'a section with one page draws no tab row');
+  assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
+  const agent = fixtureStatus('admin');
+  agent.actor = { ...agent.actor, sessionKind: 'ai' };
+  assert.deepEqual(tabs(dashboard({ status: agent }), 'work'), [], 'a section with one page draws no tab row');
   assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
 
   // Admin-only pages are hidden from reader and worker sessions, even when configured.
@@ -213,7 +216,7 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   const count = words(view).length;
   assert.ok(count <= 250, `item view renders ${count} words: ${visible}`);
   const at = (needle: string) => { const index = visible.indexOf(words(needle).join(' ')); assert.ok(index >= 0, `shows ${needle}: ${visible}`); return index; };
-  const order = [at('Moving'), at('PR #43'), at('Checking 2 of 3 proofs passed'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
+  const order = [at('Moving'), at('PR #43'), at('Testing 2 of 3 proofs passed'), at('Who acts next: Prover agent'), at('What is left'), at('The proof integration:login-latency has not passed yet')];
   assert.deepEqual([...order].sort((a, b) => a - b), order, 'state, pull request, why, who acts next, then what is left');
   // Only the current step's reasons are listed as what is left; the gates' raw reasons stay under Technical details.
   const review = itemView('GY-15');

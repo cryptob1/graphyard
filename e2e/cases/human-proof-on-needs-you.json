@@ -1,0 +1,172 @@
+{
+  "id": "human-proof-on-needs-you",
+  "title": "A person answers a human: check on Needs you and the item's proof shows passed for that commit",
+  "description": "A criterion may name a real-world check only a person can make (GY-2986). The case records the request on an item through the route the loop uses, opens Needs you in the dashboard, reads the check, its steps and URL, records a pass with a note, and reads the proof as passed for that exact commit, on the item page and on the API.",
+  "tags": [
+    "api",
+    "dashboard",
+    "human-proof"
+  ],
+  "target": "uat",
+  "required": false,
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create an item with a physical check",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}}",
+        "description": "No user-facing change: created by the human-proof-on-needs-you E2E case to carry a real-world check.",
+        "type": "chore",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "A receipt prints on the shop printer",
+            "proofs": [
+              "human:receipt-prints"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 200,
+      "save": {
+        "id": "id",
+        "key": "key"
+      }
+    },
+    {
+      "kind": "http",
+      "name": "the loop records the request for the exact commit",
+      "method": "POST",
+      "path": "/api/work/{{id}}/human-proof-request",
+      "body": {
+        "proof": "human:receipt-prints",
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "baseSha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "url": "https://preview.example/check/"
+      },
+      "status": 200
+    },
+    {
+      "kind": "browser",
+      "name": "sign in to the dashboard",
+      "action": "open",
+      "path": "/"
+    },
+    {
+      "kind": "browser",
+      "action": "fill",
+      "label": "Access token",
+      "value": "{{token}}"
+    },
+    {
+      "kind": "browser",
+      "action": "click",
+      "role": "button",
+      "text": "Open control plane",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "open the Needs you group",
+      "action": "click",
+      "role": "button",
+      "text": "Needs you",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "open the item from Needs you",
+      "action": "click",
+      "text": "E2E case {{case}} run {{run}}",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the check is what the person reads first",
+      "action": "expectText",
+      "text": "A receipt prints on the shop printer",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the steps name the URL",
+      "action": "expectText",
+      "text": "https://preview.example/check/",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the steps name the commit",
+      "action": "expectText",
+      "text": "Make this check on commit aaaaaaaaaaaa",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "write what was seen",
+      "action": "fill",
+      "label": "Note for {{key}}",
+      "value": "Printed clean on the shop printer"
+    },
+    {
+      "kind": "browser",
+      "name": "record the pass",
+      "action": "click",
+      "role": "button",
+      "text": "Pass, with this note…",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the item's proof shows passed for that commit",
+      "action": "expectText",
+      "text": "human:receipt-prints passed for aaaaaaaa",
+      "exact": false
+    },
+    {
+      "kind": "browser",
+      "name": "the note is kept with it",
+      "action": "expectText",
+      "text": "Printed clean on the shop printer",
+      "exact": false
+    },
+    {
+      "kind": "http",
+      "name": "the answer is a trusted run bound to that commit",
+      "method": "GET",
+      "path": "/api/work/{{id}}",
+      "status": 200,
+      "expect": [
+        {
+          "path": "humanProofs.0.answer.outcome",
+          "equals": "pass"
+        },
+        {
+          "path": "evidence.0.proof",
+          "equals": "human:receipt-prints"
+        },
+        {
+          "path": "evidence.0.sha",
+          "equals": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        },
+        {
+          "path": "evidence.0.result",
+          "equals": "pass"
+        },
+        {
+          "path": "evidence.0.trusted",
+          "equals": true
+        }
+      ]
+    }
+  ]
+}

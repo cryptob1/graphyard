@@ -2,6 +2,7 @@ import { dispatchIneligibility, reviewNeed } from './dispatch.js';
 import { leadHoldRefusal } from './delegation.js';
 import { mergeWriterPushPattern, mergeWriterRefusal, mergeWriterTrialPattern } from './gates.js';
 import { attestationWait } from './unproduced-attestation.js';
+import { humanProofWaiting } from './human-proof.js';
 import { proofStep } from './action-proof-step.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, type Work } from './work.js';
 import { observationPass } from './loop-observation.js';
@@ -160,6 +161,7 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
     // GY-2010: the merge writer trials and pushes every candidate it admits, so a refusal it alone
     // answers is a wait on it, never a row an executor claims or an escalation.
     if (mergeWriterRefusal(failing.name, refusal)) return waits({ kind: 'session', on: 'merge-writer', detail: `${key} is queued for the merge writer, which trials and pushes it: ${refusal}` }, failing.name, refusal);
+    if (failing.name === 'review' && humanProofWaiting(refusal)) return waits({ kind: 'human', on: 'operator', detail: `${key} waits for a person's real-world check on Needs you: ${refusal}` }, failing.name, refusal);
     const kind = refusalAction(work, failing.name, refusal, all, now);
     const binding = `${failing.name}:${work.policyRevision}:${short(work.candidate?.sha)}:${short(work.candidate?.baseSha)}:${refusal}`;
     if (kind === 'dispatch') {
@@ -279,6 +281,7 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
   // (GY-2989) — and its missing review is asked for like any other.
   { gate: 'review', match: /^Product review requested changes/, kind: 'request-rework' },
   { gate: 'review', match: /^Product review rejected/, kind: 'attention' },
+  { gate: 'review', match: /^human:\S+ failed a person's check/, kind: 'request-rework' },
   // An approval whose mechanical nits await the worker bot's round (GY-971): that round is a rework.
   { gate: 'review', match: /^Approval (\d+ )?of [0-9a-f]+ names \d+ findings? classified mechanical/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
