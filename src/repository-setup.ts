@@ -663,11 +663,10 @@ export async function readLoopCode(root: string, options: {
  * GY-1859 / GY-3000: the pins that hold this install's loop on code other than this CLI's, lifted so
  * a replacement starts this CLI. `loopUnitText` renders the known-good coordinator's launcher while
  * its pin stands (GY-1529): a rewrite under it comes back on the pinned commit. The pin's record is
- * kept beside it (`coordinator/lifted.json`, whose pin `master recover --to SHA` restores). A stale
- * `.graphyard/held-cli.json` (nothing writes one since GY-2877) is removed once during up; the
- * launcher ignores it. Returns what was lifted, one phrase each; nothing standing lifts nothing.
+ * kept beside it (`coordinator/lifted.json`, whose pin `master recover --to SHA` restores).
+ * Returns what was lifted, one phrase each; nothing standing lifts nothing.
  */
-export async function liftLoopPins(root: string, options: { installDir?: string | null; repository?: string | null; /** Where a stale held-cli.json may still sit; default ROOT. */ heldRoot?: string } = {}): Promise<string[]> {
+export async function liftLoopPins(root: string, options: { installDir?: string | null; repository?: string | null } = {}): Promise<string[]> {
   const { knownGoodDirectory, knownGoodState } = await import('./master/known-good.js');
   const installDir = options.installDir !== undefined ? options.installDir : await (async () => {
     if (!options.repository) return null;
@@ -681,14 +680,12 @@ export async function liftLoopPins(root: string, options: { installDir?: string 
     await rename(join(directory, 'state.json'), join(directory, 'lifted.json'));
     lifted.push(`the known-good pin at ${shortSha(pin.sha)} (${join(directory, 'state.json')}, kept as lifted.json)`);
   }
-  const heldRoot = options.heldRoot ?? root;
-  const heldPointer = join(heldRoot, '.graphyard', 'held-cli.json');
-  try {
-    await stat(heldPointer);
-    await rm(heldPointer, { force: true });
-    lifted.push(`the stale held-cli pin (${heldPointer})`);
-  } catch { /* no stale pin */ }
   return lifted;
+}
+
+/** Remove the retired launcher pointer on every up, including an already current install. */
+export async function removeHeldCliPin(root: string): Promise<void> {
+  await rm(join(root, '.graphyard', 'held-cli.json'), { force: true });
 }
 
 /**

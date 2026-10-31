@@ -216,7 +216,7 @@ test('unit:up-replaces-loop-on-other-code — the master-loop step rewrites a lo
 /** GY-1859: AC-1 on a pinned install, through supervisor's loopUnitText and repository-setup's reading and liftLoopPins. */
 async function pinnedReplacement() {
   const { runUp } = await up();
-  const { readLoopCode, liftLoopPins } = await repositorySetup();
+  const { readLoopCode, liftLoopPins, removeHeldCliPin } = await repositorySetup();
   const { loopUnitText } = await import('../src/supervisor.js');
   const { knownGoodCli, knownGoodState } = await import('../src/master/known-good.js');
   const { access } = await import('node:fs/promises');
@@ -244,6 +244,7 @@ async function pinnedReplacement() {
     const deps = dependencies(root, events, w);
     const outcome = await runUp(request(), { ...deps,
       loopCode: read,
+      removeHeldCliPin: async () => removeHeldCliPin(root),
       liftLoopPins: lift ? async () => liftLoopPins(root, { installDir }) : undefined,
       cli: async (args, options = {}) => {
         if (args[0] === 'master' && args[1] === 'init') { w.calls.push({ args }); await writeFile(unitFile, render()); return { code: 0, stdout: '{"supervisor":{"state":"updated"}}' }; }
@@ -262,7 +263,7 @@ async function pinnedReplacement() {
   assert.ok(JSON.parse(await readFile(join(lifted.installDir, 'coordinator', 'lifted.json'), 'utf8')).sha === OLD_COMMIT, 'and its record is kept beside it');
   await assert.rejects(() => access(join(lifted.root, '.graphyard', 'held-cli.json')), 'the stale held-cli pin is removed');
   const note = lifted.events.find(event => event.kind === 'note' && event.text.startsWith('master-loop: lifted')) as { text: string } | undefined;
-  assert.match(note?.text ?? '', new RegExp(`known-good pin at ${OLD_COMMIT.slice(0, 12)}.* and the stale held-cli pin`), 'the step names what it lifted');
+  assert.match(note?.text ?? '', new RegExp(`known-good pin at ${OLD_COMMIT.slice(0, 12)}`), 'the step names what it lifted');
   assert.ok(lifted.events.some(event => event.kind === 'note' && event.text.includes(`at ${COMMIT.slice(0, 12)}`)), 'and the commit the loop now reports');
 }
 
@@ -617,4 +618,18 @@ test('unit:up-validates-the-checkout-it-installs — the clean-checkout prefligh
   git(a, 'checkout', '--', '.');
   await dirty(b);
   assert.deepEqual(await read(), { root: b, dirty: ['bin/graphyard.mjs'] }, 'dirty work in this CLI\'s own checkout is found');
+});
+
+test('up removes a stale launcher pointer even when the loop step is already complete', async () => {
+  const { runUp } = await up();
+  const { removeHeldCliPin } = await repositorySetup();
+  const root = await recordedRoot('up-current-stale-launcher');
+  const pin = join(root, '.graphyard', 'held-cli.json');
+  await writeFile(pin, JSON.stringify({ root: '/obsolete-snapshot' }));
+  const w = world([cleanReading()]);
+  const outcome = await runUp(request(), { ...dependencies(root, [], w), removeHeldCliPin: () => removeHeldCliPin(root) });
+  assert.equal(outcome.exitCode, 0, outcome.next);
+  const { access } = await import('node:fs/promises');
+  await assert.rejects(() => access(pin), { code: 'ENOENT' });
+  assert.equal(named(w, ['master', 'restart']).length, 0);
 });

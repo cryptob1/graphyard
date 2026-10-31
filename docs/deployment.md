@@ -20,7 +20,7 @@ CI proofs publish via one producer principal; its posted run binding is Graphyar
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; the serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; the launcher always runs the checkout's own code (`up` removes any stale `.graphyard/held-cli.json`).
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; the serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; the launcher always runs the checkout's own code (every `up` removes a stale `.graphyard/held-cli.json`, even when the loop is already current).
 
 ### Serving the managed repository's app
 

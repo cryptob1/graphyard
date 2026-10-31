@@ -25,7 +25,7 @@ import type { GitHubCli } from './install/github.js';
 import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, liftLoopPins, type LoopCodeReading } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, liftLoopPins, removeHeldCliPin, type LoopCodeReading } from './repository-setup.js';
 import { loopCodeRoot } from './daemon/checkout-state.js';
 import { recordHerdrInstance } from './master/config.js';
 
@@ -202,11 +202,13 @@ export interface UpDependencies {
    */
   loopCode?(): Promise<LoopCodeReading | null>;
   /**
-   * GY-1859: lift the known-good pin and the held-snapshot pointer that hold the install's loop and
+   * GY-1859: lift the known-good pin that holds the install's loop and
    * slots on another commit (repository-setup's liftLoopPins), so a unit rewritten or restarted
    * next starts this CLI; answers what it lifted.
    */
   liftLoopPins?(): Promise<string[]>;
+  /** Remove the retired held-cli pointer even when the master-loop step is already complete. */
+  removeHeldCliPin?(): Promise<void>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
@@ -1003,6 +1005,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const read = await deps.loopCode().then(answer => answer ?? 'no reading came back', (error: any) => String(error?.message ?? error).split('\n')[0].slice(0, 400) || 'the reading was rejected');
       return typeof read === 'string' ? { error: read, reading: null } : { error: read.error, reading: read };
     };
+    await deps.removeHeldCliPin?.();
     if (state.completed.includes('master-loop') && deps.loopCode) {
       const recorded = await readLoopCode();
       if (recorded?.error || recorded?.reading?.loopStale) {
@@ -1027,7 +1030,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       let rewrote: string | null = null;
       // A known-good pin would bring a rewritten unit — and the loop's own alignment a restarted
       // one — back onto the pinned commit, so it is lifted first and the step still waits for the
-      // exact commit below. A stale held-cli.json is removed in the same lift.
+      // exact commit below.
       if (loopStale && deps.liftLoopPins) {
         const lifted = await deps.liftLoopPins().catch(error => { throw new UpStop(`master-loop: ${loopStale}, and lifting the pin that holds it there failed: ${String(error?.message ?? error).split('\n')[0]}; rerun ${rerun()}`, upExitCodes.failed); });
         if (lifted.length) deps.emit({ kind: 'note', text: `master-loop: lifted ${lifted.join(' and ')}, so the unit starts this CLI instead; graphyard master recover --to SHA pins a release again.` });
@@ -1694,8 +1697,8 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop unit is judged against the CLI running up, whose launcher and checkout are this run's.
     loopCode: async () => readLoopCode(root, { cliPath }),
-    // GY-3000: a stale held-cli.json may still sit under the checkout this CLI runs from.
-    liftLoopPins: async () => liftLoopPins(root, { repository: request.repository, heldRoot: loopCodeRoot(cliPath, root) }),
+    removeHeldCliPin: async () => removeHeldCliPin(loopCodeRoot(cliPath, root)),
+    liftLoopPins: async () => liftLoopPins(root, { repository: request.repository }),
     fileOnboarding: async (commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();
       let token = '';
