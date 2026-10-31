@@ -697,7 +697,7 @@ Effort: S under a day for one agent, M one to three days, L more.
   - Delete the tombstone, budget and triage-table tests, and fold their behavioural cases into the module's own test file, named by behaviour.
   - Merge the two scans into one `tests/architecture.test.ts`.
 
-### A17. Comments narrate history (low, no separate item)
+### A17. Comments narrate history (low, S per module as touched; no separate item)
 
 - **Size:** 30.5% of `src/` lines are comments, with 3,240 `GY-NNNN` references. 1,120 lines are longer than 250 characters, and 64 longer than 500 (`master/harness.ts:228` is 1,392 characters).
 - **Example:** `model/work.ts:29-41` explains GY-1698 down to the minute an item was filed.
