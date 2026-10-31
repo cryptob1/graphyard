@@ -15,7 +15,7 @@ A running agent instance. **Canonical usage:** *session*; host: *runtime*.
 
 ### 4. Principal, role, and credential
 
-*Principal*: identity; *role*: authority; *credential*: secret. Item `owner`: human principal; worker lease: execution ownership. Now: signed-in person’s items.
+*Principal*: identity; *role*: authority; *credential*: secret. One principal per concurrent session. Item `owner`: human principal; worker lease: execution ownership. Now: signed-in person’s items.
 
 ### 5. Worker lease and worktree
 

@@ -1,5 +1,5 @@
-import { sessionName } from '../session-name.js';
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
+import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { assertDispatchable } from '../master.js';

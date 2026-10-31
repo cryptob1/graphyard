@@ -1,13 +1,13 @@
 <!-- page: Operate Graphyard | 5 | loop -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; it files and releases items itself ([intent](how-graphyard-works.md#from-intent-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
+The master (`coordinator`) administers access, never implementing, reviewing or proving; it files and releases items itself ([intent](how-graphyard-works.md#from-intent-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
 
 ## Operate
 
 Cycle until scoped items are Done or blocked and releases healthy. `master status` prints the serving commit against main, scoped items' stage, worker and human owner, head and blocker, the merge queue, sessions and free profiles. Serving describes the managed repository's deployment, never the control plane's build; without a provider it is `unconfigured`. A repository declaring [`.graphyard/serve.json`](deployment.md#serving-the-managed-repositorys-app) reports its served commit, `atMain`, URL and last build failure. Review, rework and proof setup are not stopping conditions.
 
-Items carry an optional `owner`, a principal with `sessionKind: "human"`, separate from the worker lease. Set it in `master create` or change it through `master requirements`; `null` returns it to the install. Requirements still enforce revisions and active leases. In the install checkout, `master init --for PERSON --token-stdin` registers a personal master without replacing identities or installing another supervisor. The existing loop launches each person's master and dispatches only that person's items in its scope; the install master dispatches unowned items. Scopes share capacity, reconciliation, review/proof dispatch and one merge writer. A personal master's creates default to its person. Signed-in people open Work → Now for exactly their items, stage and next step; Work remains the shared board.
+Items carry an optional `owner`, a principal with `sessionKind: "human"`, separate from the worker lease. Set it in `master create` or change it through `master requirements`; `null` returns it to the install. Requirements still enforce revisions and active leases. In the install checkout, `master init --for PERSON --token-stdin` registers a personal master without replacing identities or installing another supervisor. The loop launches each person's master and dispatches only their items; the install master dispatches unowned items. Scopes share capacity, reconciliation, review/proof dispatch and one merge writer. A personal master's creates default to its person. Signed-in people open Work → Now for exactly their items, stage and next step; Work remains the shared board.
 
 ## The loop
 
