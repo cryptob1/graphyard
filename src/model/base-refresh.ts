@@ -61,7 +61,7 @@ export function conflictSince(previous: Pick<BaseRefresh, 'from' | 'policyRevisi
  */
 export interface BaseRefreshRequest { head: string; base: string; policyRevision: number; by: string; at: string; reason: string }
 /** Why a branch was written by the control plane rather than by its worker (GY-375, GY-528). */
-export type RefreshTrigger = 'conflict confirmed' | 'base failure repaired' | 'base breakage';
+export type RefreshTrigger = 'conflict confirmed' | 'base failure repaired';
 
 /**
  * The refresh this candidate is waiting for, or null when it needs none (GY-292): only a candidate
