@@ -219,20 +219,20 @@ async function pinnedReplacement() {
   const { readLoopCode, liftLoopPins } = await repositorySetup();
   const { loopUnitText } = await import('../src/supervisor.js');
   const { knownGoodCli, knownGoodState } = await import('../src/master/known-good.js');
-  const { heldCliSnapshotAt, heldLauncherOf } = await import('../src/daemon/held-cli.js');
+  const { access } = await import('node:fs/promises');
   const units: InstallUnits = perInstallUnits('acme/shop');
   const attempt = async (lift: boolean) => {
     const base = await temporaryDirectory(`graphyard-up-loop-pinned-${lift ? 'lifted' : 'kept'}`);
     const root = await resumedRoot(`graphyard-up-loop-pinned-root-${lift}`), installDir = join(base, 'install'), unitDirectory = join(base, 'units'), home = join(base, 'home');
-    const cliPath = join(base, 'cli', 'bin', 'graphyard.mjs'), snapshot = heldCliSnapshotAt(root, OLD_COMMIT);
-    for (const directory of [join(installDir, 'coordinator'), unitDirectory, home, join(snapshot, 'src')]) await mkdir(directory, { recursive: true });
+    const cliPath = join(base, 'cli', 'bin', 'graphyard.mjs'), snapshot = join(root, '.graphyard', 'held-cli', OLD_COMMIT.slice(0, 12));
+    for (const directory of [join(installDir, 'coordinator'), unitDirectory, home, join(snapshot, 'src'), join(root, '.graphyard')]) await mkdir(directory, { recursive: true });
     await writeFile(join(installDir, 'coordinator', 'state.json'), JSON.stringify({ sha: OLD_COMMIT, pinnedAt: 'an earlier promotion', previous: null }));
     await writeFile(join(snapshot, 'src', 'cli.ts'), '// the held snapshot\n');
     await writeFile(join(root, '.graphyard', 'held-cli.json'), JSON.stringify({ commit: OLD_COMMIT, root: snapshot }));
-    // What `master init --replace-supervisor` writes: the real renderer, reading the pins as installLoopSupervisor does.
-    const render = () => loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: heldLauncherOf(root) });
+    // What `master init --replace-supervisor` writes: the real renderer after any lift.
+    const render = () => loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir });
     const unitFile = join(unitDirectory, units.master);
-    await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null }));
+    await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir }));
     assert.match(await readFile(unitFile, 'utf8'), new RegExp(`ExecStart=\\S+ ${quote(knownGoodCli(installDir))} master run`), 'the pinned unit starts the known-good coordinator');
     // The loop reports the commit of whichever launcher its unit starts: this CLI's, or the pin's.
     const loaded = async () => (await readFile(unitFile, 'utf8')).includes(`${cliPath} master run`) ? COMMIT : OLD_COMMIT;
@@ -260,9 +260,9 @@ async function pinnedReplacement() {
   assert.doesNotMatch(lifted.unit, /coordinator\/current|held-cli/, 'neither the pin nor the held snapshot is started');
   assert.equal(knownGoodState(lifted.installDir), null, 'the pin is lifted');
   assert.ok(JSON.parse(await readFile(join(lifted.installDir, 'coordinator', 'lifted.json'), 'utf8')).sha === OLD_COMMIT, 'and its record is kept beside it');
-  assert.equal(heldLauncherOf(lifted.root), null, 'the held pointer is lifted');
+  await assert.rejects(() => access(join(lifted.root, '.graphyard', 'held-cli.json')), 'the stale held-cli pin is removed');
   const note = lifted.events.find(event => event.kind === 'note' && event.text.startsWith('master-loop: lifted')) as { text: string } | undefined;
-  assert.match(note?.text ?? '', new RegExp(`known-good pin at ${OLD_COMMIT.slice(0, 12)}.* and the held snapshot at ${OLD_COMMIT.slice(0, 12)}`), 'the step names what it lifted');
+  assert.match(note?.text ?? '', new RegExp(`known-good pin at ${OLD_COMMIT.slice(0, 12)}.* and the stale held-cli pin`), 'the step names what it lifted');
   assert.ok(lifted.events.some(event => event.kind === 'note' && event.text.includes(`at ${COMMIT.slice(0, 12)}`)), 'and the commit the loop now reports');
 }
 
@@ -277,7 +277,7 @@ test('unit:up-rewrites-self-managed-loop-on-the-managed-checkout — when Graphy
   const cliPath = join(base, 'cli', 'bin', 'graphyard.mjs'), managedPath = join(root, 'bin', 'graphyard.mjs');
   for (const directory of [unitDirectory, home, installDir]) await mkdir(directory, { recursive: true });
   const unitFile = join(unitDirectory, units.master);
-  await writeFile(unitFile, loopUnitText({ root, cliPath: managedPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null }));
+  await writeFile(unitFile, loopUnitText({ root, cliPath: managedPath, repository: 'acme/shop', intervalSeconds: 30, installDir }));
   assert.match(await readFile(unitFile, 'utf8'), new RegExp(`ExecStart=\\S+ ${quote(managedPath)} master run`), 'the loop starts the managed checkout\'s launcher');
   // Each checkout's HEAD; the loop reports the commit of the launcher its unit starts.
   const run = (_command: string, args: string[]) => args[2] === 'rev-parse' ? `${args[1] === root ? OLD_COMMIT : COMMIT}\n` : '';
@@ -296,7 +296,7 @@ test('unit:up-rewrites-self-managed-loop-on-the-managed-checkout — when Graphy
   const outcome = await runUp(request(), { ...deps,
     loopCode: read,
     cli: async (args, options = {}) => {
-      if (args[0] === 'master' && args[1] === 'init') { w.calls.push({ args }); await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null })); return { code: 0, stdout: '{"supervisor":{"state":"updated"}}' }; }
+      if (args[0] === 'master' && args[1] === 'init') { w.calls.push({ args }); await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir })); return { code: 0, stdout: '{"supervisor":{"state":"updated"}}' }; }
       return deps.cli(args, options);
     } });
   assert.equal(outcome.exitCode, 0, outcome.next);

@@ -10,7 +10,7 @@ import { serverOrigin, loadConnection, managedInstructions } from '../repository
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { APP_PENDING, checkoutLauncherOf, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
+import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
 import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
@@ -191,7 +191,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (!appPending && (!Number.isSafeInteger(status.githubAppId) || status.githubAppId <= 0)) throw new Error('Master setup requires the control plane to identify its GitHub App');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
-  const cliPath = checkoutLauncherOf(resolve(input.cliPath));
+  const cliPath = resolve(input.cliPath);
   try { if (!(await lstat(cliPath)).isFile()) throw new Error(); } catch { throw new Error('Master setup requires an existing Graphyard CLI launcher'); }
   let previous: MasterConfig | undefined;
   try { previous = await readMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }

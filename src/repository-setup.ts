@@ -12,7 +12,7 @@ import { autonomyContract } from './autonomy.js';
 import { parseRepositoryConfig, repositoryConfigFile, type RepositoryConfig } from './model/documentation.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
 import { readInstallUnits, systemdCommandLineWords, unitCheckout, userUnitDirectory, type InstallUnits } from './install/units.js';
-import { checkoutLauncherOf, coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
+import { coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
 import { herdrTarget, type HerdrInstance } from './master/herdr.js';
 import { herdrSync } from './herdr-host.js';
@@ -153,7 +153,6 @@ export function herdrRebindRefusal(bound: string, target: string, flag = '--herd
 
 export async function setupRepository(root: string, input: Connection, options: { herdr?: boolean; herdrRebind?: boolean; herdrInstance?: HerdrInstance | null; runHerdr?: (args: string[]) => string; fetcher?: typeof fetch } = {}) {
   const connection = connectionSchema.parse(input); connection.url = serverOrigin(connection.url);
-  connection.cliPath = checkoutLauncherOf(connection.cliPath);
   delete connection.principal; // Identity is established only by the authenticated server response.
   if (!isAbsolute(connection.cliPath) || !(await lstat(connection.cliPath)).isFile()) throw new Error('CLI path must be an existing absolute launcher path');
   if (options.herdr && !connection.token) throw new Error('Herdr setup requires an individual worker credential via GRAPHYARD_TOKEN or --token-stdin');
@@ -661,17 +660,15 @@ export async function readLoopCode(root: string, options: {
 }
 
 /**
- * GY-1859: the pins that hold this install's loop on code other than this CLI's, lifted so
+ * GY-1859 / GY-3000: the pins that hold this install's loop on code other than this CLI's, lifted so
  * a replacement starts this CLI. `loopUnitText` renders the known-good coordinator's launcher while
- * its pin stands (GY-1529), and the unit and `master init` start the held
- * snapshot's while a held restart's pointer stands (GY-1790): a rewrite under either comes back on
- * the pinned commit, and the loop's own alignment would put a unit rewritten past them back. The
- * pin's record is kept beside it (`coordinator/lifted.json`, whose pin `master recover --to SHA`
- * restores) and the held pointer is removed, its snapshot left; the next promotion pins afresh.
- * Returns what was lifted, one phrase each; nothing standing lifts nothing.
+ * its pin stands (GY-1529): a rewrite under it comes back on the pinned commit. The pin's record is
+ * kept beside it (`coordinator/lifted.json`, whose pin `master recover --to SHA` restores). A stale
+ * `.graphyard/held-cli.json` (nothing writes one since GY-2877) is removed once during up; the
+ * launcher ignores it. Returns what was lifted, one phrase each; nothing standing lifts nothing.
  */
-export async function liftLoopPins(root: string, options: { installDir?: string | null; repository?: string | null; /** GY-1899: the checkout the running CLI comes from, where the held snapshot's pointer lives; default ROOT. */ heldRoot?: string } = {}): Promise<string[]> {
-  const [{ knownGoodDirectory, knownGoodState }, { heldCliPointer, readHeldCli }] = await Promise.all([import('./master/known-good.js'), import('./daemon/held-cli.js')]);
+export async function liftLoopPins(root: string, options: { installDir?: string | null; repository?: string | null; /** Where a stale held-cli.json may still sit; default ROOT. */ heldRoot?: string } = {}): Promise<string[]> {
+  const { knownGoodDirectory, knownGoodState } = await import('./master/known-good.js');
   const installDir = options.installDir !== undefined ? options.installDir : await (async () => {
     if (!options.repository) return null;
     const [{ installDirectory }, { installIdFor }] = await Promise.all([import('./install/secrets.js'), import('./install/types.js')]);
@@ -684,14 +681,13 @@ export async function liftLoopPins(root: string, options: { installDir?: string 
     await rename(join(directory, 'state.json'), join(directory, 'lifted.json'));
     lifted.push(`the known-good pin at ${shortSha(pin.sha)} (${join(directory, 'state.json')}, kept as lifted.json)`);
   }
-  // GY-1899: the held snapshot's pointer lives under the checkout the running CLI comes from
-  // (`heldRoot`), where the loop's holdCliAt wrote it — the managed root holds none of it.
   const heldRoot = options.heldRoot ?? root;
-  const held = readHeldCli(heldRoot);
-  if (held) {
-    await rm(heldCliPointer(heldRoot), { force: true });
-    lifted.push(`the held snapshot at ${shortSha(held)} (${heldCliPointer(heldRoot)})`);
-  }
+  const heldPointer = join(heldRoot, '.graphyard', 'held-cli.json');
+  try {
+    await stat(heldPointer);
+    await rm(heldPointer, { force: true });
+    lifted.push(`the stale held-cli pin (${heldPointer})`);
+  } catch { /* no stale pin */ }
   return lifted;
 }
 

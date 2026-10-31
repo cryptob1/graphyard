@@ -1025,9 +1025,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // A unit that starts another checkout is rewritten; one on this checkout whose process loaded other code is restarted.
       const rewriteLoop = !!loopStale && reading?.loopReplace !== 'restart';
       let rewrote: string | null = null;
-      // A known-good pin or held snapshot would bring a rewritten unit — and the loop's own alignment
-      // a restarted one — back onto the pinned commit, so it is lifted first and the step still waits
-      // for the exact commit below.
+      // A known-good pin would bring a rewritten unit — and the loop's own alignment a restarted
+      // one — back onto the pinned commit, so it is lifted first and the step still waits for the
+      // exact commit below. A stale held-cli.json is removed in the same lift.
       if (loopStale && deps.liftLoopPins) {
         const lifted = await deps.liftLoopPins().catch(error => { throw new UpStop(`master-loop: ${loopStale}, and lifting the pin that holds it there failed: ${String(error?.message ?? error).split('\n')[0]}; rerun ${rerun()}`, upExitCodes.failed); });
         if (lifted.length) deps.emit({ kind: 'note', text: `master-loop: lifted ${lifted.join(' and ')}, so the unit starts this CLI instead; graphyard master recover --to SHA pins a release again.` });
@@ -1694,8 +1694,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop unit is judged against the CLI running up, whose launcher and checkout are this run's.
     loopCode: async () => readLoopCode(root, { cliPath }),
-    // GY-1899: the held snapshot's pointer lives under the checkout this CLI runs from, where the
-    // loop's holdCliAt wrote it — a lift that read the managed repository would remove nothing.
+    // GY-3000: a stale held-cli.json may still sit under the checkout this CLI runs from.
     liftLoopPins: async () => liftLoopPins(root, { repository: request.repository, heldRoot: loopCodeRoot(cliPath, root) }),
     fileOnboarding: async (commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();
