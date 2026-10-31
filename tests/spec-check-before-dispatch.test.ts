@@ -46,7 +46,7 @@ const states = new Map<string, DaemonState>();
 let launches = 0;
 
 /** Two loop rounds: the stubbed spec checker registers its launch and posts its verdict the way the control plane records them; a verdict that lands in round one is acted on in round two. */
-async function drive(item: Work, verdict: SpecVerdict | null, others: Work[] = [], cycles = 2) {
+async function drive(item: Work, verdict: SpecVerdict | null, others: Work[] = [], cycles = 2, people: string[] = []) {
   const directory = await temporaryDirectory('spec-check-dispatch');
   try {
     const token = join(directory, 'coordinator.token');
@@ -54,7 +54,7 @@ async function drive(item: Work, verdict: SpecVerdict | null, others: Work[] = [
     const credential = join(directory, 'worker.token');
     await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const profile: WorkerProfile = { name: 'worker', principal: 'worker-principal', agentName: 'agent-worker', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
-    const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile] });
+    const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile], people });
     const work = [item, ...others];
     const launched: string[] = [], checks: string[] = [], closed: string[] = [];
     const effects: DaemonEffects = {
@@ -217,4 +217,13 @@ test('unit:spec-check-before-dispatch — a second gaps report on the same revis
   assert.equal(item.specCheck!.recheck, undefined, 'only a report after master requirements revised the item is the re-check');
   assert.match(specCheckRefusal(item)!, /Spec check named gaps/, 'the item stays held until the requirements are revised');
   assert.equal(isRecheck({ ...item.specCheck!, policyRevision: 1 }, 2), true);
+});
+
+test('unit:spec-check-before-dispatch — a person\'s item keeps its running checker open while every other scope runs', async () => {
+  const item = feature('GY-23', { owner: 'alice' } as Partial<Work>);
+  const { checks, closed } = await drive(item, null, [], 2, ['alice']);
+  assert.deepEqual(checks, ['GY-23'], 'the owner\'s scope launches the check');
+  assert.deepEqual(closed, [], 'no scope closes the pane while its launch stands');
+  post(item, 'ready');
+  assert.equal((await drive(item, null, [], 1, ['alice'])).closed.length, 1, 'once the report lands, the pane closes once');
 });

@@ -449,10 +449,11 @@ async function dispatchStep(cycle: Cycle) {
   // is released and unblocked and no check stands and no launch is live on the item — one session
   // A launched checker's pane closes once a snapshot read after its launch shows no live launch on
   // the item — its report landed or its launch expired — or the item done; the pane then leaves
-  // the record, so it closes once.
+  // the record, so it closes once. The item is looked up across every owner's scope, as the
+  // actions are shared by them all.
   for (const [key, action] of Object.entries(state.actions)) {
     if (!key.startsWith('spec-check:') || !action.pane) continue;
-    const item = open.find(entry => entry.key === action.work);
+    const item = snapshot.work.find(entry => entry.key === action.work && entry.stage !== 'done');
     if (item && (Date.parse(snapshot.now) < Date.parse(action.at) || specCheckLaunchLive(item, clock))) continue;
     try {
       await Promise.resolve(effects.closeSession(action.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
