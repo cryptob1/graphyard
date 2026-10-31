@@ -10,7 +10,7 @@ import { proofPreview } from '../src/coordination.js';
 import { neededRework } from '../src/daemon/rework.js';
 import { mergeQueue } from '../src/merge-writer/executor.js';
 import { evaluate } from '../src/model/gates.js';
-import { dueHumanProofs, physicalCheckRefusal } from '../src/model/human-proof.js';
+import { dueHumanProofs, humanProofRows, physicalCheckRefusal } from '../src/model/human-proof.js';
 import type { HumanRequestRow } from '../src/model/human-request.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -114,6 +114,8 @@ test('unit:human-proof-request-and-answer — a fail returns the item to rework 
   const work = await submitted('GY-9102');
   await post(loop, `work/${work.id}/human-proof-request`, { proof, sha: H, baseSha: B });
   const [row] = await rows(work.id);
+  const previewed = { ...await stored(work.id), preview: { state: 'running', sha: H, path: '/preview/GY-9102' } } as unknown as Work;
+  assert.equal(humanProofRows(previewed, 'refused', Date.now())[0].request.steps![0], 'Open /preview/GY-9102/', 'a preview that came up after the ask is linked');
   assert.equal((await post(human, `work/${work.id}/human-proof`, { request: row.request.id, outcome: 'fail', note: 'The receipt came out blank' })).status, 200);
   const failed = await stored(work.id);
   assert.match(reasons(failed)[0], /failed a person's check.*The receipt came out blank/);

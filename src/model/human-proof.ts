@@ -78,10 +78,12 @@ export const answerableHumanProof = (work: Pick<Work, 'candidate' | 'policyRevis
 /** The Needs you rows of one item's open checks. */
 export function humanProofRows(work: Work, refusal: string, now: number): HumanRequestRow[] {
   return (work.humanProofs ?? []).filter(request => answerableHumanProof(work, request)).map(request => {
+    // A preview that came up after the ask is linked too.
+    const preview = work.preview?.state === 'running' && work.preview.sha === request.sha && !request.steps[0].startsWith('Open ') ? [`Open ${work.preview.path}/`] : [];
     const choice = (label: string, outcome: 'pass' | 'fail') => ({ label, input: 'text' as const, declines: false, body: { request: request.id, outcome }, note: 'note' });
     return {
       rule: 'human-proof', work: work.key, id: work.id, title: work.title,
-      request: { id: request.id, kind: 'human-proof', epoch: work.epoch, at: request.at, requestedBy: request.requestedBy, ask: request.ask, steps: request.steps,
+      request: { id: request.id, kind: 'human-proof', epoch: work.epoch, at: request.at, requestedBy: request.requestedBy, ask: request.ask, steps: [...preview, ...request.steps],
         needed: `${request.proof} on commit ${request.sha}`, reason: `${request.criterion} of ${work.key} names a check only a person can make`,
         why: 'Your answer is the proof for this exact commit: a pass lets it merge, a fail sends it back to its worker with your note.' },
       waitedMs: Math.max(0, now - Date.parse(request.at)), decision: 'a real-world check', refusal,
