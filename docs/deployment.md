@@ -34,7 +34,7 @@ A repository whose main declares `.graphyard/serve.json` gets its merged main bu
 
 ### Deployment incident
 
-`/healthz` `commit` behind tip: `install --logs` shows failures; redeploy ([manual fallback](#manual-fallback)). The serving environment name comes from `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`. `/api/github/*` is not served.
+`/healthz` `commit` behind tip: `install --logs` shows failures; redeploy ([manual fallback](#manual-fallback)). The production watch observes serving from its provider's deployment list (Railway's API, `RAILWAY_API_TOKEN` or `RAILWAY_TOKEN`) or the build identity; containment is equality alone, so a merge is deployed only when production serves its exact commit. What production serves is read from the deploy record and the watch only — `/api/status` names the production environment from `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`, and reads no ledger value. `/api/github/*` is not served.
 
 ## Backup, upgrade, rollback
 

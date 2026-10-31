@@ -39,17 +39,14 @@ export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: s
 /** The sources of installation attention. */
 export const installationSources = ['app-permissions', 'held-jobs', 'delegation-limits', 'production'] as const;
 /** The owner of one installation attention line, by the source that raised it. */
-export function installationOwner(source: typeof installationSources[number], text: string, productionBranch: string | null = null): AttentionOwner {
+export function installationOwner(source: typeof installationSources[number], text: string): AttentionOwner {
   // Reinstating a suspended App installation is an account decision on the operator's GitHub account.
   if (source === 'app-permissions') return /suspended/i.test(text) ? humanOwner('spending money or opening third-party accounts', 'Reinstate the suspended GitHub App installation from the account that owns it')
     : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
   if (source === 'held-jobs') return agentOwner('control plane', 'Nothing to run: held jobs resume once graphyard master browser installation-accept grants the permission');
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
-  // Production may track a release branch of its own: the fix is the deployment of what production
-  // tracks (GY-1207). The branch is the one the watch reported (GRAPHYARD_PRODUCTION_BRANCH when set), never a fixed name (GY-1256).
-  return agentOwner('master', productionBranch
-    ? `Fix the failing deployment of ${productionBranch}, the branch production tracks, with the configured provider`
-    : 'Fix the failing deployment of the base branch, which production tracks, with the configured provider');
+  // The failing deployment is on the base branch production deploys; the fix is its redeploy.
+  return agentOwner('master', 'Fix the failing deployment of the base branch, which production tracks, with the configured provider');
 }
 /** Why a work item raises attention. */
 export const workAttentionCauses = ['human-request', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
@@ -121,7 +118,7 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const report = status?.appPermissions;
   const items: AttentionItem[] = [];
-  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text, source === 'production' ? status?.production?.release?.branch ?? null : null) });
+  const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text) });
   for (const text of report?.attention ?? []) raise('app-permissions', text);
   if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
@@ -148,19 +145,14 @@ export function starvedJobText(job: NonNullable<ControlPlaneStatus['starvedJobs'
  */
 const masterRoleUnnamed = (text: string) => /^role master is not configured\b/.test(text);
 /**
- * The production lag an operator reads first: what production serves, how far the base
- * branch is ahead of it, and the failing deployment reason when the provider reported one.
+ * The production lag an operator reads first: what production serves, and the failing deployment
+ * reason when the provider reported one. There is no branch-ahead computation: comparisons are
+ * gone, so the summary says what the watch cannot tell when it says nothing.
  */
 export function productionSummary(report: Partial<ProductionReport>) {
   const incidents = (report.incidents ?? []).map(incident => ({ key: incident.key, mergeSha: incident.mergeSha, status: incident.status, reason: incident.reason, deploymentId: incident.deploymentId ?? null, since: incident.since }));
-  const ahead = report.ahead ?? null;
-  const release = report.release ?? null;
-  const awaiting = release && typeof release.unreleased === 'number' ? `; main is ${release.unreleased} commit${release.unreleased === 1 ? '' : 's'} ahead of it, awaiting the next release` : '';
-  const summary = release ? (ahead?.by === 0 ? `production serves ${release.branch}${awaiting}` : ahead ? `${release.branch} is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production${awaiting}` : `${report.aheadError ?? 'production lag is unknown'}${awaiting}`)
-    : ahead ? ahead.by === 0 ? 'production serves the base branch tip' : `main is ${ahead.by} commit${ahead.by === 1 ? '' : 's'} ahead of production${ahead.rollingOut ? `; rollout in flight since ${ahead.unservedSince}` : ''}` : report.aheadError ?? 'production lag is unknown';
-  return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, aheadBy: ahead?.by ?? null, aheadCommits: ahead?.commits ?? [], release, summary,
-    unservedSince: ahead?.unservedSince ?? null, rollingOut: ahead?.rollingOut ?? false,
+  return { provider: report.provider ?? null, observedAt: report.observedAt ?? null, serving: report.serving ?? null, running: report.running ?? null, summary: report.aheadError ?? 'production lag is unknown',
     latestDeployment: report.latest ? { id: report.latest.id, status: report.latest.providerStatus, commit: report.latest.commit, createdAt: report.latest.createdAt, url: report.latest.url ?? null } : null,
     deployed: report.deployed ?? [], pending: report.pending ?? [], incidents, error: report.error ?? null,
-    attention: attentionLines({ ahead, aheadError: report.aheadError ?? null, serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null, latest: report.latest ?? null, provider: report.provider ?? null, release }) };
+    attention: attentionLines({ serving: report.serving ?? null, incidents: (report.incidents ?? []), error: report.error ?? null }) };
 }
