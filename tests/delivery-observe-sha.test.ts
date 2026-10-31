@@ -80,7 +80,7 @@ async function copies(template: Work, count: number, mergeSha: string, mergedAt:
   return documents.map(d => d.key);
 }
 
-test('unit:sha-observation-marks-deployed — a producer sha observation is idempotent and marks deployed exactly the delivered items it contains', async () => {
+test('unit:delivery-observe-sha — a producer sha observation is idempotent and marks deployed exactly the delivered items it contains', async () => {
   const exact = await delivered(sha('1')), ancestor = await delivered(sha('2')), elsewhere = await delivered(sha('3'));
   const served = sha('4');
 
@@ -141,7 +141,7 @@ test('unit:sha-observation-marks-deployed — a producer sha observation is idem
 
 });
 
-test('unit:sha-observation-completion-states — a sha observation names the serving release beside the delivered label and a digest observe behaves as before', async () => {
+test('unit:delivery-observe-sha — a sha observation names the serving release beside the delivered label and a digest observe behaves as before', async () => {
   const w = await delivered(sha('5')), untouched = await delivered(sha('6'));
   assert.equal(deliveryOutcome(smoked(w)), deliveryLabel.delivered, 'delivered at its merge (GY-1981)');
 
@@ -170,7 +170,7 @@ test('unit:sha-observation-completion-states — a sha observation names the ser
   assert.equal(deliveryOutcome(smoked(await reload(untouched))), deliveryLabel.delivered, 'an item the sha does not contain names no release');
 });
 
-test('unit:sha-observation-bounded-replay — a request does bounded provider work and continues by cursor, replays its receipt after production changes, and re-reads the production selection', async () => {
+test('unit:delivery-observe-sha — a request does bounded provider work and continues by cursor, replays its receipt after production changes, and re-reads the production selection', async () => {
   // Bounded: more distinct merges than one request compares are reached by continuing from `next`, and a failed comparison stops the batch before it.
   const template = await delivered(sha('c')), served = sha('d');
   const merges = Array.from({ length: 60 }, () => randomBytes(20).toString('hex')), mergedAt = Date.parse(template.delivery!.mergedAt);
