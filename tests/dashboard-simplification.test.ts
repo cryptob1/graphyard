@@ -159,7 +159,10 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
   assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Validation', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents']);
-  assert.deepEqual(tabs(dashboard(), 'work'), [], 'a section with one page draws no tab row');
+  assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
+  const agent = fixtureStatus('admin');
+  agent.actor = { ...agent.actor, sessionKind: 'ai' };
+  assert.deepEqual(tabs(dashboard({ status: agent }), 'work'), [], 'a section with one page draws no tab row');
   assert.match(sidebar, />Help</, 'the guide is linked from the sidebar');
 
   // Admin-only pages are hidden from reader and worker sessions, even when configured.
