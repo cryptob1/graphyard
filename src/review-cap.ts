@@ -64,18 +64,4 @@ export function followUpFindingsOf(body: unknown, limit = 20): string[] {
   const blocks = body.split(/\n\s*\n|\n(?=\s*(?:[-*]|\d+\.)\s)/).map(block => block.trim()).filter(block => block && !blockingLine.test(block.split('\n')[0]!) && !scaffold.test(block));
   return blocks.map(block => block.slice(0, 2000)).slice(0, limit);
 }
-/**
- * What an observation keeps of a change request's body (github.ts): the whole body when it fits
- * `reviewBodyMax`; otherwise its `BLOCKING:` and `Follow-up finding:` lines first, then the rest,
- * cut to the bound, so a finding named late in a long verdict is never cut off. `blocking` is
- * read from the whole body before any cut (GY-1118 review: a BLOCKING: line past character 2000
- * was classed a follow-up).
- */
-export function observedReviewBody(body: string): { body: string; blocking?: string[] } {
-  const blocking = blockingFindings(body);
-  const kept = body.length <= reviewBodyMax ? body : (() => {
-    const lines = body.split('\n'), named = lines.filter(line => blockingLine.test(line) || followUpLine.test(line));
-    return [...named, '', ...lines.filter(line => !named.includes(line))].join('\n').slice(0, reviewBodyMax);
-  })();
-  return { body: kept, ...(blocking.length ? { blocking } : {}) };
-}
+

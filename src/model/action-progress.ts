@@ -68,15 +68,6 @@ export const actionStallDelay = (failures: number) =>
 export const actionRetryDelay = (attempts: number) => Math.min(actionRetryMinMs * 2 ** Math.max(0, attempts - 1), actionRetryMaxMs);
 
 /**
- * The longest a row can go from its first failure to being classified as stalled: the backoffs
- * between the failures the threshold needs. A stall is therefore visible well inside the
- * `actionIdleMs` bound the fleet applies to a row nobody is acting on — a row that is being
- * attempted and getting nowhere reaches somebody no later than one that is not attempted at all.
- */
-export const actionStallLatencyMs = Array.from({ length: actionStallThreshold - 1 }, (_unused, index) => actionRetryDelay(index + 1))
-  .reduce((total, delay) => total + delay, 0);
-
-/**
  * Why a row is making no progress: the classification a row carries once its recent attempts all
  * failed for one unchanged reason. `actionStall` derives it; nothing else decides it.
  */
@@ -261,16 +252,3 @@ export function idleActionable(all: Work[], now: Date, thresholdMs = actionIdleM
   return queueSnapshot(all, now).waiting.filter(entry => entry.waitedMs > thresholdMs);
 }
 
-/**
- * The rows of one item that are stalling rather than retrying, with how long each has been open.
- *
- * Its own reading is what the dashboard needs: a card is drawn from one work document, and a
- * stall is a fact about that item, not about the fleet. `queueSnapshot(...).stalled` is the same
- * classification across every item.
- */
-export function stalledActions(work: Work, now: Date) {
-  return (work.actionQueue?.actions ?? []).flatMap(row => {
-    const stall = actionStall(row);
-    return stall ? [{ id: row.id, kind: row.kind, stall, retryAt: row.retryAt ?? null, openMs: Math.max(0, now.getTime() - Date.parse(row.requestedAt)) }] : [];
-  }).sort((a, b) => b.openMs - a.openMs);
-}

@@ -166,7 +166,7 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
 }
 
 // One line per session for a reader, and the one reading of whether it is running: session-state.ts (GY-172).
-export { runningSessions, sessionSummary, unseenSessions } from './session-state.js';
+export { runningSessions, sessionSummary } from './session-state.js';
 
 
 /**
@@ -271,8 +271,6 @@ export function supersededSession(work: Work, handle: Pick<SessionHandle, 'kind'
  * coordination session outlives the work it shepherds, so it gets a shift rather than an hour.
  */
 export const roleSessionMaximumMs: Record<SessionKind, number> = { implementation: 4 * 3_600_000, review: 3_600_000, proof: 2 * 3_600_000, coordination: 12 * 3_600_000 };
-/** A duration in the unit the reader thinks in: seconds while it is young, then minutes, then hours. */
-export const elapsed = (ms: number) => ms >= 3_600_000 ? `${Math.floor(ms / 3_600_000)}h${Math.floor(ms % 3_600_000 / 60_000)}m` : ms >= 60_000 ? `${Math.floor(ms / 60_000)}m` : `${Math.floor(ms / 1000)}s`;
 export interface OverlongSession {
   workId: string; key: string; id: string; kind: SessionKind; role: string; principal: string; runtime: string; host: string;
   ageMs: number; maximumMs: number; idleMs: number; lastActivityAt: string; liveness: Liveness; live: boolean | null;
