@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { Principal } from './work.js';
 
-export const proofSchema = z.string().regex(/^(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+$/);
+export const proofSchema = z.string().regex(/^(unit|integration|e2e|manual|human):[a-zA-Z0-9._/-]+$/);
 /**
  * The post-deployment smoke proof. It is required through the work policy, never through an
  * acceptance criterion: a criterion gates the merge, and nothing is deployed before the merge.
@@ -40,4 +40,4 @@ export const authorizedForEveryProof = (actor: Pick<Principal, 'id' | 'role' | '
  * `producerProofs` is run by a producer session, never attested, so an admin's `manual:*` pattern does not cover it.
  */
 export const unauthorizedProofs = (principals: readonly Pick<Principal, 'id' | 'role' | 'proofs'>[], proofs: readonly string[], producerProofs: readonly string[] = []) =>
-  proofs.filter(proof => !principals.some(principal => (principal.role === 'producer' || !producerProofs.includes(proof)) && authorizedForProof(principal, proof)));
+  proofs.filter(proof => !proof.startsWith('human:') && !principals.some(principal => (principal.role === 'producer' || !producerProofs.includes(proof)) && authorizedForProof(principal, proof)));

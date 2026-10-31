@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { LaunchRefusedError } from './harness.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, selectAccount, selectRegistryAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, closeHerdrPane, createdHerdrTab, credentialMaskFor, deliverPrompt, destructivePromptGuidance, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, markReprompted, neverStarted, onSelectedSession, prepareSessionHarness, privateFile, profileAtLimit, profileSessions, registrySessionOf, readProducerCredential, readSessionScreen, repromptText, runtimeLoginHomes, selectAccount, selectRegistryAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, startAgentSession, stopCreatedHerdrTab, writeFailure, type PromptDelivery, type StartBounds, type HerdrAgent, type MasterConfig, type ProducerProfile, type RequestDelivery } from './master.js';
 import type { FleetProbe, selectFleetSession } from './fleet.js';
 import { implementerIdentities, type Work } from './model.js';
 import type { DispatchRequest } from './model/dispatch.js';
@@ -475,7 +475,10 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
     let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
     try {
       const harness = await prepareSessionHarness(root, config, { role: 'producer', kind: launch.kind, profile: profile.name, credentialFiles: [profile.credentialFile] });
-      await verifySessionSandbox('producer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox);
+      // The install's credential locations are hidden from this session (GY-1856); the producer's
+      // own credential file — often under the operator config home — and its runtime login stay.
+      const credentialMask = credentialMaskFor(config, { credentialFile: profile.credentialFile, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      await verifySessionSandbox('producer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, false, credentialMask);
       // The producer secrets never reach Herdr's argv: they are exported from a 0600 file as the runtime starts.
       const environment = { ...withVerificationPath(harness.environment, launch.environment), GRAPHYARD_URL: config.url, GRAPHYARD_TOKEN_FILE: profile.credentialFile, GRAPHYARD_HOST_ID: config.hostId, GRAPHYARD_PRODUCER: `${binding.key}@${binding.sha}`,
         GRAPHYARD_PRODUCER_BINDING: `${binding.key}@${binding.sha}@${binding.baseSha}@${binding.policyRevision}` };
@@ -486,7 +489,7 @@ export async function launchProducer(root: string, work: Work, request: Dispatch
       const memory = await readProjectMemory(root).catch(() => null);
       // The request is the session's own first message, on the runtime's command line (GY-93), read
       // from the request file in the session's checkout so the typed line stays short (GY-121).
-      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout, memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, prefix, role: harness.role, contract: launch.contract }));
+      ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], producerPrompt(config, binding, profile, checkout, memory), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, prefix, role: harness.role, contract: launch.contract, credentialMask }));
     } catch (error) {
       // A launch that never became a session leaves no checkout behind.
       await removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
@@ -534,7 +537,10 @@ async function launchHeadlessProducer(root: string, config: MasterConfig, work: 
   // The runner and the name evidence is attributed to come from the registry's choice when it made one.
   // A launch the registry's contract refuses (a tools allowlist with no tools flag) gives its session back.
   let runner: Runner;
-  try { runner = dependencies.runner ?? (registry ? registryRunner(registry.account) : narrowRunner(pi)); }
+  // The install's credential locations are hidden from this run too (GY-1856); the run's own
+  // credential file — the one its environment names — and a registry account's login home stay.
+  const credentialMask = credentialMaskFor(config, { credentialFile: profile.credentialFile, runtimeHomes: registry?.account.home ? [registry.account.home] : [] });
+  try { runner = dependencies.runner ?? (registry ? registryRunner(registry.account, [], credentialMask) : narrowRunner(pi, credentialMask)); }
   catch (error) { await registry?.release(`producer run for ${binding.key} was refused before it started: ${error instanceof Error ? error.message : String(error)}`.slice(0, 400)); throw error; }
   const via = registry ? `${registry.account.fleet.runtime} ${registry.account.fleet.modelId ?? registry.account.fleet.model} on ${registry.account.name}` : `pi ${pi.model} via ${pi.command}`;
   let checkout: Awaited<ReturnType<typeof allocateManagedCheckout>>;

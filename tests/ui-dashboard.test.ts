@@ -116,7 +116,7 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   for (const [state, item] of [['awaiting', awaiting], ['checking', checking], ['failed', failed]] as const) {
     assert.equal(groupOf(item, NOW), 'shipped', `${state}: a merged item is off the board`);
     assert.equal(prSteps(item, NOW).current, 'done', `${state}: merged is Done whatever the deployment owes`);
-    assert.equal(prSteps(item, NOW).label, 'Merged');
+    assert.equal(prSteps(item, NOW).label, 'Done', 'no deployment is watched');
   }
   const releasing = classify(work.map(item => item.key === 'GY-18' ? awaiting : item), NOW);
   assert.equal(releasing.open, open, 'a merge waiting on its release adds no open item');
@@ -135,7 +135,7 @@ test('unit:ui-one-classification — every summary tile filters the groups the l
   assert.equal(shippedLine(pendingPage), servedThisWeek(pending).length);
   assert.ok(!rowsOf(pendingPage, 'moving').includes('GY-18'), 'the pending merge has no row; it is Done');
   // The footer names it only as the latest merge (GY-168), never as shipped.
-  assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · merged /);
+  assert.match(pendingPage.slice(pendingPage.indexOf('aria-label="Shipped this week"')), /Latest: <button type="button" class="text-button" data-latest="GY-18">[\s\S]*?<\/button> · Done · \d/);
   // An item nothing is moving is Blocked on the Work page, and its own page carries the same badge.
   const stalled = work.map(item => item.key === 'GY-15' ? { ...item, nextAction: null, lease: null } as Work : item);
   assert.ok(classify(stalled, NOW).byGroup.blocked.some(item => item.key === 'GY-15'));
@@ -199,11 +199,11 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
   // The why and the next step in plain words for the three cases a newcomer meets most.
   assert.match(firstScreen(itemPage('GY-20')), /Waiting on your decision about spending money or opening third-party accounts/);
   assert.match(firstScreen(itemPage('GY-17')), /A fault blocks it; the master agent clears it/);
-  assert.match(firstScreen(itemPage('GY-22')), /Checking · 1 of 2 checks done/);
+  assert.match(firstScreen(itemPage('GY-22')), /In review · 1 of 2 checks done/);
   // GY-22 waits on CI and on review: both fold into Checking (GY-1979), so what is left lists every
   // Checking requirement at once, the checks first, each with who clears it.
   const left = /aria-label="What is left"[\s\S]*?<\/section>/.exec(itemPage('GY-22'))?.[0] ?? '';
-  assert.match(left, /aria-label="Checking state"/);
+  assert.match(left, /aria-label="Testing, review, merge state"/);
   assert.match(left, /cleared by Automated checks/);
   assert.match(left, /Automated check “test” has not passed yet/);
   assert.match(left, /Waiting for someone else to approve the latest code/);
@@ -240,29 +240,29 @@ test('unit:ui-pr-steps — every moving item shows the four states from its gate
   // Checking folds validate, test, review, proof and merge (GY-1979), so every gate case below is
   // Checking, and the label names the gate it waits on. A merge the release does not serve yet is Done.
   const cases: [string, Work, string, string, string][] = [
-    ['worker building', find('GY-14', work), 'doing', 'Doing · the builder is writing the code', 'Builder agent'],
-    ['CI running', handedIn, 'checking', 'Checking · 1 of 2 checks done', 'Automated checks'],
+    ['worker building', find('GY-14', work), 'doing', 'Building · the builder is writing the code', 'Builder agent'],
+    ['CI running', handedIn, 'checking', 'In review · 1 of 2 checks done', 'Automated checks'],
     // The merge writer's trial decides a check (GY-2010): a refused trial of this head failed the checks it names.
-    ['CI failed', withReasons(refusedTrial(handedIn), { test: [trial(handedIn)] }), 'checking', 'Checking · the check test, typecheck failed', 'Builder agent'],
-    ['review requested', find('GY-15', work), 'checking', 'Checking · waiting for the reviewer', 'Reviewer agent'],
-    ['proofs pending', find('GY-16', work), 'checking', 'Checking · 2 of 3 proofs passed', 'Prover agent'],
+    ['CI failed', withReasons(refusedTrial(handedIn), { test: [trial(handedIn)] }), 'checking', 'In review · the check test, typecheck failed', 'Builder agent'],
+    ['review requested', find('GY-15', work), 'checking', 'In review · waiting for the reviewer', 'Reviewer agent'],
+    ['proofs pending', find('GY-16', work), 'checking', 'Testing · 2 of 3 proofs passed', 'Prover agent'],
     // An obligation inherited from another change's deferred proof counts in the total and stays open until proven.
-    ['proofs pending on an inherited obligation', withReasons(find('GY-16', work), { acceptance: ['Bootstrap obligation inherited from GY-9 AC-2: integration:contract needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'] }), 'checking', 'Checking · 3 of 4 proofs passed', 'Prover agent'],
-    ['proofs no longer independent', withReasons(find('GY-16', work), { acceptance: [`Trusted ${find('GY-16', work).criteria[0].proofs[0]} evidence from producer-1 is no longer independent: producer-1 has since held an assignment on GY-16`] }), 'checking', 'Checking · 2 of 3 proofs passed', 'Prover agent'],
-    ['merging', find('GY-21', work), 'checking', 'Checking · Graphyard is merging it', 'Graphyard (automatic)'],
+    ['proofs pending on an inherited obligation', withReasons(find('GY-16', work), { acceptance: ['Bootstrap obligation inherited from GY-9 AC-2: integration:contract needs trusted passing evidence, with executed > 0 and skipped = 0, for this candidate and policy'] }), 'checking', 'Testing · 3 of 4 proofs passed', 'Prover agent'],
+    ['proofs no longer independent', withReasons(find('GY-16', work), { acceptance: [`Trusted ${find('GY-16', work).criteria[0].proofs[0]} evidence from producer-1 is no longer independent: producer-1 has since held an assignment on GY-16`] }), 'checking', 'Testing · 2 of 3 proofs passed', 'Prover agent'],
+    ['merging', find('GY-21', work), 'checking', 'Merging · Graphyard is merging it', 'Graphyard (automatic)'],
     // There is no Deploy state (GY-1979): a merge the release does not serve yet is Done, and the
     // top bar's release line carries the deployment.
-    ['merged, not yet deployed', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'done', 'Merged', 'Nobody — it has merged'],
+    ['merged, not yet deployed', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true }, delivery: { ...find('GY-18', work).delivery!, deployment: undefined } } as Work, 'done', 'Done', 'Nobody — it has merged'],
     ['merged, deployment observed, smoke policy', { ...find('GY-18', work), policy: { ...find('GY-18', work).policy, deploySmoke: true } } as Work, 'done', 'Live', 'Nobody — it is live'],
     // A change request says so in the Checking label; the hand-in stands until the merge.
-    ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'checking', 'Checking · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
+    ['changes requested', withReasons(find('GY-15', work), { review: ['Outstanding change requests must be resolved through a new review'] }), 'checking', 'In review · sent back for changes, waiting for a builder', 'Graphyard (assigns a builder)'],
   ];
   // The CI Apps the test gate trusts, as status carries them.
   const trusted = noRelease;
   for (const [name, item, current, label, who] of cases) {
     const steps = prSteps(item, NOW, trusted);
     assert.deepEqual(steps.steps.map(step => step.id), [...stateIds], name);
-    assert.deepEqual(steps.steps.map(step => step.label), ['Todo', 'Doing', 'Checking', 'Done']);
+    assert.deepEqual(steps.steps.map(step => step.label), ['Not started', 'Building', 'Testing, review, merge', 'Done']);
     assert.equal(steps.current, current, name); assert.equal(steps.label, label, name); assert.equal(steps.who, who, name);
     const at = stateIds.indexOf(current as never);
     assert.equal(steps.steps.filter(step => step.state === 'current').length, current === 'done' ? 0 : 1, `${name}: one live state until it is Done`);

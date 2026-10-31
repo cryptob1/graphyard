@@ -18,7 +18,7 @@ Nobody without the filer's context reads an item before a worker spends an attem
 
 ## From intent to work items
 
-The master files items (`master create`) and releases backlog itself (`master release`); an item of any size is dispatched whole. Review follow-ups are ordinary backlog items.
+The master files items (`master create`); the loop releases backlog itself to keep the pipeline full, and `master release` stays for an out-of-order pull. An item of any size is dispatched whole. Review follow-ups are ordinary backlog items.
 
 ## The one review rule
 

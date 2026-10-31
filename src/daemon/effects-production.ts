@@ -12,6 +12,8 @@ import { type MasterConfig, agentToken, listHerdrAgents, closeHerdrPane, observe
 import { type DaemonState, writeDaemonState } from './state.js';
 import { writeProjectMemory } from '../project-memory.js';
 import { mergeRecordKey, mergeWriterReads } from './cycle-merge-writer.js';
+import { readServeRecord, serveRecordPath } from '../serve-app.js';
+import type { RelandInput } from '../merge-writer/serve-revert.js';
 import { worktreeRoot } from '../install/worktree-root.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { readRelease } from '../protocol-version.js';
@@ -35,16 +37,20 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const fetcher = deps.fetcher ?? fetch;
   const mutate = deps.mutate;
   /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
-  const asOperatorAgent = async (path: string, body: unknown) => {
+  const asOperatorAgent = async (path: string, body: unknown, idempotencyKey: string = randomUUID()) => {
     const config = current();
     const token = await agentToken(root, config, 'operatorAgent');
-    const response = await fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    const response = await fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const text = await response.text();
     let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: text.slice(0, 200) }; }
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedBodyDetail(result)}`, response.status, result);
     return result;
   };
   const rework: DaemonEffects['rework'] = (work, reason, binding) => asOperatorAgent(`work/${work.id}/rework`, { reason, previousWorkerStopped: true, ...(binding ? { binding } : {}) });
+  const askHumanProof: DaemonEffects['askHumanProof'] = (work, proof) => mutate(`work/${work.id}/human-proof-request`, { proof, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha,
+    ...(work.preview?.state === 'running' && work.preview.sha === work.candidate!.sha ? { url: `${current().url}${work.preview.path}/` } : {}) }, `human-proof:${work.id}:${proof}:${work.candidate!.sha}:${work.policyRevision}`);
+  // GY-2991: the loop releases backlog itself, under the same identity, to keep the pipeline full.
+  const release: DaemonEffects['release'] = (work, reason) => asOperatorAgent(`work/${work.id}/ready`, { expectedRevision: work.revision, reason });
   // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
   let writtenMemory: string | null = null;
   const persist = async (state: DaemonState) => {
@@ -148,6 +154,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       cursor ??= await readDispatchCursor(root, current());
       return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run }));
     })().finally(() => { ticking = null; }),
+    personalMasterSession: config => ({
+      ...masterSessionEffects(root, () => config, run),
+      end: (session, reason) => endRegistrySessionById(config, session, reason),
+      exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
+    }),
     masterSession: {
       ...masterSessionEffects(root, current, run),
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,
@@ -159,10 +170,21 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       end: (session, reason) => endRegistrySessionById(current(), session, reason),
     },
     // The executor merges in this checkout's object store, pushes with the install's deploy key alone and records each step as the coordinator under one key per (step, commits).
-    get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const }); },
+    // GY-2990: it also reads the served commit's required-cases verdict beside the checkout, and
+    // files a reverted item's re-land as the master's operator-agent identity — only while the
+    // live configuration names that identity, like the rework beside it.
+    get mergeWriter() { const config = current();
+      const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const });
+      return { ...reads,
+        serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
+        ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
+      };
+    },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
-    // Rework exists only while the live configuration names the master's operator-agent identity.
+    // Rework and backlog release exist only while the live configuration names the master's operator-agent identity.
     get rework() { return current().operatorAgent ? rework : undefined; },
+    askHumanProof,
+    get release() { return current().operatorAgent ? release : undefined; },
     // The release this process loaded: the checkout its code comes from, read once at startup.
     loadedRelease: readRelease(loopCodeRoot(current().cliPath, root)),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },

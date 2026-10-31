@@ -7,7 +7,8 @@
 // control plane) against a fresh database under TMPDIR, serving 127.0.0.1:4391 with one admin
 // principal whose token is GRAPHYARD_E2E_TOKEN (the token the trial's cases authenticate with; one
 // is made and printed when unset). On SIGTERM or SIGINT it stops the server and the database and
-// removes the database directory. No credential is read.
+// removes the database directory. No credential is read. A case that seeds its own records
+// (scripts/e2e-seed-plain-status.mjs) reads the database URL from .graphyard/e2e-serve.json.
 import { randomBytes } from 'node:crypto';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
@@ -24,7 +25,8 @@ const freePort = () => new Promise((accept, reject) => {
 const token = process.env.GRAPHYARD_E2E_TOKEN || randomBytes(24).toString('hex');
 if (!process.env.GRAPHYARD_E2E_TOKEN) console.log(`GRAPHYARD_E2E_TOKEN unset; the admin token is ${token}`);
 const directory = await mkdtemp(join(tmpdir(), 'graphyard-e2e-serve-'));
-const removeDirectory = () => rm(directory, { recursive: true, force: true });
+const seedFile = join('.graphyard', 'e2e-serve.json');
+const removeDirectory = () => Promise.all([rm(directory, { recursive: true, force: true }), rm(seedFile, { force: true })]);
 const paths = localPaths(directory);
 let runtime;
 try {
@@ -33,9 +35,11 @@ try {
   await writeFile(paths.portFile, String(await freePort()));
   await writeFile(paths.environment, JSON.stringify({
     PORT: String(e2eServePort), HOST: '127.0.0.1',
-    GRAPHYARD_PRINCIPALS: JSON.stringify([{ id: 'e2e-operator', role: 'admin', token }]),
+    GRAPHYARD_PRINCIPALS: JSON.stringify([{ id: 'e2e-operator', role: 'admin', sessionKind: 'human', token }]),
   }), { mode: 0o600 });
   runtime = await startLocalRuntime(directory);
+  await mkdir('.graphyard', { recursive: true });
+  await writeFile(seedFile, JSON.stringify({ databaseUrl: runtime.databaseUrl }), { mode: 0o600 });
   // The trial waits for /healthz?ready to answer 200: mutations are refused until startup validation completes.
   console.log(`Graphyard e2e serve at ${runtime.url} on a database in ${directory}`);
 } catch (error) {

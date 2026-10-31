@@ -157,7 +157,7 @@ export interface SessionSkip { account: string; reason: string }
 export interface FleetSession {
   id: string; role: FleetRoleName; account: string; runtime: string; model: string;
   host: string; work: string | null; principal: string | null;
-  /** For a producer, the proof group its session answers: one live session per group, not per item. */
+  /** A producer's proof group or a personal master's human owner. */
   group?: string | null;
   selectedAt: string; selectedBy: string; reason: string; skipped: SessionSkip[];
   endedAt: string | null; endReason: string | null;
@@ -198,8 +198,8 @@ export const selectionRequestSchema = z.object({
   host: hostName,
   work: z.string().trim().min(1).max(40).nullable().default(null),
   principal: z.string().trim().min(1).max(200).nullable().default(null),
-  /** The proof group a producer request answers; every other role names none. */
-  group: z.string().trim().min(1).max(40).nullable().default(null),
+  /** A producer's proof group, or a personal master's human owner; other roles name none. */
+  group: z.string().trim().min(1).max(200).nullable().default(null),
   /** Which runtimes a worker is tried on first (GY-1746): `fast` tries Pi accounts before the rest of the role's order, `strong` tries every other runtime before Pi; null keeps the role's own order. `exclude` lists accounts this dispatch already failed to start a session on, passed over so the next account takes the launch. */
   prefer: z.enum(['fast', 'strong']).nullable().default(null),
   exclude: z.array(entryName).max(50).default([]),
@@ -254,7 +254,7 @@ export function applyRegistryMutation(current: AgentRegistry, kind: RegistryMuta
     demandRegistry(!unknown.length, `Unknown account${unknown.length === 1 ? '' : 's'} ${unknown.join(', ')}; add an account before the role that names it`);
     const model = role.policy?.model;
     demandRegistry(!model || next.models.some(entry => entry.name === model), `Unknown model ${model}; add the model before the role policy that runs it`);
-    upsert(next.roles, role.name === 'master' ? { ...role, concurrency: Math.min(role.concurrency, 1) } : role); // GY-898: two masters break single-coordinator; pinned to one
+    upsert(next.roles, role.name === 'master' ? { ...role, concurrency: Math.min(role.concurrency, 1) } : role); // One master session per ownership scope; all scopes share one coordinator loop.
   };
   let reasonText: string;
   if (kind === 'runtime.set') { const data = registryMutationSchemas[kind].parse(input); reasonText = data.reason; setRuntime(data.runtime); }

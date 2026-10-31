@@ -91,6 +91,15 @@ const approvalMode = z.enum(['auto', 'prompt']).default('auto');
 export const environmentKinds = ['claude', 'codex', 'opencode', 'cursor'] as const;
 export type EnvironmentKind = typeof environmentKinds[number];
 export const environmentVariable: Record<EnvironmentKind, string> = { claude: 'CLAUDE_CONFIG_DIR', codex: 'CODEX_HOME', opencode: 'XDG_DATA_HOME', cursor: 'CURSOR_CONFIG_DIR' };
+/**
+ * The runtime login homes a launch's environment names (GY-1856): the session's own login, set on
+ * the kind's home variable, plus the registry contract's own — the credential mask keeps these
+ * readable while it hides every other credential location.
+ */
+export const runtimeLoginHomes = (environment: Record<string, string> | undefined, homeVariable?: string | null): string[] => {
+  const variables = new Set([...Object.values(environmentVariable), ...(homeVariable ? [homeVariable] : [])]);
+  return [...variables].flatMap(variable => environment?.[variable] ? [environment[variable]] : []);
+};
 export const agentEnvironmentSchema = z.object({
   name: profileName,
   kind: z.enum(environmentKinds),
@@ -370,6 +379,8 @@ export const supervisionModes = ['autonomous', 'supervised'] as const;
 export type Supervision = typeof supervisionModes[number];
 export const promotionCommand = 'graphyard master promote --admin-token-stdin (after graphyard master reviewer setup and master reviewer add)';
 export const masterConfigSchema = forwardTolerant(z.object({
+  forPerson: z.string().trim().min(1).max(200).optional(),
+  people: z.array(z.string().trim().min(1).max(200)).optional(),
   version: z.literal(1),
   // Absent is autonomous, so every existing master.json loads and is written back unchanged.
   supervision: z.enum(supervisionModes).optional(),
@@ -419,6 +430,12 @@ export const masterConfigSchema = forwardTolerant(z.object({
   browser: masterBrowserSchema.optional(),
   // The master's operator-agent identity, which applies every decision it makes. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
+  // GY-1856: credential locations beside the operator config home that every confined session of
+  // this install must not read — a collector's token file, say. Each is masked at the nearest
+  // directory that exists; the session's own credential stays readable.
+  confinement: z.object({
+    maskPaths: z.array(z.string().trim().min(1).max(1000).refine(isAbsolute, 'maskPaths entries must be absolute paths')).max(100),
+  }).strict().optional(),
   // Retired (GY-2874): the approver identity; an existing master.json still loads.
   approver: z.unknown().optional(),
   // GY-1855: install that receives uncleared loop-step stall filings; absent files into this install (slow-loop precedent).
@@ -555,4 +572,4 @@ export function coordinatorCheckoutRefusal(checkout: CoordinatorCheckout, subjec
 
 // The OS-level confinement of the coordinator checkout (GY-888) lives in ./confinement.ts;
 // these re-export it, so every existing import keeps working.
-export { bwrapOnPath, sessionGitAdminDirectory, processLaunchMaskWords, isSocketPath, secretsBusPath, hostProcessLaunchTargets, readOnlyMountWrapper, confinementRefusalText, sessionMountNamespaceWorks, mountNamespaceProbeResult, coordinatorConfinementRefusal, coordinatorConfinement, type CoordinatorConfinement, type ConfinementInput } from './confinement.js';
+export { bwrapOnPath, sessionGitAdminDirectory, processLaunchMaskWords, credentialMaskFor, credentialMaskWords, isSocketPath, secretsBusPath, hostProcessLaunchTargets, readOnlyMountWrapper, confinementRefusalText, sessionMountNamespaceWorks, mountNamespaceProbeResult, coordinatorConfinementRefusal, coordinatorConfinement, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './confinement.js';

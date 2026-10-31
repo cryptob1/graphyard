@@ -1,7 +1,7 @@
 // `graphyard upgrade` (GY-1962): one command moves the CLI checkout, the server, the loop and
 // executors, and the managed repository's generated files to one dated release, in order.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createBackup } from '../backup.js';
@@ -16,7 +16,7 @@ import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
-import { parseServeDeclaration, readServeRecord, serveCheckoutPath, serveRecordPath, watchServe, type ServeCheck, type ServeDeclaration, type ServeRecord, type ServePorts } from '../serve-app.js';
+import { parseServeDeclaration, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveRecordPath, watchServe, type ServeCheck, type ServeDeclaration, type ServeRecord, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { knownGoodState, pinKnownGood } from '../master/known-good.js';
@@ -225,23 +225,85 @@ const startedAt = (pid: number): string | null => {
   } catch { return null; }
 };
 
-/** Whether the serve process the record tracks still runs: a pid recorded before a reboot may name another process now, and a kill must never reach one of those. Linux answers by the kernel start time recorded beside the pid — a reused pid never matches; without /proc the pid is trusted. */
-const tracksLiveProcess = (record: ServeRecord) => {
-  if (!record.pid) return false;
+/** Whether a tracked serve process still runs: a pid recorded before a reboot may name another process now, and a kill must never reach one of those. Linux answers by the kernel start time recorded beside the pid — a reused pid never matches; without /proc the pid is trusted. */
+const tracksLiveProcess = (tracked: { pid?: number | null; started?: string | null }) => {
+  if (!tracked.pid) return false;
   if (!existsSync('/proc')) return true;
-  return startedAt(record.pid) === (record.started ?? null);
+  return startedAt(tracked.pid) === (tracked.started ?? null);
+};
+
+/** Stops the tracked process group, waiting for it to be gone, as the serve and the baseline serve are stopped before a replacement starts. */
+async function stopTrackedServe(tracked: { pid?: number | null; started?: string | null }) {
+  if (!tracked.pid || !tracksLiveProcess(tracked)) return;
+  // The serve runs detached as its own process group, so the signal reaches the wrapper and
+  // the children it left holding the port, not the wrapper alone.
+  try { process.kill(-tracked.pid, 'SIGTERM'); } catch { /* already gone */ }
+  for (let wait = 0; wait < 20; wait++) {
+    try { process.kill(-tracked.pid, 0); } catch { return; }
+    await new Promise(accept => setTimeout(accept, 100));
+  }
+  try { process.kill(-tracked.pid, 'SIGKILL'); } catch { /* already gone */ }
+}
+
+/** The inodes of the TCP sockets listening on `port`, from the kernel's tables (Linux). */
+const listeningInodes = (port: number): Set<string> => {
+  const inodes = new Set<string>();
+  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let lines: string[] = [];
+    try { lines = readFileSync(table, 'utf8').split('\n'); } catch { continue; }
+    for (const line of lines.slice(1)) {
+      const field = line.trim().split(/\s+/);
+      // The kernel prints the port %04X-padded (3000 as 0BB8), so compare it numerically.
+      if (field[3] === '0A' && Number.parseInt(field[1]?.split(':')[1] ?? '', 16) === port && field[9]) inodes.add(field[9]);
+    }
+  }
+  return inodes;
+};
+
+/** Whether the declared port is still held by the serve's own process group: the kernel names every listening socket and the group of whoever owns one, so an answer from a process the restart did not start — a foreign holder the serve could not bind over — is told from the serve's own listener (GY-2993). Null when this cannot be checked (no tracked pid, no /proc, off Linux): the pass then trusts the answer. */
+const answersFromRestart = (port: number, tracked: { pid?: number | null }): boolean | null => {
+  if (!tracked.pid || !existsSync('/proc')) return null;
+  const inodes = listeningInodes(port);
+  if (!inodes.size) return false;
+  for (const name of readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat: string;
+    try { stat = readFileSync(`/proc/${name}/stat`, 'utf8'); } catch { continue; }
+    if (stat.slice(stat.lastIndexOf(')') + 1).trim().split(' ')[2] !== String(tracked.pid)) continue;
+    let fds: string[] = [];
+    try { fds = readdirSync(`/proc/${name}/fd`); } catch { continue; }
+    for (const fd of fds) {
+      let link: string;
+      try { link = readlinkSync(`/proc/${name}/fd/${fd}`); } catch { continue; } // closed since the listing
+      const socket = link.match(/^socket:\[(\d+)\]$/)?.[1];
+      if (socket && inodes.has(socket)) return true;
+    }
+  }
+  return false;
 };
 
 /** The ports the deploy unit's serve pass (GY-2976) runs against the managed repository's main: git in the install's own checkout (whose remote-tracking ref master status reads too), npm ci and the declared build in its serve checkout, and the declared serve command spawned detached. */
 export function managedServePorts(input: { root: string; baseBranch: string; run: ChildRun }): ServePorts {
   const checkout = serveCheckoutPath(input.root);
+  const baselineCheckout = serveBaselineCheckoutPath(input.root);
   const ref = `refs/remotes/origin/${input.baseBranch}`;
-  const git = async (...args: string[]) => String(await input.run('git', ['-C', checkout, ...args], { timeoutMs: 120_000 })).trim();
+  const gitIn = (at: string) => async (...args: string[]) => String(await input.run('git', ['-C', at, ...args], { timeoutMs: 120_000 })).trim();
+  const git = gitIn(checkout), baselineGit = gitIn(baselineCheckout);
   const rootGit = async (...args: string[]) => String(await input.run('git', ['-C', input.root, ...args], { timeoutMs: 120_000 })).trim();
   const ensureCheckout = async () => {
     if (existsSync(join(checkout, '.git'))) return;
     await mkdir(resolve(checkout, '..'), { recursive: true });
     await rootGit('worktree', 'add', '--detach', '--quiet', checkout, 'HEAD');
+  };
+  const npmIn = async (at: string) => {
+    // npm ci needs a lockfile; a repository without one installs. A repository with no package.json builds without npm.
+    if (!existsSync(join(at, 'package.json'))) return;
+    const locked = existsSync(join(at, 'package-lock.json'));
+    await input.run('npm', [locked ? 'ci' : 'install', '--no-audit', '--no-fund'], { cwd: at, timeoutMs: serveInstallTimeoutMs });
+  };
+  const buildIn = (at: string) => async (declaration: ServeDeclaration) => {
+    const [command, ...args] = declaration.build;
+    await input.run(command!, args, { cwd: at, timeoutMs: serveInstallTimeoutMs });
   };
   return {
     // The fetch lands in the managed root — the serve checkout is its worktree and shares its refs —
@@ -256,31 +318,35 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
       return shown === null ? null : parseServeDeclaration(shown);
     },
     checkout: async commit => { await ensureCheckout(); await git('checkout', '--detach', '--quiet', commit); },
-    install: async () => {
-      // npm ci needs a lockfile; a repository without one installs. A repository with no package.json builds without npm.
-      if (!existsSync(join(checkout, 'package.json'))) return;
-      const locked = existsSync(join(checkout, 'package-lock.json'));
-      await input.run('npm', [locked ? 'ci' : 'install', '--no-audit', '--no-fund'], { cwd: checkout, timeoutMs: serveInstallTimeoutMs });
-    },
-    build: async (declaration: ServeDeclaration) => {
-      const [command, ...args] = declaration.build;
-      await input.run(command!, args, { cwd: checkout, timeoutMs: serveInstallTimeoutMs });
-    },
+    install: () => npmIn(checkout),
+    build: buildIn(checkout),
     restart: async serve => {
-      const record = readServeRecord(serveRecordPath(input.root));
-      if (record && tracksLiveProcess(record)) {
-        // The serve runs detached as its own process group, so the signal reaches the wrapper and
-        // the children it left holding the port, not the wrapper alone.
-        try { process.kill(-record.pid!, 'SIGTERM'); } catch { /* already gone */ }
-        for (let wait = 0; wait < 20; wait++) {
-          try { process.kill(-record.pid!, 0); } catch { break; }
-          await new Promise(accept => setTimeout(accept, 100));
-        }
-        try { process.kill(-record.pid!, 'SIGKILL'); } catch { /* already gone */ }
-      }
+      await stopTrackedServe(readServeRecord(serveRecordPath(input.root)) ?? {});
       const [command, ...args] = serve;
       const child = spawn(command!, args, { cwd: checkout, detached: true, stdio: 'ignore' });
       // A serve command that cannot start (ENOENT) must not crash the watch; the pass records it as a serve that never answered.
+      child.on('error', () => {});
+      child.unref();
+      const pid = child.pid ?? null;
+      return { pid, started: pid ? startedAt(pid) : null };
+    },
+    // GY-2993: the answer the pass waits for must be this serve's own, so a commit whose serve could not bind a held port is recorded as the failure it is, never as served against the holder.
+    answersFromRestart: (port, tracked) => answersFromRestart(port, tracked),
+    // GY-2985: what was live keeps serving on the port beside the declared one, in its own
+    // baseline checkout, so a compare case judges a new build against what users had. The declared
+    // serve command serves there with the declared port rewritten to the baseline's — the port the
+    // declaration names is the one a serve command is given, by convention in its arguments.
+    baseline: async (commit, declaration) => {
+      if (existsSync(join(baselineCheckout, '.git'))) await baselineGit('checkout', '--detach', '--quiet', commit);
+      else {
+        await mkdir(resolve(baselineCheckout, '..'), { recursive: true });
+        await rootGit('worktree', 'add', '--detach', '--quiet', baselineCheckout, commit);
+      }
+      await npmIn(baselineCheckout);
+      await buildIn(baselineCheckout)(declaration);
+      await stopTrackedServe(readServeRecord(serveRecordPath(input.root))?.baseline ?? {});
+      const [command, ...args] = declaration.serve;
+      const child = spawn(command!, args.map(argument => argument === String(declaration.port) ? String(declaration.port + 1) : argument), { cwd: baselineCheckout, detached: true, stdio: 'ignore' });
       child.on('error', () => {});
       child.unref();
       const pid = child.pid ?? null;
@@ -293,11 +359,11 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
     // as not yet run rather than as a verdict no case earned. The cases' bearer token is
     // GRAPHYARD_TOKEN; a case that needs the install's own credentials declares secrets, which the
     // runner resolves from the install's e2e-secrets env as in every other run.
-    check: async url => {
+    check: async (url, baselineUrl) => {
       const cases = existsSync(join(checkout, caseDirectory)) ? await loadCases(checkout) : [];
       const required = cases.filter(entry => entry.definition.required);
       if (!required.length) return { verified: true, case: null, step: null, reason: null };
-      const report = await runCases(required, { url, token: process.env.GRAPHYARD_TOKEN ?? '', root: checkout });
+      const report = await runCases(required, { url, token: process.env.GRAPHYARD_TOKEN ?? '', root: checkout, baselineUrl: baselineUrl ?? undefined });
       const failing = report.cases.find(outcome => outcome.verdict === 'failed' || outcome.verdict === 'flaky');
       return failing
         ? { verified: false, case: failing.id, step: failing.failingStep ? `step ${failing.failingStep.index + 1} ${failing.failingStep.name}` : null, reason: failing.failingStep?.reason ?? null }

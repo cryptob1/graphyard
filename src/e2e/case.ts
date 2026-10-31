@@ -70,6 +70,8 @@ const agentStep = z.object({
   /** What agent-browser pursues at the target URL plus `path`, and the criteria it judges by. */
   goal: z.string().min(1).max(1000), success: z.array(text).min(1).max(20),
   path: z.string().regex(/^\//, 'a path starts with /').max(500).optional(), timeoutSeconds,
+  /** GY-2985: with what was live serving as BASELINE_URL, the goal runs there too and one judge call compares the two runs; the case fails when the judge answers WORSE. Without a baseline the step runs once, as today. */
+  compare: z.boolean().optional(),
 }).strict();
 const step = z.discriminatedUnion('kind', [httpStep, browserStep, commandStep, agentStep]);
 /** A case or outcome id: also a file name and a ledger tag segment. */

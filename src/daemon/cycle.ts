@@ -1,11 +1,12 @@
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
+import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
 import { assertDispatchable } from '../master.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
-import { dispatchSort } from '../coordination.js';
+import { dispatchSort, inFlight } from '../coordination.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterHandover } from '../master/master-session.js';
@@ -13,8 +14,10 @@ import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
+import { dueHumanProofs } from '../model/human-proof.js';
 import { hotspots } from './hotspots.js';
 import { settledPurpose } from '../model/session-state.js';
+import { loopOwnedRefusal, ownerHoldRefusal } from '../model/loop-owned.js';
 import { attemptClaimedAt, attemptProgressFresh, attemptProgressWindowMs } from '../model/attempt-bound.js';
 import { attemptBoundMs, attemptCeilingMs, boundMinutes } from '../master/attempt-bound.js';
 import { profileHealth, clearProfileFailure, recordProfileFailure } from './sessions.js';
@@ -89,7 +92,7 @@ export interface Cycle {
   snapshot: Awaited<ReturnType<DaemonEffects['snapshot']>>; clock: number;
   herdr: { agents: HerdrAgent[]; available: boolean };
   credentials: Awaited<ReturnType<DaemonEffects['credentials']>>;
-  performed: DaemonAction[]; launcher: Launcher;
+  performed: DaemonAction[]; launcher: Launcher; reservedProfiles: Set<string>;
 }
 
 /**
@@ -126,11 +129,20 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   for (const [key] of inFlight) delete state.actions[key];
   performed.push(...reconcilePendingActions(state, read.snapshot.work, clock));
   for (const [key, action] of inFlight) state.actions[key] = action;
-  const cycle: Cycle = { config, state, effects, now, ...read, clock, performed, launcher: launches };
+  const cycle: Cycle = { config, state, effects, now, ...read, clock, performed, launcher: launches, reservedProfiles: launches.held() };
 
-  await step('close', () => closeStep(cycle));
-  await step('dispatch', () => dispatchStep(cycle));
-  await step('merge writer', () => mergeWriterStep(cycle));
+  if (!config.forPerson) await step('close', () => closeStep(cycle));
+  await step('dispatch', async () => {
+    await dispatchStep(cycle);
+    if (!config.forPerson) for (const person of config.people ?? []) {
+      // Release and review/proof dispatch are the install's, once a cycle: every scope shares that capacity, so priority decides across owners.
+      const scopedConfig = { ...config, forPerson: person, masterAgentName: sessionName(config.masterAgentName, person) };
+      state.personalMasters[person] ??= emptyMasterSession();
+      const scopedState = { ...state, get master() { return state.personalMasters[person]; }, set master(value) { state.personalMasters[person] = value; } };
+      await dispatchStep({ ...cycle, config: scopedConfig, state: scopedState, effects: { ...effects, release: undefined, dispatchTick: undefined, masterSession: effects.personalMasterSession?.(scopedConfig), persist: () => effects.persist(state) } });
+    }
+  });
+  if (!config.forPerson) await step('merge writer', () => mergeWriterStep(cycle));
   if (own) { await launches.idle(); performed.push(...launches.drain()); }
   await step('persist', async () => {
     state.projectMemory = await syncProjectMemory({ existing: state.projectMemory, work: read.snapshot.work, now: clock });
@@ -411,15 +423,17 @@ async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<
 }
 
 /**
- * Dispatch: each claimable item to a free worker profile, each head nothing can carry forward back
- * to a worker, the reviewer and producer sessions the dispatcher owes, the spec check each released
- * feature owes before any of that (GY-2992), and the master session when absent.
+ * Dispatch: fill the pipeline from backlog (GY-2991), then each claimable item to a free worker
+ * profile, each head nothing can carry forward back to a worker, the reviewer and producer
+ * sessions the dispatcher owes, the spec check each released feature owes before any of that
+ * (GY-2992), and the master session when absent.
  */
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
-  const open = snapshot.work.filter(item => item.stage !== 'done');
+  if (effects.release) await releaseBacklog(cycle);
+  const open = snapshot.work.filter(item => item.stage !== 'done' && (item.owner ?? null) === (config.forPerson ?? null));
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
-  const taken = launcher.held();
+  const taken = cycle.reservedProfiles;
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
   for (const item of claimable) {
@@ -468,6 +482,12 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.rework(item, rework.reason, rework.binding); await note(cycle, key, 'judgement', item.key, 'done', `Returned ${item.key} to a worker: ${rework.reason}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not return ${item.key} to a worker: ${message(error)}`); }
   }
+  if (effects.askHumanProof) for (const item of open) for (const proof of dueHumanProofs(item)) {
+    const key = `human-proof:${item.id}:${proof}:${item.candidate!.sha}:${item.policyRevision}`;
+    if (state.actions[key]?.state === 'done') continue;
+    try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
+    catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
+  }
   await effects.dispatchTick?.(snapshot);
   await masterSession(cycle, open);
 }
@@ -483,6 +503,40 @@ async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: Da
     sink.push(await entry('done', `Launched ${item.key}'s spec check: a fresh-context reviewer restates the item and names its gaps before a worker starts`, launched?.pane));
   } catch (error) {
     sink.push(await entry('failed', `Spec check launch of ${item.key} failed: ${message(error)}; it is retried next cycle`));
+  }
+}
+
+/**
+ * The loop keeps the pipeline full itself (GY-2991): while fewer items occupy it — claimed,
+ * submitted, in review or merge, or released and not yet done — than its concurrency (one slot per
+ * configured worker profile), it releases the backlog item with the highest priority, oldest first
+ * on ties, whose dependencies are all done, recording the release decision under the loop's own
+ * identity with the reason. A parked item — any standing blocker — never releases, nor an
+ * owner-held or loop-owned item, whose release the control plane refuses. Items the master wants
+ * held are parked, not left in backlog, so backlog means "work this next"; `master release` stays
+ * for an out-of-order pull. Each release takes its response's document, so the same cycle's
+ * dispatch offers the item.
+ */
+async function releaseBacklog(cycle: Cycle) {
+  const { config, state, effects, snapshot, clock } = cycle;
+  let slots = config.workers.length - snapshot.work.filter(item => item.stage !== 'done' && (item.ready || inFlight(item, clock))).length;
+  if (slots <= 0) return;
+  const identity = config.operatorAgent ? { id: config.operatorAgent.id, role: 'operator-agent' as const } : undefined;
+  const candidates = snapshot.work
+    .filter(item => item.stage !== 'done' && !item.ready && !item.blocker && !loopOwnedRefusal(item) && !ownerHoldRefusal(item, identity)
+      && item.dependencies.every(dep => snapshot.work.find(entry => entry.id === dep)?.stage === 'done'))
+    .sort((a, b) => a.priority - b.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  for (const item of candidates) {
+    if (slots <= 0) break;
+    const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
+    try {
+      const released = await effects.release!(item, `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length}, every dependency of ${item.key} is done, and backlog means work this next`) as Work | undefined;
+      const index = snapshot.work.findIndex(entry => entry.id === item.id);
+      if (index >= 0 && released && typeof released === 'object' && 'ready' in released) snapshot.work[index] = released;
+      slots -= 1;
+      await note(cycle, key, 'judgement', item.key, 'done', `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency is done`, config.operatorAgent?.id ?? null);
+    }
+    catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not release ${item.key} from backlog: ${message(error)}`, config.operatorAgent?.id ?? null); }
   }
 }
 
@@ -529,15 +583,16 @@ async function masterSession(cycle: Cycle, open: Work[]) {
 function submitMasterLaunch(cycle: Cycle, open: Work[]) {
   const { config, state, effects, launcher } = cycle;
   const sessions = effects.masterSession!;
-  if (launcher.busy(masterLaunchKey)) return;
-  launcher.submit(masterLaunchKey, [], async sink => {
+  const launchKey = config.forPerson ? `${masterLaunchKey}:${config.forPerson}` : masterLaunchKey;
+  if (launcher.busy(launchKey)) return;
+  launcher.submit(launchKey, [], async sink => {
     try {
       if (state.master.session && sessions.end) await sessions.end(state.master.session, 'the master session it recorded is gone from Herdr; the loop launches its replacement').catch(() => undefined);
       const launched = await sessions.launch(masterHandover({ work: open, cliPath: config.cliPath }));
       state.master = { ...emptyMasterSession(), ...launched, startedAt: new Date(cycle.now()).toISOString() };
-      sink.push(await record(state, masterLaunchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
+      sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
     } catch (error) {
-      sink.push(await record(state, masterLaunchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: `The master session could not be launched; the next cycle tries again: ${message(error)}`, attempts: (state.actions[masterLaunchKey]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist));
+      sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: `The master session could not be launched; the next cycle tries again: ${message(error)}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist));
     }
   });
 }
@@ -552,7 +607,7 @@ async function masterPaneFailover(cycle: Cycle, handle: HerdrAgent, open: Work[]
   const { state, effects, clock } = cycle;
   const sessions = effects.masterSession!;
   const master = state.master;
-  if (cycle.launcher.busy(masterLaunchKey)) return;
+  if (cycle.launcher.busy(cycle.config.forPerson ? `${masterLaunchKey}:${cycle.config.forPerson}` : masterLaunchKey)) return;
   const exited = endedRuntimeStates.includes(handle.agent_status ?? '');
   let notice: ExhaustionSignal | null = null;
   if (!exited) {
@@ -564,7 +619,7 @@ async function masterPaneFailover(cycle: Cycle, handle: HerdrAgent, open: Work[]
     if (!notice) return;
   }
   const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
-  const key = 'master:failover';
+  const key = cycle.config.forPerson ? `master:failover:${cycle.config.forPerson}` : 'master:failover';
   try {
     if (notice && master.account && sessions.exhaust) await sessions.exhaust(master.account, notice);
     if (handle.pane_id) await Promise.resolve(effects.closeSession(handle.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; });

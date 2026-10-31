@@ -32,7 +32,7 @@ export const glossary = {
   'exclusive resource': 'Something only one work item may use at a time, such as a shared test account. It is held only while someone is working on the item.',
   'review provider': 'Who does the code review: a person approving on GitHub, or a reviewing agent.',
   dependency: 'Another work item that has to ship before this one can start moving.',
-  stage: 'Where an item is on its way to shipping: not started, needs a worker, being built, in review, automated checks, proving it works, merging, shipped.',
+  stage: 'Where an item is, in plain words: Not started, Building, Testing, In review, Merging, Merged, not live yet, Live, Live and verified, Live and failing, or Done.',
   'required check': 'A GitHub check that must pass before anything merges.',
   'p50 / p90': 'Half of the items took less than the p50 time; nine in ten took less than the p90 time.',
 } as const;
