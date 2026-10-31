@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util';
 import { collectScanInput, detectDeploy, detectStack, discover, proposeDelivery } from '../onboarding.js';
 import { parseRepositoryConfig, repositoryConfigFile } from '../model/documentation.js';
 import { requiredPullRequestChecks, type DeliveryPolicy } from '../model/delivery-policy.js';
-import { adapterFor, carriesCredential, publishedPort, readRemote, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter, DEFAULT_IMAGE } from './adapters.js';
+import { adapterFor, carriesCredential, publishedPort, readRemote, variableMarker, type AdapterContext, type AdapterObservation, type ProviderAdapter } from './adapters.js';
 import { githubCli, type GitHubCli } from './github.js';
 import { DEPLOY_KEY_FILE, ensureDeployKey } from './deploy-key.js';
 import { detectHerdr, detectRuntimes, masterRuntime, workerProfiles, type DetectedRuntime, type HerdrState, type ReviewerProfileDraft, type WorkerProfileDraft } from './runtimes.js';
@@ -339,7 +339,7 @@ export async function prepareInstall(cwd: string, rawInputs: InstallRequest & Ob
     provider, repository: inputs.repository, installId,
     service: inputs.serverName ?? `graphyard-${installId}`,
     domain: inputs.domain ?? null,
-    image: inputs.image ?? (provider === 'compose' ? `graphyard-local:${installId}` : DEFAULT_IMAGE),
+    image: inputs.image ?? `graphyard-local:${installId}`,
     workdir: provider === 'compose' ? `${directory}/compose` : directory,
     sourceRoot: dependencies.sourceRoot ?? fileURLToPath(new URL('../..', import.meta.url)),
     repoCheckout, repoGitDir,

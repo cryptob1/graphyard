@@ -46,7 +46,6 @@ export const repositoryPolicySchema = z.object({
   // every new head afresh.
   product: z.object({ ui: z.array(glob).min(1).max(200) }).strict().optional(),
 }).strict();
-export type RepositoryPolicyInput = z.infer<typeof repositoryPolicySchema>;
 /** The policy in force: every section resolved, the declared one or its default. */
 export interface RepositoryPolicy {
   risk: { sensitive: SensitiveEntry[]; declared: boolean };
@@ -201,8 +200,6 @@ function gitToplevel(fs: any, path: any, start: string): string {
 
 /** The policy this process judges every change by, read once (`loadRepositoryPolicy`). */
 export const repositoryPolicy = (): RepositoryPolicy => (inForce ??= loadRepositoryPolicy()).policy;
-/** Where the policy in force came from, for doctor. */
-export const repositoryPolicySource = (): Source => (inForce ??= loadRepositoryPolicy()).source;
 /** Replaces the policy in force (a test, or a host that reads it elsewhere); null reads it again on next use. */
 export function setRepositoryPolicy(policy: RepositoryPolicy | null, source: Source = 'graphyard.json') {
   inForce = policy ? { policy, source } : null;

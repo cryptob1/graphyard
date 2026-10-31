@@ -53,12 +53,9 @@ export function endRun(name: string, record: RunRecord) {
   if (entry) Object.assign(entry, { record, endedAt: Date.now() });
 }
 export const registeredRun = (name: string) => { prune(); return runs.get(name) ?? null; };
-export const registeredRunFor = (subject: string) => { prune(); return [...runs.values()].find(entry => entry.subject === subject) ?? null; };
 export const liveRun = (name: string) => { const entry = registeredRun(name); return entry && entry.endedAt === null ? entry : null; };
 /** Every registered run this process is watching that has not ended. */
 export const liveRuns = () => { prune(); return [...runs.values()].filter(entry => entry.endedAt === null); };
-/** How many runs this process watches, research runs included. */
-export const watchedRuns = () => watched.size;
 
 /** The live runs as Herdr-shaped sessions: no pane, and a working status. A research run is no session. */
 export function runnerAgents(): { name: string; agent: string; agent_status: string }[] {

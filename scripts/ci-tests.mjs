@@ -1,10 +1,7 @@
-// Which test files a CI run executes, and on which shard (GY-499). Each shard runs the files this
-// module assigns it, balanced by file count. On a pull request's own CI only the test files the
-// change can affect run; pushes to main, merge-queue tips and any change this module cannot map run
-// every file.
+// Which test files the merge writer's trial executes (GY-499). The trial runs only the test files
+// the change can affect; the install, the runner or configuration, and any change this module
+// cannot map run every file, while a change limited to documentation runs none.
 //
-//   node scripts/ci-tests.mjs select --out FILE           the files this CI run executes, one per line
-//   node scripts/ci-tests.mjs shards [N]                  the balanced shards of the full suite
 //   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs: `mode: reason`, then
 //                                                         the files it runs, one per line (every one when full),
 //                                                         never the advisory budget tests (`advisoryTests`)
@@ -13,17 +10,14 @@
 // The dependency map is built from the source itself: every relative import, and every path a file
 // names in text (`'../docs/x.md'`, `join(root, 'src')`, `${root}/src/cli.ts`), is an edge; a
 // directory named is an edge to everything under it. Test files reach src modules transitively
-// through those edges. It is a speed-up for the pull request's own run only: the full suite runs
-// again on the merge-queue tip, so a dependency the map misses is caught before anything lands.
+// through those edges.
 import { execFileSync } from 'node:child_process';
-import { existsSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join, posix, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const defaultShardCount = 4;
 export const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-/** The subject Graphyard gives the commit of a speculative merge-queue tip (src/github.ts). */
-export const speculativeTipSubject = /^Graphyard speculative tip for /;
 
 /** Every test file of the Node suite, as `npm test` runs it by default. */
 export function listTestFiles(root = repositoryRoot) {
@@ -69,6 +63,8 @@ const fullSuitePaths = [
   /^package(?:-lock)?\.json$/, /^\.npmrc$/, /^tests\/helpers\//, /^tsconfig[\w.-]*\.json$/, /(?:^|\/)[\w-]+\.config\.[cm]?[jt]s$/,
   /^\.github\//, /^scripts\/ci-tests\.mjs$/, /^graphyard\.json$/,
 ];
+// Documentation no test executes: prose a change cannot break, whether or not a test names its path.
+const isDocumentation = file => file.startsWith('docs/') || file.endsWith('.md');
 
 function trackedFiles(root) {
   try { return execFileSync('git', ['ls-files', '-z'], { cwd: root, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] }).split('\0').filter(Boolean); }
@@ -144,83 +140,36 @@ export function dependencyMap(root = repositoryRoot, tests = listTestFiles(root)
 }
 
 /**
- * The test files a change affects, or the full suite and why. The full suite runs when a changed
- * file is outside the map (nothing reaches it, so nothing can say what it affects), when it is the
- * install, the runner or configuration, or when the changed files are unknown.
+ * The test files a change affects, the full suite and why, or nothing. The full suite runs when
+ * a changed file is outside the map (nothing reaches it, so nothing can say what it affects),
+ * when it is the install, the runner or configuration, or when the changed files are unknown.
+ * A change limited to documentation selects nothing: no test executes it.
  */
 export function selectAffected(changed, map, tests) {
   if (!changed) return { mode: 'full', reason: 'the changed files are unknown', files: tests };
-  for (const file of changed) {
+  const effective = changed.filter(file => !isDocumentation(file));
+  if (!effective.length) return { mode: 'affected', reason: `${changed.length} changed file(s) are documentation only`, files: [] };
+  for (const file of effective) {
     if (fullSuitePaths.some(pattern => pattern.test(file))) return { mode: 'full', reason: `${file} changes the install, the test runner or configuration`, files: tests };
     if (!map.has(file)) return { mode: 'full', reason: `${file} is not in the dependency map`, files: tests };
   }
-  const selected = new Set(changed.flatMap(file => map.get(file)));
-  return { mode: 'affected', reason: `${selected.size} of ${tests.length} test files are affected by ${changed.length} changed file(s)`, files: tests.filter(test => selected.has(test)) };
-}
-
-/**
- * The selection for one CI run. Only a pull_request event may narrow the suite, and never for a
- * merge-queue tip: Graphyard pushes a speculative tip to the pull request's own branch, so a head
- * whose commit is a speculative tip, or that a published queue ref points at, runs everything —
- * as does every push to main and every other event.
- */
-export function selectForRun({ event, headSubject, queued, changed, map, tests }) {
-  if (event !== 'pull_request') return { mode: 'full', reason: `a ${event || 'local'} run always runs the full suite`, files: tests };
-  if (headSubject !== undefined && speculativeTipSubject.test(headSubject)) return { mode: 'full', reason: 'the head is a merge-queue speculative tip', files: tests };
-  if (queued === null) return { mode: 'full', reason: 'the merge-queue refs could not be read, so the head may be a queue tip', files: tests };
-  if (queued) return { mode: 'full', reason: 'the head is published as a merge-queue tip', files: tests };
-  return selectAffected(changed, map, tests);
-}
-
-// ---- CI ------------------------------------------------------------------------------------------
-
-const git = (args, root) => { try { return execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim(); } catch { return null; } };
-
-/**
- * Reads this run from the Actions environment. A pull_request checkout is GitHub's merge of the
- * head onto the base, so its first parent is the base and its second the pull request's head.
- */
-export function runContext(root = repositoryRoot, environment = process.env) {
-  const event = environment.GITHUB_EVENT_NAME ?? '';
-  if (event !== 'pull_request') return { event };
-  const payload = environment.GITHUB_EVENT_PATH && existsSync(environment.GITHUB_EVENT_PATH) ? JSON.parse(readFileSync(environment.GITHUB_EVENT_PATH, 'utf8')) : {};
-  const head = payload.pull_request?.head?.sha ?? git(['rev-parse', 'HEAD^2'], root);
-  const diff = git(['diff', '--name-only', 'HEAD^1', 'HEAD'], root);
-  const refs = git(['ls-remote', 'origin', 'refs/graphyard/queue/*'], root);
-  return {
-    event,
-    headSubject: (head && git(['log', '-1', '--format=%s', head], root)) ?? undefined,
-    queued: refs === null || !head ? null : refs.split('\n').some(line => line.split('\t')[0] === head),
-    changed: diff === null ? null : diff.split('\n').filter(Boolean),
-  };
+  const selected = new Set(effective.flatMap(file => map.get(file)));
+  return { mode: 'affected', reason: `${selected.size} of ${tests.length} test files are affected by ${effective.length} changed file(s)`, files: tests.filter(test => selected.has(test)) };
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
-  const option = name => { const at = args.indexOf(name); return at < 0 ? null : args[at + 1]; };
   const tests = listTestFiles();
-  if (command === 'select') {
-    const context = runContext();
-    const needsMap = context.event === 'pull_request' && context.changed && context.queued === false && !speculativeTipSubject.test(context.headSubject ?? '');
-    const selection = selectForRun({ ...context, map: needsMap ? dependencyMap() : new Map(), tests: listTestFiles() });
-    const out = option('--out');
-    if (out) writeFileSync(out, selection.files.map(file => `${file}\n`).join('')); else console.log(selection.files.join('\n'));
-    const summary = `### Test selection\n\n${selection.mode === 'full' ? 'Full suite' : 'Affected tests only'}: ${selection.reason}.\n\n${selection.files.length} test file(s) selected.\n`;
-    console.error(summary);
-    if (process.env.GITHUB_STEP_SUMMARY) writeFileSync(process.env.GITHUB_STEP_SUMMARY, summary, { flag: 'a' });
-  } else if (command === 'shards') {
-    const shards = shardFiles(listTestFiles(), Number(args[0] ?? defaultShardCount));
-    shards.forEach((shard, at) => console.log(`shard ${at + 1}: ${shard.length} files`));
-  } else if (command === 'affected') {
+  if (command === 'affected') {
     // The merge writer's trial selection never runs the advisory budget tests (GY-1528).
     const selection = selectAffected(args, dependencyMap(), listTestFiles().filter(file => !isAdvisoryTest(file)));
-    // The files follow in both modes, so a caller (the merge writer's trial) runs exactly the pre-merge selection and never the release-candidate suites.
+    // The files follow in both modes, so the merge writer's trial runs exactly this selection; an empty one runs nothing.
     console.log(`${selection.mode}: ${selection.reason}`); if (selection.files.length) console.log(selection.files.join('\n'));
   } else if (command === 'advisory') {
     // The advisory budget tests the loop runs once after each control-plane merge (GY-1528), in the `affected` output's shape.
     const files = advisoryTests.filter(file => tests.includes(file));
     console.log(`advisory: ${files.length} advisory budget test file(s)`); if (files.length) console.log(files.join('\n'));
   } else {
-    throw new Error('Usage: ci-tests select [--out FILE] | release-candidate [--suite soak|timing-budget] [--out FILE] | shards [N] | affected FILE... | advisory');
+    throw new Error('Usage: ci-tests affected FILE... | advisory');
   }
 }

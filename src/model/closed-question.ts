@@ -156,30 +156,3 @@ export interface StudyReport {
 }
 export const studyMinimumCases = 20;
 
-/**
- * Adoption is recommended only when at least twenty past candidates were judged, no confident
- * answer was wrong more often than `maxConfidentWrong` allows (none, by default), and confident
- * answers agreed with the known outcome at least as often as the sessions they replace did.
- */
-export function accuracyStudy(cases: readonly StudyCase[], threshold: number, options: { maxConfidentWrong?: number } = {}): StudyReport {
-  const confident = cases.filter(entry => entry.probability >= threshold);
-  const agreeing = confident.filter(entry => entry.answer === entry.known);
-  const confidentWrong = confident.filter(entry => entry.answer !== entry.known);
-  const sessions = cases.filter(entry => entry.session === 'pass' || entry.session === 'fail');
-  const sessionAgreement = sessions.filter(entry => entry.session === entry.known).length;
-  const rate = (hits: number, total: number) => total ? hits / total : 0;
-  const allowed = options.maxConfidentWrong ?? 0;
-  const refusals = [
-    ...(cases.length < studyMinimumCases ? [`only ${cases.length} past candidates were judged; the study needs at least ${studyMinimumCases}`] : []),
-    ...(confidentWrong.length > allowed ? [`${confidentWrong.length} confident answer(s) were wrong (${confidentWrong.map(entry => `${entry.key} ${entry.proof} at ${entry.sha.slice(0, 12)}`).join('; ')}); at most ${allowed} is acceptable`] : []),
-    ...(sessions.length && rate(agreeing.length, confident.length) < rate(sessionAgreement, sessions.length) ? [`confident answers agreed with the known outcome ${agreeing.length}/${confident.length} times, below the sessions' ${sessionAgreement}/${sessions.length}`] : []),
-    ...(!confident.length ? ['no answer reached the threshold, so nothing would have been decided faster'] : []),
-  ];
-  return {
-    cases: cases.length, threshold, confident: confident.length, agreement: agreeing.length, disagreement: confidentWrong.length,
-    escalated: cases.length - confident.length, confidentWrong: [...confidentWrong],
-    session: { judged: sessions.length, agreement: sessionAgreement },
-    recommendation: refusals.length ? 'refuse' : 'adopt',
-    reason: refusals.length ? refusals.join('; ') : `${agreeing.length}/${confident.length} confident answers agreed with the known outcome over ${cases.length} past candidates, none confidently wrong beyond ${allowed}, against the sessions' ${sessionAgreement}/${sessions.length}`,
-  };
-}

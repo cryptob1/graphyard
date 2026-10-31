@@ -182,13 +182,6 @@ export async function baseTree(root: string, base: string): Promise<{ tree: stri
   }
 }
 
-/** Run one passing proof against the base's sources with this change's tests: the one-proof form of what verifyWorkingTree does for every proof. */
-export async function baseExercise(root: string, base: string, proof: string, files: string[], ports: ReserveOptions = {}): Promise<BaseExercise | null> {
-  const prepared = await baseTree(root, base);
-  if (!prepared) return null;
-  try { return await exerciseIn(prepared, base, proof, files, ports); } finally { await prepared.release(); }
-}
-
 async function exerciseIn(prepared: NonNullable<Awaited<ReturnType<typeof baseTree>>>, base: string, proof: string, files: string[], ports: ReserveOptions): Promise<BaseExercise> {
   const { tree, reverted } = prepared;
   if (!tree) return { base, result: 'indeterminate', executed: 0, reverted, reason: prepared.reason };
