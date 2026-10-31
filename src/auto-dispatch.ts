@@ -17,7 +17,7 @@ import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';
 import { boundedLaunch, launchBoundMs } from './master/launch-bound.js';
 import { capacityRefusal } from './fleet.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from './master/registry-slot.js';
-import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
+import { answeredByPendingReview, postMergeFindingsMax, launchReview, reconcileReviews, reviewVerdictReminderMs, LauncherUnavailableError, UnknownReviewerProfileError, unpostedVerdict, updateReviewLedger, vanishedSettledSession, type ReviewRecord } from './reviewer.js';
 import { launchRefusalProbeDue, owedPostMergeReviews, parseFinding, postMergeFollowUp, postMergeRequestId, postMergeRefusalProbeMs, wholeFindings } from './model/post-merge-review.js';
 import { reviewedBeforeMerge, riskOf } from './model/risk-class.js';
 import { blockingFindings, followUpFindingsOf } from './review-cap.js';
@@ -1219,6 +1219,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           }
           // An unknown reviewer profile is a configuration wait (GY-1850): the launch boundary spaces its own attempts and master status names the fix, so nothing is counted and the request resumes once the profiles change.
           else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
+          // GY-2995: a launch whose sandbox cannot reach its own CLI is configuration attention, never a counted failure.
+          else if (error instanceof LauncherUnavailableError) { delete cursor.failures[review.id]; wait('review', item, review, message(error)); }
           else if (!outOfCapacity('review', item, review, error)) refuse('review', item, review, error);
         }
         await persist();
@@ -1269,7 +1271,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
               ? `product reviewer session ${answered.agentName} already answered with ${answered.answered.state}; ${launchWaitWording.settles}`
               : `a reviewer session on ${request.sha.slice(0, 12)} is already answering ${item.key} (one session per head); the product review launches once it settles`, answered.answered?.at);
           }
-          else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[request.id]; wait('review', item, request, message(error)); }
+          else if (error instanceof UnknownReviewerProfileError || error instanceof LauncherUnavailableError) { delete cursor.failures[request.id]; wait('review', item, request, message(error)); }
           else if (!outOfCapacity('review', item, request, error)) refuse('review', item, request, error);
         }
         await persist();
@@ -1390,7 +1392,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       } catch (error) {
         const answered = answeredByPendingReview(error, request);
         if (answered) wait('review', item, request, `reviewer session ${answered.agentName} is already pending on ${request.sha.slice(0, 12)}; ${launchWaitWording.settles}`);
-        else if (error instanceof UnknownReviewerProfileError) { delete cursor.failures[request.id]; wait('review', item, request, message(error)); }
+        else if (error instanceof UnknownReviewerProfileError || error instanceof LauncherUnavailableError) { delete cursor.failures[request.id]; wait('review', item, request, message(error)); }
         else if (!outOfCapacity('review', item, request, error)) refuse('review', item, request, error);
       }
       await persist();

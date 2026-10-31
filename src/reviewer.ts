@@ -2,7 +2,7 @@ import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
-import { dirname, basename, join, resolve } from 'node:path';
+import { dirname, basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
@@ -629,6 +629,26 @@ export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch
   return verifyWorkerSandbox({ ...launch, role, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, directory, writable, run === 'host' ? undefined : run);
 }
 
+/** GY-2995: a review or spec-check launch whose sandbox cannot reach the CLI its prompt names starts no session; the launcher and the loop turn the refusal into configuration attention instead of relaunching. The same fault when the config names no launcher this host holds. */
+export { LauncherUnavailableError } from './master/config.js';
+import { LauncherUnavailableError } from './master/config.js';
+
+/**
+ * Why this launch's masked sandbox could not reach the CLI its prompt names, or null (GY-2995).
+ * The masked sandbox hides the operator config home wholesale; an existing launcher is always
+ * reachable — one under the config home is kept by the mask itself (`credentialMaskFor` keeps
+ * the deploy checkout it runs from). The refusal fires when the config names a launcher the host
+ * no longer has, or one the mask would not keep: no session could ever post its verdict.
+ */
+export function cliUnreachableRefusal(config: Partial<Pick<MasterConfig, 'cliPath'>>, mask?: CredentialMask): string | null {
+  const cli = config.cliPath ?? launcherPath;
+  const underHome = (path: string) => !!mask && (path === mask.configHome || path.startsWith(`${mask.configHome}${sep}`));
+  if (!cli || !isAbsolute(cli)) return `the config names no absolute CLI path, so the session's prompt would name a CLI no sandbox holds; set cliPath with graphyard master setup`;
+  if (!existsSync(cli)) return `the CLI the prompt names (node ${cli}) is not on this host, so no session could post its verdict; restore the deploy checkout it names, or set cliPath with graphyard master setup`;
+  if (underHome(cli) && !(mask?.cli ?? []).some(kept => cli === kept || cli.startsWith(`${kept}${sep}`))) return `the CLI the prompt names (node ${cli}) sits under the masked config home and this launch's sandbox would not keep it, so no session could post its verdict; set cliPath with graphyard master setup`;
+  return null;
+}
+
 /**
  * GY-866: an interactive approver's or escalation handler's own directory under the managed
  * worktree root, never the coordinator checkout, anchored like a reviewer's so `gh` and `git`
@@ -1113,6 +1133,10 @@ export async function launchReview(root: string, work: Work, profileName: string
     const selected = await selectAccount(config, 'reviewer', profile, { ...dependencies.probe, work: work.key });
     // Everything past the choice can fail; the session it chose is given back at once when it does.
     return await onSelectedSession(selected, `reviewer launch for ${work.key} failed`, async () => {
+      // GY-2995: a launch whose sandbox cannot reach the CLI its prompt names starts nothing —
+      // refused before a credential is minted, a checkout allocated or a launch registered.
+      const cliRefusal = cliUnreachableRefusal(config, credentialMaskFor(config, {}));
+      if (cliRefusal) throw new LauncherUnavailableError(cliRefusal);
       let credential: ReviewerCredential | null = null;
       if (reviewerApp && !plane) {
         credential = await readReviewerCredential(root, reviewerApp.credentialFile);
@@ -1150,7 +1174,9 @@ export async function launchReview(root: string, work: Work, profileName: string
       const launch = accountLaunch(profile, selected.account, { writable });
       // The install's credential locations are hidden from this session (GY-1856); a reviewer's
       // own credential is the binding its launch directory carries, and its runtime login stays.
-      const credentialMask = credentialMaskFor(config, { runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      // GY-2995: that launch directory under the config home is kept readable, and with it the
+      // deploy checkout the CLI it must run lives in.
+      const credentialMask = credentialMaskFor(config, { credentialFile: sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
       try {
         // The reviewer loads its own role rules, never the master's: it may post this one verdict.

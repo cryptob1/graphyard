@@ -22,6 +22,8 @@ export async function privateFile(file: string) {
   if (!info.isFile() || info.mode & 0o077) throw new Error(`${file} must be a regular file with mode 0600`);
   return info;
 }
+/** The config names a CLI launcher no launch could run — an absolute path this host does not hold (GY-2995). Every session the config would start is refused before it starts, and the launcher and the loop name the fix as configuration attention instead of relaunching. */
+export class LauncherUnavailableError extends Error {}
 export async function readCredentialFile(file: string) {
   await privateFile(file);
   const value = (await readFile(file, 'utf8')).trim();
@@ -91,8 +93,8 @@ export async function externalCredential(root: string, file: string, label: stri
 export async function loadStoredMasterConfig(root: string): Promise<MasterConfig> {
   const config = await readMasterConfig(root);
   await externalCredential(root, config.credentialFile, 'Master');
-  if (!isAbsolute(config.cliPath)) throw new Error('Master CLI path must be absolute');
-  try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new Error('Configured Graphyard CLI launcher is unavailable'); }
+  if (!isAbsolute(config.cliPath)) throw new LauncherUnavailableError('Master CLI path must be absolute');
+  try { if (!(await lstat(config.cliPath)).isFile()) throw new Error(); } catch { throw new LauncherUnavailableError('Configured Graphyard CLI launcher is unavailable: restore the deploy checkout it names, or set cliPath with graphyard master setup'); }
   // Every Herdr sweep this process runs acts only within the install's own workspace (GY-1441), and
   // every herdr call reaches the install's own instance when it records one (GY-1511).
   applyHerdrConfig(config);
