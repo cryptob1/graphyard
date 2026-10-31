@@ -5,6 +5,7 @@ import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualF
 import { unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
 import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { reworkBriefMax } from '../master/rework-brief.js';
+import { failedHumanProof } from '../model/human-proof.js';
 
 export interface StandingVerdict { reviewer: string; at: string; reason: string }
 /**
@@ -134,6 +135,9 @@ export function exhaustedProofRework(work: Work, exhausted: readonly ExhaustedPr
 export function proofRework(work: Work): Rework | null {
   const candidate = work.candidate;
   if (!work.submission || work.reworkRequested || !candidate || work.stage === 'done' || work.observation?.merged) return null;
+  // A person's failed real-world check (GY-2986) is the head's own proof failing, with their note as the brief.
+  const human = failedHumanProof(work);
+  if (human) return { reason: `${work.key}: ${human.proof} failed a person's check on ${candidate.sha.slice(0, 12)}: ${human.answer!.note}. Only a new head is asked again, so the item returns to a worker.`, binding: `${candidate.sha}:human:${human.proof}` };
   const now = new Date();
   const failed = [...mechanicalVerdicts(work, [work], now).filter(verdict => verdict.outcome === 'failed'), ...producerManualFailures(work, [work], now)];
   const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:'));

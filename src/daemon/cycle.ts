@@ -12,6 +12,7 @@ import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
+import { dueHumanProofs } from '../model/human-proof.js';
 import { hotspots } from './hotspots.js';
 import { settledPurpose } from '../model/session-state.js';
 import { attemptClaimedAt, attemptProgressFresh, attemptProgressWindowMs } from '../model/attempt-bound.js';
@@ -435,6 +436,12 @@ async function dispatchStep(cycle: Cycle) {
     if (state.actions[key]?.state === 'done') continue;
     try { await effects.rework(item, rework.reason, rework.binding); await note(cycle, key, 'judgement', item.key, 'done', `Returned ${item.key} to a worker: ${rework.reason}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not return ${item.key} to a worker: ${message(error)}`); }
+  }
+  if (effects.askHumanProof) for (const item of open) for (const proof of dueHumanProofs(item)) {
+    const key = `human-proof:${item.id}:${proof}:${item.candidate!.sha}:${item.policyRevision}`;
+    if (state.actions[key]?.state === 'done') continue;
+    try { await effects.askHumanProof(item, proof); await note(cycle, key, 'judgement', item.key, 'done', `Asked a person for ${proof} on ${item.candidate!.sha.slice(0, 12)}`); }
+    catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not ask a person for ${proof} on ${item.key}: ${message(error)}`); }
   }
   await effects.dispatchTick?.(snapshot);
   await masterSession(cycle, open);

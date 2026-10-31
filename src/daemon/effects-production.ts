@@ -44,6 +44,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const rework: DaemonEffects['rework'] = (work, reason, binding) => asOperatorAgent(`work/${work.id}/rework`, { reason, previousWorkerStopped: true, ...(binding ? { binding } : {}) });
+  const askHumanProof: DaemonEffects['askHumanProof'] = (work, proof) => mutate(`work/${work.id}/human-proof-request`, { proof, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha,
+    ...(work.preview?.state === 'running' && work.preview.sha === work.candidate!.sha ? { url: `${current().url}${work.preview.path}/` } : {}) }, `human-proof:${work.id}:${proof}:${work.candidate!.sha}:${work.policyRevision}`);
   // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
   let writtenMemory: string | null = null;
   const persist = async (state: DaemonState) => {
@@ -160,6 +162,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
     // Rework exists only while the live configuration names the master's operator-agent identity.
     get rework() { return current().operatorAgent ? rework : undefined; },
+    askHumanProof,
     // The release this process loaded: the checkout its code comes from, read once at startup.
     loadedRelease: readRelease(loopCodeRoot(current().cliPath, root)),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },

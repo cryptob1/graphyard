@@ -27,6 +27,7 @@ import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
 import { filingRefusal, userFacingProofRefusal } from './model/user-facing.js';
+import { physicalCheckRefusal } from './model/human-proof.js';
 import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
 import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
@@ -67,7 +68,7 @@ const retiredField = z.unknown().transform(() => undefined).optional();
 const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.string().trim().min(1).max(500).nullable(), line: z.number().int().positive().nullable(), durationMs: z.number().int().min(0).nullable() }).strict();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField })
-    .superRefine((data, ctx) => { const refusal = userFacingCreateRefusal(data); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
+    .superRefine((data, ctx) => { const refusal = userFacingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
@@ -1362,6 +1363,8 @@ export class Engine {
     // GY-2965: a user-facing item keeps its e2e proof through a revision; the opt-out sentence still excuses one.
     const userFacing = userFacingProofRefusal({ type: work!.type, description: work!.description, criteria: data.criteria });
     demand(!userFacing, userFacing!);
+    const unphysical = physicalCheckRefusal(data.criteria);
+    demand(!unphysical, unphysical!);
     demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
     const reachesWork = (id: string, visited = new Set<string>()): boolean => {
       if (id === work!.id) return true;

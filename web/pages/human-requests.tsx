@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { humanDecisionLabel, humanOnlyRefusal, openHumanOnly, recommendedFirst, type HumanOnlyChoice, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
+import { humanDecisionLabel, humanOnlyRefusal, humanProofRule, openHumanOnly, recommendedFirst, type HumanOnlyChoice, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
 import { formatDuration } from '../../src/model/duration';
 import { shortShas } from '../../src/model/format';
 import { humanAsk } from '../../src/model/human-ask';
@@ -67,6 +67,9 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
   const [text, setText] = useState('');
   const [note, setNote] = useState('');
   const [secret, setSecret] = useState('');
+  const [photo, setPhoto] = useState<{ name: string; mediaType: string; bytes: string } | null>(null);
+  const check = row.rule === humanProofRule.kind;
+  const choosePhoto = async (file: File | undefined) => setPhoto(file ? { name: file.name, mediaType: file.type, bytes: btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer()))) } : null);
   const post: HumanOnlyPost = row.answer.post;
   // The recommended choice comes first, labelled, and is the form's default: Enter takes it (GY-1410).
   const choices = recommendedFirst(row.choices ?? []);
@@ -78,7 +81,7 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
   // be unrecoverable, so a failed submission keeps every field for the retry.
   const submit = (body: Record<string, unknown>) => { if (text.trim()) void answer(text.trim(), body); };
   const choose = (choice: HumanOnlyChoice) => {
-    const body = { ...choice.body, ...(choice.note && note.trim() ? { [choice.note]: note.trim() } : {}), ...(choice.input === 'secret' ? { secret } : {}) };
+    const body = { ...choice.body, ...(choice.note && note.trim() ? { [choice.note]: note.trim() } : {}), ...(choice.input === 'secret' ? { secret } : {}), ...(photo ? { photo } : {}) };
     void (send ? send(body) : answer('', body));
   };
   const ready = (choice: HumanOnlyChoice) => !busy && (choice.input !== 'text' || !!note.trim()) && (choice.input !== 'secret' || !!secret);
@@ -87,22 +90,23 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
     <h3>{shortShas(humanAsk(row.request))}</h3>
     {row.request.recommendation ? <p className="human-why human-recommendation"><strong>Recommended:</strong> {shortShas(row.request.recommendation)}{row.request.why && <span className="muted"> {row.request.why}</span>}</p>
       : row.request.why && <p className="human-why">{row.request.why}</p>}
-    {!!row.request.steps?.length && <ol className="human-steps">{row.request.steps.map((step, index) => <li key={index}>{step}</li>)}</ol>}
+    {!!row.request.steps?.length && <ol className="human-steps">{row.request.steps.map((step, index) => { const url = /^Open (\S+)$/.exec(step)?.[1]; return <li key={index}>{url ? <>Open <a href={url} target="_blank" rel="noopener noreferrer">{url}</a></> : step}</li>; })}</ol>}
     <p className="muted human-kind">{row.decision} · asked by {row.request.requestedBy}</p>
     {refusal ? <div className="login-actions"><p className="muted">This session cannot answer it: {shortShas(refusal)}.</p>{signIn && <button type="button" onClick={signIn}>{signInAction}</button>}</div> : <>
       {choices.length > 0 && <form onSubmit={event => { event.preventDefault(); if (recommended && ready(recommended)) choose(recommended); }}>
         {choices.some(choice => choice.input === 'secret') && <label>Value to provide (sealed to the requesting host, never stored as typed)<input type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)}/></label>}
         {choices.some(choice => choice.note) && <textarea aria-label={`Note for ${row.work}`} placeholder="Note (optional; needed for a choice ending in …)" value={note} onChange={event => setNote(event.target.value)} rows={2}/>}
+        {check && <label>Photo (optional)<input type="file" accept="image/png,image/jpeg" onChange={event => void choosePhoto(event.target.files?.[0])}/></label>}
         {/* The shared wrapping action row: buttons wrap at any width, down to 375 px. */}
         <div className="pulse-actions human-choices">{choices.map(choice => <button key={choice.label} type={choice === recommended ? 'submit' : 'button'} className={choice.declines ? 'text-button' : undefined}
           data-preselected={choice === recommended || undefined} aria-pressed={choice === recommended ? true : undefined} autoFocus={choice === recommended} disabled={!ready(choice)}
           onClick={event => { event.preventDefault(); choose(choice); }}>{choice === recommended && <strong>Recommended: </strong>}{choice.label}</button>)}</div>
       </form>}
-      <details className="own-words" open={choices.length === 0}><summary className="muted">{choices.length ? 'Or answer in your own words' : 'Answer'}</summary><form onSubmit={event => { event.preventDefault(); submit(post.body); }}>
+      {!check && <details className="own-words" open={choices.length === 0}><summary className="muted">{choices.length ? 'Or answer in your own words' : 'Answer'}</summary><form onSubmit={event => { event.preventDefault(); submit(post.body); }}>
         <textarea aria-label={`${post.field === 'reason' ? 'Reason' : 'Answer'} for ${row.work}`} placeholder="What you decided or provided, in words the next worker can act on…" value={text} onChange={event => setText(event.target.value)} rows={3}/>
         <div className="list-tools"><button type="submit" disabled={busy || !text.trim()}>{post.submit}</button>
           {post.decline && <button type="button" className="text-button" disabled={busy || !text.trim()} onClick={() => submit(post.decline!.body)}>{post.decline.submit}</button>}</div>
-      </form></details>
+      </form></details>}
     </>}
     <details className="agent-details"><summary className="muted">Details for agents</summary>
       <dl><dt>Needed</dt><dd>{shortShas(row.request.needed)}</dd><dt>Reason</dt><dd>{shortShas(row.request.reason)}</dd>
