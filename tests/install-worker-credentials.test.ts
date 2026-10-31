@@ -154,8 +154,7 @@ function accountsWorld(checkout: string, installDir: string, options: AccountsWo
   const calls: string[][] = [], events: UpEvent[] = [];
   let clock = 0, installed = false, loop = false, fleetReady = false;
   const status = () => ({
-    github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] },
-    reviewerApps: [{ id: 'claude', appId: 9 }],
+    github: true, githubRepository: 'acme/shop',
     mergeWriter: { merger: 'github', line: null },
     fleet: fleetReady
       ? { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] }

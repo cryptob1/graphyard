@@ -2,7 +2,7 @@ import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, stat } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -497,9 +497,7 @@ test('unit:review-standard-shared-with-reviewer — the control-plane request ke
   assert.ok(at('Review against the acceptance criteria of GY-9') < at('is a declared post-deploy verification') && at('is a declared post-deploy verification') < at('Name each nit on its own "Nit: PATH:LINE'), 'the post-deploy rule sits directly after the criteria rule, before the BLOCKING/Nit rule, as in the request before the factoring');
 });
 
-// ——— GY-2008: the launcher and the route, together, with the reviewer App bound. ———
-// An installation that retains its reviewer App after switching to control-plane merging launches
-// under the App's bot identity `${slug}[bot]`; the launch route must take exactly that shape. Both
+// ——— GY-2008: the launcher and the route, together. ———
 // These regressions drive the real launcher and review-launch route with no App credential.
 const reviewerIdentity = 'review-claude-1';
 const herdrStub = (calls: string[][]) => (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
@@ -535,6 +533,24 @@ test('integration:control-plane-reviewer-profile-launch — without a reviewer A
     // review is not weakened to let the launch through.
     for (const bad of ['review claude', 'reviewer[deputy]', 'sla[bot]ug', `${reviewerIdentity} extra`])
       assert.equal((await request(tokenOf(coordinator), `work/${work.id}/review-launch`, launchBody(freshToken(), { reviewer: bad }))).status, 400, bad);
+  } finally { await rm(master.root, { recursive: true, force: true }); await rm(master.credentials, { recursive: true, force: true }); }
+});
+
+test('unit:review-verdict — a master config with no githubAppId launches a reviewer session for a submitted head, and its verdict is recorded with no App credential configured', async () => {
+  const master = await reviewerMaster('review-no-app');
+  try {
+    const file = join(master.root, '.graphyard', 'master.json');
+    const { githubAppId: _retired, ...config } = JSON.parse(await readFile(file, 'utf8'));
+    await writeFile(file, JSON.stringify(config));
+    const calls: string[][] = [];
+    const work = await insert(item('GY-9011'));
+    await launchReview(master.root, work, 'reviewer-claude', [], now(), { run: herdrStub(calls) });
+    const [tab] = tabsOf(calls);
+    const binding = JSON.parse(await readFile(join(tab!.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length), reviewBindingFile), 'utf8')) as ReviewPostBinding;
+    const approved = await request(binding.verdictToken!, `work/${work.id}/review-verdict`, verdict(binding.verdictToken!, 'APPROVE'));
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    const [review] = (await stored(work.id)).observation!.reviews as { reviewer: string; state: string }[];
+    assert.deepEqual([review!.reviewer, review!.state], [reviewerIdentity, 'APPROVED']);
   } finally { await rm(master.root, { recursive: true, force: true }); await rm(master.credentials, { recursive: true, force: true }); }
 });
 
