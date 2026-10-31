@@ -4,8 +4,9 @@ import { mkdtemp, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { parseCase, type CaseFile } from '../e2e/case.js';
-import { projectCaseSuite, buildStaticSite } from '../release-project.js';
+import { projectCaseSuite, buildStaticSite, groupBuildShell } from '../release-project.js';
 import type { E2eReport } from '../e2e/runner.js';
+import { confinedSession } from '../e2e/steps.js';
 import { serveStaticSite } from './preview.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment } from '../compose-preview.js';
 import { checkoutRepositoryPolicy, type E2eServe } from '../model/repository-policy.js';
@@ -47,12 +48,13 @@ function declaredServe(worktree: string): { serve: E2eServe | null; applications
  * environment, no credential) until `url` answers, waited for at most `readySeconds` and the
  * budget's remainder; never past it. The group is killed on close.
  */
-async function serveByCommand(serve: E2eServe, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void): Promise<Served> {
+async function serveByCommand(serve: E2eServe, worktree: string, env: Record<string, string>, budgetMs: number, log: (line: string) => void, wrapper: readonly string[] = []): Promise<Served> {
   const startedAt = Date.now(), deadline = startedAt + Math.min(serve.readySeconds * 1000, budgetMs);
   // An endpoint that answers before the command starts is another application's: its answers would not be the head's.
   const occupied = await fetch(serve.url, { signal: AbortSignal.timeout(2_000) }).then(() => true, () => false);
   if (occupied) throw new Error(`${serve.url} already answers before the serve command starts; another application holds it, so the head cannot be served there`);
-  const child = spawn('sh', ['-c', serve.command], { cwd: worktree, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const [file, ...argv] = [...wrapper, 'sh', '-c', serve.command];
+  const child = spawn(file!, argv, { cwd: worktree, env, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
   const chunks: Buffer[] = [];
   child.stdout.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
   child.stderr.on('data', (chunk: Buffer) => { if (chunks.length < 200) chunks.push(chunk); });
@@ -100,6 +102,8 @@ export async function runTrialE2eCases(input: {
   budgetMs: number;
   holds: (path: string) => Promise<boolean>;
   log: (line: string) => void;
+  /** GY-2997: the trial's confinement words the serve command runs under. */
+  wrapper?: readonly string[];
 }): Promise<TrialE2eCase[]> {
   const cases: TrialE2eCase[] = [];
   const pending: string[] = [];
@@ -140,9 +144,9 @@ async function runGroup(target: E2eServe | Application, proofs: readonly string[
   // The cases' bearer token, handed to a serve command as GRAPHYARD_E2E_TOKEN so the head it serves can accept it.
   const token = `trial-${randomUUID()}`;
   try {
-    if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log);
+    if (!('kind' in target)) served = await serveByCommand(target, input.worktree, { ...input.env, GRAPHYARD_E2E_TOKEN: token }, input.budgetMs, input.log, input.wrapper);
     else if (target.kind === 'static') {
-      const build = target.build ? await buildStaticSite(target.build, input.worktree, input.budgetMs, undefined, undefined, input.env) : null;
+      const build = target.build ? await buildStaticSite(target.build, input.worktree, input.budgetMs, groupBuildShell(input.budgetMs, input.wrapper), undefined, input.env) : null;
       if (build) throw new Error(build);
       const static_ = await serveStaticSite(join(input.worktree, target.directory), input.mergeSha);
       served = { origin: static_.url, close: () => static_.close() };
@@ -165,13 +169,21 @@ async function runGroup(target: E2eServe | Application, proofs: readonly string[
     }
     if (loaded.length) {
       let report: E2eReport | null = null;
+      // GY-2997: one confined session for every step invocation — the masks and the fresh /proc held
+      // across them — so an agent leg's browser, opened by one invocation of its shared `--session`,
+      // outlives it; the session's namespace ends when the run does. The host carries this trial's
+      // credential-free environment: it is the namespace's PID 1, whose /proc/1/environ every child
+      // can read.
+      const steps = confinedSession(input.wrapper ?? [], input.env);
       const suite = projectCaseSuite(input.worktree, token, {
         cases: loaded.map(entry => entry.caseFile),
         // The cases come from the head itself, so they never read the install's secrets; agent-step screenshots stay in the trial's scratch, which the trial removes.
+        // GY-2997: command and agent steps run under the same confinement as the serve and static build.
         select: () => true, hostEnvironment: input.env, withholdSecrets: true, artifactsDirectory: join(input.scratch, 'e2e-artifacts'), signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
+        processRunner: steps.run,
         report: value => { report = value; },
       });
-      await suite.run(served.origin, null);
+      try { await suite.run(served.origin, null); } finally { await steps.close().catch(() => {}); }
       // A serve command that ended during the run left the endpoint to whatever answered after it, so no case counts.
       const ended = served.ended?.();
       if (ended) throw new Error(`${ended} while the cases ran`);

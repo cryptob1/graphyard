@@ -89,6 +89,17 @@ test('unit:review-gate-github-snapshot — a GitHub-observed item keeps the revi
   assert.deepEqual(reviewGate(reset).reasons, ['A new independent approval after the requirement-review baseline is required']);
 });
 
+// ——— GY-2998 AC-1: the control-plane review path the deleted observers once fed still works. ———
+test('unit:review-verdict — a reviewer verdict recorded on the exact head passes the review gate; a verdict on any other head approves nothing', () => {
+  const sensitive = item('GY-2998', { observation: planeObservation({ sha: H, baseSha: B, pr: 7, branch: 'b', author: 'graphyard-claude-1' }, ['src/store/pools.ts']) });
+  assert.equal(reviewGate(sensitive).passed, false);
+  sensitive.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'APPROVED', id: 21, submittedAt: now(), source: 'control-plane' } as never);
+  assert.equal(reviewGate(sensitive).passed, true, 'the verdict recorded on the exact head lands the review gate');
+  const elsewhere = item('GY-2998b', { observation: planeObservation({ sha: H, baseSha: B, pr: 7, branch: 'b', author: 'graphyard-claude-1' }, ['src/store/pools.ts']) });
+  elsewhere.observation!.reviews.push({ reviewer: 'review-claude-1', sha: M, state: 'APPROVED', id: 22, submittedAt: now(), source: 'control-plane' } as never);
+  assert.equal(reviewGate(elsewhere).passed, false, 'a verdict on another head is not an approval of this one');
+});
+
 // ——— AC-1: the binding, and review post in both modes. ———
 const TOKEN = 'f'.repeat(64);
 const bindingOf = (fields: Partial<ReviewPostBinding> = {}): ReviewPostBinding => ({ repository: 'owner/project', key: 'GY-7', pr: 7, sha: H, baseSha: B, policyRevision: 1, criteriaOnly: true, ...fields });

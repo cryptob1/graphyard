@@ -20,7 +20,6 @@ export const staticApplicationSchema = z.object({ id: applicationId, kind: z.lit
 export const composeApplicationSchema = z.object({ id: applicationId, kind: z.literal('compose'), file: relativePath('A Compose file'), service: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}$/, 'A Compose service name'), port: z.number().int().min(1).max(65535) }).strict();
 export const applicationSchema = z.discriminatedUnion('kind', [staticApplicationSchema, composeApplicationSchema]);
 export type Application = z.infer<typeof applicationSchema>;
-export const applicationKinds = ['static', 'compose'] as const;
 
 /** A case id as src/e2e/case.ts accepts it: lowercase letters, digits, ., _ and -, at most 100 characters. */
 const boundCaseId = /^[a-z0-9][a-z0-9._-]{0,99}$/;

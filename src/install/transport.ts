@@ -79,32 +79,6 @@ export function localTransport(): Transport {
 
 export const shellQuote = (value: string) => `'${value.replaceAll("'", `'\\''`)}'`;
 
-/** Batch mode only: the installer never prompts for an SSH password inside an agent session. */
-export function sshTransport(host: string, user = 'root', base: Transport = localTransport()): Transport {
-  const target = `${user}@${host}`;
-  const sshArgs = ['-o', 'BatchMode=yes', '-o', 'StrictHostKeyChecking=accept-new', target, '--'];
-  // ssh joins the remaining arguments into one remote shell command, so every word is
-  // quoted here; otherwise a path or value containing a space would be re-split remotely.
-  return {
-    description: target,
-    exec: (program, args, options = {}) => base.exec('ssh', [...sshArgs, ...[program, ...args].map(shellQuote)], options),
-    async putFile(path, content, mode, owner) {
-      const steps = [`mkdir -p ${shellQuote(dirname(path))}`, 'umask 077', `cat > ${shellQuote(path)}`, `chmod ${mode.toString(8).padStart(4, '0')} ${shellQuote(path)}`];
-      if (owner) steps.push(`chown ${shellQuote(owner)} ${shellQuote(path)}`);
-      const run = () => base.exec('ssh', [...sshArgs, 'sh', '-c', shellQuote(steps.join(' && '))], { input: content });
-      if (!owner) { await run(); return; }
-      const failure = await run().then(
-        result => result.code === 0 ? null : commandFailure('ssh', result).message,
-        (error: Error) => error.message,
-      );
-      if (failure === null) return;
-      // The remote shell is whatever --ssh-user names; a non-root user cannot chown to
-      // uid 1000, and the failure must be loud here rather than a crash-looping server later.
-      throw new Error(`${failure}. The server container runs as uid ${owner.split(':')[0]} and must be able to read ${path}: connect as a remote user that can chown (the default --ssh-user root), or chown ${owner} ${path} on ${host} yourself, then rerun graphyard install --apply.`);
-    },
-  };
-}
-
 export interface RecordedCommand { program: string; args: string[]; input?: string; cwd?: string }
 export interface BundleFileRecord { content: string; mode: number; owner?: string }
 export interface FakeTransportOptions {

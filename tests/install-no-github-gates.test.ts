@@ -64,7 +64,7 @@ test('unit:github-gates-removed — protection scripts and CI gate workflows are
   assert.ok(!existsSync('.github/workflows/ci.yml'));
   assert.ok(!existsSync('.github/workflows/acceptance.yml'));
   assert.ok(!existsSync('.github/workflows/deploy-smoke.yml'));
-  assert.ok(existsSync('.github/workflows/release.yml'));
+  assert.ok(!existsSync('.github/workflows/release.yml'));
   assert.ok(!existsSync('.github/workflows/release-candidate.yml'));
   assert.ok(!existsSync('.github/workflows/release-candidate-soak.yml'));
 

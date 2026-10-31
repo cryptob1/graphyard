@@ -212,18 +212,13 @@ test('unit:login-secondary-escapewhile verifying, Use another token is a link-st
   assert.match(css, /button\.text-button,\.text-button\{[^}]*background:none;border:0/, 'text-button has no button fill');
 });
 
-test('unit:login-screenshots-present the browser suite captures the sign-in page in each state at 1280 and 375 px and the images are committed', () => {
+test('unit:login-screenshots-present the browser suite captures the sign-in page in each state at 1280 and 375 px into a gitignored directory', () => {
   const spec = readFileSync(new URL('browser-tests/screenshots.spec.ts', root), 'utf8');
   assert.match(spec, /loginWidths = \[1280, 375\] as const/);
   assert.match(spec, /loginStates = \['token-form', 'verifying', 'unreachable'\] as const/);
-  assert.match(spec, /const loginOut = 'browser-tests\/screenshots\/login'/);
+  assert.match(spec, /const loginOut = 'test-results\/screenshots\/login'/);
   // The browser checks: no sideways overflow, one left edge, and the helper text below every button.
   assert.match(spec, /scrollWidth[\s\S]*toBeLessThanOrEqual\(layout\.width\)/);
   assert.match(spec, /new Set\(layout\.lefts\)\.size[\s\S]*toBe\(1\)/);
   assert.match(spec, /layout\.helpTop[\s\S]*toBeGreaterThanOrEqual\(layout\.buttonBottom\)/);
-  for (const state of ['token-form', 'verifying', 'unreachable']) for (const width of [1280, 375]) {
-    const image = readFileSync(new URL(`browser-tests/screenshots/login/${state}-${width}.png`, root));
-    assert.deepEqual([...image.subarray(0, 8)], [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], `${state}-${width}.png is a PNG`);
-    assert.equal(image.readUInt32BE(16), width, `${state}-${width}.png is ${width} px wide`);
-  }
 });

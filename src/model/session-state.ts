@@ -65,10 +65,6 @@ export function runningSessions(all: Work[], now: Date) {
     .sort((a, b) => b.runningMs - a.runningMs);
 }
 /** Every open record not shown running — recorded open, but not seen working or idle lately — longest unseen first. */
-export function unseenSessions(all: Work[], now: Date) {
-  return all.flatMap(work => sessionSummary(work, now).filter(handle => handle.state === 'running' && !handle.live))
-    .sort((a, b) => (b.unseenMs ?? 0) - (a.unseenMs ?? 0));
-}
 
 /**
  * The one session state (GY-172): what the loop observes of every Graphyard-launched session it
@@ -288,5 +284,5 @@ export function reportedHandle(entry: SessionReportEntry): SessionHandleInput {
     ...(entry.observed ? { observed: entry.observed } : {}), ...(entry.observedAt ? { observedAt: entry.observedAt } : {}), missedReports: entry.missedReports };
 }
 
-export { launchHeldByLease, launchingSession, sessionLaunchGraceMs, unclaimedLaunch } from './session-launch-window.js';
+export { launchHeldByLease, sessionLaunchGraceMs, unclaimedLaunch } from './session-launch-window.js';
 export { coordinateAttempts, coordinateRetryMs, registeredLaunch, type LaunchedCoordinates } from './session-launch.js';
