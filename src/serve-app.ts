@@ -6,7 +6,9 @@
 // master status, the dashboard and doctor read. Once a new commit serves, the pass runs that
 // commit's own required E2E cases against the served URL (GY-2983) and records the verdict for
 // that exact commit beside it: a failing case is the release health the master acts on, never a
-// reason to stop serving or roll back. A repository that declares nothing is untouched.
+// reason to stop serving or roll back. The previously served build keeps serving on the port
+// beside the served one as BASELINE_URL, so a compare case judges a new build against what was
+// live (GY-2985). A repository that declares nothing is untouched.
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -34,8 +36,10 @@ export function parseServeDeclaration(source: string, file = '.graphyard/serve.j
 
 /** The served commit's required cases, as the pass ran them against the URL it serves; `case`, `step` and `reason` name the first required case that failed, and are null when verified. */
 export interface ServeCheck { verified: boolean; case: string | null; step: string | null; reason: string | null }
-/** What the serve pass last did: the commit whose build serves, the URL it answers, the commit whose build last failed and why, the serve process it tracks (pid and kernel start time, so a pid reused after a reboot is never mistaken for it), and the required cases' verdict on the served commit (null while they have not run against it). */
-export interface ServeRecord { commit: string | null; url: string | null; failed: string | null; reason: string | null; pid?: number | null; started?: string | null; check?: ServeCheck | null; at: string }
+/** The previously served build kept serving beside the current one (GY-2985): what was live, and what a compare case judges the new build against. */
+export interface ServeBaseline { commit: string; url: string; pid: number | null; started: string | null }
+/** What the serve pass last did: the commit whose build serves, the URL it answers, the commit whose build last failed and why, the serve process it tracks (pid and kernel start time, so a pid reused after a reboot is never mistaken for it), the required cases' verdict on the served commit (null while they have not run against it), and what was live serving on the baseline URL (GY-2985). */
+export interface ServeRecord { commit: string | null; url: string | null; failed: string | null; reason: string | null; pid?: number | null; started?: string | null; check?: ServeCheck | null; baseline?: ServeBaseline | null; at: string }
 /** The serve process a restart left running. */
 export interface ServeProcess { pid: number | null; started: string | null }
 export const serveRecordPath = (root: string) => join(root, '.graphyard', 'served.json');
@@ -46,7 +50,7 @@ export function readServeRecord(file: string): ServeRecord | null {
 async function writeServeRecord(file: string, record: Omit<ServeRecord, 'at'>) {
   const cut = (reason: string | null | undefined) => reason?.slice(0, 2000) ?? null;
   await mkdir(dirname(file), { recursive: true });
-  await writeFile(`${file}.tmp`, `${JSON.stringify({ ...record, reason: cut(record.reason), check: record.check ? { ...record.check, reason: cut(record.check.reason) } : null, at: new Date().toISOString() }, null, 2)}\n`);
+  await writeFile(`${file}.tmp`, `${JSON.stringify({ ...record, reason: cut(record.reason), check: record.check ? { ...record.check, reason: cut(record.check.reason) } : null, baseline: record.baseline ?? null, at: new Date().toISOString() }, null, 2)}\n`);
   await rename(`${file}.tmp`, file);
 }
 
@@ -77,8 +81,10 @@ export interface ServePorts {
   build(declaration: ServeDeclaration): Promise<void>;
   /** Stops the recorded serve process and starts the declared serve command; answers the new process's identity (pid and kernel start time). */
   restart(serve: readonly string[]): Promise<ServeProcess>;
-  /** Once a new commit serves: runs that commit's own required E2E cases against the served URL and answers their verdict; the pass records it for that exact commit. A case that fails here neither stops serving nor rolls back. */
-  check?(url: string): Promise<ServeCheck>;
+  /** Once a new commit serves (GY-2985): keeps `commit`'s build serving on the port beside the declared one, so a compare case judges the new build against what was live. Answers the started process's identity. */
+  baseline?(commit: string, declaration: ServeDeclaration): Promise<ServeProcess>;
+  /** Once a new commit serves: runs that commit's own required E2E cases against the served URL and answers their verdict; the pass records it for that exact commit. A case that fails here neither stops serving nor rolls back. `baselineUrl` is what was live's URL, or null when none serves (GY-2985). */
+  check?(url: string, baselineUrl?: string | null): Promise<ServeCheck>;
 }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -109,14 +115,14 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
     try {
       served = await ports.restart(declaration.serve);
       if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the restarted serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
-      // The same commit serves again, so the verdict its cases earned still stands.
-      await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check: record?.check ?? null });
+      // The same commit serves again, so the verdict its cases earned still stands, and the baseline it was judged against keeps serving.
+      await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check: record?.check ?? null, baseline: record?.baseline ?? null });
       log(`[graphyard-serve] ${tip.slice(0, 12)} serves again at ${url}`);
       return 'restarted';
     } catch (error) {
       const reason = message(error);
       log(`[graphyard-serve] serving ${tip.slice(0, 12)} again failed: ${reason}`);
-      await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null, check: null });
+      await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null, check: null, baseline: record?.baseline ?? null });
       return 'failed';
     }
   }
@@ -128,23 +134,39 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   } catch (error) {
     const reason = message(error);
     log(`[graphyard-serve] the build of ${tip.slice(0, 12)} failed, so ${(record?.commit ?? 'nothing').slice(0, 12)} keeps serving: ${reason}`);
-    await writeServeRecord(file, { commit: record?.commit ?? null, url: record?.url ?? url, failed: tip, reason, pid: record?.pid ?? null, started: record?.started ?? null, check: record?.check ?? null });
+    await writeServeRecord(file, { commit: record?.commit ?? null, url: record?.url ?? url, failed: tip, reason, pid: record?.pid ?? null, started: record?.started ?? null, check: record?.check ?? null, baseline: record?.baseline ?? null });
     return 'failed';
   }
   // The restart stopped the previous serve, so the new one must answer before the commit is recorded as served.
   let served: ServeProcess | null = null;
+  // GY-2985: what was live before keeps serving beside the new build — the previously served
+  // commit, on the port beside the declared one, as BASELINE_URL — so a compare case judges the
+  // new build against what users had. Nothing served before (the first serve), no baseline; the
+  // baseline start stops the one the record tracked, so a failed start leaves none to compare
+  // against.
+  const baselineUrl = `http://127.0.0.1:${declaration.port + 1}`;
+  let baseline: ServeBaseline | null = record?.baseline ?? null;
   try {
     served = await ports.restart(declaration.serve);
     if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
-    await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check: null });
+    const candidate = record?.commit ?? record?.baseline?.commit ?? null;
+    if (candidate && ports.baseline) {
+      baseline = null;
+      try {
+        const started = await ports.baseline(candidate, declaration);
+        if (!(await waitAnswer(baselineUrl, answerTimeoutMs))) throw new Error(`the baseline serve did not answer ${baselineUrl} within ${Math.round(answerTimeoutMs / 1000)}s`);
+        baseline = { commit: candidate, url: baselineUrl, pid: started.pid, started: started.started };
+      } catch (error) { log(`[graphyard-serve] the baseline serve of ${candidate.slice(0, 12)} failed: ${message(error)}`); }
+    }
+    await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check: null, baseline });
     log(`[graphyard-serve] serving ${tip.slice(0, 12)} at ${url}`);
     // A served commit is live-verified (GY-2983): its own required cases run against the URL it
     // serves, and the verdict is recorded for that exact commit. A case that fails is the release
     // health the master acts on — the commit keeps serving, and the next pass waits for the next tip.
     if (ports.check) {
       try {
-        const check = await ports.check(url);
-        await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check });
+        const check = await ports.check(url, baseline?.url ?? null);
+        await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check, baseline });
         log(`[graphyard-serve] ${tip.slice(0, 12)} ${check.verified ? 'is verified: every required case passed' : `fails its required case ${check.case}: ${check.step}`}`);
       } catch (error) {
         log(`[graphyard-serve] the required cases of ${tip.slice(0, 12)} could not run against ${url}: ${message(error)}`);
@@ -154,7 +176,7 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   } catch (error) {
     const reason = message(error);
     log(`[graphyard-serve] ${reason}, so nothing serves`);
-    await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null, check: null });
+    await writeServeRecord(file, { commit: null, url, failed: tip, reason, pid: served?.pid ?? null, started: served?.started ?? null, check: null, baseline });
     return 'failed';
   }
 }
@@ -171,3 +193,5 @@ export async function watchServe(file: string, ports: ServePorts, options: { int
 
 /** The install's own serve checkout: a detached worktree of the managed root under its local .graphyard — never the coordinator's or a worker's checkout. Its ports live beside the deploy watch's own (src/cli/upgrade.ts), the one file allowed to reach the remote. */
 export const serveCheckoutPath = (root: string) => join(root, '.graphyard', 'serve-checkout');
+/** The baseline checkout (GY-2985): a second detached worktree holding the previously served build, which keeps serving on the port beside the served one. */
+export const serveBaselineCheckoutPath = (root: string) => join(root, '.graphyard', 'serve-checkout-baseline');
