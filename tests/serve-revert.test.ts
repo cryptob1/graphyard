@@ -10,6 +10,9 @@ import { masterConfigSchema } from '../src/master.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { relandItemFor, runServeRevert, selectServeCulprit, serveRangeMerges, type RelandInput, type ServeRevertPorts } from '../src/merge-writer/serve-revert.js';
 import type { MergeTrialRun } from '../src/merge-writer/executor.js';
+import { baseFailureHoldMs } from '../src/merge-writer/executor.js';
+import { mergeWriterInFlight } from '../src/daemon/cycle-merge-writer.js';
+import { TrialTimeoutError } from '../src/merge-writer/trial.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -210,7 +213,7 @@ test('unit:revert-only-the-failing-item — a failing case no item names reverts
   // The held revert is named in the merge writer's status.
   if (held.outcome === 'held') {
     const state = emptyMergeWriterState();
-    state.serveRevert = { lastVerified: verified, reverts: [], held: { serve: served, culprit: held.culprit.key, reason: held.reason, at: new Date().toISOString() } };
+    state.serveRevert = { lastVerified: verified, reverts: [], held: { serve: served, culprit: held.culprit.key, reason: held.reason, at: new Date().toISOString() }, retry: null, answered: null };
     assert.equal(mergeWriterSummary(state, Date.now()).serveRevert?.held?.culprit, 'GY-3002');
   }
 });
@@ -281,4 +284,153 @@ test('unit:revert-only-the-failing-item — the loop step drives the production 
   assert.equal(tipOf(origin), revertSha);
   assert.equal(filed.length, 1);
   assert.equal(tried.length, 1);
+});
+
+/** The loop's ports over a fixture with a mutable clock, a counted fetch and a stubbed trial. */
+function loopReads(coordinator: string, origin: string, servedFile: string, state: { nowMs: number; fetches: number },
+  trial: (item: unknown) => Promise<MergeTrialRun> | MergeTrialRun, tried: unknown[], filed: RelandInput[]): MergeWriterReads {
+  return {
+    baseBranch: 'main', retrials: 1, now: () => state.nowMs,
+    git: async (args, extra) => gitEnv(coordinator, ['-C', coordinator, ...args], extra ?? {}),
+    fetch: async () => { state.fetches++; git(coordinator, 'fetch', '-q', '--no-tags', 'origin', 'main'); return git(coordinator, 'rev-parse', 'origin/main'); },
+    merge: async () => { throw new Error('no merge in the serve-revert retry test'); },
+    trial: async (_sha, _files, trialItem) => { tried.push(trialItem); return trial(trialItem); },
+    push: async (revertSha, baseTip) => {
+      if (tipOf(origin) !== baseTip) return 'rejected';
+      git(coordinator, 'push', '-q', 'origin', `${revertSha}:main`);
+      return 'pushed';
+    },
+    holds: async () => false,
+    record: async () => {},
+    merger: async () => 'control-plane',
+    serveRecord: async () => { const record = readServeRecord(servedFile); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
+    createWork: async input => { filed.push(input); return { key: 'GY-3003' }; },
+  };
+}
+
+function loopState(config: ReturnType<typeof masterConfigSchema.parse>, clock: { nowMs: number }) {
+  const state = emptyDaemonState(config);
+  const cycle = (work: Work[]) => ({ state, effects: null as never, now: () => clock.nowMs,
+    snapshot: { work, now: new Date(clock.nowMs).toISOString() }, performed: [] as never[] }) as unknown as Cycle;
+  return { state, cycle };
+}
+
+test('unit:revert-only-the-failing-item — a revert whose trial fails only where the base fails backs off: the next cycle starts no trial and leaves the queue free', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-backoff');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const servedFile = join(coordinator, '.graphyard', 'served.json');
+  const tried: unknown[] = [], filed: RelandInput[] = [];
+  // The revert's trial fails only a repository check the base tip fails too: the revert proves nothing yet.
+  const baseFailTrial = { ...passTrial, tests: { passed: 0, failed: ['tests/repo-check.test.ts'], files: 1 },
+    base: { tip: served, files: ['tests/repo-check.test.ts'], tests: ['repo check names cases'], cases: ['repo check names cases'] } } as unknown as MergeTrialRun;
+  const reads = loopReads(coordinator, origin, servedFile, clock, () => baseFailTrial, tried, filed);
+  const effects = { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects;
+  const { state, cycle } = loopState(config, clock);
+  const step = () => mergeWriterStep({ ...cycle(work), effects });
+
+  await servedBaseline(coordinator, verified);
+  await step();
+  assert.equal(state.mergeWriter.serveRevert?.lastVerified, verified);
+
+  await servedFixture(coordinator, served, 'case-beta');
+  await step();
+  await mergeWriterIdle(state);
+  await step();
+
+  // The base-failing trial settles as a retry with its serve and tip recorded: nothing pushed, nothing filed.
+  const retry = state.mergeWriter.serveRevert?.retry;
+  assert.ok(retry && retry.serve === served);
+  assert.equal(retry.mergeSha, served);
+  assert.equal(tried.length, 1);
+  assert.equal(tipOf(origin), served);
+  assert.deepEqual(filed, []);
+  assert.equal(state.mergeWriter.inFlight, null);
+  assert.equal(mergeWriterInFlight(state), false);
+
+  // The very next cycle starts no new trial: the flight would block the queue's base-failure
+  // repair, the very fix that would let the revert pass.
+  await step();
+  assert.equal(tried.length, 1);
+  assert.equal(mergeWriterInFlight(state), false);
+  assert.equal(tipOf(origin), served);
+
+  // The hold elapsing tries again — once per hold, not once per cycle.
+  clock.nowMs += baseFailureHoldMs + 1;
+  await step();
+  await mergeWriterIdle(state);
+  assert.equal(tried.length, 2);
+  await step();
+  assert.equal(tipOf(origin), served);
+  assert.deepEqual(filed, []);
+  assert.ok(state.mergeWriter.serveRevert?.retry);
+});
+
+test('unit:revert-only-the-failing-item — a revert trial that throws settles as a retry, not as the culprit’s merge failure', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-throw');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const servedFile = join(coordinator, '.graphyard', 'served.json');
+  const tried: unknown[] = [], filed: RelandInput[] = [];
+  const reads = loopReads(coordinator, origin, servedFile, clock, () => {
+    throw new TrialTimeoutError('tests', 1_000, 'tests/slow.test.ts slow');
+  }, tried, filed);
+  const effects = { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects;
+  const { state, cycle } = loopState(config, clock);
+  const step = () => mergeWriterStep({ ...cycle(work), effects });
+
+  await servedBaseline(coordinator, verified);
+  await step();
+  await servedFixture(coordinator, served, 'case-beta');
+  await step();
+  await mergeWriterIdle(state);
+  await step();
+
+  // The thrown trial is a revert retry: the culprit keeps no timeout record and no merge verdict under the revert sha.
+  assert.ok(state.mergeWriter.serveRevert?.retry);
+  assert.equal((state.mergeWriter.timeouts ?? []).filter(entry => entry.key === 'GY-3002').length, 0);
+  assert.equal(tried.length, 1);
+  assert.equal(tipOf(origin), served);
+  await step();
+  assert.equal(tried.length, 1);
+});
+
+test('unit:revert-only-the-failing-item — a serve still failing on its answered revert reads nothing: the guard hit once names it', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-answered');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const failing = await servedFixture(coordinator, served, 'case-beta');
+  const filed: RelandInput[] = [];
+  const first = await runServeRevert(ports(coordinator, origin, passTrial, filed),
+    { ...failing, lastVerified: verified, baseTip: served, baseBranch: 'main', work });
+  assert.equal(first.outcome, 'reverted');
+  const revertSha = first.outcome === 'reverted' ? first.revertSha : '';
+
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const servedFile = join(coordinator, '.graphyard', 'served.json');
+  const tried: unknown[] = [], relands: RelandInput[] = [];
+  const reads = loopReads(coordinator, origin, servedFile, clock, () => passTrial, tried, relands);
+  const effects = { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects;
+  const { state, cycle } = loopState(config, clock);
+  state.mergeWriter.serveRevert = { lastVerified: verified,
+    reverts: [{ serve: served, culprit: 'GY-3002', mergeSha: served, revertSha, reland: 'GY-3003', at: new Date(clock.nowMs).toISOString() }],
+    held: null, retry: null, answered: null };
+  const step = () => mergeWriterStep({ ...cycle(work), effects });
+
+  // The serve stays failing on the revert commit, whose merge is already reverted: the guard
+  // answers it once, and the next cycle reads nothing.
+  await servedFixture(coordinator, revertSha, 'case-beta');
+  await step();
+  assert.equal(tried.length, 0);
+  assert.equal(tipOf(origin), revertSha);
+  const fetches = clock.fetches;
+  await step();
+  assert.equal(clock.fetches, fetches);
+  assert.equal(tried.length, 0);
+  assert.equal(tipOf(origin), revertSha);
 });
