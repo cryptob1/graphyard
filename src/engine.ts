@@ -593,14 +593,11 @@ export class Engine {
   reviewerApps: ReviewerApp[] = [];
   controlPlaneAppId?: number;
   /**
-  }
-  /**
    * Reads a submitted head from the control plane's checkout (GY-1523) while the control plane is
    * the merge writer. Left undefined, `git -C` GRAPHYARD_REPOSITORY_ROOT (else the working
    * directory); null means no checkout, and every head submission is refused as unreadable.
    */
   gitRunner: GitRunner | null | undefined = undefined;
-  /**
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
