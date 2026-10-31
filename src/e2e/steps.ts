@@ -51,6 +51,16 @@ export const runProcess: ProcessRunner = (command, args, options) => new Promise
   child.on('close', code => { settle(); resolve({ code, output: Buffer.concat(chunks).toString('utf8'), timedOut }); });
 });
 
+/**
+ * GY-2997: a ProcessRunner that runs under confinement words (the merge trial's bubblewrap mask).
+ * Shell command steps keep `sh -c` semantics; non-shell (agent-browser) words stay argv after the wrapper.
+ */
+export const confinedProcessRunner = (wrapper: readonly string[] = [], base: ProcessRunner = runProcess): ProcessRunner =>
+  (command, args, options) => !wrapper.length ? base(command, args, options)
+    : options.shell
+      ? base(wrapper[0]!, [...wrapper.slice(1), 'sh', '-c', command], { ...options, shell: false })
+      : base(wrapper[0]!, [...wrapper.slice(1), command, ...args], { ...options, shell: false });
+
 /** The last `keptOutputLines` lines of a process's output. */
 export function lastLines(output: string, count = keptOutputLines) {
   const lines = output.replace(/\r\n?/g, '\n').replace(/\n+$/, '').split('\n');

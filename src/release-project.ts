@@ -2,6 +2,7 @@
 import { spawn } from 'node:child_process';
 import { loadCases, type CaseFile, type ReleaseContract } from './e2e/case.js';
 import { e2eSuite, type E2eLauncher, type E2eReport } from './e2e/runner.js';
+import type { ProcessRunner } from './e2e/steps.js';
 
 /**
  * GY-1535: a managed repository's own cases as an `e2e` suite — every required case and every case
@@ -14,12 +15,14 @@ export function projectCaseSuite(root: string, token: string, options: { fetcher
   /** The cases to run, loaded beforehand; when absent they are loaded from `root` at run time. */
   cases?: readonly CaseFile[];
   /** The checkout's release contract: an outcome still pending (GY-1802) runs its failing cases as pending, never blocking. */
-  contract?: ReleaseContract | null } = {}) {
+  contract?: ReleaseContract | null;
+  /** GY-2997: how command and agent steps spawn; the merge trial hands a confined runner. */
+  processRunner?: ProcessRunner } = {}) {
   return {
     name: 'e2e',
     run: async (url: string, candidate: { id: string; pendingOutcomes?: readonly string[] } | null) => {
       const suite = e2eSuite(options.cases ? [...options.cases] : await loadCases(root), token, { fetcher: options.fetcher, launcher: options.launcher, stepTimeoutMs: options.stepTimeoutMs, root, report: options.report, signal: options.signal,
-        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, contract: options.contract });
+        select: options.select ?? (entry => entry.definition.required || entry.definition.target === 'uat'), runAll: true, withholdSecrets: options.withholdSecrets, hostEnvironment: options.hostEnvironment, artifactsDirectory: options.artifactsDirectory, contract: options.contract, processRunner: options.processRunner });
       return suite.run(url, candidate);
     },
   };

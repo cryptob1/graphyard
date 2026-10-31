@@ -6,6 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { parseCase, type CaseFile } from '../e2e/case.js';
 import { projectCaseSuite, buildStaticSite, groupBuildShell } from '../release-project.js';
 import type { E2eReport } from '../e2e/runner.js';
+import { confinedProcessRunner } from '../e2e/steps.js';
 import { serveStaticSite } from './preview.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment } from '../compose-preview.js';
 import { checkoutRepositoryPolicy, type E2eServe } from '../model/repository-policy.js';
@@ -171,7 +172,9 @@ async function runGroup(target: E2eServe | Application, proofs: readonly string[
       const suite = projectCaseSuite(input.worktree, token, {
         cases: loaded.map(entry => entry.caseFile),
         // The cases come from the head itself, so they never read the install's secrets; agent-step screenshots stay in the trial's scratch, which the trial removes.
+        // GY-2997: command and agent steps run under the same confinement as the serve and static build.
         select: () => true, hostEnvironment: input.env, withholdSecrets: true, artifactsDirectory: join(input.scratch, 'e2e-artifacts'), signal: AbortSignal.timeout(Math.max(1_000, input.budgetMs)),
+        processRunner: confinedProcessRunner(input.wrapper ?? []),
         report: value => { report = value; },
       });
       await suite.run(served.origin, null);

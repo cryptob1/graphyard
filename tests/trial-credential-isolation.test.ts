@@ -9,6 +9,7 @@ import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { buildStaticSite, groupBuildShell } from '../src/release-project.js';
+import { confinedProcessRunner } from '../src/e2e/steps.js';
 import { trialConfinement, trialHiddenPaths } from '../src/merge-writer/trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -97,4 +98,22 @@ test(`${proof} — a static application's build in the trial runs under the same
   const confined = await buildStaticSite(build, checkout, 30_000, groupBuildShell(30_000, trialConfinement(trialHiddenPaths(key, { GRAPHYARD_CONFIG_HOME: join(host, '.config', 'graphyard') }), [checkout])), undefined, { PATH: process.env.PATH! });
   assert.match(confined ?? '', new RegExp(`/proc/${process.pid}/root.*No such file or directory`), 'confined, the key is not there, nor through the merge writer\'s /proc root');
   assert.doesNotMatch(confined ?? '', /fixture-deploy-key/);
+});
+
+test(`${proof} — an E2E command step in the trial runs under the same confinement: it cannot read the deploy key by its absolute path or through the merge writer's /proc root`, async () => {
+  const host = await temporaryDirectory('trial-credential-e2e-cmd', tmpdir());
+  const key = join(host, '.config', 'graphyard', 'owner-project', 'deploy-key');
+  mkdirSync(dirname(key), { recursive: true });
+  writeFileSync(key, 'fixture-deploy-key\n', { mode: 0o600 });
+  const checkout = await temporaryDirectory('trial-credential-e2e-cmd-checkout', tmpdir());
+  const probe = `cat ${key} || cat /proc/${process.pid}/root${key}`;
+  const env = { PATH: process.env.PATH! };
+  const open = await confinedProcessRunner()(probe, [], { cwd: checkout, env, timeoutMs: 30_000, shell: true });
+  assert.equal(open.code, 0, 'unconfined, the command step reads the key');
+  assert.match(open.output, /fixture-deploy-key/);
+  const wrapper = trialConfinement(trialHiddenPaths(key, { GRAPHYARD_CONFIG_HOME: join(host, '.config', 'graphyard') }), [checkout]);
+  const closed = await confinedProcessRunner(wrapper)(probe, [], { cwd: checkout, env, timeoutMs: 30_000, shell: true });
+  assert.notEqual(closed.code, 0, 'confined, the command step cannot read the key');
+  assert.match(closed.output, new RegExp(`/proc/${process.pid}/root.*No such file or directory`), 'confined, the key is not there, nor through the merge writer\'s /proc root');
+  assert.doesNotMatch(closed.output, /fixture-deploy-key/);
 });
