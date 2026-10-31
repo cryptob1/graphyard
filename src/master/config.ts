@@ -258,28 +258,24 @@ export async function setupMaster(root: string, input: { url: string; token: str
   ).catch(error => ({ supported: false, unit: loopUnitOf(root), unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
     reason: `Installing the loop's supervisor failed: ${error instanceof Error ? error.message : String(error)}`,
     instruction: unsupervisedInstruction({ root, cliPath: config.cliPath }) })) : null;
-  // A permission the installed App lacks is announced here with its exact migration steps, not
-  // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
-  const { attention, appPermissions, delegationLimits, production } = controlPlaneAttention(status);
+  const { attention, delegationLimits, production } = controlPlaneAttention(status);
   // A loop nothing restarts is an installation fact like any other, so it is stated where the rest
   // are — in the same words `master status` will keep using — rather than left for whoever
   // eventually notices the silence. A refused install is stated with what the operator runs.
   const supervision = !supervisor ? [] : supervisor.wrote === 'refused' ? [`${supervisor.reason}: ${supervisor.instruction}`] : loopSupervisionAttention(supervisor).map(gap => `${gap.text}: ${gap.next}`);
   attention.push(...supervision, ...(unrecorded ? [unrecorded] : []));
-  // Each installation fact keeps its own remedy: a permission shortfall is a GitHub migration, a
-  // capacity variable is a deployment setting, and production lag is a deploy to confirm.
-  const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? 'Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps)'
-    : delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
+  // Capacity drift and production lag each name their own remedy.
+  const remedy = delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
     : production?.incidents.length ? `Deploy main: ${production.attention[0] ?? production.incidents[0].reason}` : null;
   const profiles = 'graphyard master environments --apply to generate worker, reviewer and producer profiles from the logged-in agent accounts';
-  const start = config.reviewer ? `run ${profiles}, then graphyard master start codex (or another supported agent kind)` : `run graphyard master reviewer setup to register the independent reviewer identity, then ${profiles}, then graphyard master start codex (or another supported agent kind)`;
+  const start = `run ${profiles}, then graphyard master start codex (or another supported agent kind)`;
   // Which agent accounts this machine has, and which are logged in; quota is read by master environments.
   const environmentDirectory = agentEnvironmentRoot();
   const environments = await Promise.all((await discoverAgentEnvironments(environmentDirectory).catch(() => [] as AgentEnvironment[])).map(async environment => {
     const health = await checkAgentEnvironment(environment, { quota: false });
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
-  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: autoMerge ? autoMerge.autoMerge !== false : true, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: autoMerge ? autoMerge.autoMerge !== false : true, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', attention,
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.

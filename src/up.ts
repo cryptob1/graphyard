@@ -497,7 +497,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   let herdrAttach: string | null = null;
   const supervised = upSupervised(request);
   const controlPlaneMerger = upMergerControlPlane(request);
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null, { githubApps: !controlPlaneMerger }), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -516,7 +516,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     return items.map(item => (item.id === 'account:worker' || item.id === 'account:reviewer') && item.done ? { ...item, done: false, action: null,
       line: 'The account is connected, but the coordinator has no agent profile for it yet; setup writes one once the account is signed in where the coordinator runs.' } : item);
   };
-  const checklist = async () => (last = await withWrittenProfiles(setupChecklist(await deps.status().catch(() => null), { githubApps: !controlPlaneMerger })));
+  const checklist = async () => (last = await withWrittenProfiles(setupChecklist(await deps.status().catch(() => null))));
   let reached = false;
   /**
    * GY-1477: the dashboard's address from the operator's other devices, worked out once a server is

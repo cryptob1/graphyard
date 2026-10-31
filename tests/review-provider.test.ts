@@ -18,7 +18,7 @@ function work(overrides: Partial<Work> = {}): Work {
   const now = new Date().toISOString();
   return {
     id: 'work-id', key: 'GY-42', title: 'Pluggable review', description: '', type: 'feature', priority: 2, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Reviewed', proofs: ['integration:claim-safety'] }], 
+    criteria: [{ id: 'AC-1', text: 'Reviewed', proofs: ['integration:claim-safety'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: profiles },
     stage: 'review', revision: 5, policyRevision: 3, createdAt: now, updatedAt: now, stageEnteredAt: now, ready: true,
     epoch: 1, lease: null, workspaces: [{ host: 'h', path: '/p', branch: 'graphyard/gy-42-1', epoch: 1, owner: 'agent-a' }],
@@ -46,11 +46,10 @@ test('policy validation binds agent review to registered, distinct reviewer iden
     [profiles[0], { ...profiles[1], name: 'claude-reviewer' }],
     [profiles[0], { ...profiles[1], reviewerApp: 'claude-reviewer' }],
   ]) assert.throws(() => policySchema.parse({ checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: duplicated }), /must be unique|distinct/);
-  assert.doesNotThrow(() => assertReviewerProfiles(profiles, registry, GRAPHYARD_APP));
-  assert.throws(() => assertReviewerProfiles([{ ...profiles[0], reviewerApp: 'unregistered' }], registry, GRAPHYARD_APP), /not registered/);
-  assert.throws(() => assertReviewerProfiles([{ ...profiles[0], runtime: 'cursor' }], registry, GRAPHYARD_APP), /registered runtime/);
-  assert.throws(() => assertReviewerProfiles(profiles, [{ ...registry[0], appId: GRAPHYARD_APP }], GRAPHYARD_APP), /control-plane App/);
-  assert.throws(() => assertReviewerProfiles([], registry, GRAPHYARD_APP), /at least one reviewer profile/);
+  assert.doesNotThrow(() => assertReviewerProfiles(profiles, registry));
+  assert.throws(() => assertReviewerProfiles([{ ...profiles[0], reviewerApp: 'unregistered' }], registry), /not registered/);
+  assert.throws(() => assertReviewerProfiles([{ ...profiles[0], runtime: 'cursor' }], registry), /registered runtime/);
+  assert.throws(() => assertReviewerProfiles([], registry), /at least one reviewer profile/);
 });
 
 test('the reviewer registry refuses ambiguous identities and unknown fields', () => {

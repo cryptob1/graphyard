@@ -591,7 +591,6 @@ export class Engine {
   principals: Principal[] = [];
   // Reviewer identities and the control-plane App are deployment facts, not client input.
   reviewerApps: ReviewerApp[] = [];
-  controlPlaneAppId?: number;
   /**
   }
   /**
@@ -930,7 +929,7 @@ export class Engine {
         if (actor.role === 'operator-agent') {
           authorizeOperatorCommand(actor, command, data, undefined, this.repository);
         } else admin(actor);
-        if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
+        if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         const criteria = this.declareBootstrap(actor, data, [], 1, now);

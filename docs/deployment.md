@@ -7,7 +7,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider com
 
 ## Variables
 
-`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH`; no remote-side credential variable (the merge writer pushes with the [deploy key](install.md#step-3-deploy-key)); `GRAPHYARD_REVIEWER_APPS`; `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/`s3`); `GRAPHYARD_SIGNIN_CLAIM`:
+`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH`; no remote-side credential variable (the merge writer pushes with the [deploy key](install.md#step-3-deploy-key)); `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/`s3`); `GRAPHYARD_SIGNIN_CLAIM`:
 
 | Variable | Purpose
 | --- | ---

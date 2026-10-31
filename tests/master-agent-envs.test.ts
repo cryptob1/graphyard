@@ -8,7 +8,7 @@ import { fileURLToPath } from 'node:url';
 import { accountLaunch, agentLaunchPlan, checkAgentEnvironment, deliverPrompt, discoverAgentEnvironments, dispatchWork, herdrErrorCode, inspectProducerCredentials, inspectWorkerCredentials, loadMasterConfig, masterHarness, masterSettingsFromArgs, NoHealthyAccountError, prepareAgentEnvironment, PromptNotAcceptedError, readEnvironmentLog, saveMasterSettings, selectAccount, sessionHarnessFile, setupAgentEnvironments, setupMaster, sharedGitDirectory, startMaster, workerPrompt, type EnvironmentProbe } from '../src/master.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
-import { bindReviewer, launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, saveReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, readProducerLedger, saveProducerLedger } from '../src/producer.js';
 import { readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { atomicPrivateWrite } from '../src/master.js';
@@ -26,7 +26,6 @@ import { readySpecCheck } from './helpers/spec-check.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 const installed = async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } });
 const hour = 3_600_000, future = (ms = hour) => new Date(Date.now() + ms).toISOString();
 
@@ -71,7 +70,6 @@ async function repository() {
 async function master(options: { reviewer?: boolean } = {}) {
   const root = await repository(), credentialDirectory = await temporaryDirectory('agent-envs-credentials');
   const setup = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
-  if (options.reviewer) await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, installed);
   return { root, credentialDirectory, setup, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
 async function token(directory: string, folder: string, name: string, value: string) {
@@ -86,7 +84,7 @@ async function configure(root: string, change: (config: any) => void) {
 function work(overrides: Partial<Work> = {}) {
   const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 68, branch: 'graphyard/gy-68-1', author: 'worker' };
   return { id: 'work-68', key: 'GY-68', title: 'Agent environments', description: '', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:agent-env-discovery'] }], policy: { checks: ['test'], review: true }, 
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:agent-env-discovery'] }], policy: { checks: ['test'], review: true },
     stage: 'review', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [],
     candidate, submission: { epoch: 1, pr: 68 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false },
@@ -252,12 +250,12 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
 
     // A reviewer launch: the configured profile has no healthy account, so it refuses before minting
     // a token; the automatic loop fails over to the next reviewer profile and says why.
-    const mint = async () => ({ token: 'ghs_session_token_value', expiresAt: future(3_000_000) });
+    const registerLaunch = async () => ({ launch: 'fixture-launch' });
     let minted = 0;
-    await assert.rejects(launchReview(root, work(), 'review-spent', [], new Date().toISOString(), { run: herdr([]), mint: async () => { minted++; return mint(); }, probe }), (error: any) => error.accountsExhausted === true);
+    await assert.rejects(launchReview(root, work(), 'review-spent', [], new Date().toISOString(), { run: herdr([]), registerLaunch: async () => { minted++; return registerLaunch(); }, probe }), (error: any) => error.accountsExhausted === true);
     assert.equal(minted, 0); assert.deepEqual((await readReviewLedger(root)).reviews, []);
     const reviewCalls: string[][] = [];
-    const reviewed = await launchReview(root, work(), 'review-fresh', [], new Date().toISOString(), { run: herdr(reviewCalls), mint, probe });
+    const reviewed = await launchReview(root, work(), 'review-fresh', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch, probe });
     assert.equal(reviewed.account!.environment, 'claude-c'); assert.equal(tabEnvironment(reviewCalls[0]).CLAUDE_CONFIG_DIR, homes.fresh);
     const produceCalls: string[][] = [];
     const requested = { id: 'request-producer', kind: 'producer', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 2, pr: 68, group: 'integration', proofs: ['integration:agent-quota-failover'], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
@@ -272,7 +270,7 @@ test('integration:agent-quota-failover — every launch checks login and quota, 
     const reviewLedger = await readReviewLedger(root);
     await saveReviewLedger(root, { ...reviewLedger, reviews: reviewLedger.reviews.filter(record => record.state !== 'pending') });
     const reviewCrossCalls: string[][] = [];
-    await assert.rejects(launchReview(root, work(), 'review-cross', [], new Date().toISOString(), { run: herdr(reviewCrossCalls), mint, probe }), (error: any) => error instanceof NoHealthyAccountError
+    await assert.rejects(launchReview(root, work(), 'review-cross', [], new Date().toISOString(), { run: herdr(reviewCrossCalls), registerLaunch, probe }), (error: any) => error instanceof NoHealthyAccountError
       && error.capacityExhausted && JSON.stringify(error.skipped.map((entry: any) => [entry.environment, entry.cause])) === JSON.stringify([['codex', 'exhausted'], ['claude-c', 'cross-runtime']])
       && /claude-c runs claude, not codex: a reviewer launch of profile review-cross starts only on codex accounts/.test(error.message));
     assert.deepEqual(reviewCrossCalls, [], 'no tab is created and no session started');
@@ -348,7 +346,7 @@ test('integration:prompt-delivery-confirmed — a launch counts only once the ru
     // A reviewer on Muse, once prompted after start, starts on its own request: nothing is pasted, so no prompt can drop.
     await saveReviewerProfile(root, { name: 'review-muse', agentName: 'review-muse', kind: 'muse' });
     const reviewCalls: string[][] = [];
-    const reviewed = await launchReview(root, work(), 'review-muse', [], new Date().toISOString(), { run: herdr(reviewCalls, args => args[1] === 'prompt' ? stalled : undefined), mint: async () => ({ token: 'ghs_x', expiresAt: future(3_000_000) }), prompt: fast });
+    const reviewed = await launchReview(root, work(), 'review-muse', [], new Date().toISOString(), { run: herdr(reviewCalls, args => args[1] === 'prompt' ? stalled : undefined), registerLaunch: async () => ({ launch: 'fixture-launch' }), prompt: fast });
     assert.equal(reviewed.delivery, 'request'); assert.equal(reviewCalls.filter(args => args[1] === 'prompt').length, 0);
 
     // The loop relaunches such a session once before it records a refusal.
@@ -410,7 +408,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     assert.equal(workerTab.GH_CONFIG_DIR, undefined); assert.equal(JSON.stringify(workerCalls).includes('worker-oc-token-'), false);
     await saveReviewerProfile(root, { name: 'review-oc', agentName: 'review-oc', kind: 'opencode', accounts: ['opencode-a'] });
     const reviewCalls: string[][] = [];
-    await launchReview(root, work(), 'review-oc', [], new Date().toISOString(), { run: herdr(reviewCalls), mint: async () => ({ token: 'ghs_x', expiresAt: future(3_000_000) }), probe: { cacheMs: 0 } });
+    await launchReview(root, work(), 'review-oc', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), probe: { cacheMs: 0 } });
     const reviewTab = tabEnvironment(reviewCalls[0]);
     assert.equal(JSON.parse(reviewTab.OPENCODE_PERMISSION)['*'], 'allow'); assert.ok(reviewTab.GH_CONFIG_DIR);
     assert.equal(reviewTab.GRAPHYARD_TOKEN_FILE, undefined, 'a reviewer still holds no Graphyard credential');

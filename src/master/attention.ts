@@ -11,7 +11,6 @@ import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
 export interface ControlPlaneStatus {
-  appPermissions?: { app?: string; installationUrl?: string; verifiedAt?: string | null; error?: string | null; suspended?: boolean; missing?: { permission: string; required: string; features: string[] }[]; attention?: string[] } | null;
   heldJobs?: number;
   /** Observation jobs that saved no observation three or more times in a row (GY-506); a server before it reports none. */
   starvedJobs?: { key: string; unobserved: number; error?: string | null; deferred_reason?: string | null }[];
@@ -113,16 +112,13 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   return agentOwner('master', `graphyard diagnose ${key}`);
 }
 /**
- * Attention that belongs to the installation rather than to a work item: a declared App
- * permission the installation lacks, an unverifiable preflight, the jobs held on it, a
+ * Attention that belongs to the installation rather than to a work item: held jobs, a
  * capacity variable that no longer covers the roster, and a base branch that production has
  * not deployed.
  */
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
-  const report = status?.appPermissions;
   const items: AttentionItem[] = [];
   const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text, source === 'production' ? status?.production?.release?.branch ?? null : null) });
-  for (const text of report?.attention ?? []) raise('app-permissions', text);
   if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
   // A job that keeps finishing without an observation holds the merge queue behind its item (GY-506).
@@ -130,7 +126,7 @@ export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const production = status?.production ? productionSummary(status.production) : null;
   for (const text of production?.attention ?? []) raise('production', text);
   const attention = items.map(item => item.text);
-  return { attention, attentionItems: items, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0,
+  return { attention, attentionItems: items, heldJobs: status?.heldJobs ?? 0,
     delegationLimits: status?.delegationLimits ? { limits: status.delegationLimits.limits ?? null, deployed: status.delegationLimits.deployed ?? null, drift: (status.delegationLimits.drift ?? []).map(entry => ({ variable: entry.variable, deployed: entry.deployed, required: entry.required, reason: entry.reason })) } : null,
     build: status?.build ? { commit: status.build.commit ?? null, protocol: status.build.protocol ?? null } : null, production };
 }

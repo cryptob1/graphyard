@@ -70,7 +70,6 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
 /** SUPERVISED (GY-1501, `up --local`): as the live loop names it in the status (`setup.supervision`); the checklist is the same either way (GY-1978). */
 export const statusSupervised = (status: any | null) => status?.setup?.supervision === 'supervised';
 /** Where the pull-request-era installer served its GitHub App page; a status from before GY-2010 may still name it. */
-const defaultAppSetupUrl = 'http://127.0.0.1:4311';
 /**
  * CONTROL-PLANE MERGER (GY-1553): the control plane is the only merge writer, so no GitHub App opens
  * pull requests and no reviewer App signs reviews: those items pass as not required. No GitHub
@@ -78,23 +77,9 @@ const defaultAppSetupUrl = 'http://127.0.0.1:4311';
  * same words for the same ids.
  */
 export const mergerNotRequired = 'not required (merger: control-plane)';
-export function setupChecklist(status: any | null, options: { githubApps?: boolean } = {}): SetupItem[] {
+export function setupChecklist(status: any | null): SetupItem[] {
   const notRequired = (id: SetupItemId, title: string): SetupItem => ({ id, title, done: true, human: false, line: mergerNotRequired, action: null });
-  // Only `up`'s App path (a run recorded before every `up` took the control plane) judges the App items.
-  if (!options.githubApps) return [notRequired('github-app', 'GitHub App'), notRequired('reviewer-app', 'Reviewer App'), ...accountItems(status)];
-  const missing: unknown[] = status?.appPermissions?.missing ?? [];
-  const appBound = !!status?.github;
-  const appDone = appBound && missing.length === 0;
-  const reviewerDone = Array.isArray(status?.reviewerApps) && status.reviewerApps.length > 0;
-  return [{ id: 'github-app', title: 'GitHub App', done: appDone, human: true,
-    line: appDone ? 'Graphyard can open pull requests and read checks in your repository.'
-      : appBound ? 'The App needs a few more permissions before Graphyard can use it.'
-      : 'Create the App that lets Graphyard work in your repository, then install it there.',
-    action: appDone ? null : appBound && status?.appPermissions?.installationUrl ? { kind: 'link', label: 'Accept the new permissions', href: status.appPermissions.installationUrl }
-      : { kind: 'link', label: 'Create the GitHub App', href: defaultAppSetupUrl } },
-  { id: 'reviewer-app', title: 'Reviewer App', done: reviewerDone, human: true,
-    line: reviewerDone ? 'A second App signs the independent code reviews.' : 'Create a second App so every change is reviewed by someone other than its author.',
-    action: reviewerDone ? null : appBound ? { kind: 'link', label: 'Create the reviewer App', href: defaultAppSetupUrl } : { kind: 'wait', label: 'Waiting for the GitHub App' } }, ...accountItems(status)];
+  return [notRequired('github-app', 'GitHub App'), notRequired('reviewer-app', 'Reviewer App'), ...accountItems(status)];
 }
 function accountItems(status: any | null): SetupItem[] {
   const items: SetupItem[] = [];

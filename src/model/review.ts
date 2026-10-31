@@ -69,13 +69,12 @@ export function reviewerProfileFor(work: Work): ReviewerProfile | null {
 
 // Registration is the identity boundary: a policy may only name reviewer Apps whose
 // numeric GitHub identities the control plane already knows, and never its own App.
-export function assertReviewerProfiles(profiles: ReviewerProfile[] | undefined, registry: ReviewerApp[], controlPlaneAppId?: number) {
+export function assertReviewerProfiles(profiles: ReviewerProfile[] | undefined, registry: ReviewerApp[]) {
   demand(profiles?.length, 'Agent review requires at least one reviewer profile');
   for (const profile of profiles!) {
     const app = registry.find(entry => entry.id === profile.reviewerApp);
     demand(app, `Reviewer App ${profile.reviewerApp} is not registered in Graphyard`);
     demand(app!.runtime === profile.runtime, `Reviewer profile ${profile.name} must name its registered runtime ${app!.runtime}`);
-    demand(!controlPlaneAppId || app!.appId !== controlPlaneAppId, 'The Graphyard control-plane App cannot act as a reviewer identity');
   }
 }
 

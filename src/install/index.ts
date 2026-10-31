@@ -411,7 +411,6 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     { name: 'GRAPHYARD_PRINCIPALS', value: principalsVariable(session.principals, session.tokens), secret: true },
     { name: 'GITHUB_REPOSITORY', value: inputs.repository, secret: false },
     { name: 'GITHUB_BASE_BRANCH', value: inputs.baseBranch, secret: false },
-    { name: 'GRAPHYARD_REVIEWER_APPS', value: JSON.stringify((session.record?.reviewers ?? []).map(reviewer => ({ id: reviewer.name, runtime: reviewer.name.replace(/-reviewer$/, ''), appId: reviewer.appId, botUserId: reviewer.botUserId }))), secret: false },
     // The capacity limits derived from the principal set being deployed; the server derives the
     // same values when they are unset, and an explicit value keeps the install predictable
     // across upgrades. A re-run after the roster changed reports the old values as drift.

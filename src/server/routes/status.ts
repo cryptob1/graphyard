@@ -64,7 +64,7 @@ export const statusRoutes = defineRoutes('status', [
       const servingRoot = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : repositoryToplevel(process.cwd());
       const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs, deploy, serving,
+        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', heldJobs, starvedJobs, jobs, deploy, serving,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work

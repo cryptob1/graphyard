@@ -29,7 +29,7 @@ export type BrowserFlow = typeof browserFlows[number];
 // for the sudo and capture flows.
 export const controlPlanePermissions: Record<string, 'read' | 'write' | 'admin'> = {};
 /** What the installation read (no longer served by the control plane) answers: the shape the permission flows judge. */
-interface InstallationState { appId?: number; installationId: number | string; slug: string; account?: string; accountType?: string; installationUrl?: string; suspended?: boolean; permissions: Record<string, string>; appPermissions?: Record<string, string>; app?: Record<string, string>; [key: string]: unknown }
+interface InstallationState { appId?: number; installationId: number | string; slug: string; account?: string; accountType?: string; installationUrl?: string; suspended?: boolean; permissions: Record<string, string>; app?: Record<string, string>; [key: string]: unknown }
 const level = (value: unknown) => value === 'admin' ? 3 : value === 'write' ? 2 : value === 'read' ? 1 : 0;
 /** Permissions still below what the control plane needs. */
 export function missingPermissions(actual: Record<string, unknown> | null | undefined, desired = controlPlanePermissions) {
@@ -1055,7 +1055,7 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
   const entry: Omit<AdministrationEntry, 'completedAt' | 'outcome' | 'verified' | 'before' | 'after' | 'screenshots' | 'sudo'> = {
     id, flow, startedAt: startedAt.toISOString(),
     actor: { browser: null, profile: config.browser.profile, cli, os: userInfo().username, host: config.hostId, coordinator: dependencies.coordinator ?? null },
-    target: { repository: config.repository, appId: config.githubAppId }, record: relative(root, directory),
+    target: { repository: config.repository, appId: config.githubAppId ?? 0 }, record: relative(root, directory),
   };
   // The first Confirm-access page of the flow keeps its forms' redacted markup (GY-1461) and saves it
   // as the record's Confirm-access captures, which each method the flow selects then saves again, the
@@ -1078,7 +1078,7 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
   let before: unknown = null, after: unknown = null, outcome: AdministrationEntry['outcome'] = 'refused', verified = false, reason: string | undefined;
   try {
     if (flow === 'app-permissions') {
-      const installation = await observeInstallation(dependencies.installation, config.githubAppId);
+      const installation = await observeInstallation(dependencies.installation, config.githubAppId ?? 0);
       before = { app: installation.app, installation: installation.permissions };
       entry.target = { ...entry.target, slug: installation.slug, installationId: installation.id };
       const missing = missingPermissions((before as any).app);
@@ -1093,14 +1093,14 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
         }
         page.click(required(page.locate('button', 'Save changes'), 'the Save changes button', flow).selector);
         page.wait(1_500);
-        const updated = await observeInstallation(dependencies.installation, config.githubAppId);
+        const updated = await observeInstallation(dependencies.installation, config.githubAppId ?? 0);
         after = { app: updated.app, installation: updated.permissions };
         const still = missingPermissions((after as any).app);
         verified = !still.length; outcome = verified ? 'applied' : 'refused';
         reason = verified ? `App now requests ${missing.length} raised permission(s); run master browser installation-accept so the installation grants them` : `GitHub still reports ${still.join(', ')} after saving`;
       }
     } else if (flow === 'installation-accept') {
-      const installation = await observeInstallation(dependencies.installation, config.githubAppId);
+      const installation = await observeInstallation(dependencies.installation, config.githubAppId ?? 0);
       before = { installation: installation.permissions, app: installation.app };
       entry.target = { ...entry.target, slug: installation.slug, installationId: installation.id, account: installation.account };
       const missing = missingPermissions(installation.permissions);
@@ -1113,7 +1113,7 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
         if (!accept) { outcome = 'refused'; reason = 'GitHub shows no pending permission request for this installation; the recorded page shows what it offered instead'; }
         else {
           page.click(accept.selector); page.wait(1_500);
-          const updated = await observeInstallation(dependencies.installation, config.githubAppId);
+          const updated = await observeInstallation(dependencies.installation, config.githubAppId ?? 0);
           after = { installation: updated.permissions };
           const still = missingPermissions(updated.permissions);
           verified = !still.length; outcome = verified ? 'applied' : 'refused';
@@ -1124,7 +1124,7 @@ export async function runBrowserFlow(root: string, config: MasterConfig, flow: B
       // GY-1686: reach a Confirm-access page on purpose and keep its views as fixtures. The pass that
       // confirms access (passSudo) is never entered, so nothing is submitted, typed or sent and no
       // GitHub Mobile prompt is issued: the capture follows each view's own link and stops.
-      const installation = await observeInstallation(dependencies.installation, config.githubAppId);
+      const installation = await observeInstallation(dependencies.installation, config.githubAppId ?? 0);
       entry.target = { ...entry.target, slug: installation.slug, installationId: installation.id };
       const url = `https://github.com/settings/apps/${encodeURIComponent(installation.slug)}/permissions`;
       before = { url, views: [] as string[] };

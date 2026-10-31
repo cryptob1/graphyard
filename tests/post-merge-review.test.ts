@@ -31,7 +31,7 @@ const clock = Date.parse(at);
 function delivered(key: string, fields: Record<string, unknown> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author: 'graphyard-claude-1' };
   return { id: randomUUID(), key, title: `Item ${key}`, description: '', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, 
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true },
     stage: 'done', revision: 9, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-7-1', epoch: 1, owner: 'graphyard-claude-1' }], candidate, submission: { epoch: 1, pr: 7 }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['graphyard-claude-1'], postMergeReview: 'owed',
@@ -114,8 +114,7 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   const refused = delivered('GY-10', { reviewLaunch: { ...launched.reviewLaunch!, verdict: null, refused: { at, reason: 'Reviewer review-claude-1 implemented GY-10' } } });
   assert.match(controlPlaneRefusal(record(owed), [refused])!, /refused the verdict: Reviewer review-claude-1 implemented GY-10/);
   // The dispatcher: one post-merge session per merge commit, without a reviewer App.
-  assert.equal(selectReviewerProfile(config, 'control-plane').profile!.name, 'reviewer-claude');
-  assert.match(selectReviewerProfile(config).reason!, /no reviewer identity is registered/, 'github mode still needs the App');
+  assert.equal(selectReviewerProfile(config).profile!.name, 'reviewer-claude');
   const log: string[] = [], reviews: any[] = [], filed: unknown[] = [], settled: unknown[] = [], memory: string[][] = [];
   let items: Work[] = [owed];
   const effects = stubEffects(() => items, log, reviews, {

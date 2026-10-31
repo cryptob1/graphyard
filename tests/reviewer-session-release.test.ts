@@ -101,7 +101,7 @@ test('unit:reviewer-session-released-after-review — the close step releases a 
     // recorded the session, and the ledger record carries the registry session it ran under.
     const item = requested(1);
     const requestId = item.autoDispatch!.review!.id;
-    const launched = await launchReview(host.root, item, 'review-a', host.agents, new Date().toISOString(), { run: host.run, mint: host.mint, requestId, probe });
+    const launched = await launchReview(host.root, item, 'review-a', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId, probe });
     const sessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === requestId)!.session!;
     assert.deepEqual(registry.live().map(session => [session.id, session.work]), [[sessionId, 'GY-501']], 'the registry counts the fresh review live');
 
@@ -127,7 +127,7 @@ test('unit:reviewer-session-released-after-review — the close step releases a 
     // (a codex session exits on its own): the close step releases it too, naming the missing pane.
     const vanished = requested(2);
     const vanishedRequestId = vanished.autoDispatch!.review!.id;
-    const gone = await launchReview(host.root, vanished, 'review-a', host.agents, new Date().toISOString(), { run: host.run, mint: host.mint, requestId: vanishedRequestId, probe });
+    const gone = await launchReview(host.root, vanished, 'review-a', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: vanishedRequestId, probe });
     const goneSessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === vanishedRequestId)!.session!;
     assert.deepEqual(registry.live().map(session => session.id), [goneSessionId], 'the standing request holds its session');
     host.agents.splice(host.agents.findIndex(agent => agent.pane_id === gone.pane), 1);

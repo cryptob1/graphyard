@@ -25,3 +25,12 @@ test('unit:retired-merge-queue-keys — unknown merge-queue keys are kept and wr
   assert.deepEqual(parsed.mergeQueue, { optimisticLane: true }, 'the retired declared key drops; the unknown one a newer version wrote is kept (GY-1960)');
   assert.deepEqual(masterConfigSchema.parse(JSON.parse(JSON.stringify(parsed))).mergeQueue, { optimisticLane: true }, 'and re-parses unchanged');
 });
+
+// A pre-control-plane master.json keeps loading while new installations omit the App ID.
+test('unit:master-config-retired-keys — old App and merge settings load and githubAppId is optional', () => {
+  const old = masterConfigSchema.parse({ ...base, mergeMethod: 'squash' });
+  assert.equal(old.githubAppId, 1234);
+  assert.equal(old.mergeMethod, 'squash');
+  const { githubAppId, ...withoutApp } = base;
+  assert.equal(masterConfigSchema.parse(withoutApp).githubAppId, undefined);
+});

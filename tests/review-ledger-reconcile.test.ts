@@ -7,7 +7,7 @@ import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, sessionHarnessPlan, setupMaster, type MasterConfig } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, reviewRetryPrompt, saveReviewerProfile, staleReviewReason, type ReviewRecord } from '../src/reviewer.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import type { Observation, Work } from '../src/model.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -22,9 +22,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const H = sha40('a1'), H2 = sha40('a2'), B = sha40('b1');
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+const registerLaunch = async () => ({ launch: 'fixture-launch' });
 const verdict = (state = 'APPROVED') => ({ state, reviewer: 'graphyard-reviewer[bot]', reviewId: 77, submittedAt: new Date().toISOString() });
 
 async function boundMaster() {
@@ -32,7 +31,6 @@ async function boundMaster() {
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
   return { root, credentialDirectory, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
@@ -43,7 +41,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
-  return { id: 'work-64', key: 'GY-64', title: 'Reviewer ledger', description: '', type: 'feature', priority: 0, dependencies: [], 
+  return { id: 'work-64', key: 'GY-64', title: 'Reviewer ledger', description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['integration:review-ledger-reconcile'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'review', revision: 7, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 64 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -66,7 +64,7 @@ test('integration:review-ledger-reconcile — a verdict GitHub shows on the exac
     const calls: string[][] = [];
     const run = herdrRun(calls);
     const item = work();
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch });
     const sessionDirectory = (await readReviewLedger(root)).reviews[0].sessionDirectory;
     // The verdict lands (first attempt or after a retry) while Herdr cannot confirm the pane:
     // the record is completed anyway, with the close failure kept as attention on the record.
@@ -82,7 +80,7 @@ test('integration:review-ledger-reconcile — a verdict GitHub shows on the exac
     assert.equal(again.changed, 0);
     assert.equal((await readReviewLedger(root)).reviews[0].state, 'completed');
     // The completed record no longer holds the key: the next review request launches.
-    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint });
+    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch });
     assert.equal(next.work, 'GY-64');
     const ledger = await readReviewLedger(root);
     assert.deepEqual(ledger.reviews.map(record => record.state), ['completed', 'pending']);
@@ -94,10 +92,10 @@ test('integration:review-ledger-reconcile — a pending record for a superseded 
   try {
     const calls: string[][] = [];
     const run = herdrRun(calls);
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run, mint });
-    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run, mint }), /already pending on a1f+/);
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch });
+    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch }), /already pending on a1f+/);
     // The head moved on (rework pushed): launching for the new head cancels the old record and proceeds.
-    const launched = await launchReview(root, moved(), 'claude-reviewer', [], new Date().toISOString(), { run, mint });
+    const launched = await launchReview(root, moved(), 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch });
     assert.equal(launched.sha, H2);
     const ledger = await readReviewLedger(root);
     assert.deepEqual(ledger.reviews.map(record => record.state), ['cancelled', 'pending']);
@@ -115,7 +113,7 @@ test('integration:review-ledger-reconcile — a session that stops before postin
     const run = herdrRun(calls);
     const config = await loadMasterConfig(root);
     const item = work();
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint, requestId: 'review-request' });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: 'review-request' });
     const record: ReviewRecord = (await readReviewLedger(root)).reviews[0];
     const start = Date.parse(record.requestedAt);
     const blocked = [{ name: 'review-claude-1', pane_id: 'pane-review', agent_status: 'blocked' }];
@@ -170,7 +168,7 @@ test('integration:reviewer-posts-autonomously — the launch grants the post as 
     const request = item.autoDispatch!.review!;
     const calls: string[][] = [];
     const run = herdrRun(calls);
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint, requestId: request.id });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: request.id });
     const prompts: string[] = [];
     const launches: string[] = [];
     let clock = Date.now();
