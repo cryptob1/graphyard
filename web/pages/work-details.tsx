@@ -60,6 +60,17 @@ export function ProductReviewPanel({ item, token }: { item: Work; token: string 
     </> : <p className="muted">A user-facing feature is product-reviewed before it merges: a reviewer walks the head's preview — or the served app against the head's diff where no preview runs — and approves it, asks for changes, or rejects it.</p>}
   </section>;
 }
+/** The item's real-world checks (GY-2986): each proof, the commit it binds and the person's answer. */
+function HumanChecksPanel({ item, token }: { item: Work; token: string }) {
+  const checks = item.humanProofs ?? [];
+  if (!checks.length) return null;
+  return <section className="panel" aria-label="Real-world checks"><h2>Real-world checks</h2>
+    {checks.map(check => <div className="criterion" key={check.id}><strong>{check.proof} {check.answer ? (check.answer.outcome === 'pass' ? 'passed' : 'failed') : 'waiting for a person'} for {check.sha.slice(0, 8)}</strong>
+      <p>{check.ask}</p>
+      {check.answer && <p>{check.answer.note} <small className="muted">{check.answer.by}</small></p>}
+      {check.answer?.photo && <ProductScreenshot item={item} name={check.answer.photo} token={token}/>}</div>)}
+  </section>;
+}
 /** One screenshot of the product review: a link to an image hosted elsewhere, or the uploaded image the control plane keeps, read with the session's token. Keyed by the review's head and time, so a fresh verdict reusing a name mounts afresh and reads its own image. */
 function ProductScreenshot({ item, name, token }: { item: Work; name: string; token: string }) {
   const linked = /^https?:\/\//i.test(name);
@@ -220,6 +231,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     </section>
     {item.preview && <PreviewPanel preview={item.preview}/>}
     <ProductReviewPanel item={item} token={token}/>
+    <HumanChecksPanel item={item} token={token}/>
     <TestCases item={item} api={api}/>
     <section className="panel activity" aria-label="Activity"><h2>Activity</h2>
       {events.length ? <ul className="activity-list">{events.slice(0, 3).map(event => <li key={event.seq}>{activityLabel(event.kind)} <small>· {formatAge(event.created_at, now)} ago</small></li>)}</ul> : <p className="muted">Nothing recorded yet.</p>}

@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { contractFile, describeStep, loadCases, loadContract, registeredRevision, scenarioDefinition, type Api, type CaseFile, type E2eStep, type ReleaseContract } from './case.js';
 import { checkoutRepositoryPolicy, repositoryPolicy, type RepositoryPolicy } from '../model/repository-policy.js';
-import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type ProcessRunner, type StepRecord } from './steps.js';
+import { installSecretsDirectory, loadSecrets, redact, redactValues, runAgentStep, runCommandStep, runProcess, stepEnvironment, type CompareJudge, type ProcessRunner, type StepRecord } from './steps.js';
 import type { ExternalEvidence, ExternalRunResult, ExternalVerdict } from '../runner-report.js';
 import { importedEvidenceArtifacts, type EvidenceArtifact } from '../model/evidence.js';
 
@@ -113,6 +113,10 @@ export interface RunOptions {
   withholdSecrets?: boolean;
   /** Where agent steps' screenshots go: a run-named directory under the temp directory by default. */
   artifactsDirectory?: string;
+  /** GY-2985: what was live's URL, set as BASELINE_URL in every step's environment; a compare agent step runs its goal there too and is judged against it. None on the first serve. */
+  baselineUrl?: string;
+  /** GY-2985: how a compare agent step's one judge call answers; the agent-browser judge by default. Tests stub it. */
+  judge?: CompareJudge;
   /** The host environment a step's process draws its basics from, and how it is spawned; tests substitute both. */
   hostEnvironment?: NodeJS.ProcessEnv; processRunner?: ProcessRunner;
   /**
@@ -213,7 +217,7 @@ const createdWork = (parsed: unknown): { id: string; key: string | null } | null
 interface CaseContext { url: string; vars: Record<string, string>; timeoutMs: number; pollMs: number; maxWaitSeconds: number; waitUntil: number; waitBudgetMs: number; now: () => number; sleep: (ms: number) => Promise<void>; fetcher: typeof fetch; page: () => Promise<E2ePage>; pageErrors: string[]; idempotency: (index: number) => string;
   /** GY-2216: remembers each work item the case's steps created, so the run can close them when it ends. */
   created: (item: { id: string; key: string | null }) => void;
-  secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string; signal?: AbortSignal } }
+  secrets: Record<string, string>; general: { root: string; env: Record<string, string>; run: ProcessRunner; artifacts: string; session: (index: number) => string; signal?: AbortSignal; judge?: CompareJudge } }
 
 /** A step's own timeout: a command or agent step declares one; the request and browser steps share the run's, a waiting GET's widened by the wait it may still take. */
 const timeoutOf = (step: E2eStep, context: Pick<CaseContext, 'timeoutMs' | 'maxWaitSeconds' | 'waitUntil' | 'now'>) => step.kind === 'command' || step.kind === 'agent' ? step.timeoutSeconds * 1000
@@ -274,7 +278,7 @@ async function runStep(step: E2eStep, index: number, context: CaseContext): Prom
 }
 
 /** Run one case once: its declared secrets resolved first, then its steps in order, stopping at the first that fails. */
-async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number; waitUntil?: number; waitBudgetMs?: number; now: () => number; sleep: (ms: number) => Promise<void>; created: (item: { id: string; key: string | null }) => void }) {
+async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, 'url' | 'token' | 'stepTimeoutMs' | 'root' | 'artifactsDirectory' | 'hostEnvironment' | 'processRunner'>> & { runId: string; attempt: number; fetcher: typeof fetch; launcher: () => Promise<E2eLauncher>; secretsDirectory: () => string; signal?: AbortSignal; withholdSecrets?: boolean; waitPollMs?: number; maxWaitSeconds?: number; waitUntil?: number; waitBudgetMs?: number; now: () => number; sleep: (ms: number) => Promise<void>; created: (item: { id: string; key: string | null }) => void; baselineUrl?: string; judge?: CompareJudge }) {
   const { definition } = entry;
   const steps: StepRecord[] = [];
   let secrets: Record<string, string>;
@@ -288,7 +292,7 @@ async function attemptCase(entry: CaseFile, options: Required<Pick<RunOptions, '
   let browser: E2eBrowser | null = null, page: E2ePage | null = null;
   const session = (index: number) => `graphyard-e2e-${options.runId}-${definition.id}-${options.attempt}-${index + 1}`.replace(/[^a-zA-Z0-9_.-]/g, '-').slice(0, 120);
   const context: CaseContext = { url: options.url, vars, timeoutMs: options.stepTimeoutMs, pollMs: options.waitPollMs ?? httpWaitPollMs, maxWaitSeconds: options.maxWaitSeconds ?? Infinity, waitUntil: options.waitUntil ?? Infinity, waitBudgetMs: options.waitBudgetMs ?? Infinity, now: options.now, sleep: options.sleep, fetcher: options.fetcher, pageErrors, secrets, created: options.created,
-    general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment), run: options.processRunner, artifacts: options.artifactsDirectory, session, signal: options.signal },
+    general: { root: options.root, env: stepEnvironment(options.url, secrets, options.hostEnvironment, options.baselineUrl), run: options.processRunner, artifacts: options.artifactsDirectory, session, signal: options.signal, judge: options.judge },
     idempotency: index => `e2e:${definition.id}:${options.runId}:${options.attempt}:${index}`,
     page: async () => {
       if (!page) {
@@ -356,7 +360,7 @@ export async function runCases(cases: readonly CaseFile[], options: RunOptions):
     do {
       // Each attempt waits within an equal share of what is left of its case's budget, so a retry is never left 0 s either.
       const began = now(), attemptBudgetMs = Math.max(0, started + waitBudgetMs - began) / (retries + 1 - attemptResults.length);
-      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs, created: item => created.push({ ...item, case: id }),
+      const result = await attemptCase(entry, { url: options.url, token: options.token, stepTimeoutMs, runId, attempt: attemptResults.length + 1, fetcher, launcher: launch, signal, withholdSecrets: options.withholdSecrets, waitPollMs: options.waitPollMs, created: item => created.push({ ...item, case: id }), baselineUrl: options.baselineUrl, judge: options.judge,
         // A case whose outcome nothing can serve — pending on the candidate (GY-1938) or suspended because this install cannot serve it at all (GY-2217) — asks once and never holds the run on a wait, required or not.
         maxWaitSeconds: pendingCases.includes(id) ? 0 : options.maxWaitSeconds, waitUntil: began + attemptBudgetMs, waitBudgetMs: attemptBudgetMs, now, sleep, ...general });
       attemptResults.push({ attempt: attemptResults.length + 1, outcome: result.failingStep ? 'fail' : 'pass', durationMs: Math.max(0, now() - began), ...result });

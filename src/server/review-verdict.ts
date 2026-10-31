@@ -48,7 +48,7 @@ export const reviewLaunchBodySchema = z.object({ reviewer: identifier, head: sha
  * (`GET /api/work/:id/product-review/screenshots/:name`), so the panel shows what the reviewer saw.
  */
 export const productScreenshotBytesMax = 2 * 1024 * 1024, productScreenshotsMax = 5;
-const screenshotUpload = z.object({ name: z.string().trim().min(1).max(1000), mediaType: z.enum(['image/png', 'image/jpeg']), bytes: z.string().min(4).max(Math.ceil(productScreenshotBytesMax / 3) * 4) }).strict();
+export const screenshotUpload = z.object({ name: z.string().trim().min(1).max(1000), mediaType: z.enum(['image/png', 'image/jpeg']), bytes: z.string().min(4).max(Math.ceil(productScreenshotBytesMax / 3) * 4) }).strict();
 type ScreenshotUpload = z.infer<typeof screenshotUpload>;
 /** The body limit of a route that may carry screenshots: every one at its largest, base64, with room for the rest. */
 export const productScreenshotBodyLimit = productScreenshotsMax * Math.ceil(productScreenshotBytesMax / 3) * 4 + 200_000;
@@ -76,7 +76,7 @@ const linked = (name: string) => /^https?:\/\//i.test(name);
  * http(s) URL. A line naming a local file not uploaded is dropped — nobody could open it.
  */
 async function keepProductScreenshots(db: pg.PoolClient, workId: string, uploads: ScreenshotUpload[], named: string[]): Promise<string[]> {
-  await db.query('DELETE FROM product_review_screenshots WHERE work_id=$1', [workId]);
+  await db.query("DELETE FROM product_review_screenshots WHERE work_id=$1 AND name NOT LIKE 'human-check-%'", [workId]);
   for (const upload of uploads) {
     const bytes = Buffer.from(upload.bytes, 'base64');
     demand(bytes.length > 0 && bytes.length <= productScreenshotBytesMax && bytes.toString('base64') === upload.bytes, `Screenshot ${upload.name} must be canonical base64 of at most ${productScreenshotBytesMax} bytes`, 400);

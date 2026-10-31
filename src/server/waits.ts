@@ -1,9 +1,13 @@
 import { createCipheriv, createHash, publicEncrypt, randomBytes, randomUUID, constants as cryptoConstants } from 'node:crypto';
 import type pg from 'pg';
+import { z } from 'zod';
 import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
 import { capacityEventSchema, capacityRetryAt, capacitySignature, retainedExhaustions, type CapacityState, type ExhaustionRecord } from '../model/capacity.js';
-import { describeHumanRequest, humanDecisionLabel, humanOnlyRefusal, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, recommendationIssues, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
+import { describeHumanRequest, humanDecisionLabel, humanOnlyRefusal, humanProofRule, humanRequestBlocker, humanRequestSchema, openHumanOnly, parkRefusal, parkRule, recommendationIssues, retainedHumanRequests, type HumanOnlySubject, type HumanRequest } from '../model/human-request.js';
 import { humanAnswerSchema, resolveHumanAnswer } from '../model/human-answer.js';
+import { answerableHumanProof, requestFor } from '../model/human-proof.js';
+import { proofSchema } from '../model/proof.js';
+import { productScreenshotBytesMax, screenshotUpload } from './review-verdict.js';
 import { endAttempt, recordIntervention } from '../pipeline-speed.js';
 import { save } from '../store.js';
 import { eventWorkSql } from '../store/snapshot-delta.js';
@@ -113,6 +117,51 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
     work!.humanRequest = null;
     if (work!.blocker?.startsWith(humanRequestBlocker)) work!.blocker = resolved.outcome === 'provided' ? null : `A human declined ${humanDecisionLabel[answered.kind]} for this item: ${resolved.text}`.slice(0, 2000);
     return commit(services, db, now, work!, all, actor, 'human.answered', { request: answered, resumed: resolved.outcome === 'provided' }, key, fingerprint);
+  });
+}
+
+const humanProofRequestSchema = z.object({ proof: proofSchema, sha: z.string().regex(/^[0-9a-f]{40}$/), baseSha: z.string().regex(/^[0-9a-f]{40}$/), url: z.url({ protocol: /^https?$/ }).max(2000).optional() }).strict();
+const humanProofAnswerSchema = z.object({ request: z.string().uuid(), outcome: z.enum(['pass', 'fail']), note: z.string().trim().min(1).max(1000), photo: screenshotUpload.optional() }).strict();
+
+/** Records one real-world check for an exact commit (GY-2986); the same check asked again changes nothing. */
+export async function requestHumanProof(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  const data = humanProofRequestSchema.parse(body);
+  const fingerprint = digest({ id, data });
+  return services.engine.store.transaction(async (db, now) => {
+    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+    demand(actor.role === 'admin' || actor.role === 'coordinator', 'Only the loop or an admin asks for a real-world check', 403);
+    const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
+    demand(work!.stage !== 'done', 'Delivered work is immutable');
+    const criterion = work!.criteria.find(entry => !entry.bootstrap && entry.proofs.includes(data.proof));
+    demand(criterion && data.proof.startsWith('human:'), `No criterion of ${work!.key} names the real-world check ${data.proof}`, 409);
+    if (work!.candidate) demand(work!.candidate.sha === data.sha, `${work!.key}'s head is ${work!.candidate.sha.slice(0, 12)}, not ${data.sha.slice(0, 12)}`, 409);
+    if (!requestFor(work!, data.proof, data.sha)) work!.humanProofs = [...(work!.humanProofs ?? []), { id: randomUUID(), proof: data.proof, criterion: criterion!.id, sha: data.sha, baseSha: data.baseSha, policyRevision: work!.policyRevision,
+      ask: criterion!.text, steps: [...(data.url ? [`Open ${data.url}`] : []), `Make this check on commit ${data.sha.slice(0, 12)}`, 'Record pass or fail with a note saying what you saw'], at: now.toISOString(), requestedBy: actor.id, answer: null }];
+    return commit(services, db, now, work!, all, actor, 'human-proof.requested', { proof: data.proof, sha: data.sha }, key, fingerprint);
+  });
+}
+
+/** The person's answer: a trusted run bound to the commit, kept with their note and any photo. Only a declared human session answers. */
+export async function answerHumanProof(services: Services, actor: Principal, id: string, body: unknown, key: string) {
+  const data = humanProofAnswerSchema.parse(body);
+  const fingerprint = digest({ id, data });
+  return services.engine.store.transaction(async (db, now) => {
+    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+    const refusal = humanOnlyRefusal(humanProofRule.kind, actor);
+    demand(!refusal, refusal!, 403);
+    const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
+    const request = work!.humanProofs?.find(entry => entry.id === data.request);
+    demand(request && answerableHumanProof(work!, request), `${work!.key} has no open real-world check ${data.request}; reload before answering`, 409);
+    let photo: string | null = null;
+    if (data.photo) {
+      const bytes = Buffer.from(data.photo.bytes, 'base64');
+      demand(bytes.length > 0 && bytes.length <= productScreenshotBytesMax && bytes.toString('base64') === data.photo.bytes, `The photo must be canonical base64 of at most ${productScreenshotBytesMax} bytes`, 400);
+      photo = `human-check-${request!.id}.${data.photo.mediaType === 'image/png' ? 'png' : 'jpg'}`;
+      await db.query('INSERT INTO product_review_screenshots(work_id,name,media_type,bytes) VALUES($1,$2,$3,$4)', [work!.id, photo, data.photo.mediaType, bytes]);
+    }
+    request!.answer = { by: actor.id, at: now.toISOString(), outcome: data.outcome, note: data.note, photo };
+    work!.evidence.push({ id: randomUUID(), proof: request!.proof, sha: request!.sha, baseSha: work!.candidate?.baseSha ?? request!.baseSha, policyRevision: request!.policyRevision, producer: actor.id, trusted: true, result: data.outcome, executed: 1, skipped: 0, at: now.toISOString() });
+    return commit(services, db, now, work!, all, actor, 'human-proof.answered', { proof: request!.proof, sha: request!.sha, outcome: data.outcome, note: data.note }, key, fingerprint);
   });
 }
 

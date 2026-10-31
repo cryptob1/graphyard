@@ -3,7 +3,7 @@ import { RenewalFault, type Command } from '../../engine.js';
 import { leaseCommands } from '../../store/pools.js';
 import { producerIndependenceRefusal, recordEvidenceRefusal, recordLeadViolation } from '../../delegation.js';
 import { defineRoutes, parseJson, Sent, type RouteContext } from '../routes.js';
-import { answerHumanDecision, listHumanRequests, recordCapacity, requestHumanDecision } from '../waits.js';
+import { answerHumanDecision, answerHumanProof, listHumanRequests, requestHumanProof, recordCapacity, requestHumanDecision } from '../waits.js';
 import { judgeClosedQuestion } from '../closed-question.js';
 import { closeWork } from '../close.js';
 import { productScreenshotBodyLimit, readProductScreenshot, recordProductReviewByHand, recordReviewLaunch, recordReviewVerdict } from '../review-verdict.js';
@@ -78,6 +78,15 @@ export const workRoutes = defineRoutes('work', [
     async handle(context, [id]) {
       await refuseLead(context, id, 'product-review');
       return recordProductReviewByHand(context.services, context.actor, decodeURIComponent(id), await parseJson(context, productScreenshotBodyLimit), context.idempotencyKey());
+    },
+  },
+  // A real-world check (GY-2986): the loop asks for it on Needs you and a person answers it with a note and any photo.
+  {
+    method: 'POST', path: /^\/api\/work\/([^/]+)\/(human-proof-request|human-proof)$/,
+    async handle(context, [id, action]) {
+      await refuseLead(context, id, action);
+      const data = await parseJson(context, productScreenshotBodyLimit), key = context.idempotencyKey(), target = decodeURIComponent(id);
+      return action === 'human-proof' ? answerHumanProof(context.services, context.actor, target, data, key) : requestHumanProof(context.services, context.actor, target, data, key);
     },
   },
   // The screenshots a product review uploaded, served to any reader of the item (its panel fetches them).

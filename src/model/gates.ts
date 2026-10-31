@@ -9,6 +9,7 @@ import { isDelivered } from './closure.js';
 import { reviewedBeforeMerge, riskOf } from './risk-class.js';
 import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
 import { filingRefusal } from './user-facing.js';
+import { humanProofHolds } from './human-proof.js';
 import { productReviewRefusal } from './product-review.js';
 
 // Pure evaluation: neither worker assertions nor UI state can authorize progression.
@@ -113,7 +114,8 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   // puts the code review on (GY-2989): an approval of the exact head (or one carried across a
   // non-UI delta) lets it pass; a change request reworks; a reject never merges.
   const productHold = productReviewRefusal(work);
-  add('review', [...riskRefusal, ...changeRequestHold, ...(mechanicalHold ? [mechanicalHold] : []), ...(productHold ? [productHold] : [])]);
+  // A `human:` proof holds the head here until a person passes it on this commit (GY-2986).
+  add('review', [...riskRefusal, ...changeRequestHold, ...(mechanicalHold ? [mechanicalHold] : []), ...(productHold ? [productHold] : []), ...humanProofHolds(work, now)]);
   // GY-2010: gates never read GitHub. The merge writer's ledger stands for the test and merge
   // gates for every observed candidate — including a document that still carries pull-request-era
   // checks, PR numbers and mergeability. Those fields load; they do not refuse progression.

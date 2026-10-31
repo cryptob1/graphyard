@@ -4,7 +4,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
 import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/launch.js';
-import { bwrapOnPath } from '../master/profiles.js';
+import { bwrapOnPath, type CredentialMask } from '../master/profiles.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
 import { z } from 'zod';
@@ -37,12 +37,13 @@ export function confiningSpawn(base: typeof spawn = spawn, options: { coordinato
  * output and exit to its directory under the coordinator checkout, which the confinement binds
  * read-only; and a run's transient scope stays outermost, because the confinement masks the user
  * bus a `systemd-run` needs. A run that cannot be confined throws here, so it fails instead of
- * starting unconfined.
+ * starting unconfined. A `credentialMask` hides the install's credential locations from the run
+ * (GY-1856), with the run's own kept.
  */
-export function runConfinement(options: { coordinatorRoot?: string | null; bwrap?: string | null } = {}): ((cwd: string | undefined) => readonly string[]) | undefined {
+export function runConfinement(options: { coordinatorRoot?: string | null; bwrap?: string | null; credentialMask?: CredentialMask } = {}): ((cwd: string | undefined) => readonly string[]) | undefined {
   const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
   if (!root) return undefined;
-  return cwd => headlessConfinementWrapper(root, cwd, options.bwrap !== undefined ? options.bwrap : bwrapOnPath());
+  return cwd => headlessConfinementWrapper(root, cwd, options.bwrap !== undefined ? options.bwrap : bwrapOnPath(), options.credentialMask);
 }
 
 /**
@@ -52,11 +53,11 @@ export function runConfinement(options: { coordinatorRoot?: string | null; bwrap
  * never by what the run says.
  */
 
-export function narrowRunner(pi: unknown): Runner {
+export function narrowRunner(pi: unknown, credentialMask?: CredentialMask): Runner {
   const configured = piRuntimeSchema.parse(pi ?? {});
   // Every headless run is confined at its spawn (GY-888): the checkout the launcher runs from is
   // unwritable to the run, shell commands included, exactly as for a pane session.
-  return piRunner({ command: configured.command, model: configured.model, confine: runConfinement() });
+  return piRunner({ command: configured.command, model: configured.model, confine: runConfinement({ credentialMask }) });
 }
 
 /**
@@ -91,9 +92,9 @@ export function accountKeyEnvironment(account: Pick<FleetLaunchAccount, 'name' |
   return { [account.key.variable]: value };
 }
 /** A registry account's headless runner: every run reads the account's key afresh, into its own environment only, and every run is confined at its spawn (GY-888). Extra arguments after the account's own narrow the session further (the doctor's tool set). */
-export function registryRunner(account: FleetLaunchAccount, extraArgs: string[] = []): Runner {
+export function registryRunner(account: FleetLaunchAccount, extraArgs: string[] = [], credentialMask?: CredentialMask): Runner {
   const launch = registryHeadlessLaunch(account);
-  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: [...launch.args, ...extraArgs], environment: { ...launch.environment, ...accountKeyEnvironment(account) }, confine: runConfinement() }).start(prompt, options) };
+  return { name: 'pi', start: (prompt, options) => piRunner({ command: launch.command, model: launch.model, args: [...launch.args, ...extraArgs], environment: { ...launch.environment, ...accountKeyEnvironment(account) }, confine: runConfinement({ credentialMask }) }).start(prompt, options) };
 }
 /**
  * The one-prompt smoke test of a registry account (GY-446): its runtime, login home, key and model,

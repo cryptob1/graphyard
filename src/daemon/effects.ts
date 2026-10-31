@@ -92,6 +92,10 @@ export interface DaemonEffects {
   composeServer?: () => ComposeServer | null | Promise<ComposeServer | null>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`). */
   rework?: (work: Work, reason: string, binding?: string) => Promise<unknown>;
+  /** Records one real-world check on Needs you for the item's head (GY-2986). */
+  askHumanProof?: (work: Work, proof: string) => Promise<unknown>;
+  /** Releases one backlog item with the master's own operator-agent identity (`POST work/:id/ready`, GY-2991): the dispatch step keeps the pipeline full itself. Absent, nothing is released; `master release` stays for an out-of-order pull. */
+  release?: (work: Work, reason: string) => Promise<unknown>;
   /** One reviewer and producer dispatch tick over the cycle's snapshot (auto-dispatch.ts). */
   dispatchTick?: (snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   /** The loop's own master session (GY-898): absent, none is launched. */
