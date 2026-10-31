@@ -1,7 +1,7 @@
 // `graphyard upgrade` (GY-1962): one command moves the CLI checkout, the server, the loop and
 // executors, and the managed repository's generated files to one dated release, in order.
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, readlinkSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join, resolve } from 'node:path';
 import { createBackup } from '../backup.js';
@@ -245,6 +245,40 @@ async function stopTrackedServe(tracked: { pid?: number | null; started?: string
   try { process.kill(-tracked.pid, 'SIGKILL'); } catch { /* already gone */ }
 }
 
+/** The inodes of the TCP sockets listening on `port`, from the kernel's tables (Linux). */
+const listeningInodes = (port: number): Set<string> => {
+  const hex = port.toString(16), inodes = new Set<string>();
+  for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
+    let lines: string[] = [];
+    try { lines = readFileSync(table, 'utf8').split('\n'); } catch { continue; }
+    for (const line of lines.slice(1)) {
+      const field = line.trim().split(/\s+/);
+      if (field[3] === '0A' && field[1]?.split(':')[1]?.toLowerCase() === hex && field[9]) inodes.add(field[9]);
+    }
+  }
+  return inodes;
+};
+
+/** Whether the declared port is still held by the serve's own process group: the kernel names every listening socket and the group of whoever owns one, so an answer from a process the restart did not start — a foreign holder the serve could not bind over — is told from the serve's own listener (GY-2993). Null when this cannot be checked (no tracked pid, no /proc, off Linux): the pass then trusts the answer. */
+const answersFromRestart = (port: number, tracked: { pid?: number | null }): boolean | null => {
+  if (!tracked.pid || !existsSync('/proc')) return null;
+  const inodes = listeningInodes(port);
+  if (!inodes.size) return false;
+  for (const name of readdirSync('/proc')) {
+    if (!/^\d+$/.test(name)) continue;
+    let stat: string;
+    try { stat = readFileSync(`/proc/${name}/stat`, 'utf8'); } catch { continue; }
+    if (stat.slice(stat.lastIndexOf(')') + 1).trim().split(' ')[2] !== String(tracked.pid)) continue;
+    let fds: string[] = [];
+    try { fds = readdirSync(`/proc/${name}/fd`); } catch { continue; }
+    for (const fd of fds) {
+      const socket = readlinkSync(`/proc/${name}/fd/${fd}`).match(/^socket:\[(\d+)\]$/)?.[1];
+      if (socket && inodes.has(socket)) return true;
+    }
+  }
+  return false;
+};
+
 /** The ports the deploy unit's serve pass (GY-2976) runs against the managed repository's main: git in the install's own checkout (whose remote-tracking ref master status reads too), npm ci and the declared build in its serve checkout, and the declared serve command spawned detached. */
 export function managedServePorts(input: { root: string; baseBranch: string; run: ChildRun }): ServePorts {
   const checkout = serveCheckoutPath(input.root);
@@ -293,6 +327,8 @@ export function managedServePorts(input: { root: string; baseBranch: string; run
       const pid = child.pid ?? null;
       return { pid, started: pid ? startedAt(pid) : null };
     },
+    // GY-2993: the answer the pass waits for must be this serve's own, so a commit whose serve could not bind a held port is recorded as the failure it is, never as served against the holder.
+    answersFromRestart: (port, tracked) => answersFromRestart(port, tracked),
     // GY-2985: what was live keeps serving on the port beside the declared one, in its own
     // baseline checkout, so a compare case judges a new build against what users had. The declared
     // serve command serves there with the declared port rewritten to the baseline's — the port the
