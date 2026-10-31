@@ -95,7 +95,7 @@ export interface RelandInput { title: string; type: Work['type']; priority: numb
  * in the description. A carried criterion keeps its id, text and proofs; a bootstrap deferral is
  * not carried — the re-land satisfies everything now, it does not re-defer it.
  */
-export function relandItemFor(original: Work, input: ServeFailure & { mergeSha: string; revertSha: string; baseBranch: string }): RelandInput {
+export function relandItemFor(original: Work, input: ServeFailure & { mergeSha: string; baseBranch: string }): RelandInput {
   const used = new Set(original.criteria.map(criterion => criterion.id));
   let next = original.criteria.length + 1;
   while (used.has(`AC-${next}`)) next++;
@@ -130,6 +130,7 @@ export type ServeRevertResult =
   | { outcome: 'reverted'; culprit: Work; mergeSha: string; revertSha: string; reland: string | null }
   | { outcome: 'held'; culprit: Work; mergeSha: string; reason: string }
   | { outcome: 'retry'; culprit: Work; mergeSha: string; revertSha: string; reason: string }
+  | { outcome: 'already-reverted'; culprit: Work; mergeSha: string }
   | { outcome: 'unattributed'; merges: string[] }
   | { outcome: 'up-to-date' };
 
@@ -154,14 +155,17 @@ export async function trialAndPushRevert(ports: Pick<ServeRevertPorts, 'trial' |
  * One serve revert, end to end: the merges since the last verified commit, the culprit among
  * them, its revert commit on `baseTip`, the normal trial and the leased push, and the filed
  * re-land. A revert the trial fails is held with its reason; a push the base move rejects is
- * retried, never held. A filing that fails (or a loop that cannot file) still stands on the
- * pushed revert: the re-land rides as null and the loop files it from the recorded revert.
+ * retried, never held. A merge named by `alreadyReverted` stays reverted: reverting it again
+ * would re-apply its change onto its own revert and oscillate main while the serve keeps
+ * failing. A filing that fails (or a loop that cannot file) still stands on the pushed revert:
+ * the re-land rides as null and the loop files it from the recorded revert.
  */
-export async function runServeRevert(ports: ServeRevertPorts, input: ServeFailure & { lastVerified: string; baseTip: string; baseBranch: string; work: readonly Work[] }): Promise<ServeRevertResult> {
+export async function runServeRevert(ports: ServeRevertPorts, input: ServeFailure & { lastVerified: string; baseTip: string; baseBranch: string; work: readonly Work[]; alreadyReverted?: readonly string[] }): Promise<ServeRevertResult> {
   const merges = await serveRangeMerges(ports.git, input.lastVerified, input.serve);
   if (!merges.length) return { outcome: 'up-to-date' };
   const culprit = selectServeCulprit(merges, input.work, input.failingCase);
   if (!culprit) return { outcome: 'unattributed', merges: merges.map(merge => merge.sha) };
+  if (input.alreadyReverted?.some(sha => sha.toLowerCase() === culprit.mergeSha)) return { outcome: 'already-reverted', culprit: culprit.item, mergeSha: culprit.mergeSha };
   const subject = merges.find(merge => merge.sha === culprit.mergeSha)?.subject ?? `Merge ${culprit.item.key}`;
   const revert = await revertMergeCommit(ports.git, { mergeSha: culprit.mergeSha, baseTip: input.baseTip, subject });
   if ('conflict' in revert) return { outcome: 'held', culprit: culprit.item, mergeSha: culprit.mergeSha,
@@ -170,7 +174,7 @@ export async function runServeRevert(ports: ServeRevertPorts, input: ServeFailur
   const decided = await trialAndPushRevert(ports, { revertSha: revert.revertSha, files, item: culprit.item, baseTip: input.baseTip, culpritKey: culprit.item.key, mergeSha: culprit.mergeSha });
   if ('retry' in decided) return { outcome: 'retry', culprit: culprit.item, mergeSha: culprit.mergeSha, revertSha: revert.revertSha, reason: decided.retry };
   if ('held' in decided) return { outcome: 'held', culprit: culprit.item, mergeSha: culprit.mergeSha, reason: decided.held };
-  const reland = { ...relandItemFor(culprit.item, { ...input, mergeSha: culprit.mergeSha, revertSha: revert.revertSha }), };
+  const reland = relandItemFor(culprit.item, { ...input, mergeSha: culprit.mergeSha });
   let filed: { key?: string } | null = null;
   try { filed = await ports.file(reland); } catch { filed = null; }
   return { outcome: 'reverted', culprit: culprit.item, mergeSha: culprit.mergeSha, revertSha: revert.revertSha, reland: filed?.key ?? null };

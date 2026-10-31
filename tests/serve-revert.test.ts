@@ -135,7 +135,7 @@ test('unit:revert-only-the-failing-item — the served commit fails the case one
   assert.match(reland.description, /GY-3002/);
   assert.match(reland.description, new RegExp(served.slice(0, 12)));
   assert.equal(result.outcome === 'reverted' && result.reland, 'GY-3003');
-  assert.deepEqual(relandItemFor(work[1]!, { ...failing, mergeSha: served, revertSha, baseBranch: 'main' }).title, reland.title);
+  assert.deepEqual(relandItemFor(work[1]!, { ...failing, mergeSha: served, baseBranch: 'main' }).title, reland.title);
 });
 
 test('unit:revert-only-the-failing-item — the failing case names the older item, and an unnamed case falls back to the newest merge', async t => {
@@ -154,6 +154,27 @@ test('unit:revert-only-the-failing-item — the failing case names the older ite
   assert.equal(show(origin, olderSha, 'b.txt'), 'beta\n');
   assert.equal(filed.length, 1);
   assert.equal(filed[0]!.title, 'Re-land GY-3001: alpha page');
+});
+
+test('unit:revert-only-the-failing-item — a merge already reverted is never reverted twice: the serve still failing re-applies nothing', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-once');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const failing = await servedFixture(coordinator, served, 'case-beta');
+  const filed: RelandInput[] = [];
+  const first = await runServeRevert(ports(coordinator, origin, passTrial, filed),
+    { ...failing, lastVerified: verified, baseTip: served, baseBranch: 'main', work });
+  assert.equal(first.outcome, 'reverted');
+  const revertSha = first.outcome === 'reverted' ? first.revertSha : '';
+
+  // The serve still fails on the revert commit: without the guard the loop would revert the
+  // same merge again — re-applying its change onto its own revert and oscillating main.
+  const again = await runServeRevert(ports(coordinator, origin, passTrial, filed),
+    { ...failing, serve: revertSha, lastVerified: verified, baseTip: revertSha, baseBranch: 'main', work, alreadyReverted: [served] });
+  assert.equal(again.outcome, 'already-reverted');
+  if (again.outcome === 'already-reverted') assert.equal(again.mergeSha, served);
+  assert.equal(tipOf(origin), revertSha);
+  assert.equal(show(origin, revertSha, 'b.txt'), null);
+  assert.equal(filed.length, 1);
 });
 
 test('unit:revert-only-the-failing-item — a failing case no item names reverts the newest merge, and a failing trial holds the revert', async t => {

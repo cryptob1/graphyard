@@ -65,8 +65,9 @@ export const mergeWriterStateSchema = z.object({
   /**
    * GY-2990: the last served commit whose required cases passed, the reverts a failing serve
    * already caused (each keyed by the serve it answered, so one serve reverts once and a filed
-   * re-land is never filed twice), and the revert held when its own trial failed. Absent until
-   * the serve-revert step first runs.
+   * re-land is never filed twice; a merge reverts once altogether, so a serve that still fails
+   * after its revert never reverts the same merge again), and the revert held when its own
+   * trial failed. Absent until the serve-revert step first runs.
    */
   serveRevert: z.object({
     lastVerified: shaField.nullable().default(null),
@@ -608,6 +609,10 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   } catch { return false; }
   const culprit = selectServeCulprit(merges, snapshot.work, failing.failingCase);
   if (!culprit) return false;
+  // One merge reverts once: reverting it again would re-apply its change onto its own revert
+  // and oscillate main while the serve keeps failing. The failing serve still reads as the
+  // release health the re-land carries.
+  if (revertState.reverts.some(entry => entry.mergeSha === culprit.mergeSha)) return false;
   const subject = merges.find(merge => merge.sha === culprit.mergeSha)?.subject ?? `Merge ${culprit.item.key}`;
   let revert: Awaited<ReturnType<typeof revertMergeCommit>>;
   try { revert = await revertMergeCommit(git, { mergeSha: culprit.mergeSha, baseTip, subject }); }
