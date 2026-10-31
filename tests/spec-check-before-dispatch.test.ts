@@ -167,3 +167,12 @@ test('unit:spec-check-before-dispatch — a report on requirements revised while
   assert.deepEqual(launched, ['GY-16'], 'whose ready verdict dispatches');
   assert.deepEqual(closed, [first, `pane-${launches}`], 'each checker pane closes once, after its report lands');
 });
+
+test('unit:spec-check-before-dispatch — a "No user-facing change" feature owes its check like any feature', async () => {
+  const item = feature('GY-17', { description: 'No user-facing change: add an internal capability.' });
+  assert.equal(needsSpecCheck(item), true);
+  const { checks, launched, refusal } = await drive(item, null);
+  assert.deepEqual(checks, ['GY-17'], 'the loop launches its checker');
+  assert.deepEqual(launched, [], 'and dispatches no worker before it reports');
+  assert.match(refusal!, /^Spec check before dispatch has not reported/);
+});

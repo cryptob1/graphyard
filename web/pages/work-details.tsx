@@ -91,7 +91,7 @@ export function SpecCheckPanel({ item }: { item: Work }) {
     {check ? <>
       <dl className="facts">
         <div><dt>Reviewer</dt><dd>{check.reviewer} · {new Date(check.at).toLocaleString()}</dd></div>
-        <div><dt>Verdict</dt><dd>{specWords[check.verdict]}{check.recheck ? ' · the re-check after master requirements' : ''}{check.verdict === 'ready' ? ' · the item dispatches' : current ? ' · held at ready until master requirements revises the item' : ' · a fresh check runs before dispatch'}</dd></div>
+        <div><dt>Verdict</dt><dd>{specWords[check.verdict]}{check.recheck ? ' · the re-check after master requirements' : ''}{!current ? ' · a fresh check runs before dispatch' : check.verdict === 'ready' ? ' · the item dispatches' : check.recheck ? ' · the item dispatches with this report attached for the worker' : ' · held at ready until master requirements revises the item'}</dd></div>
       </dl>
       <h3>Paraphrase</h3>
       <p className="spec-paraphrase" style={{ whiteSpace: 'pre-wrap' }}>{check.paraphrase}</p>

@@ -7,10 +7,9 @@
 // will be built and how each criterion will be proven (the EGM comprehension test), and the
 // implementation-readiness gaps that would leave a worker making design decisions. `ready`
 // dispatches; `gaps` holds the item at ready with the report until master requirements revises it,
-// which runs one re-check; a second gaps verdict dispatches with the report attached. Bugs, chores
-// and "No user-facing change" items skip it, as EGM itself advises for small clear fixes.
+// which runs one re-check; a second gaps verdict dispatches with the report attached. Bugs and
+// chores skip it, as EGM itself advises for small clear fixes; every feature owes one.
 import type { Work } from './work.js';
-import { optsOutOfE2e } from './user-facing.js';
 
 export const specVerdicts = ['ready', 'gaps'] as const;
 export type SpecVerdict = typeof specVerdicts[number];
@@ -46,9 +45,8 @@ declare module './work.js' {
 /** How long a spec-check launch stands: its token's life, after which the loop closes the session and launches again. */
 export const specCheckLaunchMs = 3_600_000;
 
-/** Who owes one: a feature item that is not a "No user-facing change" item — EGM skips small clear fixes. */
-export const needsSpecCheck = (work: Pick<Work, 'type' | 'description'>): boolean =>
-  work.type === 'feature' && !optsOutOfE2e(work.description);
+/** Who owes one: every feature item — a "No user-facing change" feature too; bugs and chores skip it, as EGM skips small clear fixes. */
+export const needsSpecCheck = (work: Pick<Work, 'type'>): boolean => work.type === 'feature';
 
 /** The check that judged the item's current requirements, or null: master requirements bumped the revision, so one more check runs before dispatch. */
 export const specCheckCurrent = (work: Pick<Work, 'specCheck' | 'policyRevision'>): SpecCheck | null =>

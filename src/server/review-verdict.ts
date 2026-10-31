@@ -359,7 +359,7 @@ export async function recordSpecCheckLaunch(services: Services, actor: Principal
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', `${work!.key} is done; a spec check launches for released work`, 409);
-    demand(needsSpecCheck(work!), `${work!.key} owes no spec check: bugs, chores and "No user-facing change" items skip it`, 409);
+    demand(needsSpecCheck(work!), `${work!.key} owes no spec check: bugs and chores skip it`, 409);
     const expiresAt = new Date(Math.min(Date.parse(data.expiresAt), now.getTime() + launchTokenBoundMs)).toISOString();
     // One launch stands per item: a relaunch replaces the earlier registration and withdraws its token.
     const withdraw = work!.specCheckLaunch ? [work!.specCheckLaunch.tokenHash] : [];

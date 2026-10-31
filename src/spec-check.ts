@@ -71,7 +71,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
 } = {}): Promise<SpecCheckLaunchResult> {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('A spec-check launch requires a valid Graphyard snapshot clock');
-  if (!needsSpecCheck(work)) throw new Error(`${work.key} owes no spec check: bugs, chores and "No user-facing change" items skip it`);
+  if (!needsSpecCheck(work)) throw new Error(`${work.key} owes no spec check: bugs and chores skip it`);
   if (specCheckCurrent(work)) throw new Error(`${work.key}'s spec check already reported for policy revision ${work.policyRevision}`);
   const config = await loadMasterConfig(root);
   const { profile, reason } = profileName

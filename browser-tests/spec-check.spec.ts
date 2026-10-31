@@ -44,6 +44,8 @@ test('integration:spec-check-shown — a feature item shows its spec check: the 
   await expect(panel).toContainText('AC-1 does not say which of the two export buttons the flow starts from');
   await expect(panel).toContainText('spec-checker');
   await expect(panel).toContainText('the re-check after master requirements');
+  await expect(panel).toContainText('the item dispatches with this report attached for the worker');
+  await expect(panel).not.toContainText('held at ready');
 });
 
 test('integration:spec-check-shown — a bug owes no spec check and shows no panel', async ({ page }) => {
