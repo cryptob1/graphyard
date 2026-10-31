@@ -70,7 +70,7 @@ const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField })
     .superRefine((data, ctx) => { const refusal = userFacingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
-  requirements: z.object({ expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
+  requirements: z.object({ owner: createSchema.shape.owner, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
@@ -946,6 +946,7 @@ export class Engine {
           const scenario = await resolveScenario(db, proof.slice(4), { at: now, by: actor.id }, this.repository);
           if (scenario) scenarioRequirements.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
         }
+        this.assertHumanOwner(data.owner);
         const created = now.toISOString();
         const { reason: _reason, ...intent } = data;
         work = { ...intent, criteria, id: randomUUID(), key: '', stage: 'backlog', revision: 0, policyRevision: 1, createdAt: created, updatedAt: created, stageEnteredAt: created,
@@ -1351,7 +1352,11 @@ export class Engine {
     }, { lane: leaseCommands.has(command) ? 'lease' : 'request', itemLock: id ?? undefined });
   }
 
-  /** The `requirements` command: a revision of the item's criteria, dependencies, resources and producer proofs, applied inside the caller's transaction. */
+  private assertHumanOwner(owner: string | null | undefined) {
+    demand(owner == null || this.principals.some(person => person.id === owner && person.sessionKind === 'human'), 'Owner must name a person principal (sessionKind: human)');
+  }
+
+  /** Revise requirements and human ownership inside the caller's transaction. */
   private async reviseRequirements(db: PoolClient, actor: Principal, work: Work, all: Work[], data: any, now: Date): Promise<void> {
     if (actor.role !== 'operator-agent') admin(actor);
     demand(!work.observation?.merged, 'Merged work requires a follow-up task');
@@ -1385,6 +1390,7 @@ export class Engine {
       if (scenario) pins.push({ proof, revision: scenario.revision, environment: scenario.environment, hash: scenario.hash });
     }
     work.retiredCriterionIds = [...(work.retiredCriterionIds ?? []), ...work.criteria.filter(ac => !data.criteria.some((next: { id: string }) => next.id === ac.id)).map(ac => ac.id)];
+    if (data.owner !== undefined) { this.assertHumanOwner(data.owner); work.owner = data.owner; }
     work.criteria = revised;
     work.dependencies = data.dependencies; work.exclusiveResources = data.exclusiveResources; work.producerProofs = data.producerProofs;
     work.scenarioRequirements = pins; work.policyRevision++;

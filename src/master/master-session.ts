@@ -31,6 +31,7 @@ export function masterHandover(input: { work: Work[]; cliPath: string }) {
   return [
     `Handover from the launcher that started this session: it relaunches the master when the session is gone, so continue from node ${input.cliPath} master status; there is no earlier memory to inherit.`,
     `- Needs-you parks (human-only decisions): ${line.length > 480 ? `${line.slice(0, 479)}…` : line}`,
+    `- Your open items: ${input.work.filter(item => item.stage !== 'done').map(item => `${item.key}: ${item.title}`).join('; ').slice(0, 2000) || 'none'}`,
   ].join('\n');
 }
 /** The session's first request: the shared master prompt, the simplicity paragraph, then the handover. */
@@ -49,7 +50,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
   const name = nameForLaunch(retry, () => config.masterAgentName);
   if (!herdr.available) throw new Error(`Herdr's session inventory could not be read, so no master session is launched into it; the launch is made again once Herdr answers`);
   if (herdr.agents.some(agent => agent.name === name)) throw new Error(`Master session ${name} is already visible in Herdr; the loop adopts it instead of launching a second`);
-  const selected = await selectFleetSession(config, 'master', { name: masterProfile, principal: config.operatorAgent?.id }, await heldAwareProbe(config, { runtime: herdr, ...probe }));
+  const selected = await selectFleetSession(config, 'master', { name: masterProfile, principal: config.operatorAgent?.id }, await heldAwareProbe(config, { runtime: herdr, ...(config.forPerson ? { group: config.forPerson } : {}), ...probe }));
   if (!selected) throw masterRoleUnconfigured(`No agent registry role decides the master session`);
   const kind = selected.account.kind;
   let plan: ReturnType<typeof accountLaunch>;
@@ -72,7 +73,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     // deny rules that keep it from borrowing another identity — never a worker or producer credential.
     await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root,
-      '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`,
+      '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', ...(config.forPerson ? ['--env', `GRAPHYARD_FOR_PERSON=${config.forPerson}`] : []), '--env', `GRAPHYARD_URL=${config.url}`, '--env', `GRAPHYARD_HOST_ID=${config.hostId}`,
       ...Object.entries(plan.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
     // Confined exactly as `master start` launches it (GY-1658): the checkout read-only at the OS

@@ -151,6 +151,11 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       cursor ??= await readDispatchCursor(root, current());
       return runDispatchTick(current(), cursor, dispatchEffects(root, current, { snapshot: async () => snapshot, mutate, run }));
     })().finally(() => { ticking = null; }),
+    personalMasterSession: config => ({
+      ...masterSessionEffects(root, () => config, run),
+      end: (session, reason) => endRegistrySessionById(config, session, reason),
+      exhaust: (account, notice) => recordObservedExhaustion(config, account, { at: new Date().toISOString(), reason: notice.reason, resetsAt: notice.resetsAt, role: 'master', profile: masterProfile, work: null }),
+    }),
     masterSession: {
       ...masterSessionEffects(root, current, run),
       // GY-2949: the master pane's limit notice holds its account exactly as a worker's holds theirs,
