@@ -11,7 +11,7 @@ import type { DispatchEffects } from '../../src/auto-dispatch.js';
 import { temporaryDirectory } from './temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01T10:00Z at stamps createdAt, stageEnteredAt and evidence of fixture items; new Date() is the clock handed to reconcileAutoDispatch and stamps snapshots and token expiries nothing ages.
 
-// The automatic-review fleet (GY-1072): a master bound to a reviewer App over a stubbed Herdr, and
+// The automatic-review fleet (GY-1072): a master over a stubbed Herdr, and
 // review requests for it, shared by tests/automatic-review-concurrency.test.ts and the soak.
 
 const launcher = fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
@@ -42,7 +42,7 @@ export function requested(n: number, head = 1): Work {
 }
 
 /**
- * A master bound to a reviewer App with a stubbed Herdr: every typed launch becomes a visible agent,
+ * A master with a stubbed Herdr: every typed launch becomes a visible agent,
  * and `pane close` removes one unless the test makes Herdr refuse it: `refuseClose` maps a pane to
  * how many more closes Herdr refuses (Infinity: every one). `closes` lists every close asked for.
  */

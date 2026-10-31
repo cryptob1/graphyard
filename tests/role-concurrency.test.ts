@@ -62,7 +62,7 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
 }
 
 /**
- * A master bound to a reviewer App with a stubbed Herdr: every typed launch becomes a visible
+ * A master with a stubbed Herdr: every typed launch becomes a visible
  * agent, every `pane close` removes one, and each tab gets its own pane, so what the launchers
  * count against a profile's limit is exactly what they started.
  */

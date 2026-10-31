@@ -36,7 +36,7 @@ import type { Services } from './routes.js';
  */
 const sha = z.string().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const hex64 = z.string().regex(/^[0-9a-f]{64}$/);
-// Reviewer principal names; retain bot logins so existing launches and verdicts still load.
+// Reviewer principal names, which may carry a bot suffix.
 const identifier = z.string().trim().min(1).max(120).regex(/^[A-Za-z0-9][A-Za-z0-9._:@/-]*(?:\[bot\])?$/);
 const instant = z.string().max(64).refine(value => Number.isFinite(Date.parse(value)), 'an ISO 8601 instant');
 export const reviewLaunchBodySchema = z.object({ reviewer: identifier, head: sha, baseTip: sha, tokenHash: hex64, expiresAt: instant, postMerge: z.boolean().default(false), product: z.boolean().default(false) }).strict();

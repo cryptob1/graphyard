@@ -42,7 +42,7 @@ function work(overrides: Partial<Work> = {}): Work {
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
 }
 
-/** A master with a bound reviewer App and two reviewer profiles — the two runtimes the incident launched. */
+/** A master with two reviewer profiles — the two runtimes the incident launched. */
 async function reviewerMaster() {
   const root = await temporaryDirectory('gy124'), credentials = await temporaryDirectory('gy124-cred');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
