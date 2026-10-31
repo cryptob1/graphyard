@@ -1,7 +1,7 @@
 <!-- page: Operate Graphyard | 5 | loop -->
 # Master-agent operating mode
 
-The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; it files and releases items itself ([intent](how-graphyard-works.md#from-intent-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
+The master (`coordinator`) routes and administers remote access unasked, never implementing, reviewing or proving; it files items itself, and its loop releases backlog to keep the pipeline full ([intent](how-graphyard-works.md#from-intent-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
 
 ## Operate
 
@@ -13,7 +13,7 @@ Cycle until every in-scope item is Done or carries a recorded blocker and the re
 
 1. **snapshot**: the work snapshot and Herdr's session list.
 2. **close**: end sessions whose item left the stage they were launched for; keep what an attempt ended by its lapsed lease had not committed and record it for the redispatch's handoff — whether the lapsed lease is still on the record or the control plane's reconciliation already cleared it (GY-2956); reconcile leases that lapsed unsubmitted; remove ended attempts' worktrees.
-3. **dispatch**: claimable items to free worker profiles; unmergeable heads back to a worker; reviewer and producer requests; the master session, launched when absent.
+3. **dispatch**: backlog released while the pipeline sits under its concurrency — the highest-priority item whose dependencies are done, oldest first on ties; a parked item never releases; claimable items to free worker profiles; unmergeable heads back to a worker; reviewer and producer requests; the master session, launched when absent.
 4. **merge writer**: trial and merge each submitted head in order ([delivery](delivery.md)).
 5. **persist**: the loop cursor.
 
