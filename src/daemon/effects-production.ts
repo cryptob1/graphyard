@@ -141,7 +141,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     },
     dispatch: (work, profile, agents, snapshot) => dispatchWork(root, work, profile, agents, run, snapshot.work, undefined, undefined, undefined, snapshot.now, { agents: () => listHerdrAgents(run) }),
     // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch.
-    launchSpecCheck: work => launchSpecCheck(root, work, undefined, [], new Date().toISOString(), { run }),
+    launchSpecCheck: async work => launchSpecCheck(root, work, undefined, await listHerdrAgents(run), new Date().toISOString(), { run }),
     // The reviewer and producer sessions the dispatcher owes, over the cycle's own snapshot; a tick
     // still running past its step's timeout is not started twice.
     dispatchTick: snapshot => ticking ??= (async () => {

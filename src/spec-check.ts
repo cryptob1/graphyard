@@ -7,27 +7,29 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { ChildRun } from './child-runner.js';
 import type { FleetProbe } from './fleet.js';
 import type { SandboxExec } from './worker-sandbox.js';
 import {
   accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab,
   herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, prepareSessionHarness, readCredentialFile,
-  selectAccount, sessionAgentName, startAgentSession,
+  profileAtLimit, profileSessions, selectAccount, sessionAgentName, startAgentSession,
   type PromptDelivery, type StartBounds,
 } from './master.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
-import { anchorSessionCheckout as anchorCheckout, reviewerCredentialDirectory, sessionWritable, simplicityParagraph, verifySessionSandbox } from './reviewer.js';
+import { anchorSessionCheckout as anchorCheckout, readReviewLedger, reviewerCredentialDirectory, sessionWritable, simplicityParagraph, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { writeSpecCheckBinding } from './spec-check-post.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchMs } from './model/spec-check.js';
 import type { Work } from './model.js';
 
-/** The vendored EGM reviewer prompts, read from the coordinator checkout at launch. */
-export async function readVendorPrompts(root: string): Promise<{ comprehension: string; readiness: string }> {
+/** The vendored EGM reviewer prompts, read from the Graphyard install that runs the loop — never the managed project, which carries none. */
+export async function readVendorPrompts(): Promise<{ comprehension: string; readiness: string }> {
   const read = async (file: string) => {
-    try { return await readFile(resolve(root, 'vendor/egm', file), 'utf8'); }
-    catch { throw new Error(`The vendored Elephant-Goldfish prompt vendor/egm/${file} is missing from the coordinator checkout; restore it to launch a spec check`); }
+    const path = fileURLToPath(new URL(`../vendor/egm/${file}`, import.meta.url));
+    try { return await readFile(path, 'utf8'); }
+    catch { throw new Error(`The vendored Elephant-Goldfish prompt ${path} is missing from this Graphyard install; restore it to launch a spec check`); }
   };
   return { comprehension: await read('egm-comprehension.md'), readiness: await read('egm-implementation-readiness.md') };
 }
@@ -78,6 +80,9 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
     ? (selected => selected ? { profile: selected, reason: null } : { profile: null, reason: `no configured reviewer profile is named ${profileName}` })(config.reviewers.find(item => item.name === profileName))
     : selectReviewerProfile(config, 'control-plane');
   if (!profile) throw new Error(`No reviewer profile to launch ${work.key}'s spec checker from: ${reason}. Write one with graphyard master environments --apply`);
+  // A spec checker takes one of the reviewer profile's sessions: its pending reviews and live panes hold the rest.
+  const sessions = profileSessions(profile, agents, (await readReviewLedger(root)).reviews);
+  if (!sessions.free) throw new Error(`${profileAtLimit('Reviewer', profile, sessions)}; ${work.key}'s spec check launches when a session ends`);
   const run = dependencies.run;
   // The base branch tip, as it stands now: what the item's named files look like before any worker starts.
   let baseTip: string;
@@ -113,7 +118,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
         '--label', `${work.key} spec check · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], run));
       pane = created.pane;
       await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args],
-        specCheckPrompt(config, work, await readVendorPrompts(root), checkout.worktree, baseTip), run,
+        specCheckPrompt(config, work, await readVendorPrompts(), checkout.worktree, baseTip), run,
         { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role });
       return { work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {

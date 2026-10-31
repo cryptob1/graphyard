@@ -433,9 +433,6 @@ async function dispatchStep(cycle: Cycle) {
   // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
   // session per owed check. The hold itself is assertDispatchable's; the launch runs while the item
   // is released and unblocked and no check stands and no launch is live on the item — one session
-  // per check, and the report's arrival (or a launch that stands) ends the launching. The key names
-  // the revision judged and the last launch, so a revision's re-check, or a relaunch after a
-  // launch expired unreported, is a fresh action.
   // A launched checker's pane closes once a snapshot read after its launch shows no live launch on
   // the item — its report landed or its launch expired — or the item done; the pane then leaves
   // the record, so it closes once.
@@ -448,13 +445,18 @@ async function dispatchStep(cycle: Cycle) {
       await record(state, key, { ...action, pane: undefined, at: undefined, detail: `Closed ${action.work}'s spec-check session (${action.pane}): ${item ? 'its launch no longer stands' : 'the item is done'}` }, cycle.now(), effects.persist);
     } catch (error) { await note(cycle, `close:${key}`, 'close', action.work, 'failed', `Could not close ${action.work}'s spec-check session (${action.pane}): ${message(error)}`); }
   }
-  if (effects.launchSpecCheck) for (const item of open) {
+  // per check, and the report's arrival (or a launch that stands) ends the launching. The key names
+  // the revision judged and the last launch, so a revision's re-check, or a relaunch after a
+  // launch expired unreported, is a fresh action. One launch flies at a time: each reads Herdr and
+  // the review ledger afresh, so the reviewer profile's concurrency bounds the checkers.
+  if (effects.launchSpecCheck && !launcher.keys().some(key => key.startsWith('spec-check:'))) for (const item of open) {
     if (!item.ready || item.blocker) continue;
     if (item.lease && Date.parse(item.lease.expiresAt) > clock) continue;
     if (!needsSpecCheck(item) || specCheckCurrent(item) || specCheckLaunchLive(item, clock)) continue;
     const key = `spec-check:${item.id}:${item.policyRevision}:${item.specCheckLaunch?.id ?? ''}`;
     if (launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) continue;
     launcher.submit(key, [], sink => launchSpecChecker(cycle, item, key, sink));
+    break;
   }
   if (effects.rework) for (const item of open) {
     const rework = neededRework(item);

@@ -46,7 +46,7 @@ const states = new Map<string, DaemonState>();
 let launches = 0;
 
 /** Two loop rounds: the stubbed spec checker registers its launch and posts its verdict the way the control plane records them; a verdict that lands in round one is acted on in round two. */
-async function drive(item: Work, verdict: SpecVerdict | null) {
+async function drive(item: Work, verdict: SpecVerdict | null, others: Work[] = [], cycles = 2) {
   const directory = await temporaryDirectory('spec-check-dispatch');
   try {
     const token = join(directory, 'coordinator.token');
@@ -55,7 +55,7 @@ async function drive(item: Work, verdict: SpecVerdict | null) {
     await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
     const profile: WorkerProfile = { name: 'worker', principal: 'worker-principal', agentName: 'agent-worker', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
     const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile] });
-    const work = [item];
+    const work = [item, ...others];
     const launched: string[] = [], checks: string[] = [], closed: string[] = [];
     const effects: DaemonEffects = {
       agents: () => [], credentials: async items => Object.fromEntries(items.map(entry => [entry.name, { available: true, reason: null }])),
@@ -74,8 +74,7 @@ async function drive(item: Work, verdict: SpecVerdict | null) {
     };
     const state = states.get(item.key) ?? emptyDaemonState(master);
     states.set(item.key, state);
-    await runCycle(master, state, effects, () => clock);
-    await runCycle(master, state, effects, () => clock);
+    for (let round = 0; round < cycles; round += 1) await runCycle(master, state, effects, () => clock);
     return { launched, checks, closed, refusal: specCheckRefusal(item) };
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
@@ -175,4 +174,15 @@ test('unit:spec-check-before-dispatch — a "No user-facing change" feature owes
   assert.deepEqual(checks, ['GY-17'], 'the loop launches its checker');
   assert.deepEqual(launched, [], 'and dispatches no worker before it reports');
   assert.match(refusal!, /^Spec check before dispatch has not reported/);
+});
+
+test('unit:spec-check-before-dispatch — one spec check launches at a time, so the reviewer profile\'s concurrency bounds the checkers', async () => {
+  const { checks } = await drive(feature('GY-18'), null, [feature('GY-19')], 1);
+  assert.deepEqual(checks, ['GY-18'], 'a cycle launches one checker; the next launches after it settles, reading Herdr afresh');
+});
+
+test('unit:spec-check-before-dispatch — the EGM prompts are read from the Graphyard install, not the managed project', async () => {
+  const { readVendorPrompts } = await import('../src/spec-check.js');
+  const prompts = await readVendorPrompts();
+  assert.ok(prompts.comprehension.length > 100 && prompts.readiness.length > 100);
 });
