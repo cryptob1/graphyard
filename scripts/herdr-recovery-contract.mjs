@@ -37,8 +37,9 @@ export async function exercise(url, principals, inventory = createInventory(), f
     return request(`work/${work.id}/ready`, operator, {});
   }
   const worktree = (machine, work, epoch) => ({ epoch, host: machine.host, path: `/srv/graphyard/${machine.host}/${work.key.toLowerCase()}-${epoch}`, branch: `graphyard/${work.key.toLowerCase()}-${epoch}` });
+  // submit names a head: the HTTP route refuses a pull-request number before the lease fence runs.
   const staleBody = (command, work, machine) => ({ heartbeat: { epoch: 1 }, release: { epoch: 1 }, blocked: { epoch: 1, reason: 'Stale owner note' },
-    workspace: worktree(machine, work, 1), submit: { epoch: 1, pr: 1 } }[command]);
+    workspace: worktree(machine, work, 1), submit: { epoch: 1, head: 'a'.repeat(40) } }[command]);
   const candidateNow = async () => Date.parse((await request('status', operator)).now);
   // A fence created between two candidate clock reads runs for at most `deadline - before`, so this
   // refuses any default shorter than the requirement while granting no more slack than that window.

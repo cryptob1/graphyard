@@ -54,7 +54,7 @@ export async function exercise(url, principals, inventory = createInventory()) {
   const replacement = workers.find(w => w.id !== winner.actor.id);
   work = await request(`work/${work.id}/claim`, replacement, {}); assert.equal(work.epoch, 2);
   for (const command of ['heartbeat', 'release']) await request(`work/${work.id}/${command}`, winner.actor, { epoch: 1 }, 409);
-  await request(`work/${work.id}/submit`, winner.actor, { epoch: 1, pr: 1 }, 409); inventory.pass('stale-epoch');
+  await request(`work/${work.id}/submit`, winner.actor, { epoch: 1, head: 'a'.repeat(40) }, 409); inventory.pass('stale-epoch');
   inventory.begin('worker-proof-denied');
   const proof = { proof: 'integration:claim-safety', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, result: 'pass', executed: 5, skipped: 0 };
   await request(`work/${work.id}/evidence`, replacement, { ...proof, trusted: true }, 400);

@@ -233,7 +233,7 @@ test('unit:gates-github-snapshot — with source undefined a pull-request-era ob
   assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: false, checks: [{ name: 'test', result: 'failure', appId: 15368 }] })), snapshot);
 });
 
-test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, head} with the SHA defaulting to the worktree HEAD, complete GY-N EPOCH PR sends the body it always did, and the command still reports self-verification beside the control plane\'s answer', async () => {
+test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, head} with the SHA defaulting to the worktree HEAD, and the command still reports self-verification beside the control plane\'s answer', async () => {
   const headOf = () => head;
   assert.deepEqual(completionBody(['2'], headOf), { epoch: 2, head });
   assert.deepEqual(completionBody(['2', '--head'], headOf), { epoch: 2, head });
