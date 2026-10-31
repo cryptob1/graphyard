@@ -156,7 +156,9 @@ const identities = () => [{ ...operator, token: 'r'.repeat(32) }, ...machines];
 const run = (target: string, principals: unknown[], fences?: typeof shortFences, inventory = createInventory()) => exercise(target, principals, inventory, fences);
 before(async () => {
   const port = Number(process.env.GRAPHYARD_HERDR_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 7);
-  pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  // The suite connects over TCP, so no Unix-domain socket is needed (GY-3001): disabling it
+// lets this run where socket creation is unavailable while changing nothing over TCP.
+pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1', '-k', ''] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('recovery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/recovery_test`); await store.init();
   http = server(new Engine(store, leaseSeconds, 'owner/project'), [{ ...operator, token: 'r'.repeat(32) }, ...machines]);
