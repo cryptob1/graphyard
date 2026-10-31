@@ -133,10 +133,11 @@ export async function runCycle(config: MasterConfig, state: DaemonState, effects
   await step('dispatch', async () => {
     await dispatchStep(cycle);
     if (!config.forPerson) for (const person of config.people ?? []) {
+      // Release and review/proof dispatch are the install's, once a cycle: every scope shares that capacity, so priority decides across owners.
       const scopedConfig = { ...config, forPerson: person, masterAgentName: sessionName(config.masterAgentName, person) };
       state.personalMasters[person] ??= emptyMasterSession();
       const scopedState = { ...state, get master() { return state.personalMasters[person]; }, set master(value) { state.personalMasters[person] = value; } };
-      await dispatchStep({ ...cycle, config: scopedConfig, state: scopedState, effects: { ...effects, masterSession: effects.personalMasterSession?.(scopedConfig), persist: () => effects.persist(state) } });
+      await dispatchStep({ ...cycle, config: scopedConfig, state: scopedState, effects: { ...effects, release: undefined, dispatchTick: undefined, masterSession: effects.personalMasterSession?.(scopedConfig), persist: () => effects.persist(state) } });
     }
   });
   if (!config.forPerson) await step('merge writer', () => mergeWriterStep(cycle));
@@ -426,8 +427,7 @@ async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<
  */
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
-  // Release is the install's, once a cycle: every scope shares its capacity, so priority decides across owners.
-  if (effects.release && !config.forPerson) await releaseBacklog(cycle);
+  if (effects.release) await releaseBacklog(cycle);
   const open = snapshot.work.filter(item => item.stage !== 'done' && (item.owner ?? null) === (config.forPerson ?? null));
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
   const taken = cycle.reservedProfiles;
@@ -449,7 +449,7 @@ async function dispatchStep(cycle: Cycle) {
     try { await effects.rework(item, rework.reason, rework.binding); await note(cycle, key, 'judgement', item.key, 'done', `Returned ${item.key} to a worker: ${rework.reason}`); }
     catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not return ${item.key} to a worker: ${message(error)}`); }
   }
-  if (!config.forPerson) await effects.dispatchTick?.(snapshot);
+  await effects.dispatchTick?.(snapshot);
   await masterSession(cycle, open);
 }
 
