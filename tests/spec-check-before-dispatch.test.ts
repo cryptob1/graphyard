@@ -196,3 +196,14 @@ test('unit:spec-check-before-dispatch — a spec checker holds its reviewer sess
   item.specCheckLaunch = null;
   assert.match(sessionEnded(session, item, clock)!, /no standing review request or spec-check launch/, 'once the report lands, the session ends');
 });
+
+test('unit:spec-check-before-dispatch — a launch a loop restart cut off before it registered launches again', async () => {
+  const item = feature('GY-21');
+  const key = `spec-check:${item.id}:${item.policyRevision}:`;
+  const master = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/nonexistent', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [] });
+  const state = emptyDaemonState(master);
+  state.actions[key] = { kind: 'review', work: item.key, principal: null, state: 'started', detail: `Launching ${item.key}'s spec check`, attempts: 1, epoch: null, cycle: 0, at: new Date(clock - 60_000).toISOString() };
+  states.set(item.key, state);
+  const { checks } = await drive(item, null);
+  assert.deepEqual(checks, ['GY-21'], 'the restarted loop launches the check the cut-off launch never registered');
+});

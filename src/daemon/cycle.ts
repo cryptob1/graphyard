@@ -424,7 +424,7 @@ async function dispatchStep(cycle: Cycle) {
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
   for (const item of claimable) {
     const key = dispatchKey(item);
-    if (launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) continue;
+    if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     const free = health.find(entry => entry.healthy && !taken.has(entry.profile.name));
     if (!free) break;
     taken.add(free.profile.name);
@@ -454,7 +454,9 @@ async function dispatchStep(cycle: Cycle) {
     if (item.lease && Date.parse(item.lease.expiresAt) > clock) continue;
     if (!needsSpecCheck(item) || specCheckCurrent(item) || specCheckLaunchLive(item, clock)) continue;
     const key = `spec-check:${item.id}:${item.policyRevision}:${item.specCheckLaunch?.id ?? ''}`;
-    if (launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) continue;
+    // Only a launch that registered ends the launching: a started one a restart cut off before its
+    // registration (resumed as indeterminate) launches again, since a launch registers before any session starts.
+    if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     launcher.submit(key, [], sink => launchSpecChecker(cycle, item, key, sink));
     break;
   }
