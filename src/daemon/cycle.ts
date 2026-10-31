@@ -6,7 +6,7 @@ import { assertDispatchable } from '../master.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
-import { dispatchSort } from '../coordination.js';
+import { dispatchSort, inFlight } from '../coordination.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
@@ -15,6 +15,7 @@ import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
 import { hotspots } from './hotspots.js';
 import { settledPurpose } from '../model/session-state.js';
+import { loopOwnedRefusal, ownerHoldRefusal } from '../model/loop-owned.js';
 import { attemptClaimedAt, attemptProgressFresh, attemptProgressWindowMs } from '../model/attempt-bound.js';
 import { attemptBoundMs, attemptCeilingMs, boundMinutes } from '../master/attempt-bound.js';
 import { profileHealth, clearProfileFailure, recordProfileFailure } from './sessions.js';
@@ -419,11 +420,14 @@ async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<
 }
 
 /**
- * Dispatch: each claimable item to a free worker profile, each head nothing can carry forward back
- * to a worker, the reviewer and producer sessions the dispatcher owes, and the master session when absent.
+ * Dispatch: fill the pipeline from backlog (GY-2991), then each claimable item to a free worker
+ * profile, each head nothing can carry forward back to a worker, the reviewer and producer
+ * sessions the dispatcher owes, and the master session when absent.
  */
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
+  // Release is the install's, once a cycle: every scope shares its capacity, so priority decides across owners.
+  if (effects.release && !config.forPerson) await releaseBacklog(cycle);
   const open = snapshot.work.filter(item => item.stage !== 'done' && (item.owner ?? null) === (config.forPerson ?? null));
   const health = profileHealth(config.workers, credentials, herdr.agents, state, clock, snapshot.work);
   const taken = cycle.reservedProfiles;
@@ -447,6 +451,40 @@ async function dispatchStep(cycle: Cycle) {
   }
   if (!config.forPerson) await effects.dispatchTick?.(snapshot);
   await masterSession(cycle, open);
+}
+
+/**
+ * The loop keeps the pipeline full itself (GY-2991): while fewer items occupy it — claimed,
+ * submitted, in review or merge, or released and not yet done — than its concurrency (one slot per
+ * configured worker profile), it releases the backlog item with the highest priority, oldest first
+ * on ties, whose dependencies are all done, recording the release decision under the loop's own
+ * identity with the reason. A parked item — any standing blocker — never releases, nor an
+ * owner-held or loop-owned item, whose release the control plane refuses. Items the master wants
+ * held are parked, not left in backlog, so backlog means "work this next"; `master release` stays
+ * for an out-of-order pull. Each release takes its response's document, so the same cycle's
+ * dispatch offers the item.
+ */
+async function releaseBacklog(cycle: Cycle) {
+  const { config, state, effects, snapshot, clock } = cycle;
+  let slots = config.workers.length - snapshot.work.filter(item => item.stage !== 'done' && (item.ready || inFlight(item, clock))).length;
+  if (slots <= 0) return;
+  const identity = config.operatorAgent ? { id: config.operatorAgent.id, role: 'operator-agent' as const } : undefined;
+  const candidates = snapshot.work
+    .filter(item => item.stage !== 'done' && !item.ready && !item.blocker && !loopOwnedRefusal(item) && !ownerHoldRefusal(item, identity)
+      && item.dependencies.every(dep => snapshot.work.find(entry => entry.id === dep)?.stage === 'done'))
+    .sort((a, b) => a.priority - b.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt));
+  for (const item of candidates) {
+    if (slots <= 0) break;
+    const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
+    try {
+      const released = await effects.release!(item, `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length}, every dependency of ${item.key} is done, and backlog means work this next`) as Work | undefined;
+      const index = snapshot.work.findIndex(entry => entry.id === item.id);
+      if (index >= 0 && released && typeof released === 'object' && 'ready' in released) snapshot.work[index] = released;
+      slots -= 1;
+      await note(cycle, key, 'judgement', item.key, 'done', `Released ${item.key} to keep the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length} and every dependency is done`, config.operatorAgent?.id ?? null);
+    }
+    catch (error) { await note(cycle, key, 'judgement', item.key, 'failed', `Could not release ${item.key} from backlog: ${message(error)}`, config.operatorAgent?.id ?? null); }
+  }
 }
 
 /** One worker launch on the launcher: the claim is the worker's own, under its profile's principal. */

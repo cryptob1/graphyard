@@ -10,6 +10,8 @@ import { defaultChildRun, type ChildRun } from './child-runner.js';
 import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, loadStoredMasterConfig, markReprompted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { sessionConfinement } from './master/launch.js';
+import { credentialMaskFor, type CredentialMask } from './master/confinement.js';
+import { runtimeLoginHomes } from './master/profiles.js';
 import { underTestRunner } from './supervisor.js';
 import { runtimeSandboxes, sessionWritablePaths, verifyWorkerSandbox, type SandboxExec } from './worker-sandbox.js';
 import { withVerificationPath } from './master/verification-slots.js';
@@ -619,11 +621,11 @@ export type SessionSandboxProbe = SandboxExec | 'host' | null;
  * first command and is recorded as never started. A runtime without a write-restricting sandbox is
  * not probed here.
  */
-export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch: { kind?: string; args: string[]; environment?: Record<string, string> }, directory: string, writable: string[], probe: SessionSandboxProbe | undefined, ownGitHubCredential = false) {
+export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch: { kind?: string; args: string[]; environment?: Record<string, string> }, directory: string, writable: string[], probe: SessionSandboxProbe | undefined, ownGitHubCredential = false, credentialMask?: CredentialMask) {
   const run = probe === undefined ? (underTestRunner() ? null : 'host') : probe;
   const sandbox = launch.kind ? runtimeSandboxes[launch.kind] : undefined;
   if (!run || !sandbox || sandbox.mode(launch.args) === null) return null;
-  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, ownGitHubCredential });
+  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, ownGitHubCredential, credentialMask });
   return verifyWorkerSandbox({ ...launch, role, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, directory, writable, run === 'host' ? undefined : run);
 }
 
@@ -1146,12 +1148,15 @@ export async function launchReview(root: string, work: Work, profileName: string
       }
       const writable = await sessionWritable(root, config, checkout.directory);
       const launch = accountLaunch(profile, selected.account, { writable });
+      // The install's credential locations are hidden from this session (GY-1856); a reviewer's
+      // own credential is the binding its launch directory carries, and its runtime login stays.
+      const credentialMask = credentialMaskFor(config, { runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       let pane: string | undefined, tabId: string | undefined, delivery: RequestDelivery | undefined, consent: z.infer<typeof consentAnswerSchema>[] = [];
       try {
         // The reviewer loads its own role rules, never the master's: it may post this one verdict.
         // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
-        await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true);
+        await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
         const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, ...(plane ? { GRAPHYARD_URL: config.url } : {}) };
         startedTab = true;
         const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
@@ -1161,7 +1166,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();

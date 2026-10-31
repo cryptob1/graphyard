@@ -58,6 +58,19 @@ test('unit:masters-dispatch-owned-items two personal masters and the install sha
   }
 });
 
+test('unit:masters-dispatch-owned-items the shared loop releases each scope\'s backlog once, while each scope dispatches only its own', async () => {
+  const backlog = await Promise.all([create('alice'), create('bob'), create()]);
+  const config = masterConfigSchema.parse({ version: 1, url: 'http://control-plane', credentialFile: '/tmp/unused-owner-test-token', cliPath: '/tmp/unused-cli', repository: 'owner/project', baseBranch: 'main', githubAppId: 0, hostId: 'test', masterAgentName: 'master', people: ['alice', 'bob'], workers: Array.from({ length: 12 }, (_, index) => ({ name: `w${index}`, principal: `w${index}`, agentName: `w${index}`, mode: 'launch', kind: 'codex', credentialFile: '/tmp/unused-worker-token' })) });
+  const released: string[] = [];
+  await runCycle(config, emptyDaemonState(config), {
+    snapshot: async () => ({ work: await store.list(), now: new Date().toISOString() }),
+    agents: () => [], closeSession: () => {}, persist: async () => {}, dispatch: async () => {},
+    credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: false, reason: 'not under test' }])),
+    release: async item => { released.push(item.key); },
+  } as DaemonEffects);
+  for (const item of backlog) assert.equal(released.filter(key => key === item.key).length, 1, `${item.key} is released once`);
+});
+
 test('unit:masters-dispatch-owned-items owner changes are transactional requirements, preserve criteria and append history', async () => {
   const item = await create('alice');
   const requirements = { expectedPolicyRevision: item.policyRevision, reason: 'Bob now owns this priority', criteria, dependencies: [], exclusiveResources: [], producerProofs: [] };
