@@ -26,6 +26,8 @@ export const mergeWriterTrialTimeoutRefusals = 2;
 /** How many record writes whose reply was lost `state.mergeWriter` keeps, and how many cycles one is replayed before the ledger is adopted instead (GY-1852). */
 export const mergeWriterKeptUnconfirmed = 20, mergeWriterUnconfirmedReplays = 10;
 const shaField = z.string().max(64), instant = z.string().max(64);
+/** GY-2990: how many reverts `state.mergeWriter.serveRevert` keeps. A filed one is dropped oldest first to make room; one still owing its re-land never is, so at this many owed no new revert starts. */
+const serveRevertsKept = 20;
 /**
  * A rework a failed trial grounds that the server has not yet confirmed (AC-3): kept until the
  * decision request succeeds or the snapshot shows the item reworked, moved to a new head or done,
@@ -80,7 +82,7 @@ export const mergeWriterStateSchema = z.object({
   serveRevert: z.object({
     lastVerified: shaField.nullable().default(null),
     reverts: z.array(z.object({ serve: shaField, culprit: z.string().max(100), mergeSha: shaField, revertSha: shaField, reland: z.string().max(100).nullable(),
-      failingCase: z.string().max(500), failingStep: z.string().max(2000).nullable(), failingReason: z.string().max(2000).nullable(), at: instant }).strict()).max(20).default([]),
+      failingCase: z.string().max(500), failingStep: z.string().max(2000).nullable(), failingReason: z.string().max(2000).nullable(), at: instant }).strict()).max(serveRevertsKept).default([]),
     held: z.object({ serve: shaField, culprit: z.string().max(100), reason: z.string().max(2000), at: instant }).strict().nullable().default(null),
     /**
      * GY-2990 rework: the last revert attempt that needs another try (a trial failing only
@@ -545,8 +547,10 @@ function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWriterRead
     action('failed', `Held: ${settled.reason}`);
     return;
   }
-  revertState.reverts = [...revertState.reverts, { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland: null,
-    failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason, at: at() }].slice(-20);
+  const reverts = [...revertState.reverts, { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland: null,
+    failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason, at: at() }];
+  const forgotten = reverts.length > serveRevertsKept ? reverts.find(entry => entry.reland) : undefined;
+  revertState.reverts = reverts.filter(entry => entry !== forgotten);
   if (revertState.held?.serve === revert.serve) revertState.held = null;
   writer.lastMergeAt = at();
   action('done', `Reverted ${flight.key}'s merge ${short(revert.mergeSha)} from ${reads.baseBranch} as ${short(revert.revertSha)} after served ${short(revert.serve)} failed the required case ${revert.failingCase}`);
@@ -629,6 +633,8 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   const failing = { serve, failingCase: check.case.slice(0, 500), failingStep: check.step?.slice(0, 2000) ?? null, failingReason: check.reason?.slice(0, 2000) ?? null };
   // One serve reverts once.
   if (revertState.reverts.some(entry => entry.serve === serve)) return false;
+  // Every kept record owes its re-land: a new revert would have to forget one, so it waits for a filing.
+  if (revertState.reverts.filter(entry => !entry.reland).length >= serveRevertsKept) return false;
   if (revertState.held?.serve === serve || flights.has(state)) return false;
   // A serve the guard already answered reads nothing until the serve or the baseline moves.
   if (revertState.answered?.serve === serve && revertState.answered.lastVerified === revertState.lastVerified) return false;

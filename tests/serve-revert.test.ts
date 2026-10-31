@@ -682,3 +682,49 @@ test('unit:revert-only-the-failing-item — an original at the 50-criterion limi
   const { reason: _fullReason, ...atLimit } = relandItemFor(original(criteria), live);
   assert.deepEqual(createSchema.parse(atLimit).criteria[0]!.proofs, ['unit:proof-1', 'e2e:production-exact-verification']);
 });
+
+test('unit:revert-only-the-failing-item — a re-land still owed is never forgotten: a filed record makes room, and at 20 owed no new revert starts until one is filed', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-owed-kept');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const tried: unknown[] = [], filed: RelandInput[] = [];
+  const reads = loopReads(coordinator, origin, join(coordinator, '.graphyard', 'served.json'), clock, () => passTrial, tried, filed);
+  const createWork = reads.createWork!;
+  delete reads.createWork;
+  const { state, cycle } = loopState(config, clock);
+  const step = () => mergeWriterStep({ ...cycle(work), effects: { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects });
+  const record = (index: number, reland: string | null) => ({ serve: index.toString(16).padStart(40, 'a'), culprit: 'GY-3001', mergeSha: index.toString(16).padStart(40, 'b'), revertSha: index.toString(16).padStart(40, 'c'),
+    reland, failingCase: `case-${index}`, failingStep: null, failingReason: null, at: new Date(clock.nowMs).toISOString() });
+  // A full history: the oldest filed, the other 19 still owing.
+  const seeded = [record(0, 'GY-2000'), ...Array.from({ length: 19 }, (_, index) => record(index + 1, null))];
+  state.mergeWriter.serveRevert = { lastVerified: verified, reverts: seeded, held: null, retry: null, answered: null };
+
+  // The 20th owed revert drops the filed record, never an owed one.
+  await servedFixture(coordinator, served, 'case-beta');
+  await step();
+  await mergeWriterIdle(state);
+  await step();
+  const kept = state.mergeWriter.serveRevert.reverts;
+  assert.equal(kept.length, 20);
+  assert.deepEqual(kept.slice(0, 19).map(entry => entry.failingCase), seeded.slice(1).map(entry => entry.failingCase));
+  assert.equal(kept[19]!.failingCase, 'case-beta');
+  assert.equal(kept.every(entry => entry.reland === null), true);
+  mergeWriterStateSchema.parse(JSON.parse(JSON.stringify(state.mergeWriter)));
+
+  // Twenty owed: the next failing serve starts no revert.
+  const tip = tipOf(origin);
+  await servedFixture(coordinator, tip, 'case-alpha');
+  await step();
+  assert.equal(tried.length, 1);
+  assert.equal(state.mergeWriter.inFlight, null);
+
+  // The filing route returns: every owed re-land is filed, each from its own record, and the serve is answered.
+  reads.createWork = createWork;
+  await step();
+  await mergeWriterIdle(state);
+  assert.equal(filed.length, 20);
+  assert.equal(filed.filter(input => input.criteria.at(-1)!.proofs[0] === 'e2e:case-1').length, 1);
+  assert.equal(tried.length, 2);
+});
