@@ -1,7 +1,7 @@
 {
   "id": "per-owner-now-page",
   "title": "Each signed-in person has a Now page of exactly their items",
-  "description": "Three signed-in browser sessions share a board: Alice sees her two items, Bob sees his one, and Charlie sees an empty Now page. Every row carries its stage and next step; unowned items remain on the shared board.",
+  "description": "Three signed-in browser sessions share a board: Alice sees her open item (finished work stays off Now), Bob sees his one, and Charlie sees an empty Now page that says the master assigns ownership on filing. Every row carries the board's stage wording and next step; board cards name the human owner.",
   "tags": ["dashboard", "ownership"],
   "target": "any",
   "required": false,

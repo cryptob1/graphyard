@@ -27,6 +27,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     unreachable = error instanceof Error ? error.message : String(error);
     return { work: [] as Work[], now: new Date().toISOString() };
   }), observeHerdrAgents(), inspectWorkerCredentials(root, master.workers), readDaemonState(root, master).catch(() => null)]);
+  // The install master lists only unowned items; count personal scopes so the operator still sees them.
+  const personalScopes = master.forPerson ? 0 : snapshot.work.filter(item => item.owner).length;
   snapshot.work = snapshot.work.filter(item => (item.owner ?? null) === (master.forPerson ?? null));
   const now = Date.parse(snapshot.now) || Date.now();
   // The managed repository's release health reads only what its own deployment records as served,
@@ -66,6 +68,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
     masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent),
     items: open.map((item, index) => itemLine(item, now, launched[index])),
+    ...(personalScopes > 0 ? { personalScopes: `${personalScopes} items in personal scopes` } : {}),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
     sessions,

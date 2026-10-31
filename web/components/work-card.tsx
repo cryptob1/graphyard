@@ -46,6 +46,7 @@ export default function WorkCard({ item, all, repository, now, onOpen, group: gi
     <span className="row-key mono">{item.key}</span>
     <span className="row-main">
       <h3><button type="button" className="card-open" data-title aria-label={`${item.title} — open ${item.key}`} onClick={e => { e.stopPropagation(); onOpen(item.id); }}>{item.title}</button></h3>
+      <span className="row-owner">Owner · {item.owner ?? 'Nobody yet'}</span>
       <span className="row-sub status-line">{pr && <span className="card-pr" onClick={e => e.stopPropagation()}>{pr}</span>}{pr && why && ' · '}{why && <Explained sentence={why}/>}{!pr && !why && (steps ? 'No commit recorded yet' : '')}</span>
     </span>
     {steps ? <span className="row-steps"><StepsBar steps={steps} labelled={group !== 'blocked'}/></span> : <span className="row-steps"/>}
