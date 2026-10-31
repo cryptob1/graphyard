@@ -829,7 +829,8 @@ export async function reconcileIntents(ports: MergePorts, work: readonly Work[],
     const item = work.find(entry => entry.key === state.key);
     if (!item) continue;
     const mergeSha = state.mergeSha!;
-    const head = state.head!;
+    // Ledger heads are lowercased at fold; normalize here too so a mixed-case row never skips the supersede branch and deadlocks the queue again.
+    const head = state.head!.toLowerCase();
     const current = item.candidate?.sha.toLowerCase() ?? null;
     // GY-3039: the item has a new head while this intent is still open. The old merge settles as
     // refused whatever the base holds — reconciling it would deliver the newer head — so the queue

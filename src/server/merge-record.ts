@@ -122,7 +122,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       if (data.head !== candidate) {
         demand(data.kind === 'refused', otherHeadRefusal(work!.key, data.head, candidate), 409);
         const ledger = await foldItemLedger(db, work!, data);
-        demand(ledger !== null && (ledger.state === 'intent' || ledger.state === 'pushed') && ledger.head === data.head, otherHeadRefusal(work!.key, data.head, candidate), 409);
+        demand(ledger !== null && (ledger.state === 'intent' || ledger.state === 'pushed') && ledger.head?.toLowerCase() === data.head, otherHeadRefusal(work!.key, data.head, candidate), 409);
       }
     }
     else {
