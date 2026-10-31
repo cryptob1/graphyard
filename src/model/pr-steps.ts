@@ -168,7 +168,8 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
   if (isClosed(work)) return make(() => 'pending', null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
   if (work.stage === 'done') {
     // The plain stage names how far a merged item got: Merged, not live yet / Live* / Done (GY-2988).
-    return make(() => 'done', 'done', plain, servedFor(work, release) ? 'Nobody — it is live' : 'Nobody — it has merged');
+    return servedFor(work, release) ? make(() => 'done', 'done', plain, 'Nobody — it is live')
+      : make(() => 'done', 'done', plain, 'Nobody — it has merged');
   }
   if (!work.submission) {
     const { detail, who } = waitsOn('build', undefined, work, now, release);
