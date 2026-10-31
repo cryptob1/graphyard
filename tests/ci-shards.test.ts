@@ -82,7 +82,8 @@ test('unit:affected-tests-selected — a pull request runs only the tests that r
   assert.ok(direct.files.length < tests.length, `${direct.files.length} of ${tests.length}`);
   const own = selectAffected(['tests/ci-shards.test.ts'], map, tests);
   assert.equal(own.mode, 'affected'); assert.ok(own.files.includes('tests/ci-shards.test.ts'), 'a changed test file selects itself');
-  assert.equal(selectAffected(['README.missing.md'], map, tests).mode, 'full');
+  assert.equal(selectAffected(['scripts/missing.mjs'], map, tests).mode, 'full');
+  assert.deepEqual(selectAffected(['README.missing.md'], map, tests).files, [], 'documentation selects nothing, mapped or not');
 });
 
 test('unit:ci-shards — a changed src file maps to its affected tests and a docs-only change to none', () => {
