@@ -61,7 +61,7 @@ export function checkoutRelease(cwd: string, fallbackRevision = 'unknown'): Rele
  * The release a build stamped through `GRAPHYARD_VERSION` (with the revision `GRAPHYARD_BUILD_REVISION`
  * names), or null when it stamped none it recognises. An image has no `.git`, so its stamp is its
  * release: a promoted image's date version, a candidate image's `unreleased <sha>`, or the X.Y.Z a
- * `vX.Y.Z` tag published through release.yml. The Dockerfile's `0.0.0-dev` default is no release.
+ * `vX.Y.Z` tag carried. The Dockerfile's `0.0.0-dev` default is no release.
  */
 export function stampedRelease(env: NodeJS.ProcessEnv, revisionOf: () => string): Release | null {
   const version = env.GRAPHYARD_VERSION?.trim();
@@ -92,8 +92,6 @@ export const releaseInfo = () => {
   return { version: (stamped ?? cliRelease()).version, revision: stamped?.revision ?? (process.env.GRAPHYARD_BUILD_REVISION || 'unknown') };
 };
 
-/** The image an install defaults to: the CLI's own release, else package.json's version, the tag release.yml publishes on `vX.Y.Z`. */
-export const defaultImageFor = (release: Pick<Release, 'version' | 'released'>) => `${imageRepository}:${release.released ? release.version : packageVersion}`;
 /**
  * The digest of every generation's table definitions, oldest first (GY-1961): generation N's
  * migration had digest `schemaGenerations[N]`; generations recorded before the lineage are null.

@@ -7,11 +7,6 @@ import { mergeAuthorized } from './model/merge-authorization.js';
  * head that moved on GitHub is noticed, and the request superseded, within it.
  */
 export const reviewObservationFreshnessMs = 30 * 60_000;
-/**
- * A review-requested item is polled at least this often however far the fleet's steady-state
- * interval stretches: a third of its bound, so two missed polls still leave a launchable reading.
- */
-export const reviewCadenceCapMs = reviewObservationFreshnessMs / 3;
 /** A review-requested item whose reading is this old is claimed with the merge path, ahead of starved jobs. */
 export const reviewPromotionAgeMs = reviewObservationFreshnessMs / 2;
 
@@ -34,9 +29,6 @@ export function waitsOnObservation(work: Work, all: Work[], now = new Date(), ki
 function mergePath(all: Work[]): string[] {
   return all.filter(mergeAuthorized).map(work => work.id);
 }
-/** How many of the claim order's leading ids are the merge path (GY-567), which no starved job overtakes. */
-export const observationHeadCount = (all: Work[]) => mergePath(all).length;
-
 /** Every open item's claim class, read once from the fleet: the expensive part of the claim order. */
 export interface ObservationClaimClasses { mergePath: string[]; firstReads: string[]; review: string[]; waiting: string[]; running: string[] }
 export function observationClaimClasses(all: Work[], now = Date.now()): ObservationClaimClasses {
@@ -71,5 +63,4 @@ export function observationClaim(all: Work[], now = Date.now(), tight = false) {
   const at = new Map(all.map(work => [work.id, work.observation?.at ? Date.parse(work.observation.at) : null]));
   return observationClaimPlan(observationClaimClasses(all, now), id => at.get(id) ?? null, now, tight);
 }
-/** The claim order alone (GY-492): see `observationClaimPlan`. */
-export const observationClaimOrder = (all: Work[], now = Date.now(), tight = false) => observationClaim(all, now, tight).order;
+

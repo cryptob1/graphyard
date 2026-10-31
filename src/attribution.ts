@@ -376,7 +376,6 @@ export function computeAttribution(dataset: AttributionDataset) {
     exclusions, unavailable, blockedNow: dataset.blockedNow.slice(0, attributionLimits.items), metrics,
   };
 }
-export type AttributionReport = ReturnType<typeof computeAttribution>;
 
 export const attributionDrilldownMetrics = ['targetMismatches', 'paidRunsAvoided', 'superseded', 'rescheduled', 'reanchors', 'blocked', 'convergenceWait', 'multiServiceConvergence', 'candidateToReleaseDrift', 'signatureRegenerations', 'immutablePreviewShare', 'unsupportedClaims', 'cost'] as const;
 /**
