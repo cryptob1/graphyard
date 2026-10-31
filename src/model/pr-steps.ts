@@ -5,6 +5,7 @@ import { assignment } from './assignment.js';
 import { ciCheckRefusalPattern, mergeWriterTrialPattern } from './gates.js';
 import { statusDuration, type StatusDuration } from './duration.js';
 import { plainReason, statusSince } from './plain-status.js';
+import { noServe, plainStage, type ServeView } from './plain-stage.js';
 
 /**
  * The four item states the dashboard draws (GY-1979): Todo (not started — no lease and nothing
@@ -39,7 +40,7 @@ export interface PrSteps {
   steps: PrStep[];
   /** The current state: todo, doing or checking while it moves, done once merged; null for work closed without merging. */
   current: StateId | null;
-  /** The current state in plain words, naming what it waits on: "Checking · 1 of 2 checks done". */
+  /** The current state in plain words (GY-2988): Building, Testing, In review, Merging, Live*, or Done. */
   label: string;
   /** What the current state waits on, without the state's name. */
   detail: string;
@@ -152,34 +153,34 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
 
 /**
  * The four states for one item (GY-1979). Todo while nothing is handed in and no worker holds it;
- * Doing while a worker holds it and has not handed in; Checking from the hand-in until the merge,
- * its label naming which folded gate it waits on; Done once merged — a merged item is Done whether
- * or not the release serves it yet, and the board's release line carries that deployment. Work
- * closed without merging has no current state, and nobody acts.
+ * Doing while a worker holds it and has not handed in; Checking from the hand-in until the merge;
+ * Done once merged. The label people read is the plain stage (GY-2988): Building, Testing,
+ * In review, Merging, Live and verified, Live and failing, Live, or Done — never the gate name.
+ * Work closed without merging has no current state, and nobody acts.
  */
-export function prSteps(work: Work, now: number, release: ReleaseView = noRelease): PrSteps {
-  const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, who: string): PrSteps => ({
+export function prSteps(work: Work, now: number, release: ReleaseView = noRelease, serve: ServeView = noServe): PrSteps {
+  const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, who: string, label?: string): PrSteps => ({
     steps: stateIds.map(id => ({ id, label: stateLabel[id], state: state(id) })), current,
-    label: current && current !== 'done' ? `${stateLabel[current]} · ${detail}` : detail, detail, who,
+    label: label ?? (current && current !== 'done' ? `${stateLabel[current]} · ${detail}` : detail), detail, who,
   });
   // Closed without merging (src/model/closure.ts): no state is done or current, and nobody acts.
   if (isClosed(work)) return make(() => 'pending', null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
   if (work.stage === 'done') {
-    // Done means merged (GY-1979): whether or not the release serves it yet. "Live" only once the
-    // release is observed serving it; the board's release line carries the deployment either way.
-    return servedFor(work, release) ? make(() => 'done', 'done', 'Live', 'Nobody — it is live')
-      : make(() => 'done', 'done', 'Merged', 'Nobody — it has merged');
+    // The plain stage names Live* or Done from the release and GY-2983's serve verdict (GY-2988).
+    const label = plainStage(work, release, serve);
+    return make(() => 'done', 'done', label, servedFor(work, release) ? 'Nobody — it is live' : 'Nobody — it has merged', label);
   }
   if (!work.submission) {
     const { detail, who } = waitsOn('build', undefined, work, now, release);
-    // Doing: a worker holds it and has not handed in. Todo: not started — no lease, nothing handed in.
-    return assignment(work, now).active ? make(id => id === 'doing' ? 'current' : id === 'todo' ? 'done' : 'pending', 'doing', detail, who)
-      : make(id => id === 'todo' ? 'current' : 'pending', 'todo', detail, who);
+    // Doing / Todo: the plain stage is Building (GY-2988).
+    const label = plainStage(work, release, serve);
+    return assignment(work, now).active ? make(id => id === 'doing' ? 'current' : id === 'todo' ? 'done' : 'pending', 'doing', detail, who, label)
+      : make(id => id === 'todo' ? 'current' : 'pending', 'todo', detail, who, label);
   }
   // Checking: handed in, until the merge. The validate, test, review, proof and merge gates fold
-  // into this one state, and the label names the gate it waits on. A recorded blocker, a
-  // dependency a requirements revision added, a requested rework or a change request says so here
-  // rather than sending the item back to Todo: the hand-in stands until the merge.
+  // into this one state; the plain stage (GY-2988) is the words people read. A recorded blocker, a
+  // dependency a requirements revision added, a requested rework or a change request says so in
+  // detail rather than sending the item back to Todo: the hand-in stands until the merge.
   const byName = new Map(work.gates.map(gate => [gate.name, gate]));
   const sentBack = work.reworkRequested || changesRequested(work) || byName.get('ready')?.passed === false;
   const phase = sentBack ? 'build' : checkingSteps.find(id => byName.get(stepGate[id]!)?.passed === false) ?? 'merge';
@@ -189,7 +190,7 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
   return make(id => {
     const index = stateIds.indexOf(id);
     return index < at ? 'done' : index === at ? 'current' : 'pending';
-  }, 'checking', detail, who);
+  }, 'checking', detail, who, plainStage(work, release, serve));
 }
 
 /**

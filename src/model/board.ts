@@ -7,6 +7,7 @@ import { OVERDUE_MINUTES, statusDuration } from './duration.js';
 import { blockerSummary, phaseOf, plainReason, plainStatus, statusSince } from './plain-status.js';
 import { prSteps, stepSince } from './pr-steps.js';
 import { noRelease, releaseView, servedFor, type ReleaseView } from './release.js';
+import { noServe, plainStage, serveView, type ServeView } from './plain-stage.js';
 import { stalledCards } from './actionless.js';
 import { resourceConflicts } from '../coordination.js';
 
@@ -209,6 +210,8 @@ export function nextCommand(work: Work, group: Group | null, actor: ActorRole, h
 export interface BoardItem {
   id: string; key: string; title: string; priority: number;
   group: OpenGroup; stage: Work['stage'];
+  /** The derived stage in plain words (GY-2988); the Work page and master status name the item with this. */
+  label: ReturnType<typeof plainStage>;
   /** The identity holding (or last holding) the item's lease; null when nobody has claimed it. */
   owner: string | null;
   /** The role that takes the next step, and that step in plain words, as the Work page shows them. */
@@ -231,7 +234,7 @@ export interface Board {
 }
 
 /** Every open item into its group with its next actor, command, since and overdue. */
-export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRow[] | null, release: ReleaseView = noRelease): Board {
+export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRow[] | null, release: ReleaseView = noRelease, serve: ServeView = noServe): Board {
   const { byGroup, open } = classify(work, now, humanRows, release);
   const stalls = new Map(stalledCards(work.filter(item => item.stage !== 'done' && !isClosed(item)), now).map(card => [card.item.id, card]));
   const rows = new Map((humanRows ?? []).map(row => [row.id, row]));
@@ -244,7 +247,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
         : timed ? stepSince(entry, now, null, release) : statusSince(entry, now);
     // The board is built on the server, so a wait's time is written in UTC and served as `until` for a reader's own zone.
     const wait = entry.blocker ? blockerSummary(entry.blocker, now, entry, 'UTC') : null, blocker = wait && { summary: wait.sentence, ...(wait.until ? { until: wait.until } : {}) };
-    return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
+    return { id: entry.id, key: entry.key, title: entry.title, priority: entry.priority, group, stage: entry.stage, label: plainStage(entry, release, serve), owner: entry.lease?.owner ?? entry.lastAssignment?.owner ?? null,
       actor, who, does, command: nextCommand(entry, group, actor, rows.get(entry.id)), since, overdue: timed && !windowHeld(entry, now) && statusDuration(since, now).overdue, ...(blocker ? { blocker } : {}) };
   };
   const board = Object.fromEntries(groups.map(group => [group, byGroup[group].map(entry => item(entry, group))])) as Record<OpenGroup, BoardItem[]>;
@@ -257,7 +260,7 @@ export function buildBoard(work: Work[], now: number, humanRows?: HumanRequestRo
  * `production`): what `GET /api/board` serves, and what `master status` builds for
  * itself when the server it talks to predates the route.
  */
-export const boardFromStatus = (work: Work[], now: number, status: any) => buildBoard(work, now, status?.humanOnly, releaseView(status));
+export const boardFromStatus = (work: Work[], now: number, status: any) => buildBoard(work, now, status?.humanOnly, releaseView(status), serveView(status));
 
 /** True for a response shaped as a board. */
 export const isBoard = (value: any): value is Board => !!value && typeof value === 'object' && !!value.groups && groups.every(group => Array.isArray(value.groups[group]));

@@ -68,26 +68,28 @@ test('unit:ui-four-states — prSteps returns exactly the four states Todo, Doin
   const checking = prSteps(find('GY-22', work), NOW);
   assert.equal(checking.current, 'checking');
   assert.deepEqual(segments(checking), 'done,done,current,pending');
-  assert.equal(checking.label, 'Checking · 1 of 2 checks done');
+  assert.equal(checking.label, 'In review');
   assert.equal(checking.who, 'Automated checks');
   // Waiting for review, and already merging, are Checking too — one state, what it waits on differs.
-  assert.equal(prSteps(find('GY-15', work), NOW).label, 'Checking · waiting for the reviewer');
-  assert.equal(prSteps(find('GY-21', work), NOW).label, 'Checking · Graphyard is merging it');
+  assert.equal(prSteps(find('GY-15', work), NOW).label, 'In review');
+  assert.equal(prSteps(find('GY-21', work), NOW).label, 'Merging');
   assert.equal(prSteps(find('GY-21', work), NOW).who, 'Graphyard (automatic)');
   // A requested rework says so in the Checking label; the hand-in stands until the merge.
   const changes = { ...find('GY-15', work), gates: find('GY-15', work).gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] } : gate) } as Work;
   assert.equal(prSteps(changes, NOW).current, 'checking');
-  assert.equal(prSteps(changes, NOW).label, 'Checking · sent back for changes, waiting for a builder');
+  assert.equal(prSteps(changes, NOW).label, 'In review');
+  assert.equal(prSteps(changes, NOW).detail, 'sent back for changes, waiting for a builder');
   // A blocker recorded after the hand-in is the Checking label's news, and the master agent clears it.
   const held = { ...find('GY-22', work), gates: find('GY-22', work).gates.map(gate => gate.name === 'ready' ? { ...gate, passed: false, reasons: ['Staging credentials expired'] } : gate) } as Work;
-  assert.equal(prSteps(held, NOW).label, 'Checking · held by a recorded blocker');
+  assert.equal(prSteps(held, NOW).label, 'In review');
+  assert.equal(prSteps(held, NOW).detail, 'held by a recorded blocker');
   assert.equal(prSteps(held, NOW).who, 'Master agent');
 
   // Done: merged — including a merge the release does not serve yet. No Deploy state exists.
   const undeployed = prSteps(mergedUndeployed(), NOW);
   assert.equal(undeployed.current, 'done');
   assert.deepEqual(segments(undeployed), 'done,done,done,done');
-  assert.equal(undeployed.label, 'Merged');
+  assert.equal(undeployed.label, 'Live');
   assert.equal(undeployed.who, 'Nobody — it has merged');
   // Served by the release, it still reads Done, as Live.
   const live = prSteps(find('GY-18', work), NOW);

@@ -49,6 +49,19 @@ Role | Held by | May | Never
 
 Master applies `release`, `unblock`, `requirements`, `rework`, `close` and `attest` at once under its operator-agent identity. Human keeps goals and priorities, money and accounts, credentials for people; those [park](master-agent-reference.md#items-and-human-waits).
 
+## Plain stage labels
+
+Where an open or delivered item is, in the words the dashboard and `master status` show (GY-2988). The control plane still derives backlog, ready, build, review, test, acceptance, merge and done; only the label people read changes, and no client sets it.
+
+Building (build) — a worker is writing the change, or it is waiting for one.
+Testing (test) — automated checks or proofs are running on the handed-in change.
+In review (review) — someone other than the builder is judging the change.
+Merging (merge) — the merge writer is queuing or trying the change onto main.
+Live and verified — merged and served; the served commit's required cases passed (GY-2983).
+Live and failing — merged and served; a required case against the served URL is failing (GY-2983).
+Live — merged; the repository serves nothing, so there is no verification verdict.
+Done — merged (or closed) and not live on a served head.
+
 ## Diagram legend
 
 Shape and colour | Term

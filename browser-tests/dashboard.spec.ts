@@ -222,7 +222,7 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(page.locator('.step-name')).toHaveText(['Todo', 'Doing', 'Checking', 'Done']);
     await expect(row(page, 'GY-3').locator('.step-seg[data-step="doing"][data-state="current"]')).toHaveCount(1);
     await expect(row(page, 'GY-4').locator('.step-seg[data-step="checking"][data-state="current"]')).toHaveCount(1);
-    await expect(row(page, 'GY-4')).toContainText('Checking ·');
+    await expect(row(page, 'GY-4')).toContainText('In review');
     // The todo item is not on the moving rows: it waits in Up next, off the step track.
     await expect(row(page, 'GY-2').locator('.steps-track')).toHaveCount(0);
     // Nothing clips at this width: the bar fits its row and the line wraps within the page.

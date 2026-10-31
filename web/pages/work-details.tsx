@@ -18,6 +18,7 @@ import { formatAge } from '../../src/model/duration';
 import { candidatePrUrl } from '../links';
 import { activityLabel, historyLabel, overlapLine, whatIsLeft, type LeftGroup } from '../item-page';
 import { plainStatus } from '../../src/model/plain-status';
+import { plainStage, serveView } from '../../src/model/plain-stage';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
@@ -118,6 +119,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     const head = b.slice(0, 60), at = b.length > 60 ? text.indexOf(head) : -1; return at < 0 ? text : `${text.slice(0, at)}the recorded blocker, above`; };
   // The same duration and the same threshold the card carries; this view is another view of it.
   const release = releaseView(status);
+  const serve = serveView(status);
   const held = stepHeld(item, now, null, release);
   const owner = assignment(item, now);
   const admin = status?.actor?.role === 'admin';
@@ -144,7 +146,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
   // The Work page's own classification of this item, so its badge is the tile that led here. A
   // merged item is off the board (Done, GY-1979) and its page still renders, badge Shipped.
   const group = groupWithin(item, work, now, status?.humanOnly, release);
-  const steps = prSteps(item, now, release);
+  const steps = prSteps(item, now, release, serve);
   const actor = nextActor(item, group, now, release, work);
   // Work closed without merging has no state: no bar, nothing left, nobody acting (`prSteps`).
   const closed = isClosed(item);
@@ -240,7 +242,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
       {plain.blocking && <p className="blocking-now"><strong>Blocking now:</strong> <Explained sentence={plain.blocking}/></p>}
       {/* The recorded blocker as its agent wrote it, here and nowhere else (GY-1739): every other line reads its summary. */}
       {item.blocker && <p className="blocker-recorded"><strong>Blocker as recorded:</strong> <span className="mono">{item.blocker}</span></p>}
-      <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span>{item.stage}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
+      <div className="tags"><span>{item.type}</span><span>P{item.priority}</span><span data-plain-stage>{plainStage(item, release, serve)}</span><span>In this step for {age(item.stageEnteredAt)}</span><span>Policy v{item.policyRevision}</span><span>Revision {item.revision}</span>{deploySmokeRequired(item.policy) && <span><Term term="post-deploy check">e2e:deploy-smoke</Term> after deploy</span>}</div>
       <h3>Ownership</h3><p>{owner.text}</p>{owner.owner && <p className="muted">Worker ID: {owner.owner} · assignment {owner.epoch}</p>}<p>{owner.active && item.lease ? `Active lease · expires ${new Date(item.lease.expiresAt).toLocaleTimeString()}` : 'No active assignment'}</p>{item.workspaces.map(w => <code key={w.epoch}>{w.host}:{w.path}<br/>{w.branch} · assignment {w.epoch}</code>)}
       {postDeployment}
       <h3>Gate decisions</h3>{item.gates.map(g => <div className="gate" key={g.name}><strong className={g.passed ? 'green-text' : 'amber'}>{g.passed ? '✓' : '○'} {g.name}</strong>{g.reasons.map(r => <p key={r}>{r === item.blocker ? 'The recorded blocker, above' : shortShas(r)}</p>)}</div>)}

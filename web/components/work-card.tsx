@@ -7,6 +7,7 @@ import { currentMergeStep } from '../../src/model/merge-ledger';
 import { prSteps, stepHeld } from '../../src/model/pr-steps';
 import type { ActionlessCard } from '../../src/model/actionless';
 import type { ReleaseView } from '../../src/model/release';
+import { noServe, type ServeView } from '../../src/model/plain-stage';
 import StatusAge from './status-age';
 import StepsBar from './steps-bar';
 import { Explained } from './term';
@@ -16,17 +17,18 @@ const unprefixed = (sentence: string) => sentence.replace(/^Stuck: /, '').replac
 
 /**
  * One item as a row of its group (GY-161): key, title, one line saying why it is where it is, the
- * four states (GY-1979) while it moves, who acts next as a role, and — only for moving work —
- * how long it has held the state the bar shows (`stepHeld`), red past the one configured
- * threshold. On a phone the same element lays out as a card. The candidate is linked once, on the row's second line; the open
- * control and that link are siblings, never nested, so each stays a separate keyboard stop.
+ * four states (GY-1979) while it moves with the plain stage label (GY-2988), who acts next as a
+ * role, and — only for moving work — how long it has held the state the bar shows (`stepHeld`),
+ * red past the one configured threshold. On a phone the same element lays out as a card. The
+ * candidate is linked once, on the row's second line; the open control and that link are siblings,
+ * never nested, so each stays a separate keyboard stop.
  */
-export default function WorkCard({ item, all, repository, now, onOpen, group: given, stall, release }: { item: Work; all?: Work[]; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; release?: ReleaseView }) {
+export default function WorkCard({ item, all, repository, now, onOpen, group: given, stall, release, serve }: { item: Work; all?: Work[]; repository?: string | null; now: number; onOpen(id: string): void; group?: Group | null; stall?: ActionlessCard; release?: ReleaseView; serve?: ServeView }) {
   const group = given ?? groupOf(item, now, undefined, undefined, release) ?? 'shipped';
   const status = plainStatus(item, now);
   const held = stepHeld(item, now, null, release);
   const timed = timedGroups.has(group);
-  const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now, release) : null;
+  const steps = group === 'moving' || group === 'blocked' ? prSteps(item, now, release, serve ?? noServe) : null;
   const actor = nextActor(item, group, now, release, all);
   // The merge writer opens no pull request, so a candidate the control plane observed itself names no PR (GY-2963).
   const pr = item.candidate && item.observation?.source !== 'control-plane' && <CandidatePr repository={repository} candidate={item.candidate} workKey={item.key}/>;
