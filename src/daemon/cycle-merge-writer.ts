@@ -644,7 +644,7 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
     try {
       const files = (await git(['diff', '--name-only', baseTip, revertSha])).split('\n').map(line => line.trim()).filter(Boolean);
       const decided = await trialAndPushRevert({ trial: (sha, trialFiles, item) => reads.trial(sha, trialFiles, item, baseTip, onStep), push: reads.push },
-        { revertSha, files, item: culprit.item, baseTip, culpritKey: key, mergeSha: culprit.mergeSha });
+        { revertSha, files, baseTip, culpritKey: key, mergeSha: culprit.mergeSha });
       entry.settled = 'ok' in decided ? { revert: { ok: true } }
         : 'held' in decided ? { revert: { ok: false, reason: decided.held } }
         : { revert: { ok: false, reason: decided.retry, retry: true } };

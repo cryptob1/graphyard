@@ -4,7 +4,10 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readServeRecord } from '../src/serve-app.js';
-import { mergeWriterSummary, emptyMergeWriterState } from '../src/daemon/cycle-merge-writer.js';
+import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, emptyMergeWriterState, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
+import { masterConfigSchema } from '../src/master.js';
+import type { Cycle } from '../src/daemon/cycle.js';
 import { relandItemFor, runServeRevert, selectServeCulprit, serveRangeMerges, type RelandInput, type ServeRevertPorts } from '../src/merge-writer/serve-revert.js';
 import type { MergeTrialRun } from '../src/merge-writer/executor.js';
 import type { Work } from '../src/model.js';
@@ -68,6 +71,14 @@ async function fixture(label: string) {
     item('GY-3002', 'beta page', ['unit:beta', 'e2e:case-beta'], served),
   ];
   return { base, origin, coordinator, verified, mergeA, served, work };
+}
+
+/** The served.json fixture the deploy unit's serve pass would have written for a passing serve: the baseline a later failure measures from. */
+async function servedBaseline(coordinator: string, serve: string) {
+  const file = join(coordinator, '.graphyard', 'served.json');
+  await mkdir(join(coordinator, '.graphyard'), { recursive: true });
+  await writeFile(file, JSON.stringify({ commit: serve, url: 'http://127.0.0.1:9', failed: null, reason: null, pid: null, started: null,
+    check: { verified: true, case: null, step: null, reason: null } }));
 }
 
 /** The served.json fixture the deploy unit's serve pass would have written for a failing serve. */
@@ -202,4 +213,72 @@ test('unit:revert-only-the-failing-item — a failing case no item names reverts
     state.serveRevert = { lastVerified: verified, reverts: [], held: { serve: served, culprit: held.culprit.key, reason: held.reason, at: new Date().toISOString() } };
     assert.equal(mergeWriterSummary(state, Date.now()).serveRevert?.held?.culprit, 'GY-3002');
   }
+});
+
+test('unit:revert-only-the-failing-item — the loop step drives the production path: the served commit fails the case one item names, the writer pushes the revert and files one re-land', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-loop');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const start = Date.parse('2030-06-01T00:00:00Z');
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const servedFile = join(coordinator, '.graphyard', 'served.json');
+  const tried: unknown[] = [], filed: RelandInput[] = [];
+  // The loop's own ports over the temporary origin: real git and the served.json fixture through
+  // the serve record the deploy unit writes, a capturing trial, and a leased push to the origin.
+  const reads: MergeWriterReads = {
+    baseBranch: 'main', retrials: 1, now: () => start,
+    git: async (args, extra) => gitEnv(coordinator, ['-C', coordinator, ...args], extra ?? {}),
+    fetch: async () => { git(coordinator, 'fetch', '-q', '--no-tags', 'origin', 'main'); return git(coordinator, 'rev-parse', 'origin/main'); },
+    merge: async () => { throw new Error('no merge in the serve-revert loop test'); },
+    trial: async (_sha, _files, trialItem) => { tried.push(trialItem); return passTrial; },
+    push: async (revertSha, baseTip) => {
+      if (tipOf(origin) !== baseTip) return 'rejected';
+      git(coordinator, 'push', '-q', 'origin', `${revertSha}:main`);
+      return 'pushed';
+    },
+    holds: async () => false,
+    record: async () => {},
+    merger: async () => 'control-plane',
+    serveRecord: async () => { const record = readServeRecord(servedFile); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
+    createWork: async input => { filed.push(input); return { key: 'GY-3003' }; },
+  };
+  const effects = { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects;
+  const state = emptyDaemonState(config);
+  const cycle = () => ({ state, effects, now: () => start, snapshot: { work, now: new Date(start).toISOString() }, performed: [] as never[] }) as unknown as Cycle;
+
+  // The passing serve sets the baseline the failure measures from.
+  await servedBaseline(coordinator, verified);
+  await mergeWriterStep(cycle());
+  assert.equal(state.mergeWriter.serveRevert?.lastVerified, verified);
+
+  // The served commit fails the case GY-3002's own e2e: proof names: the loop trials the revert
+  // beside the cycle, pushes it, and files one re-land.
+  await servedFixture(coordinator, served, 'case-beta');
+  await mergeWriterStep(cycle());
+  await mergeWriterIdle(state);
+  await mergeWriterStep(cycle());
+
+  // The revert went through the writer's normal trial — but as a proofless pseudo-item under the
+  // culprit's key, never the culprit's own head with its failing bound case.
+  assert.equal(tried.length, 1);
+  assert.deepEqual(tried[0], { key: 'GY-3002', criteria: [] });
+
+  // Exactly the failing item's merge came back out of main.
+  const reverts = state.mergeWriter.serveRevert?.reverts ?? [];
+  assert.equal(reverts.length, 1);
+  const revertSha = reverts[0]!.revertSha;
+  assert.equal(tipOf(origin), revertSha);
+  assert.equal(show(origin, revertSha, 'b.txt'), null);
+  assert.equal(show(origin, revertSha, 'a.txt'), 'alpha\n');
+  assert.equal(reverts[0]!.reland, 'GY-3003');
+  assert.equal(filed.length, 1);
+  assert.equal(filed[0]!.title, 'Re-land GY-3002: beta page');
+  assert.deepEqual(filed[0]!.criteria.map(criterion => criterion.id), ['AC-1', 'AC-2']);
+  assert.deepEqual(filed[0]!.dependencies, [work[1]!.id]);
+
+  // One serve reverts once: the next cycle pushes and files nothing more.
+  await mergeWriterStep(cycle());
+  assert.equal(tipOf(origin), revertSha);
+  assert.equal(filed.length, 1);
+  assert.equal(tried.length, 1);
 });

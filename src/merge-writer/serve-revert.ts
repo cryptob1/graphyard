@@ -5,7 +5,7 @@
 // else the `Merge GY-N` subject the writer gave it); the culprit is the one whose own `e2e:`
 // proof names the failing case, else the newest of those merges. The revert is a commit on the
 // base tip that takes exactly that merge back out, made without a worktree like the trial's own
-// merges, and rides the writer's normal trial and push. The loop files one `Re-land GY-N` item
+// merges, and rides the writer's normal trial (as a proofless pseudo-item) and push. The loop files one `Re-land GY-N` item
 // carrying the original criteria plus the failing case, linked to GY-N and the failing serve.
 import type { Work } from '../model.js';
 import { e2eProofsOf, failureIsBase, trialFailureReason, type MergeTrialRun } from './executor.js';
@@ -117,7 +117,12 @@ export function relandItemFor(original: Work, input: ServeFailure & { mergeSha: 
 /** The ports the serve revert runs through: the checkout's git, the writer's normal trial and leased push, and the loop's filing of the re-land. */
 export interface ServeRevertPorts {
   git: ServeRevertGit;
-  /** The build and tests on the revert commit, with the culprit's proofs counted — the writer's normal trial. */
+  /**
+   * The build and tests on the revert commit — the writer's normal trial, but on a proofless
+   * pseudo-item (`revertTrialItem`), never the culprit: the culprit's own `e2e:` proof names the
+   * case that is failing on the served app, so trialling the revert as the culprit's head would
+   * hold every real revert (a case the revert removes reads as missing; one it keeps still fails).
+   */
   trial(revertSha: string, files: readonly string[], item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }): Promise<MergeTrialRun>;
   /** The leased push of the revert commit onto the tip it was trialled on. */
   push(revertSha: string, baseTip: string): Promise<'pushed' | 'rejected'>;
@@ -141,10 +146,18 @@ const revertTrialVerdict = (run: MergeTrialRun): { retry: string } | { held: str
   return failed ? { held: failed } : null;
 };
 
+/**
+ * What the revert is trialled as: a proofless pseudo-item under the culprit's key, with no bug
+ * type — so the trial judges the revert on the repository's own checks (build plus the affected
+ * and required tests), without the culprit's proofs, bound cases or bug-reproduction check.
+ */
+export const revertTrialItem = (culpritKey: string): Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] } =>
+  ({ key: culpritKey, criteria: [] });
+
 /** The revert commit's trial and leased push: pass, a held trial failure, or a retry (a failing base, or a push the base move rejected). */
 export async function trialAndPushRevert(ports: Pick<ServeRevertPorts, 'trial' | 'push'>,
-  input: { revertSha: string; files: readonly string[]; item: Pick<Work, 'key' | 'criteria'> & { type?: Work['type'] }; baseTip: string; culpritKey: string; mergeSha: string }): Promise<{ ok: true } | { held: string } | { retry: string }> {
-  const verdict = revertTrialVerdict(await ports.trial(input.revertSha, input.files, input.item));
+  input: { revertSha: string; files: readonly string[]; baseTip: string; culpritKey: string; mergeSha: string }): Promise<{ ok: true } | { held: string } | { retry: string }> {
+  const verdict = revertTrialVerdict(await ports.trial(input.revertSha, input.files, revertTrialItem(input.culpritKey)));
   if (verdict && 'retry' in verdict) return { retry: verdict.retry };
   if (verdict) return { held: `the revert of ${input.culpritKey}'s merge ${input.mergeSha.slice(0, 12)} failed its trial: ${verdict.held}` };
   if (await ports.push(input.revertSha, input.baseTip) !== 'pushed') return { retry: `the leased push of the revert of ${input.culpritKey}'s merge was rejected; the base moved` };
@@ -171,7 +184,7 @@ export async function runServeRevert(ports: ServeRevertPorts, input: ServeFailur
   if ('conflict' in revert) return { outcome: 'held', culprit: culprit.item, mergeSha: culprit.mergeSha,
     reason: `the revert of ${culprit.item.key}'s merge ${culprit.mergeSha.slice(0, 12)} does not apply cleanly on ${input.baseTip.slice(0, 12)}: ${revert.conflict.slice(0, 20).join(', ')}` };
   const files = (await ports.git(['diff', '--name-only', input.baseTip, revert.revertSha])).split('\n').map(line => line.trim()).filter(Boolean);
-  const decided = await trialAndPushRevert(ports, { revertSha: revert.revertSha, files, item: culprit.item, baseTip: input.baseTip, culpritKey: culprit.item.key, mergeSha: culprit.mergeSha });
+  const decided = await trialAndPushRevert(ports, { revertSha: revert.revertSha, files, baseTip: input.baseTip, culpritKey: culprit.item.key, mergeSha: culprit.mergeSha });
   if ('retry' in decided) return { outcome: 'retry', culprit: culprit.item, mergeSha: culprit.mergeSha, revertSha: revert.revertSha, reason: decided.retry };
   if ('held' in decided) return { outcome: 'held', culprit: culprit.item, mergeSha: culprit.mergeSha, reason: decided.held };
   const reland = relandItemFor(culprit.item, { ...input, mergeSha: culprit.mergeSha });
