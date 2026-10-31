@@ -8,10 +8,11 @@ import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight } from '../coordination.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
+import { cliUnreachableRefusal } from '../reviewer.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
-import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState } from './state.js';
+import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, touchStanding } from './state.js';
 import { dispatchKey, reconcilePendingActions } from './reconcile.js';
 import { neededRework, reworkKey } from './rework.js';
 import { dueHumanProofs } from '../model/human-proof.js';
@@ -479,6 +480,16 @@ async function dispatchStep(cycle: Cycle) {
     // Only a launch that registered ends the launching: a started one a restart cut off before its
     // registration (resumed as indeterminate) launches again, since a launch registers before any session starts.
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
+    // GY-2995: a launch whose sandbox could not reach the CLI its prompt names is refused before
+    // any session starts; attention names it while the refusal stands, and no launch is retried
+    // in a loop. The check runs each cycle, so a restored CLI launches again on its own.
+    const cliRefusal = cliUnreachableRefusal(config);
+    if (cliRefusal) {
+      const refused = `spec-check-cli-refused:${item.id}`;
+      if (state.actions[refused]?.state === 'failed') touchStanding(state, refused, new Date(clock).toISOString());
+      else await record(state, refused, { kind: 'attention', work: item.key, principal: null, state: 'failed', attempts: 1, cycle: state.cycle, detail: `${item.key}'s spec check is not launched: ${cliRefusal}` }, cycle.now(), effects.persist);
+      continue;
+    }
     launcher.submit(key, [], sink => launchSpecChecker(cycle, item, key, sink));
     break;
   }

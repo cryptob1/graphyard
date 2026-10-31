@@ -193,6 +193,8 @@ export interface CredentialMask {
   extraPaths: readonly string[];
   /** The session's own credential locations: its token file and its runtime login homes, re-exposed after the masks. */
   own: readonly string[];
+  /** The checkout the install's own CLI launcher runs from, when the launcher sits under the config home (a self-deployed install, GY-2995): re-exposed read-only after the masks, so a confined session can execute the CLI its prompt names and post its verdict. */
+  cli: readonly string[];
 }
 
 /**
@@ -202,15 +204,21 @@ export interface CredentialMask {
  * on the runtime's home variable) readable; `home` overrides the operator config home (tests).
  */
 export function credentialMaskFor(
-  config: { credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; run?: { mergeWriter?: { deployKeyFile?: string } }; upstream?: { url?: string; credentialFile?: string } },
+  config: { cliPath?: string; credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; run?: { mergeWriter?: { deployKeyFile?: string } }; upstream?: { url?: string; credentialFile?: string } },
   own: { credentialFile?: string | null; runtimeHomes?: readonly string[] },
   home?: string,
 ): CredentialMask {
   const recorded = (path: string | undefined) => !!path && isAbsolute(path) ? [path] : [];
+  const operatorHome = configHome(home);
+  const launcher = recorded(config.cliPath)[0];
   return {
-    configHome: configHome(home),
+    configHome: operatorHome,
     extraPaths: [...recorded(config.credentialFile), ...recorded(config.run?.mergeWriter?.deployKeyFile), ...recorded(config.upstream?.credentialFile), ...(config.confinement?.maskPaths ?? []).flatMap(path => recorded(path))],
     own: [own.credentialFile ?? null, ...(own.runtimeHomes ?? [])].filter((path): path is string => !!path && isAbsolute(path)),
+    // GY-2995: a self-deployed install runs its CLI from a checkout under the config home
+    // (`<install>/deploy/build`, the launcher at `bin/graphyard.mjs` running code from its
+    // checkout root). The mask keeps that checkout — code, never a credential — readable.
+    cli: launcher !== undefined && withinCheckout(launcher, operatorHome) ? [dirname(dirname(launcher))] : [],
   };
 }
 
@@ -291,6 +299,9 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   // token file read-only, its runtime login homes writable — are re-exposed last, so a later bind
   // shadows the mask that covered them.
   const kept = keptCredentialPaths(input.credentialMask);
+  // GY-2995: the install's own CLI checkout is re-exposed read-only after the masks, so a
+  // confined session runs the launcher its prompt names but can change none of its code.
+  const cli = (input.credentialMask?.cli ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath);
   const masks = [...processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]), ...credentialMaskWords(input.credentialMask, [root, directory])];
   // GY-2967: every ref transaction a session runs — commit, merge, reset, branch -f, update-ref, a
   // cherry-pick's cleanup — takes the common git directory's packed-refs lock once anything has
@@ -316,7 +327,8 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
     ...[...sharedDirectories, ...own, ...(input.writable ?? []).filter(isDirectoryPath)].flatMap(path => ['--bind', path, path]),
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
     ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]),
-    ...kept.flatMap(path => isDirectoryPath(path) ? ['--bind', path, path] : ['--ro-bind', path, path]), '--'];
+    ...kept.flatMap(path => isDirectoryPath(path) ? ['--bind', path, path] : ['--ro-bind', path, path]),
+    ...cli.flatMap(path => ['--ro-bind', path, path]), '--'];
 }
 
 /** The one refusal text for a launch whose coordinator confinement cannot be applied (GY-888): the head names the runtime and the checkout, `problem` says what is missing. */

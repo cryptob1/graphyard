@@ -87,6 +87,13 @@ test('unit:credential-mask-covers-recorded-credential-locations — the mask gat
     assert.equal(mask.configHome, configHome, 'the operator config home is the override');
     assert.deepEqual(mask.extraPaths, [join(configHome, 'masters', 'x.token'), deployed, collector, collector], 'every recorded credential path is gathered, relative entries dropped');
     assert.deepEqual(mask.own, [join(configHome, 'workers', 'own.token'), join(base, 'home')], 'the session\'s own token and runtime login are kept');
+    // GY-2995: a launcher under the config home keeps its deploy checkout read-only; one outside keeps nothing.
+    const deployCheckout = join(configHome, 'acme', 'deploy', 'build');
+    mkdirSync(dirname(join(deployCheckout, 'bin', 'graphyard.mjs')), { recursive: true });
+    writeFileSync(join(deployCheckout, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
+    assert.deepEqual(credentialMaskFor({ cliPath: join(deployCheckout, 'bin', 'graphyard.mjs') }, {}, configHome).cli, [deployCheckout], 'a launcher under the config home keeps its checkout root');
+    assert.deepEqual(credentialMaskFor({ cliPath: deployed }, {}, configHome).cli, [], 'a launcher outside the config home keeps nothing');
+    assert.deepEqual(credentialMaskFor({ cliPath: join(configHome, 'gone', 'bin', 'graphyard.mjs') }, {}, configHome).cli, [join(configHome, 'gone')], 'the checkout root is named whether or not it exists (the refusal check judges reachability)');
     // A relative own path is never kept.
     assert.deepEqual(credentialMaskFor({}, { credentialFile: 'relative/token' }, configHome).own, [], 'a relative own path is not kept');
     // Without an override, the operator config home comes from GRAPHYARD_CONFIG_HOME, else ~/.config/graphyard.
@@ -109,15 +116,15 @@ test('unit:credential-mask-words — a location that exists is masked at the dir
     writeFileSync(token, 'x'.repeat(40)); writeFileSync(beside, 'x'.repeat(40));
     const outside = join(base, 'collector', 'collector.token');
     mkdirSync(dirname(outside)); writeFileSync(outside, 'x'.repeat(40));
-    const mask = { configHome, extraPaths: [token, beside, outside, join(base, 'gone', 'x.token')], own: [] };
+    const mask = { configHome, extraPaths: [token, beside, outside, join(base, 'gone', 'x.token')], own: [], cli: [] };
     assert.deepEqual(credentialMaskWords(mask, [join(base, 'coordinator')]),
       ['--tmpfs', configHome, '--tmpfs', join(base, 'collector')], 'the config home and each recorded path\'s directory are masked once; two files in one directory mask it once; a stale recorded path hides nothing');
     // A candidate that would hide the checkout or the session directory is dropped wholesale.
-    assert.deepEqual(credentialMaskWords({ configHome: base, extraPaths: [], own: [] }, [join(base, 'coordinator')]), [], 'a mask that would hide the checkout is dropped');
-    assert.deepEqual(credentialMaskWords({ configHome, extraPaths: [join(configHome, 'x')], own: [] }, [configHome]), [], 'a session directory under the config home keeps it unmasked');
+    assert.deepEqual(credentialMaskWords({ configHome: base, extraPaths: [], own: [], cli: [] }, [join(base, 'coordinator')]), [], 'a mask that would hide the checkout is dropped');
+    assert.deepEqual(credentialMaskWords({ configHome, extraPaths: [join(configHome, 'x')], own: [], cli: [] }, [configHome]), [], 'a session directory under the config home keeps it unmasked');
     // A missing config home masks nothing, and `/` is never masked.
-    assert.deepEqual(credentialMaskWords({ configHome: join(base, 'missing'), extraPaths: [], own: [] }, []), [], 'a missing config home masks nothing');
-    assert.deepEqual(credentialMaskWords({ configHome: '/', extraPaths: ['/'], own: [] }, []), [], '/ is never masked');
+    assert.deepEqual(credentialMaskWords({ configHome: join(base, 'missing'), extraPaths: [], own: [], cli: [] }, []), [], 'a missing config home masks nothing');
+    assert.deepEqual(credentialMaskWords({ configHome: '/', extraPaths: ['/'], own: [], cli: [] }, []), [], '/ is never masked');
     // The schema accepts the per-install list and refuses a relative entry.
     const master = { version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: '/bin/graphyard.mjs', repository: 'owner/project', baseBranch: 'main', githubAppId: 0, hostId: 'h', masterAgentName: 'graphyard-master-project' };
     assert.deepEqual(masterConfigSchema.parse({ ...master, confinement: { maskPaths: [outside] } }).confinement, { maskPaths: [outside] }, 'master.json parses the per-install mask list');
@@ -142,6 +149,13 @@ test('unit:worker-wrapper-masks-credentials — the read-only mount hides the cr
     const homeIdx = masked.indexOf(f.runtimeHome);
     assert.ok(homeIdx > configIdx && masked[homeIdx - 1] === '--bind', 'the session\'s own runtime login home is re-exposed writable after the masks');
     assert.equal(masked.at(-1), '--');
+    // GY-2995: a session whose install runs its CLI from a checkout under the config home keeps that checkout read-only, after the masks.
+    const deployCheckout = join(f.configHome, 'install-a', 'deploy', 'build');
+    mkdirSync(dirname(join(deployCheckout, 'bin', 'graphyard.mjs')), { recursive: true });
+    writeFileSync(join(deployCheckout, 'bin', 'graphyard.mjs'), '#!/usr/bin/env node\n');
+    const withCli = readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.worktree, bwrap: 'bwrap', credentialMask: credentialMaskFor({ cliPath: join(deployCheckout, 'bin', 'graphyard.mjs') }, {}, f.configHome) });
+    const cliIdx = withCli.indexOf(deployCheckout);
+    assert.ok(cliIdx > withCli.indexOf(f.configHome) && withCli[cliIdx - 1] === '--ro-bind', 'the install\'s own CLI checkout is re-exposed read-only after the config-home tmpfs');
     // The master session carries no mask: it acts as the coordinator identity and reads its credential.
     const master = readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.root, bwrap: 'bwrap' });
     assert.ok(!master.some((word, index) => word === '--tmpfs' && master[index + 1] === f.configHome), 'the master session keeps the coordinator credential readable');

@@ -12,13 +12,16 @@ import { readVendorPrompts, specCheckPrompt } from '../src/spec-check.js';
 import { postSpecCheck, writeSpecCheckBinding } from '../src/spec-check-post.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { fileURLToPath } from 'node:url';
+
+// GY-2995: the loop refuses a launch whose CLI is unreachable, so the fixture names this checkout's real launcher.
+const cliPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 
 // GY-2994: a spec-check session that cannot fetch origin still reads the base tip it was handed
 // from the local repository and posts its report; and one that ends without a report — its pane
 // gone, or BLOCKED on it — is named in master status with its reason and relaunched at once,
 // rather than when its launch expires an hour on.
 
-const cliPath = '/opt/graphyard/deploy/build/bin/graphyard.mjs';
 const start = Date.parse('2030-01-01T12:00:00Z');
 
 function feature(key: string): Work {

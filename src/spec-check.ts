@@ -18,7 +18,7 @@ import {
   type PromptDelivery, type StartBounds,
 } from './master.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
-import { anchorSessionCheckout as anchorCheckout, readReviewLedger, reviewerCredentialDirectory, sessionWritable, simplicityParagraph, verifySessionSandbox } from './reviewer.js';
+import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, simplicityParagraph, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { credentialMaskFor } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
@@ -102,6 +102,10 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
   if (agents.some(agent => agent.name === agentName)) throw new Error(`Reviewer agent ${agentName} is already visible in Herdr; the spec-check launch is retried next cycle`);
   const selected = await selectAccount(config, 'reviewer', profile, { ...dependencies.probe, work: work.key });
   return onSelectedSession(selected, `spec-check launch for ${work.key} failed`, async () => {
+    // GY-2995: a launch whose sandbox cannot reach the CLI its prompt names starts nothing — refused
+    // before the launch is registered or any credential material is written.
+    const cliRefusal = cliUnreachableRefusal(config, credentialMaskFor(config, {}));
+    if (cliRefusal) throw new LauncherUnavailableError(cliRefusal);
     let pane: string | null = null;
     const sessionDirectory = resolve(reviewerCredentialDirectory(config), 'sessions', id);
     try {
@@ -114,7 +118,8 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       const launch = accountLaunch(profile, selected.account, { writable });
       const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, checkout: checkout.worktree });
       // The same mask every reviewer launch runs under: the operator's config home and the loop's credentials stay hidden.
-      const credentialMask = credentialMaskFor(config, { runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      // GY-2995: the session's own binding directory under the config home is kept readable, and with it the deploy checkout the CLI it must run lives in.
+      const credentialMask = credentialMaskFor(config, { credentialFile: sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
       const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
       const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,

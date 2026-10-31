@@ -10,6 +10,7 @@ import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage } from '../model/plain-stage.js';
 import { specCheckCurrent } from '../model/spec-check.js';
+import { cliUnreachableRefusal } from '../reviewer.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
@@ -79,6 +80,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     // GY-2994: a spec checker that ended without a report, named with its reason until the item's check reports.
     specChecksEnded: Object.entries(state?.actions ?? {}).filter(([key, action]) => key.startsWith('spec-check-ended:') && open.some(item => item.key === action.work && !specCheckCurrent(item)))
       .map(([, action]) => ({ work: action.work, at: action.at, reason: action.detail })),
+    // GY-2995: a launch whose sandbox cannot reach the CLI the prompt names, named while the refusal stands, with the spec checks it is withholding.
+    ...(cliUnreachableRefusal(master) ? { cliRefusal: { reason: cliUnreachableRefusal(master)!, specChecks: Object.entries(state?.actions ?? {}).filter(([key]) => key.startsWith('spec-check-cli-refused:'))
+      .map(([, action]) => ({ work: action.work, at: action.at })) } } : { cliRefusal: null }),
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),
   };
 }
