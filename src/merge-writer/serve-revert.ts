@@ -117,16 +117,29 @@ export const relandTitle = (item: Pick<Work, 'key'>) => `Re-land ${item.key}`;
 /** What the loop files for a reverted item (`POST /api/work` as the master's operator-agent identity). */
 export interface RelandInput { title: string; type: Work['type']; priority: number; description: string; criteria: { id: string; text: string; proofs: string[] }[]; dependencies: string[]; reason: string }
 
+/** The most criteria, the most proofs on one and the longest text the create route accepts (model/work.ts, model/policy.ts). */
+const relandCriteriaLimit = 50, criterionProofLimit = 20, criterionTextLimit = 2000;
+const withFailingCase = (carried: RelandInput['criteria'], failingCase: string, proof: string) => {
+  const clause = ` The served app also passes the required case "${failingCase}", fixed at its cause.`;
+  const fits = (criterion: RelandInput['criteria'][number]) => criterion.text.length + clause.length <= criterionTextLimit;
+  const host = carried.find(criterion => criterion.proofs.includes(proof) && fits(criterion)) ?? carried.find(criterion => criterion.proofs.length < criterionProofLimit && fits(criterion));
+  return carried.map(criterion => criterion !== host ? criterion : { ...criterion, text: `${criterion.text}${clause}`, proofs: [...new Set([...criterion.proofs, proof])] });
+};
+
 /**
  * The `Re-land GY-N` item for a reverted merge: the original criteria carried over, plus the
  * failing case as a criterion of its own, linked to GY-N by dependency and to the failing serve
  * in the description. A carried criterion keeps its id, text and proofs; a bootstrap deferral is
- * not carried — the re-land satisfies everything now, it does not re-defer it.
+ * not carried — the re-land satisfies everything now, it does not re-defer it. An original at the
+ * create route's criteria limit has no room for another, so the case joins the first carried
+ * criterion its proof and text fit (the one already proving it, if any); the description names the
+ * case whatever fits.
  */
 export function relandItemFor(original: Work, input: ServeFailure & { mergeSha: string; baseBranch: string }): RelandInput {
   const used = new Set(original.criteria.map(criterion => criterion.id));
   let next = original.criteria.length + 1;
   while (used.has(`AC-${next}`)) next++;
+  const proof = `e2e:${input.failingCase}`, carried = original.criteria.map(criterion => ({ id: criterion.id, text: criterion.text, proofs: [...criterion.proofs] }));
   const step = input.failingStep ? ` (${input.failingStep})` : '', reason = input.failingReason ? `: ${input.failingReason}` : '';
   return {
     title: `${relandTitle(original)}${original.title ? `: ${original.title}` : ''}`.slice(0, 200),
@@ -135,8 +148,9 @@ export function relandItemFor(original: Work, input: ServeFailure & { mergeSha: 
       `Re-land of ${original.key}${original.title ? ` ("${original.title}")` : ''}: the merge writer reverted its merge ${input.mergeSha.slice(0, 12)} from ${input.baseBranch} after the served commit ${input.serve.slice(0, 12)} failed the required E2E case "${input.failingCase}"${step}${reason}.`,
       `This item carries ${original.key}'s criteria plus that failing case, and is linked to ${original.key} and the failing serve. Land the change again with the case passing.`,
     ].join('\n\n').slice(0, 20000),
-    criteria: [...original.criteria.map(criterion => ({ id: criterion.id, text: criterion.text, proofs: [...criterion.proofs] })),
-      { id: `AC-${next}`, text: `The served app passes the required case "${input.failingCase}"${step}, fixed at its cause rather than skipped or weakened`.slice(0, 2000), proofs: [`e2e:${input.failingCase}`] }],
+    criteria: carried.length < relandCriteriaLimit
+      ? [...carried, { id: `AC-${next}`, text: `The served app passes the required case "${input.failingCase}"${step}, fixed at its cause rather than skipped or weakened`.slice(0, 2000), proofs: [proof] }]
+      : withFailingCase(carried, input.failingCase, proof),
     dependencies: [original.id],
     reason: `The served commit ${input.serve.slice(0, 12)} failed the required case "${input.failingCase}", so ${original.key}'s merge ${input.mergeSha.slice(0, 12)} was reverted; this re-lands it with the case as a criterion`.slice(0, 2000),
   };

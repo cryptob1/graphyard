@@ -14,6 +14,7 @@ import type { MergeTrialRun } from '../src/merge-writer/executor.js';
 import { baseFailureHoldMs } from '../src/merge-writer/executor.js';
 import { mergeWriterInFlight } from '../src/daemon/cycle-merge-writer.js';
 import { TrialTimeoutError } from '../src/merge-writer/trial.js';
+import { createSchema } from '../src/model/work.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -647,4 +648,30 @@ test('unit:revert-only-the-failing-item — the production filing route sends th
   const answers = [await effects.mergeWriter!.createWork!(input, 'serve-reland:abc'), await effects.mergeWriter!.createWork!(input, 'serve-reland:abc')];
   assert.deepEqual(sent, ['serve-reland:abc', 'serve-reland:abc']);
   assert.deepEqual(answers, [{ key: 'GY-3003' }, { key: 'GY-3003' }]);
+});
+
+test('unit:revert-only-the-failing-item — an original at the 50-criterion limit still files a re-land the create route accepts, carrying every criterion and the case', () => {
+  const failure = { serve: 'a'.repeat(40), failingCase: 'case-full', failingStep: 'step 1 ready', failingReason: 'wanted 200, got 404', mergeSha: 'b'.repeat(40), baseBranch: 'main' };
+  const criteria = Array.from({ length: 50 }, (_, index) => ({ id: `AC-${index + 1}`, text: `criterion ${index + 1}`, proofs: [`unit:proof-${index + 1}`] }));
+  const original = (filled: typeof criteria) => ({ ...item('GY-3009', 'full page', [], null), id: '53c1ac2f-8949-47fc-9be3-b4d9490b1ae9', criteria: filled }) as Work;
+
+  // The route's own schema, whose command adds only the reason (engine.ts `commands.create`).
+  const accepted = (filled: typeof criteria) => { const { reason: _reason, ...input } = relandItemFor(original(filled), failure); return createSchema.parse(input); };
+
+  const reland = accepted(criteria);
+  assert.equal(reland.criteria.length, 50);
+  assert.deepEqual(reland.criteria.map(criterion => criterion.id), criteria.map(criterion => criterion.id));
+  assert.deepEqual(reland.criteria[0]!.proofs, ['unit:proof-1', 'e2e:case-full']);
+  assert.match(reland.criteria[0]!.text, /^criterion 1 .*"case-full"/);
+  assert.deepEqual(reland.criteria.slice(1).map(criterion => criterion.text), criteria.slice(1).map(criterion => criterion.text));
+
+  // The criterion already proving the case takes it, with no second copy of the proof.
+  const named = criteria.map((criterion, index) => index === 7 ? { ...criterion, proofs: ['e2e:case-full'] } : criterion);
+  assert.deepEqual(accepted(named).criteria[7]!.proofs, ['e2e:case-full']);
+
+  // Every proof list full: the payload stays valid and the description still names the case.
+  const full = criteria.map(criterion => ({ ...criterion, proofs: Array.from({ length: 20 }, (_, index) => `unit:p-${index}`) }));
+  const crowded = accepted(full);
+  assert.deepEqual(crowded.criteria, full);
+  assert.match(crowded.description, /"case-full"/);
 });
