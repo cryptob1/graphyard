@@ -1,11 +1,17 @@
 {
   "id": "plain-status-words",
   "title": "The Work page names an item in review as In review and a merged, served, verified item as Live and verified",
-  "description": "GY-2988 AC-2: after sign-in the Work page shows the plain stage words. A companion unit test seeds one item at review and one merged item the release serves with GY-2983's verified verdict, then runs this case the way the merge trial runs served-app-verified.",
+  "description": "GY-2988 AC-2: the command step seeds the served control plane with one item in review and one merged item whose own merge commit is served and verified (GY-2983), then after sign-in the Work page names them in plain stage words.",
   "tags": ["api", "dashboard", "status"],
   "target": "uat",
   "required": false,
   "steps": [
+    {
+      "kind": "command",
+      "name": "seed an item in review and a merged item served and verified",
+      "run": "node scripts/e2e-seed-plain-status.mjs",
+      "timeoutSeconds": 60
+    },
     {
       "kind": "http",
       "name": "the board carries plain stage labels",
