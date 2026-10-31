@@ -186,3 +186,13 @@ test('unit:spec-check-before-dispatch — the EGM prompts are read from the Grap
   const prompts = await readVendorPrompts();
   assert.ok(prompts.comprehension.length > 100 && prompts.readiness.length > 100);
 });
+
+test('unit:spec-check-before-dispatch — a spec checker holds its reviewer session in the agent registry while its launch stands', async () => {
+  const { sessionEnded } = await import('../src/model/registry-sessions.js');
+  const item = feature('GY-20');
+  const session = { id: 's-1', role: 'reviewer', account: 'reviewer-a', work: 'GY-20', selectedAt: new Date(clock - 30 * 60_000).toISOString() } as Parameters<typeof sessionEnded>[0];
+  item.specCheckLaunch = { id: 'launch-x', reviewer: 'spec-checker', requester: 'master', tokenHash: 'f'.repeat(64), at, expiresAt: new Date(clock + 30 * 60_000).toISOString(), policyRevision: 1 };
+  assert.equal(sessionEnded(session, item, clock), null, 'past the launch grace, the standing launch keeps the session live');
+  item.specCheckLaunch = null;
+  assert.match(sessionEnded(session, item, clock)!, /no standing review request or spec-check launch/, 'once the report lands, the session ends');
+});

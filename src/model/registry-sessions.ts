@@ -1,4 +1,5 @@
 import type { Work } from './work.js';
+import { specCheckLaunchLive } from './spec-check.js';
 import { fleetRoles, rolePolicy } from './registry.js';
 import { exhaustedTwin, foldObservation } from './account-quota.js';
 import type { AccountSmoke, AgentRegistry, FleetAccount, FleetModel, FleetRefusal, FleetRole, FleetRoleName, FleetRuntime, FleetSession, ObservedQuota, RolePolicy, RunOutcome, SelectionRequest, SessionSkip } from './registry.js';
@@ -13,7 +14,7 @@ import { deriveAccountPlan, groupAccountsByPlan, type FleetPlanView } from '../p
  */
 export const sessionHistoryLimit = 100, refusalHistoryLimit = 20;
 export const launchGraceMs = 5 * 60_000, reviewSessionMs = 2 * 3_600_000, producerSessionMs = 24 * 3_600_000, sessionCapMs = 48 * 3_600_000;
-type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'>;
+type SessionWork = Pick<Work, 'key' | 'lease' | 'autoDispatch' | 'stage'> & Partial<Pick<Work, 'specCheckLaunch'>>;
 /**
  * Whether a recorded session still occupies its account, and why not when it does not. Nothing
  * reports a session's end: the control plane already knows what each one was launched for, so a
@@ -36,7 +37,8 @@ export function sessionEnded(session: FleetSession, work: SessionWork | undefine
     if (!lease || Date.parse(lease.expiresAt) <= now) return `${work.key} holds no live lease`;
     return session.principal && lease.owner !== session.principal ? `${work.key} is leased to ${lease.owner}` : null;
   }
-  if (session.role === 'reviewer') return work.autoDispatch?.review?.state === 'requested' && age <= reviewSessionMs ? null : `${work.key} has no standing review request`;
+  // A spec checker (GY-2992) is a reviewer session that answers its item's standing spec-check launch.
+  if (session.role === 'reviewer') return (work.autoDispatch?.review?.state === 'requested' || specCheckLaunchLive(work, now)) && age <= reviewSessionMs ? null : `${work.key} has no standing review request or spec-check launch`;
   return (work.autoDispatch?.producers ?? []).some(request => request.state === 'requested') && age <= producerSessionMs ? null : `${work.key} has no standing producer request`;
 }
 
