@@ -44,6 +44,8 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     return result;
   };
   const rework: DaemonEffects['rework'] = (work, reason, binding) => asOperatorAgent(`work/${work.id}/rework`, { reason, previousWorkerStopped: true, ...(binding ? { binding } : {}) });
+  // GY-2991: the loop releases backlog itself, under the same identity, to keep the pipeline full.
+  const release: DaemonEffects['release'] = (work, reason) => asOperatorAgent(`work/${work.id}/ready`, { expectedRevision: work.revision, reason });
   // The shared project memory (GY-1125) is mirrored to its own file only when it changed.
   let writtenMemory: string | null = null;
   const persist = async (state: DaemonState) => {
@@ -158,8 +160,9 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // The executor merges in this checkout's object store, pushes with the install's deploy key alone and records each step as the coordinator under one key per (step, commits).
     get mergeWriter() { const config = current(); return mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const }); },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
-    // Rework exists only while the live configuration names the master's operator-agent identity.
+    // Rework and backlog release exist only while the live configuration names the master's operator-agent identity.
     get rework() { return current().operatorAgent ? rework : undefined; },
+    get release() { return current().operatorAgent ? release : undefined; },
     // The release this process loaded: the checkout its code comes from, read once at startup.
     loadedRelease: readRelease(loopCodeRoot(current().cliPath, root)),
     notify: async state => { await run('systemd-notify', state === 'ready' ? ['--ready'] : ['WATCHDOG=1']); },
