@@ -3,7 +3,10 @@
 // and the declared build, and restarts the declared serve command on the declared loopback port —
 // only when the build passed, so the previous build keeps serving through a failing one. It
 // records the served commit, the URL and the last build failure in .graphyard/served.json, which
-// master status, the dashboard and doctor read. Once a new commit serves, the pass runs that
+// master status, the dashboard and doctor read. A commit counts as served only when the answer on
+// the declared port is the restarted serve's own: a port another process already holds is one the
+// serve cannot bind, recorded as a failure whose reason names the port, and no required case runs
+// against the foreign holder (GY-2993). Once a new commit serves, the pass runs that
 // commit's own required E2E cases against the served URL (GY-2983) and records the verdict for
 // that exact commit beside it: a failing case is the release health the master acts on, never a
 // reason to stop serving or roll back. The previously served build keeps serving on the port
@@ -60,6 +63,13 @@ export const answering = (url: string) => fetch(url, { signal: AbortSignal.timeo
 /** How long a restarted serve has to answer before the pass records the commit as unserved (a serve that cannot bind, a command that fails). */
 export const serveAnswerTimeoutMs = 30_000;
 
+/** The answer the pass waited for must be the restarted serve's own (GY-2993): when the ports can tell who holds the declared port, an answer from a process the pass did not start means the serve left without binding the port another process already holds — a failure whose reason names the port, never a served commit. Ports that cannot tell (no /proc, off Linux) leave the answer standing. */
+const servedByRestart = (ports: ServePorts, declaration: ServeDeclaration, url: string, served: ServeProcess) => {
+  if (ports.answersFromRestart && served.pid && ports.answersFromRestart(declaration.port, served) === false) {
+    throw new Error(`a process the serve pass did not start answers ${url}: the restarted serve exited without binding port ${declaration.port}`);
+  }
+};
+
 /** Waits for a restarted serve to answer; false once `timeoutMs` passes without an answer. */
 async function waitAnswer(url: string, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
@@ -85,6 +95,8 @@ export interface ServePorts {
   baseline?(commit: string, declaration: ServeDeclaration): Promise<ServeProcess>;
   /** Once a new commit serves: runs that commit's own required E2E cases against the served URL and answers their verdict; the pass records it for that exact commit. A case that fails here neither stops serving nor rolls back. `baselineUrl` is what was live's URL, or null when none serves (GY-2985). */
   check?(url: string, baselineUrl?: string | null): Promise<ServeCheck>;
+  /** Whether the declared port is still held by the process `restart` started — its process group — so the answer the pass waited for is that serve's own and not a foreign holder's (GY-2993); null when the ports cannot tell (no /proc, off Linux). */
+  answersFromRestart?(port: number, process: ServeProcess): boolean | null;
 }
 
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -92,9 +104,9 @@ const message = (error: unknown) => error instanceof Error ? error.message : Str
 /**
  * One pass: fetch main, read its declaration, and when it moved past the served commit, check it
  * out, install and build it, and restart the serve — recording the served commit and URL only
- * once the new serve answers, so one that never answers (a port it cannot bind, a command that
- * fails) is recorded as the failure it is, with the process it spawned still tracked for the next
- * restart to stop. A failure at checkout, install or build records the failed commit and its
+ * once the new serve answers and the answer is that serve's own, so one that never answers (a
+ * port it cannot bind — one another process already holds — a command that fails) is recorded as
+ * the failure it is, with the process it spawned still tracked for the next restart to stop. A failure at checkout, install or build records the failed commit and its
  * reason and leaves the previous build serving. A failed tip waits for the next one, like the
  * deploy watch. When the served commit is still main but nothing answers it (a reboot, a crashed
  * serve), the build the checkout already holds is served again and the record is written with the
@@ -115,6 +127,7 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
     try {
       served = await ports.restart(declaration.serve);
       if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the restarted serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
+      servedByRestart(ports, declaration, url, served);
       // The same commit serves again, so the verdict its cases earned still stands, and the baseline it was judged against keeps serving.
       await writeServeRecord(file, { commit: tip, url, failed: null, reason: null, pid: served.pid, started: served.started, check: record?.check ?? null, baseline: record?.baseline ?? null });
       log(`[graphyard-serve] ${tip.slice(0, 12)} serves again at ${url}`);
@@ -149,6 +162,7 @@ export async function serveOnce(file: string, ports: ServePorts, log: (line: str
   try {
     served = await ports.restart(declaration.serve);
     if (!(await waitAnswer(url, answerTimeoutMs))) throw new Error(`the serve did not answer ${url} within ${Math.round(answerTimeoutMs / 1000)}s`);
+    servedByRestart(ports, declaration, url, served);
     const candidate = record?.commit ?? record?.baseline?.commit ?? null;
     if (candidate && ports.baseline) {
       try {
