@@ -25,11 +25,11 @@ export const keptOutputLines = 50;
 /** Host variables a step's process keeps: what a command needs to run at all, never a credential. */
 export const hostPassthrough = ['PATH', 'HOME', 'USER', 'SHELL', 'LANG', 'LC_ALL', 'TERM', 'TMPDIR', 'TZ', 'DISPLAY', 'XDG_RUNTIME_DIR', 'PLAYWRIGHT_BROWSERS_PATH', 'CI'] as const;
 
-/** The environment a step's process gets: the host basics, the target, and the case's secrets. */
-export function stepEnvironment(url: string, secrets: Record<string, string>, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
+/** The environment a step's process gets: the host basics, the target, what was live when one serves (GY-2985), and the case's secrets — none of the three overridable by a secret. */
+export function stepEnvironment(url: string, secrets: Record<string, string>, host: NodeJS.ProcessEnv = process.env, baselineUrl?: string): Record<string, string> {
   const env: Record<string, string> = {};
   for (const name of hostPassthrough) if (host[name] !== undefined) env[name] = host[name]!;
-  return { ...env, ...secrets, TARGET_URL: url };
+  return { ...env, ...secrets, ...(baselineUrl ? { BASELINE_URL: baselineUrl } : {}), TARGET_URL: url };
 }
 
 export interface ProcessResult { code: number | null; output: string; timedOut: boolean }
@@ -89,7 +89,18 @@ export function agentPrompt(step: Extract<E2eStep, { kind: 'agent' }>, url: stri
     'Work in the browser until the goal is achieved or you are sure it cannot be. Then end your answer with exactly one final line, either `VERDICT: PASS` or `VERDICT: FAIL - <reason>`, and nothing after it.'].join('\n');
 }
 
-export interface GeneralStepContext { url: string; root: string; env: Record<string, string>; secrets: Record<string, string>; run: ProcessRunner; artifacts: string; session: string; signal?: AbortSignal }
+/** What the judge of a compare step is given for each of the two runs (GY-2985): where it ran, what the agent answered, and the screenshots kept. */
+export interface CompareRun { url: string; transcript: readonly string[]; screenshots: readonly string[] }
+/** What a compare step hands its judge (GY-2985): the goal and criteria, and both runs — the candidate build's and the baseline's. */
+export interface CompareInput { goal: string; success: readonly string[]; target: CompareRun; baseline: CompareRun }
+/** How a compare step's judge answers (GY-2985): the candidate is the same, better, or worse than what was live. */
+export interface CompareVerdict { verdict: 'SAME' | 'BETTER' | 'WORSE'; reason: string | null }
+/** The one judge call a compare step makes (GY-2985). */
+export type CompareJudge = (input: CompareInput) => Promise<CompareVerdict>;
+
+export interface GeneralStepContext { url: string; root: string; env: Record<string, string>; secrets: Record<string, string>; run: ProcessRunner; artifacts: string; session: string; signal?: AbortSignal;
+  /** GY-2985: how a compare step's one judge call answers; the agent-browser judge when unnamed. */
+  judge?: CompareJudge }
 
 /** A command step: pass on exit 0, fail otherwise, with the last lines of output kept. */
 export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
@@ -99,13 +110,40 @@ export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>
   return { record: { kind: 'command', outcome: reason ? 'fail' : 'pass', output }, reason };
 }
 
-/** An agent step: open the page, hand agent-browser the goal, read its verdict, keep a screenshot, close the session. */
-export async function runAgentStep(step: Extract<E2eStep, { kind: 'agent' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
-  const target = new URL(step.path ?? '/', context.url).toString();
-  const prefix = ['--session', context.session];
+/** The judge's verdict line (GY-2985): the last `VERDICT: SAME|BETTER|WORSE` wins, so its own reasoning never counts; none is no verdict. */
+export function parseCompareVerdict(output: string): CompareVerdict | null {
+  const last = [...output.matchAll(/^\s*VERDICT:\s*(SAME|BETTER|WORSE)\b\s*(?:-\s*(.*))?$/gim)].at(-1);
+  return last ? { verdict: last[1].toUpperCase() as CompareVerdict['verdict'], reason: last[2]?.trim() || null } : null;
+}
+
+/** What the compare judge is asked (GY-2985): both runs of one goal, and the one line it ends with. */
+export function compareJudgePrompt(input: CompareInput) {
+  return ['You are judging two builds of one web application by the same goal, run on each.',
+    `Goal: ${input.goal}`, 'The goal is achieved only when every one of these holds:', ...input.success.map((criterion, index) => `${index + 1}. ${criterion}`),
+    `The candidate build answered at ${input.target.url}:`, ...input.target.transcript, `Its screenshot: ${input.target.screenshots.join(', ') || 'none'}`,
+    `The baseline build, what was live before the candidate, answered at ${input.baseline.url}:`, ...input.baseline.transcript, `Its screenshot: ${input.baseline.screenshots.join(', ') || 'none'}`,
+    'Look at both answers and screenshots and judge whether the candidate build is worse for a user pursuing this goal. Then end your answer with exactly one final line, either `VERDICT: SAME`, `VERDICT: BETTER` or `VERDICT: WORSE - <reason>`, and nothing after it.'].join('\n');
+}
+
+/** The default compare judge (GY-2985): one agent-browser call in its own session within the step's remaining time. */
+export function agentBrowserJudge(context: GeneralStepContext, session: string, deadline: number): CompareJudge {
+  return async input => {
+    const result = await context.run('agent-browser', ['--session', session, 'chat', compareJudgePrompt(input)], { cwd: context.root, env: context.env, timeoutMs: Math.max(1, deadline - Date.now()), shell: false, signal: context.signal });
+    const judged = parseCompareVerdict(result.output);
+    if (!judged) throw new Error(result.timedOut ? 'the judge did not finish in the step\'s time' : 'the judge ended without a VERDICT line');
+    return judged;
+  };
+}
+
+/** The first line of an error, for a step's failure reason. */
+const firstLine = (error: unknown) => (error instanceof Error ? error.message : String(error)).split('\n')[0];
+
+/** One agent-browser session's run of the goal at `base` (GY-2985): open the page, hand agent-browser the goal, read its verdict, keep a screenshot, close the session. */
+async function agentLeg(step: Extract<E2eStep, { kind: 'agent' }>, base: string, context: GeneralStepContext, session: string, deadline: number): Promise<{ transcript: string[]; screenshots: string[]; reason: string | null; verdict?: string }> {
+  const target = new URL(step.path ?? '/', base).toString();
+  const prefix = ['--session', session];
   // A cancelled run kills the step's invocations; only the session's own close still runs, bounded by its timeout.
   const invoke = (args: string[], timeoutMs: number, cancellable = true) => context.run('agent-browser', [...prefix, ...args], { cwd: context.root, env: context.env, timeoutMs, shell: false, signal: cancellable ? context.signal : undefined });
-  const deadline = Date.now() + step.timeoutSeconds * 1000;
   const remaining = () => Math.max(1, deadline - Date.now());
   const transcript: string[] = [];
   let reason: string | null = null, verdict: string | undefined;
@@ -115,7 +153,7 @@ export async function runAgentStep(step: Extract<E2eStep, { kind: 'agent' }>, co
     transcript.push(opened.output);
     if (opened.timedOut || opened.code !== 0) reason = `agent-browser could not open ${target}${opened.output.trim() ? `: ${lastLines(redact(opened.output, context.secrets), 1)[0].slice(0, 500)}` : ''}`;
     else {
-      const chat = await invoke(['chat', agentPrompt(step, context.url)], remaining());
+      const chat = await invoke(['chat', agentPrompt(step, base)], remaining());
       transcript.push(chat.output);
       if (chat.timedOut) reason = `agent-browser did not finish within ${step.timeoutSeconds} s`;
       else {
@@ -124,12 +162,37 @@ export async function runAgentStep(step: Extract<E2eStep, { kind: 'agent' }>, co
         if (chat.code !== 0 && (!judged.verdict || !reason)) reason = `agent-browser exited ${chat.code ?? 'by signal'}${judged.verdict ? ` after ${judged.verdict}` : ' without a VERDICT line'}`;
       }
       await mkdir(context.artifacts, { recursive: true });
-      const file = join(context.artifacts, `${context.session}.png`);
+      const file = join(context.artifacts, `${session}.png`);
       const shot = await invoke(['screenshot', file], Math.min(remaining(), 60_000));
       if (!shot.timedOut && shot.code === 0) screenshots.push(file); else transcript.push(shot.output);
     }
   } finally { await invoke(['close'], 30_000, false).catch(() => {}); }
-  const output = lastLines(redact(transcript.join('\n'), context.secrets));
+  return { transcript, screenshots, reason, verdict };
+}
+
+/** An agent step: open the page, hand agent-browser the goal, read its verdict, keep a screenshot, close the session. A compare step (GY-2985) with a baseline serving runs the same goal there too, then one judge call given both transcripts and screenshots answers `VERDICT: SAME|BETTER|WORSE - reason`; WORSE fails the case and names the reason. Without a baseline (the first serve) the step runs as today. */
+export async function runAgentStep(step: Extract<E2eStep, { kind: 'agent' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
+  const deadline = Date.now() + step.timeoutSeconds * 1000;
+  const ran = await agentLeg(step, context.url, context, context.session, deadline);
+  let reason = ran.reason, verdict = ran.verdict;
+  const screenshots = ran.screenshots;
+  if (!reason && step.compare && context.env.BASELINE_URL) {
+    const baselineLeg = await agentLeg(step, context.env.BASELINE_URL, context, `${context.session}-baseline`, deadline);
+    if (baselineLeg.reason) reason = baselineLeg.reason;
+    else {
+      const input: CompareInput = {
+        goal: step.goal, success: step.success,
+        target: { url: new URL(step.path ?? '/', context.url).toString(), transcript: lastLines(redact(ran.transcript.join('\n'), context.secrets)), screenshots },
+        baseline: { url: new URL(step.path ?? '/', context.env.BASELINE_URL).toString(), transcript: lastLines(redact(baselineLeg.transcript.join('\n'), context.secrets)), screenshots: baselineLeg.screenshots },
+      };
+      try {
+        const judged = await (context.judge ?? agentBrowserJudge(context, `${context.session}-judge`, deadline))(input);
+        verdict = `VERDICT: ${judged.verdict}${judged.reason ? ` - ${judged.reason}` : ''}`;
+        if (judged.verdict === 'WORSE') reason = judged.reason ?? 'the judge judged the new build worse than what was live';
+      } catch (error) { reason = firstLine(error); }
+    }
+  }
+  const output = lastLines(redact(ran.transcript.join('\n'), context.secrets));
   return { record: { kind: 'agent', outcome: reason ? 'fail' : 'pass', output, ...(verdict ? { verdict: redact(verdict, context.secrets) } : {}), screenshots }, reason: reason && redact(reason, context.secrets) };
 }
 
