@@ -49,19 +49,19 @@ test('unit:ui-four-states — prSteps returns exactly the four states Todo, Doin
   const todo = prSteps(find('GY-13', work), NOW);
   assert.equal(todo.current, 'todo');
   assert.deepEqual(segments(todo), 'current,pending,pending,pending');
-  assert.equal(todo.label, 'Todo · waiting for a builder');
+  assert.equal(todo.label, 'Building');
   assert.equal(todo.who, 'Graphyard (assigns a builder)');
   // A recorded blocker holds an unstarted item off the workers: the row's why names the fault and
   // the master agent clears it (the blocked row reads that, not the state label).
   const blocked = prSteps(find('GY-17', work), NOW);
   assert.equal(blocked.current, 'todo');
-  assert.equal(blocked.label, 'Todo · waiting for a builder');
+  assert.equal(blocked.label, 'Building');
 
   // Doing: a worker holds it and has not handed in. GY-14 is a builder at work.
   const doing = prSteps(find('GY-14', work), NOW);
   assert.equal(doing.current, 'doing');
   assert.deepEqual(segments(doing), 'done,current,pending,pending');
-  assert.equal(doing.label, 'Doing · the builder is writing the code');
+  assert.equal(doing.label, 'Building');
   assert.equal(doing.who, 'Builder agent');
 
   // Checking: handed in, until the merge — its label names what it waits on. GY-22 waits on CI.

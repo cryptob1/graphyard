@@ -64,7 +64,7 @@ test('unit:plain-status-words-case — the Work page shows In review and Live an
       policy: { checks: ['test'], review: true }, policyRevision: 1, revision: 1, stage: 'done', stageEnteredAt: at,
       ready: true, epoch: 1, lease: null, workspaces: [], candidate: { sha, baseSha: sha, pr: 8, branch: 'graphyard/gy-live', author: 'w', createdAt: at },
       submission: { epoch: 1, pr: 8 }, observation: { candidate: { sha, baseSha: sha, pr: 8, branch: 'graphyard/gy-live', author: 'w', createdAt: at }, checks: [], reviews: [], protected: true, mergeable: true, merged: true, mergeSha: sha, mergedAt: at, files: [], scopeFiles: [], at },
-      delivery: { mergeSha: sha, mergedAt: at, pr: 8, deployment: { sha, mergeSha: sha, source: 'endpoint', covers: 'exact', observedAt: at, at, observer: 'master' } },
+      delivery: { mergeSha: sha, mergedAt: at, authorizationRevision: 1, pr: 8, deployment: { sha, mergeSha: sha, source: 'endpoint', covers: 'exact', observedAt: at, at, observer: 'master' } },
       gates: ['ready', 'build', 'review', 'test', 'acceptance', 'merge'].map(name => ({ name, passed: true, reasons: [] })),
       evidence: [], violations: [], createdAt: at, updatedAt: at,
     };

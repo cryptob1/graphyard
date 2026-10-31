@@ -21,7 +21,7 @@ const base = {
 
 const item = (stage: Stage, extra: Partial<Work> = {}): Work => ({ ...base, stage, ...extra } as Work);
 
-const delivery = { mergeSha: 'a'.repeat(40), mergedAt: '2026-01-01T01:00:00Z', pr: 1 };
+const delivery = { mergeSha: 'a'.repeat(40), mergedAt: '2026-01-01T01:00:00Z', authorizationRevision: 1, pr: 1 };
 const served: ReleaseView = {
   environment: 'production', observedAt: Date.parse('2026-01-01T02:00:00Z'),
   unserved: new Set(), failed: new Set(),
@@ -35,7 +35,7 @@ const withDeployment = (work: Work): Work => ({
       observedAt: '2026-01-01T02:00:00Z', at: '2026-01-01T02:00:00Z', observer: 'master',
     },
   },
-} as Work);
+} as unknown as Work);
 
 test('unit:plain-stage-labels — every derived stage maps to exactly one plain label, and master status items carry it', async () => {
   // Each stored stage has one plain label.
@@ -45,25 +45,26 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
     done: 'Live', // repository serves nothing
   };
   for (const stage of stages) {
-    const work = stage === 'done' ? item('done', { delivery }) : item(stage);
+    const work = stage === 'done' ? item('done', { delivery } as Partial<Work>) : item(stage);
     assert.equal(plainStage(work), byStage[stage], stage);
   }
 
   // Done + serve verdict (GY-2983): Live and verified / Live and failing / Done / Live.
-  const live = withDeployment(item('done', { delivery }));
+  const live = withDeployment(item('done', { delivery } as Partial<Work>));
   const verified: ServeView = { serves: true, check: { verified: true, case: null, step: null, reason: null } };
   const failing: ServeView = { serves: true, check: { verified: false, case: 'home', step: 'GET /', reason: '404' } };
   const serving: ServeView = { serves: true, check: null };
   assert.equal(plainStage(live, served, verified), 'Live and verified');
   assert.equal(plainStage(live, served, failing), 'Live and failing');
-  assert.equal(plainStage(item('done', { delivery }), served, verified), 'Done', 'merged but not yet served');
+  assert.equal(plainStage(item('done', { delivery } as Partial<Work>), served, verified), 'Done', 'merged but not yet served');
   assert.equal(plainStage(live, served, serving), 'Live', 'served, verdict not yet run');
-  assert.equal(plainStage(item('done', { delivery })), 'Live', 'repository serves nothing');
-  assert.equal(plainStage(item('done', { closure: { kind: 'obsolete', ref: null, reason: 'gone', by: 'op', at: '2026-01-01T00:00:00Z', from: 'build' } } as Work['closure'])), 'Done');
+  assert.equal(plainStage(item('done', { delivery } as Partial<Work>)), 'Live', 'repository serves nothing');
+  assert.equal(plainStage(item('done', {
+    closure: { kind: 'obsolete', ref: null, reason: 'gone', by: 'op', at: '2026-01-01T00:00:00Z', from: 'build' },
+  } as Partial<Work>)), 'Done');
 
   // Every plain label is reached by at least one walk above, and glossary names each once.
   const seen = new Set(plainStages.map(label => {
-    // Re-derive a fixture that yields this label.
     const examples: Record<typeof plainStages[number], () => string> = {
       Building: () => plainStage(item('build')),
       Testing: () => plainStage(item('test')),
@@ -71,8 +72,8 @@ test('unit:plain-stage-labels — every derived stage maps to exactly one plain 
       Merging: () => plainStage(item('merge')),
       'Live and verified': () => plainStage(live, served, verified),
       'Live and failing': () => plainStage(live, served, failing),
-      Live: () => plainStage(item('done', { delivery })),
-      Done: () => plainStage(item('done', { delivery }), served, verified),
+      Live: () => plainStage(item('done', { delivery } as Partial<Work>)),
+      Done: () => plainStage(item('done', { delivery } as Partial<Work>), served, verified),
     };
     return examples[label]();
   }));

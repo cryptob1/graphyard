@@ -159,23 +159,26 @@ export function waitsOn(step: StepId, gate: Gate | undefined, work: Work, now: n
  * Work closed without merging has no current state, and nobody acts.
  */
 export function prSteps(work: Work, now: number, release: ReleaseView = noRelease, serve: ServeView = noServe): PrSteps {
-  const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, who: string, label?: string): PrSteps => ({
+  // `who` stays the last argument of `make` so the actor-role scan (GY-469) keeps reading it.
+  const make = (state: (id: StateId) => StepState, current: StateId | null, detail: string, label: string | null, who: string): PrSteps => ({
     steps: stateIds.map(id => ({ id, label: stateLabel[id], state: state(id) })), current,
     label: label ?? (current && current !== 'done' ? `${stateLabel[current]} · ${detail}` : detail), detail, who,
   });
   // Closed without merging (src/model/closure.ts): no state is done or current, and nobody acts.
-  if (isClosed(work)) return make(() => 'pending', null, `Closed as ${work.closure!.kind}, not merged`, 'Nobody — it was closed');
+  if (isClosed(work)) return make(() => 'pending', null, `Closed as ${work.closure!.kind}, not merged`, null, 'Nobody — it was closed');
   if (work.stage === 'done') {
     // The plain stage names Live* or Done from the release and GY-2983's serve verdict (GY-2988).
     const label = plainStage(work, release, serve);
-    return make(() => 'done', 'done', label, servedFor(work, release) ? 'Nobody — it is live' : 'Nobody — it has merged', label);
+    return servedFor(work, release)
+      ? make(() => 'done', 'done', label, label, 'Nobody — it is live')
+      : make(() => 'done', 'done', label, label, 'Nobody — it has merged');
   }
   if (!work.submission) {
     const { detail, who } = waitsOn('build', undefined, work, now, release);
     // Doing / Todo: the plain stage is Building (GY-2988).
     const label = plainStage(work, release, serve);
-    return assignment(work, now).active ? make(id => id === 'doing' ? 'current' : id === 'todo' ? 'done' : 'pending', 'doing', detail, who, label)
-      : make(id => id === 'todo' ? 'current' : 'pending', 'todo', detail, who, label);
+    return assignment(work, now).active ? make(id => id === 'doing' ? 'current' : id === 'todo' ? 'done' : 'pending', 'doing', detail, label, who)
+      : make(id => id === 'todo' ? 'current' : 'pending', 'todo', detail, label, who);
   }
   // Checking: handed in, until the merge. The validate, test, review, proof and merge gates fold
   // into this one state; the plain stage (GY-2988) is the words people read. A recorded blocker, a
@@ -190,7 +193,7 @@ export function prSteps(work: Work, now: number, release: ReleaseView = noReleas
   return make(id => {
     const index = stateIds.indexOf(id);
     return index < at ? 'done' : index === at ? 'current' : 'pending';
-  }, 'checking', detail, who, plainStage(work, release, serve));
+  }, 'checking', detail, plainStage(work, release, serve), who);
 }
 
 /**
