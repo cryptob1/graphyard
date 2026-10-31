@@ -813,8 +813,10 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
 export type ReconcileOutcome = { key: string; mergeSha: string; outcome: 'reconciled' | 'requeued' };
 /**
  * Before any new merge (AC-5): every intent with no `pushed` record, and every push no
- * reconciliation followed, is settled against the base branch as fetched now. A merge commit the
- * base's first-parent history holds was pushed: it is recorded pushed (when it was not) and
+ * reconciliation followed, is settled against the base branch as fetched now. An intent on a
+ * superseded head is refused first, even if the base holds its merge commit, without delivering
+ * the newer candidate. Otherwise a merge commit the base's first-parent history holds was pushed:
+ * it is recorded pushed (when it was not) and
  * reconciled, delivering the item without a second push. One the base does not hold was never
  * pushed: it is refused `unpushedIntentReason`, which leaves the head queued for a fresh merge.
  */
