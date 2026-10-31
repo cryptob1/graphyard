@@ -507,7 +507,7 @@ export const specCheckEndedKey = (item: Pick<Work, 'id' | 'specCheckLaunch'>) =>
 async function specCheckEnded(cycle: Cycle, pane: string): Promise<string | null> {
   if (cycle.herdr.available && !cycle.herdr.agents.some(agent => agent.pane_id === pane)) return `Herdr no longer reports pane ${pane}`;
   const screen = await Promise.resolve(cycle.effects.sessionScreen?.({ pane, agentName: null })).catch(() => null) ?? '';
-  const blocked = [...screen.matchAll(/^[\s⏺●•>*-]*(BLOCKED:\s*\S.*)$/gm)].at(-1);
+  const blocked = [...screen.matchAll(/^[\s⏺●•>*-]*(BLOCKED:\s*[^\s,].*)$/gm)].at(-1); // not the prompt's own "starting BLOCKED:, naming"
   return blocked ? blocked[1].trim().slice(0, 500) : null;
 }
 
