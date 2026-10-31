@@ -4,7 +4,7 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { assertDispatchable, masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { needsSpecCheck, specCheckRefusal, type SpecVerdict } from '../src/model/spec-check.js';
 import { specCheckReportSection } from '../src/master/dispatch.js';
 import type { Work } from '../src/model.js';
@@ -33,6 +33,9 @@ function feature(key: string, overrides: Partial<Work> = {}): Work {
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
   } as Work;
 }
+
+/** Each item's loop state, kept across its drives as the running loop keeps it. */
+const states = new Map<string, DaemonState>();
 
 /** Two loop rounds: the stubbed spec checker registers its launch and posts its verdict the way the control plane records them; a verdict that lands in round one is acted on in round two. */
 async function drive(item: Work, verdict: SpecVerdict | null) {
@@ -64,7 +67,8 @@ async function drive(item: Work, verdict: SpecVerdict | null) {
       },
       persist: async () => {},
     };
-    const state = emptyDaemonState(master);
+    const state = states.get(item.key) ?? emptyDaemonState(master);
+    states.set(item.key, state);
     await runCycle(master, state, effects, () => clock);
     await runCycle(master, state, effects, () => clock);
     return { launched, checks, refusal: specCheckRefusal(item) };
@@ -132,4 +136,13 @@ test('unit:spec-check-before-dispatch — a bug item dispatches with no check at
   assert.deepEqual(checks, [], 'the loop launches no spec checker for a bug');
   assert.deepEqual(launched, ['GY-14'], 'and dispatches it');
   assert.equal(refusal, null);
+});
+
+test('unit:spec-check-before-dispatch — a launch that expires unreported is relaunched', async () => {
+  const item = feature('GY-15');
+  await drive(item, null);
+  item.specCheckLaunch = { ...item.specCheckLaunch!, expiresAt: new Date(clock - 1).toISOString() };
+  const { checks, launched } = await drive(item, null);
+  assert.deepEqual(checks, ['GY-15'], 'the expired launch is replaced by one fresh session');
+  assert.deepEqual(launched, []);
 });

@@ -433,12 +433,14 @@ async function dispatchStep(cycle: Cycle) {
   // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
   // session per owed check. The hold itself is assertDispatchable's; the launch runs while the item
   // is released and unblocked and no check stands and no launch is live on the item — one session
-  // per check, and the report's arrival (or a launch that stands) ends the launching.
+  // per check, and the report's arrival (or a launch that stands) ends the launching. The key names
+  // the revision judged and the last launch, so a revision's re-check, or a relaunch after a
+  // launch expired unreported, is a fresh action.
   if (effects.launchSpecCheck) for (const item of open) {
     if (!item.ready || item.blocker) continue;
     if (item.lease && Date.parse(item.lease.expiresAt) > clock) continue;
     if (!needsSpecCheck(item) || specCheckCurrent(item) || specCheckLaunchLive(item, clock)) continue;
-    const key = `spec-check:${item.id}`;
+    const key = `spec-check:${item.id}:${item.policyRevision}:${item.specCheckLaunch?.id ?? ''}`;
     if (launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) continue;
     launcher.submit(key, [], sink => launchSpecChecker(cycle, item, key, sink));
   }
