@@ -76,10 +76,4 @@ export interface CandidateValidation {
   /** Each required case's verdict, and the cases or suites that failed. */
   cases: { id: string; result: string }[]; failed: string[];
 }
-export interface CandidateValidation {
-  /** The `rc/ID` record the loop cut at the candidate's source and validated. */
-  release: string; sha: string; identity: string; result: 'pass' | 'fail'; at: string; by: string;
-  /** Each required case's verdict, and the cases or suites that failed. */
-  cases: { id: string; result: string }[]; failed: string[];
-}
 
