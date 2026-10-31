@@ -85,10 +85,10 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   assert.equal(upSupervised(await localRequest()), true, '--local installs supervised');
   assert.equal(upSupervised({ provider: 'compose' }), false, 'every other provider keeps autonomous');
 
-  // The checklist (GY-1978): supervised and autonomous installs ask for the same steps — no App, a writing and a reviewing account.
+  // The checklist (GY-1978): supervised and autonomous installs ask for the same steps — a writing and a reviewing account, and the running coordinator.
   const bare = status({ calls: [], installed: true, loop: true, supervised: 0 });
   const supervisedIds = setupChecklist(bare).map(item => item.id);
-  assert.deepEqual(supervisedIds, ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'master-loop']);
+  assert.deepEqual(supervisedIds, ['account:worker', 'account:reviewer', 'master-loop']);
   assert.ok(setupChecklist(bare).every(item => item.done), 'a local install with a writing and a reviewing account is green');
   const autonomous = setupChecklist(bare);
   assert.ok(!setupChecklist({ ...bare!, fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }], accounts: bare!.fleet.accounts } }).find(item => item.id === 'account:reviewer')!.done, 'a supervised install still needs its reviewing account');

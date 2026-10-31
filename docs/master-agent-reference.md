@@ -9,10 +9,6 @@ Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choi
 
 `graphyard master promote --admin-token-stdin` provisions the master's operator-agent identity.
 
-## GitHub administration through the browser
-
-Graphyard's one remote credential is the merge writer's deploy key ([install](install.md)). `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing credential. `master harness claude|codex --apply` writes rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`.
-
 ## Typed actions
 
 `nextAction`: `dispatch`/`request-review`/`request-rework`/`resync`/`reclaim`/`merge`; a gate refusal is its reason string.
