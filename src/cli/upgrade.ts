@@ -247,13 +247,14 @@ async function stopTrackedServe(tracked: { pid?: number | null; started?: string
 
 /** The inodes of the TCP sockets listening on `port`, from the kernel's tables (Linux). */
 const listeningInodes = (port: number): Set<string> => {
-  const hex = port.toString(16), inodes = new Set<string>();
+  const inodes = new Set<string>();
   for (const table of ['/proc/net/tcp', '/proc/net/tcp6']) {
     let lines: string[] = [];
     try { lines = readFileSync(table, 'utf8').split('\n'); } catch { continue; }
     for (const line of lines.slice(1)) {
       const field = line.trim().split(/\s+/);
-      if (field[3] === '0A' && field[1]?.split(':')[1]?.toLowerCase() === hex && field[9]) inodes.add(field[9]);
+      // The kernel prints the port %04X-padded (3000 as 0BB8), so compare it numerically.
+      if (field[3] === '0A' && Number.parseInt(field[1]?.split(':')[1] ?? '', 16) === port && field[9]) inodes.add(field[9]);
     }
   }
   return inodes;
