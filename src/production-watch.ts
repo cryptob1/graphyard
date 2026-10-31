@@ -195,7 +195,7 @@ export class ProductionWatch {
     report.serving = live ?? newestSuccess?.commit ?? this.options.build.commit;
     report.servingSource = live ? 'endpoint' : newestSuccess?.commit ? 'provider' : this.options.build.commit ? 'build' : null;
     if (!report.serving) report.aheadError = 'Production commit is unknown: no provider deployment list is configured and the build reports no commit (set GRAPHYARD_BUILD_SHA or RAILWAY_GIT_COMMIT_SHA)';
-    else report.aheadError = 'Base branch comparison needs the GitHub App';
+    else report.aheadError = 'Branch lag is not computed: GitHub comparisons are gone';
 
     report.deployed = []; report.pending = [];
     const inWindow = new Set(delivered.map(item => item.id));
