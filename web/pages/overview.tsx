@@ -5,6 +5,7 @@ import { GroupDot } from '../components/status-badge';
 import { formatAge } from '../../src/model/duration';
 import { groupLabel, mergedAt, shippedThisWeek, groupMeaning, groups, summarySentence, upNextTile, type BoardItem, type OpenGroup } from '../groups';
 import { releaseView, servedFor } from '../../src/model/release';
+import { liveFailingLine, plainStage, serveView } from '../../src/model/plain-stage';
 import { stalledCards } from '../../src/model/actionless';
 import type { Dashboard } from './dashboard';
 
@@ -28,6 +29,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
   const now = Number.isNaN(observedAt) ? Date.now() : observedAt;
   const match = (w: Pick<Work, 'key' | 'title'>) => `${w.key} ${w.title}`.toLowerCase().includes(query.toLowerCase());
   const release = releaseView(status);
+  const serve = serveView(status);
   // Each group's rows are the board's, in the board's order; the item documents the rows render come from the snapshot.
   const byId = new Map(work.map(w => [w.id, w]));
   const rowsOf = (entries: BoardItem[]) => entries.filter(match).flatMap(entry => byId.has(entry.id) ? [byId.get(entry.id)!] : []);
@@ -76,7 +78,7 @@ export default function OverviewPage({ work, board, status, query, setQuery, set
       {board && groups.every(group => counts[group] === 0) && <p className="muted">{query ? 'No open item matches.' : 'Nothing is open.'}</p>}
       <div className="shipped-line" aria-label="Shipped this week">
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d="M4 12.5l5 5L20 6.5"/></svg>
-        <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · merged {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}</span>
+        <span><strong>{recent.length} shipped this week.</strong>{latest && <> Latest: <button type="button" className="text-button" data-latest={latest.key} onClick={() => setSelected(latest.id)}><span className="mono">{latest.key}</span> <span data-title>{latest.title}</span></button> · {plainStage(latest, release, serve)} · {formatAge(new Date(mergedAt(latest)).toISOString(), now)} ago</>}{unreleased > 0 && <span className="muted" data-unreleased={unreleased}> {unreleased} merged, not yet seen live.</span>}{liveFailingLine(serve) && <span className="danger-text" data-live-failing> {liveFailingLine(serve)}.</span>}</span>
         <button type="button" className="text-button push" onClick={() => setView('shipped')}>See what shipped →</button>
       </div>
     </>}

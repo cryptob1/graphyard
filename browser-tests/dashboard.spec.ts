@@ -219,10 +219,10 @@ for (const viewport of [{ name: 'desktop', width: 1280, height: 900 }, { name: '
     await expect(release).toContainText('1 merged change not carried yet');
     // The four states, in order, over the Moving rows; each row shows its own current state.
     await expect(page.locator('[data-group-section="moving"] .work-row')).toHaveCount(2);
-    await expect(page.locator('.step-name')).toHaveText(['Todo', 'Doing', 'Checking', 'Done']);
+    await expect(page.locator('.step-name')).toHaveText(['Not started', 'Building', 'Testing, review, merge', 'Done']);
     await expect(row(page, 'GY-3').locator('.step-seg[data-step="doing"][data-state="current"]')).toHaveCount(1);
     await expect(row(page, 'GY-4').locator('.step-seg[data-step="checking"][data-state="current"]')).toHaveCount(1);
-    await expect(row(page, 'GY-4')).toContainText('Checking ·');
+    await expect(row(page, 'GY-4')).toContainText('In review ·');
     // The todo item is not on the moving rows: it waits in Up next, off the step track.
     await expect(row(page, 'GY-2').locator('.steps-track')).toHaveCount(0);
     // Nothing clips at this width: the bar fits its row and the line wraps within the page.

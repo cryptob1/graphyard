@@ -8,13 +8,14 @@ import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport } from '../deploy-watch.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
+import { plainStage } from '../model/plain-stage.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
-/** One open item's line: its stage, its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
+/** One open item's line: its plain stage (GY-2988), its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
 export function itemLine(item: Work, now: number, launched: AttemptLaunch | null = null) {
   const lease = item.lease && Date.parse(item.lease.expiresAt) > now ? item.lease : null;
-  return { key: item.key, title: item.title, stage: item.stage, attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, humanOwner: item.owner ?? null, head: short(item.candidate?.sha),
+  return { key: item.key, title: item.title, stage: plainStage(item), attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, humanOwner: item.owner ?? null, head: short(item.candidate?.sha),
     blocker: item.blocker ?? (item.humanRequest && !item.humanRequest.answer ? `waits on a human: ${item.humanRequest.needed}` : null) };
 }
 
