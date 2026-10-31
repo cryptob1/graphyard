@@ -1,4 +1,6 @@
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { z } from 'zod';
 import { admin, demand, type Principal } from './model.js';
@@ -87,6 +89,20 @@ export const fixtureCases = (): E2eCase[] => [
     "The declared Compose-backed application of the fixture project, served in a change's local preview against its own database: its page shows the running app, and the change on it.", 'Fixture compose app'),
 ];
 
+/**
+ * GY-2992: the spec-check-shown dashboard case. Its created feature item cites
+ * `e2e:spec-check-shown` (a user-facing feature carries an e2e proof), so — for GY-1800's reason —
+ * revision 1 ships here: on a fresh registry no e2e sync has run yet, and create would refuse the
+ * proof naming a scenario the registry lacks. The file under `e2e/cases/` stays the source e2e
+ * sync revises later; it is read at call time, so the shipped revision is exactly the file's.
+ */
+export const specCheckShownScenario = 'spec-check-shown';
+const specCheckShownCaseFile = fileURLToPath(new URL('../e2e/cases/spec-check-shown.json', import.meta.url));
+export function specCheckShownRevision(createdAt = new Date().toISOString(), createdBy = 'graphyard'): Scenario {
+  const definition: E2eCase = caseSchema.parse(JSON.parse(readFileSync(specCheckShownCaseFile, 'utf8')));
+  return shippedCaseRevision(definition, createdAt, createdBy);
+}
+
 /** Revision 1 of a case shipped in code: exactly the revision `e2e sync` registers from its file under `e2e/cases/`. The timestamp is real (GY-2964): a seeded revision never reads as the epoch. */
 export function shippedCaseRevision(definition: E2eCase, createdAt = new Date().toISOString(), createdBy = 'graphyard'): Scenario {
   const scenario = scenarioDefinition({ file: `${caseDirectory}/${definition.id}.json`, definition });
@@ -99,7 +115,7 @@ export function shippedCaseRevision(definition: E2eCase, createdAt = new Date().
  * its own `e2e/cases/`, and Graphyard's internal cases never stand in for them.
  */
 export const shippedScenarioRevisions = (repository: string | null | undefined = graphyardRepository): Scenario[] =>
-  repository?.toLowerCase() === graphyardRepository ? [capacityLimitRedispatchRevision(), ...fixtureCases().map(definition => shippedCaseRevision(definition))] : [];
+  repository?.toLowerCase() === graphyardRepository ? [capacityLimitRedispatchRevision(), specCheckShownRevision(), ...fixtureCases().map(definition => shippedCaseRevision(definition))] : [];
 
 /** The shipped revision for `id`, or undefined when this release does not ship one to `repository`. */
 export const shippedScenario = (id: string, repository?: string | null): Scenario | undefined => shippedScenarioRevisions(repository).find(entry => entry.id === id);

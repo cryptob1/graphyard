@@ -16,4 +16,5 @@ export * from './model/carry.js';
 export * from './model/closure.js';
 export * from './model/user-facing.js';
 export * from './model/product-review.js';
+export * from './model/spec-check.js';
 export * from './model/single-case.js';

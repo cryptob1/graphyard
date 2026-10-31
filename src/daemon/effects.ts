@@ -88,6 +88,8 @@ export interface DaemonEffects {
   /** Removes the managed checkouts no live session owns past their grace. */
   sweepCheckouts?: () => Promise<unknown>;
   dispatch: (work: Work, profile: WorkerProfile, agents: HerdrAgent[], snapshot: { work: Work[]; now: string }) => Promise<unknown>;
+  /** The spec check a released feature item owes before dispatch (GY-2992): one fresh-context reviewer session, whose report gates the dispatch. Absent, none is launched. */
+  launchSpecCheck?: (work: Work) => Promise<unknown>;
   /** The install's compose server (GY-2966), which the loop starts when the control plane stays unreachable; null when the install is not a compose install on this host. */
   composeServer?: () => ComposeServer | null | Promise<ComposeServer | null>;
   /** Returns one head to a worker with the master's own operator-agent identity (`POST work/:id/rework`). */

@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { daemonSummary, emptyDaemonState, loopLiveness, neededRework, runCycle, runDaemon, standingVerdict, watchdogPlan, type DaemonAction, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { masterConfigSchema, type MasterConfig, type MasterRun, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 // Time-bomb allowance (GY-1694): the 2031-03-01 clockStart is the loop's injected now and every verdict/lease instant and loopLiveness call takes it explicitly; new Date() only stamps an empty snapshot for a lockless status.
 
 /**
@@ -59,6 +60,8 @@ function plane(scripts: Script[], options: { hostId?: string; delivered?: number
     stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(now - 30 * minute), updatedAt: iso(), stageEnteredAt: iso(now - minute),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [],
+    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+    specCheck: readySpecCheck(iso(now - 30 * minute)),
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: false, reasons: ['Worker has not submitted implementation for this attempt'] }],
     pr: 100 + index,
   } as unknown as Work));

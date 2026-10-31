@@ -5,12 +5,16 @@ Graphyard decides whether work advances; runtimes (Herdr) run sessions.
 
 ## One trip to Done
 
-1. **Ready**: released, unblocked, criteria name proofs.
+1. **Ready**: released, unblocked, criteria name proofs; a feature item waits here for its spec check (below).
 2. **Build**: worker claims lease and worktree, submits the exact commit, pushes nothing.
 3. **Review**: a [sensitive](#the-one-review-rule) commit waits for one independent approval; a user-facing feature also waits for its product review.
 4. **Test**: the merge writer trial-merges onto base, runs build and tests.
 5. **Acceptance**: roster producers report the criteria's proofs.
 6. **Done**: Graphyard rechecks gates, pushes base, observes.
+
+## The spec check before dispatch
+
+Nobody without the filer's context reads an item before a worker spends an attempt on it, so design gaps surface as rework. Before a released feature item dispatches, the loop launches one spec-check session — a reviewer identity, fresh context (the goldfish of Google's [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model), whose two reviewer prompts are vendored under `vendor/egm/`) — that reads only the item and the files and docs it names, and answers in one report: a paraphrase of what will be built and how each criterion is proven, and the implementation-readiness gaps. `ready` dispatches; a first `gaps` holds the item at ready with its report until master requirements revises it, which runs one re-check; the re-check's verdict dispatches, a second `gaps` with the report attached for the worker. Bugs, chores and "No user-facing change" items skip it. The report — paraphrase, gaps, verdict — shows on the item.
 
 ## From intent to work items
 

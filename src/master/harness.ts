@@ -142,6 +142,9 @@ export function sessionHarnessPlan(input: SessionHarnessInput): HarnessPlan {
       // GY-1492: the verdict goes through review post, which checks the launch's binding, the head,
       // mergeability and the thread lines before its one POST; a raw review call is denied below.
       { rule: `Bash(${cli} review post:*)`, why: 'Post the one verdict this session was launched for, checked against its launch binding; the master itself is denied every review call.' },
+      // GY-2992: a spec-check session posts its one report the same way, through its own binding;
+      // a session with no binding is refused by the command, and the server refuses an unregistered token.
+      { rule: `Bash(${cli} spec-check post:*)`, why: 'Post the one spec-check report this session was launched for, checked against its launch binding.' },
       // Surrounding code is read from a detached checkout under the managed worktree root, which
       // Graphyard allocates for the session and removes when it ends.
       ...(input.checkout ? [{ rule: 'Bash(git fetch:*)', why: 'Fetch the exact head under review.' },

@@ -6,6 +6,7 @@ import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
 import { dispatchSort } from '../coordination.js';
+import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
@@ -411,7 +412,8 @@ async function blockedPromptStep(cycle: Cycle, item: Work, session: NonNullable<
 
 /**
  * Dispatch: each claimable item to a free worker profile, each head nothing can carry forward back
- * to a worker, the reviewer and producer sessions the dispatcher owes, and the master session when absent.
+ * to a worker, the reviewer and producer sessions the dispatcher owes, the spec check each released
+ * feature owes before any of that (GY-2992), and the master session when absent.
  */
 async function dispatchStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock, herdr, credentials, launcher } = cycle;
@@ -428,6 +430,18 @@ async function dispatchStep(cycle: Cycle) {
     taken.add(free.profile.name);
     launcher.submit(key, [free.profile.name], sink => launchWorker(cycle, item, key, free.profile, sink));
   }
+  // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
+  // session per owed check. The hold itself is assertDispatchable's; the launch runs while the item
+  // is released and unblocked and no check stands and no launch is live on the item — one session
+  // per check, and the report's arrival (or a launch that stands) ends the launching.
+  if (effects.launchSpecCheck) for (const item of open) {
+    if (!item.ready || item.blocker) continue;
+    if (item.lease && Date.parse(item.lease.expiresAt) > clock) continue;
+    if (!needsSpecCheck(item) || specCheckCurrent(item) || specCheckLaunchLive(item, clock)) continue;
+    const key = `spec-check:${item.id}`;
+    if (launcher.busy(key) || (state.actions[key] && state.actions[key].state !== 'failed')) continue;
+    launcher.submit(key, [], sink => launchSpecChecker(cycle, item, key, sink));
+  }
   if (effects.rework) for (const item of open) {
     const rework = neededRework(item);
     if (!rework) continue;
@@ -438,6 +452,20 @@ async function dispatchStep(cycle: Cycle) {
   }
   await effects.dispatchTick?.(snapshot);
   await masterSession(cycle, open);
+}
+
+/** One spec check launch on the launcher (GY-2992): the effect starts the reviewer session and registers it on the item, so the next cycle launches no second. */
+async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: DaemonAction[]) {
+  const { state, effects, now } = cycle;
+  const attempts = (state.actions[key]?.attempts ?? 0) + 1;
+  const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'review', work: item.key, principal: null, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
+  await entry('started', `Launching ${item.key}'s spec check`);
+  try {
+    await effects.launchSpecCheck!(item);
+    sink.push(await entry('done', `Launched ${item.key}'s spec check: a fresh-context reviewer restates the item and names its gaps before a worker starts`));
+  } catch (error) {
+    sink.push(await entry('failed', `Spec check launch of ${item.key} failed: ${message(error)}; it is retried next cycle`));
+  }
 }
 
 /** One worker launch on the launcher: the claim is the worker's own, under its profile's principal. */

@@ -12,6 +12,7 @@ import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, 
 import { sensitiveRules } from '../src/model/risk-class.js';
 import { piAttempts, workerPreference } from '../src/model/worker-preference.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 
 /**
  * GY-1772: dispatch prefers Pi by the risk class of the change the item names, not by its path lane.
@@ -136,7 +137,9 @@ test('unit:dispatch-hands-planned-files — a real dispatch hands the item to th
   const profile: WorkerProfile = { name: 'registry-worker', principal: 'graphyard-worker-1', agentName: 'eng-pi', mode: 'launch', kind: 'pi', credentialFile, agentArgs: [], approvals: 'auto', environment: {} };
   const item = (key: string, lane: string, paths: string[]) => ({ id: `work-${key}`, key, title: 'Preference by risk', ...naming(paths), type: 'feature', priority: 1, dependencies: [], lane, pipeline: { reworkRounds: 0, attempts: [] },
     criteria: [{ id: 'AC-2', text: 'Dispatch hands the item to the preference', proofs: ['unit:dispatch-hands-planned-files'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
-    reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [] }) as any;
+    reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
+    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+    specCheck: readySpecCheck(new Date().toISOString()) }) as any;
 
   const dispatch = async (work: any) => {
     const at = new Date().toISOString();

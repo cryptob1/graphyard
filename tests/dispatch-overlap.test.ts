@@ -24,11 +24,15 @@ const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const hour = 3_600_000;
 
 function work(key: string, overrides: Partial<Work> = {}): Work {
+  const at = new Date(Date.now() - 3_600_000).toISOString();
   return {
     id: `id-${key}`, key, title: key, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
-    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-4 * hour), updatedAt: iso(0), stageEnteredAt: iso(-4 * hour),
+    policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at,
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...overrides,
+    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
+    // GY-2992: a released feature dispatches only with its spec check reported; these fixtures stand after it did.
+    specCheck: { policyRevision: 1, verdict: 'ready', paraphrase: 'It works; AC-1 is proven by the integration proof.', gaps: [], reviewer: 'spec-checker', at },
+    ...overrides,
   } as Work;
 }
 /** Claimed `sinceMs` ago with a live lease; no candidate yet, so it excludes on nothing. */

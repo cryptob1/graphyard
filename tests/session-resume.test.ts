@@ -12,6 +12,7 @@ import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 
 /**
  * GY-2971: an item's next attempt resumes the previous attempt's runtime session when it runs on the
@@ -91,7 +92,9 @@ async function fixture() {
 
 const item = (extra: Record<string, unknown> = {}) => ({ id: 'work-GY-1', key: 'GY-1', title: 'Parking', description: 'Changes src/parking.ts.', type: 'feature', priority: 1, dependencies: [], lane: 'low', pipeline: { reworkRounds: 0, attempts: [] },
   criteria: [{ id: 'AC-1', text: 'Parking keeps stable ids', proofs: ['unit:parking'] }], policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
-  reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], ...extra }) as any;
+  reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
+  // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+  specCheck: readySpecCheck(new Date().toISOString()), ...extra }) as any;
 /** The launch with its session-id value masked, so two fresh launches compare word for word. */
 const masked = (words: string[]) => words.map((word, index) => words[index - 1] === '--session-id' ? 'ID' : word);
 const sessionIdOf = (args: string[]) => args[args.indexOf('--session-id') + 1];

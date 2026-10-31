@@ -9,6 +9,7 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import { Launcher, defaultLaunchConcurrency } from '../src/daemon/cycle.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { readySpecCheck } from './helpers/spec-check.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 snapshot `now` is the cycle's own logic clock (runCycle adopts snapshot.now); Date.now() only times the cycle and the launcher waves, which nothing compares with 2030.
 
 // GY-616: a burst of session launches ran inside the master cycle, one Herdr pane and session
@@ -25,6 +26,8 @@ function work(key: string): Work {
     id: `id-${key}`, key, title: `Hotfix: ${key}`, description: '', type: 'feature', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }],
     policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(-4 * hour), updatedAt: iso(0), stageEnteredAt: iso(-4 * hour),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
+    // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
+    specCheck: readySpecCheck(new Date().toISOString()),
     gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [],
   } as Work;
 }
