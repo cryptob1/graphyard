@@ -288,8 +288,3 @@ export function statusHeld(work: Work, now: number): StatusDuration {
   return statusDuration(statusSince(work, now), now, phaseOf(work, now) === 'shipped');
 }
 
-/** Stuck items first, then the oldest in its phase; the order people should look at them. */
-export function byAttention(items: Work[], now: number) {
-  const rank = (w: Work) => plainStatus(w, now).tone === 'stuck' ? 0 : 1;
-  return [...items].sort((a, b) => rank(a) - rank(b) || a.stageEnteredAt.localeCompare(b.stageEnteredAt));
-}

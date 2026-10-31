@@ -176,8 +176,6 @@ export interface AllowlistEntry {
  * calls behind the merge writer); unit:git-network-door-baseline keeps the set from growing.
  */
 export const allowlist: Record<string, AllowlistEntry> = {
-  'scripts/ci-tests.mjs': { subcommands: ['ls-remote'], runs: 'the CI runner reading the merge queue refs while selecting this run\'s tests', credential: 'the Actions checkout token the runner already holds', door: 'it runs on a GitHub Actions runner, a different machine from the loop that hosts the merge writer, and reads the queue refs with the token Actions hands that runner; the writer has no port a CI job can call' },
-  'scripts/prepare-acceptance.mjs': { subcommands: ['fetch'], runs: 'the trusted acceptance job preparing the exact candidate head and base', credential: 'none stored: an anonymous https fetch of a public repository inside the candidate build context', door: 'it runs inside the trusted acceptance job on a CI runner, which must build from the exact head and base it reads itself; the merge writer lives in the loop on another machine and no port reaches it from CI' },
   'src/cli/complete.ts': { subcommands: ['push'], runs: 'the worker CLI publishing its head (`complete`)', credential: 'the worker sandbox\'s own git credential (GY-1925: it fails wherever SSH cannot read /etc/ssh)', door: 'the push exists only in the PR form, which the engine accepts only while GitHub is the merger (GY-1523) — exactly when the control plane is not the merge writer, so there is no writer queue to hand the push to; the writer\'s one push door (sync-push) carries only a pure base sync of the worker\'s own assigned branch, and the answer to a sandbox that cannot push is `complete --head`, which pushes nothing (GY-1925)' },
   'src/cli/workspace-worktree.ts': { subcommands: ['fetch'], runs: 'the worker launcher\'s workspace tools (`handoff`, `restore-branch`)', credential: 'the workspace checkout\'s own git credential', door: 'the fetch refreshes the workspace checkout\'s own remote-tracking refs for `restore-branch`\'s lease push and for an adopted pull request\'s branch, which the merge writer neither holds nor pushes; a rework workspace reads the registered local head and fetches nothing (GY-2017), and `restore-branch`\'s lease push replaces a worker branch the merge writer has no lease on' },
   'src/daemon/cycle-merge-writer.ts': { subcommands: ['fetch', 'push'], runs: 'the loop\'s merge-writer cycle (the base read, and the leased push it executes from pushArgs)', credential: 'the merge writer\'s deploy key alone (pushEnvironment, GIT_SSH_COMMAND)', door: 'it is the merge writer: its base fetch and leased push are the door itself' },
@@ -193,21 +191,14 @@ export const allowlist: Record<string, AllowlistEntry> = {
  * silently dropped. A follow-up that moves its cluster's calls behind the merge writer removes its
  * entries here and in the allowlist in the same commit; the set never grows.
  * The four follow-ups own these files by cluster: GY-1941 release and promotion, GY-1942
- * docs-sync and workspace tooling, GY-1943 acceptance and planner, GY-1944 worker CLI — GY-1944
- * moved the worker CLI's trailing fetch behind the control plane's own push (the route validates
- * the fast-forward onto the commit the worker built, so the remote-tracking ref follows locally)
- * and removed that entry here and above in the same commit; its other three entries record in
- * `door` why their calls cannot go through the merge writer.
+ * docs-sync and workspace tooling, GY-1943 acceptance and planner, GY-1944 worker CLI — GY-1943
+ * deleted the acceptance job and the CI selection's queue-tip reads, removing both entries here
+ * and above in the same commit; GY-1944 moved the worker CLI's trailing fetch behind the control
+ * plane's own push (the route validates the fast-forward onto the commit the worker built, so the
+ * remote-tracking ref follows locally) and removed that entry here and above in the same commit;
+ * its other three entries record in `door` why their calls cannot go through the merge writer.
  */
-/**
- * GY-1943: the acceptance and planner cluster. Each file either leaves both lists, its calls moved
- * behind the merge writer, or keeps an entry stating why its call cannot go through it.
- */
-export const acceptanceAndPlannerCluster = ['scripts/prepare-acceptance.mjs', 'scripts/ci-tests.mjs'];
-
 export const baseline = [
-  'scripts/ci-tests.mjs',
-  'scripts/prepare-acceptance.mjs',
   'src/cli/complete.ts',
   'src/cli/upgrade.ts',
   'src/cli/workspace-worktree.ts',
@@ -267,10 +258,6 @@ test('unit:git-network-door — every file that spawns a git network subcommand 
     assert.deepEqual(subcommandsOf(detected.get(path) ?? []), [...entry.subcommands].sort(), `${path}'s entry must name exactly the subcommands it spawns`);
     assert.ok(entry.runs.trim().length >= 15, `${path}'s entry names the process that runs its git network subcommands`);
     assert.ok(entry.credential.trim().length >= 10, `${path}'s entry names the credential its git network subcommands use`);
-  }
-  for (const path of acceptanceAndPlannerCluster) {
-    if (!Object.hasOwn(allowlist, path)) { assert.ok(!baseline.includes(path), `${path} left the allowlist, so it leaves the baseline in the same commit`); continue; }
-    assert.ok((allowlist[path].door ?? '').trim().length >= 60, `${path} still spawns, so its entry states why its call cannot go through the merge writer (GY-1943)`);
   }
 });
 

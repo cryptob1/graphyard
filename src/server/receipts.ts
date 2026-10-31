@@ -2,13 +2,10 @@ import { createHash } from 'node:crypto';
 import type pg from 'pg';
 import { demand, type Principal, type Work } from '../model.js';
 import type { Services } from './routes.js';
-import { workIdByRef } from '../store/locked-read.js';
 
 type Db = pg.PoolClient;
 /** The fingerprint an idempotent mutation's receipt is matched on. */
 export const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
-export const findWork = async (db: Db, id: string): Promise<Work | undefined> =>
-  (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')} FOR UPDATE`, [id])).rows[0]?.document;
 export const record = (db: Db, work: Work, actor: string, kind: string, payload: unknown) =>
   db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, actor, kind, JSON.stringify(payload)]);
 /** The caller as the server knows it: an operator agent is re-read from its registry row. */

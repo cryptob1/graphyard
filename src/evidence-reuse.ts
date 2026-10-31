@@ -21,7 +21,6 @@ const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const pattern = z.string().min(1).max(300).regex(/^[^\s\\]+$/, 'Patterns are repository-relative paths without whitespace or backslashes').refine(p => !p.startsWith('/') && !p.split('/').includes('..'), 'Patterns are repository-relative');
 const patterns = z.array(pattern).max(100).refine(a => new Set(a).size === a.length, 'Patterns must be unique');
 export const reuseCategories = ['dependencies', 'lockfiles', 'buildInputs', 'configuration', 'migrations'] as const;
-export type ReuseCategory = (typeof reuseCategories)[number];
 /** The applicability definition an operator publishes as a `reuse` definition. */
 export const reuseScopeSchema = z.object({
   dependencies: patterns, lockfiles: patterns, buildInputs: patterns, configuration: patterns, migrations: patterns,

@@ -80,15 +80,3 @@ export function resolveTimingBaseline(base: string, branch: string, files: reado
   return timingBaselineCompanion(base, resolved, own).allowed ? resolved : null;
 }
 
-/**
- * Attaches the companion verdict to the baseline among compared files, reading the base and head
- * versions through `read` (a blob by sha). A baseline the planned scope covers, or one whose
- * versions cannot be read, carries none and is judged by blob identity as before.
- */
-export async function judgeTimingCompanion(files: ScopeFile[], read: (sha: string) => Promise<string | null>, planned: (path: string) => boolean = () => false) {
-  const file = files.find(entry => entry.path === timingBaselinePath);
-  if (!file || planned(file.path) || file.status === 'removed' || !file.sha || !file.baseSha || file.sha === file.baseSha) return;
-  const inScopeTests = files.filter(f => planned(f.path) || f.status === 'added' || f.baseSha === null);
-  const [base, head] = await Promise.all([read(file.baseSha), read(file.sha)]);
-  if (base !== null && head !== null) file.companion = timingBaselineCompanion(base, head, changedTestFiles(inScopeTests));
-}

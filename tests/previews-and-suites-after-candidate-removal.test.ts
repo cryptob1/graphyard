@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readdirSync } from 'node:fs';
+import { existsSync, readdirSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { listTestFiles, repositoryRoot } from '../scripts/ci-tests.mjs';
@@ -31,11 +31,13 @@ test('unit:previews-and-suites-after-candidate-removal — a merge preview still
     assert.match(failing.detail, /missing/);
   } finally { await served.close(); }
 
-  const listed = execFileSync(process.execPath, ['scripts/ci-tests.mjs', 'select'], { cwd: repositoryRoot, env: { ...process.env, GITHUB_EVENT_NAME: 'push', GITHUB_STEP_SUMMARY: '' }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean);
-  assert.deepEqual(listed, listTestFiles(), 'the ordinary selection is every test file');
+  const affected = execFileSync(process.execPath, ['scripts/ci-tests.mjs', 'affected', 'package.json'], { cwd: repositoryRoot, env: { ...process.env }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).split('\n').filter(Boolean);
+  assert.match(affected[0]!, /^full: /);
+  assert.deepEqual(affected.slice(1), listTestFiles(), 'the ordinary selection is every test file');
   for (const file of ['tests/soak-merge-writer.test.ts', 'tests/work-snapshot-latency.test.ts', 'tests/server-scale.test.ts', 'tests/healthz-bounded.test.ts'])
-    assert.ok(listed.includes(file), `${file} runs in the ordinary suite`);
-  const workflows = readdirSync(join(repositoryRoot, '.github/workflows'));
+    assert.ok(affected.includes(file), `${file} runs in the ordinary suite`);
+  const workflowsDir = join(repositoryRoot, '.github/workflows');
+  const workflows = existsSync(workflowsDir) ? readdirSync(workflowsDir) : [];
   assert.deepEqual(workflows.filter(name => /release-candidate|soak|deploy-smoke/.test(name)), [], 'no release-candidate, soak or deploy-smoke workflow');
-  assert.ok(workflows.includes('release.yml'), 'release.yml still publishes the image on v* tags');
+  assert.ok(!workflows.includes('release.yml'), 'no release workflow: installs build the image locally');
 });

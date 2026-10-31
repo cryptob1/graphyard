@@ -29,4 +29,3 @@ export function parseGeneratedFiles(value: string | undefined): string[] {
  */
 export const configuredGeneratedFiles = (env: NodeJS.ProcessEnv = typeof process === 'undefined' ? {} : process.env) => parseGeneratedFiles(env.GRAPHYARD_GENERATED_FILES);
 
-export const isGeneratedFile = (generated: readonly string[], path: string) => generated.includes(path);

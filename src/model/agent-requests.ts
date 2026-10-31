@@ -56,7 +56,6 @@ export const agentRequestSchema = z.object({
   /** Resolve an open request instead of raising one. */
   resolve: z.string().min(1).max(64).optional(),
 }).strict();
-export type AgentRequestInput = z.infer<typeof agentRequestSchema>;
 
 
 /**
