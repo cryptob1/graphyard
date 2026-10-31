@@ -122,10 +122,13 @@ test('unit:five-step-cycle — merging a head runs exactly one trial for it and 
   const state = emptyDaemonState(config);
   await runCycle(config, state, effects, () => now);
   await mergeWriterIdle(state);
+  assert.equal(trials, 1, 'the merge runs its required trial once');
+  assert.ok(!('advisory' in state.mergeWriter), 'the merge creates no advisory obligation');
   // The control plane has observed the delivery, so the following cycle owes the head nothing.
   now = start + 60_000;
   work[0] = { ...work[0]!, observation: { ...work[0]!.observation!, merged: true, mergeSha: sha(`merge:${sha('head2')}`) } } as typeof work[0];
   await runCycle(config, state, effects, () => now);
   await mergeWriterIdle(state);
   assert.equal(trials, 1, 'exactly one trial runs for the head, across the merge and the following cycle');
+  assert.ok(!('advisory' in state.mergeWriter), 'the following cycle creates no advisory obligation');
 });
