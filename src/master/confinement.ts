@@ -1,8 +1,9 @@
 // Concern: the OS-level confinement of the coordinator checkout (GY-888) — the read-only mount namespace, or the runtime's own sandbox, that every launch carries.
 import { existsSync, realpathSync, statSync } from 'node:fs';
-import { delimiter, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
+import { configHome } from '../install/secrets.js';
 import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
 
 // ---- OS-level confinement of the coordinator checkout (GY-888) -----------------------------------
@@ -60,6 +61,8 @@ export interface ConfinementInput {
   ownGitHubCredential?: boolean;
   /** An explicit null binds no keyring proxy whether or not the session carries a credential of its own: a worker launched while the control plane is the merge writer (GY-1523) has no GitHub credential and pushes nothing, so it reaches no keyring either. */
   secretsBus?: null;
+  /** The install's credential locations the session must not read (GY-1856), with its own kept. Absent, nothing is masked — the master session keeps its coordinator credential. */
+  credentialMask?: CredentialMask;
 }
 const withinCheckout = (path: string, root: string) => { const from = relative(root, path); return from !== '' && from !== '..' && !from.startsWith(`..${sep}`) && !isAbsolute(from); };
 /** Whether `path` is a directory (or nothing); symlinks to directories count, as bwrap binds resolve them. */
@@ -167,6 +170,78 @@ export const processLaunchMaskWords = (
   return [...directories.flatMap(path => ['--tmpfs', path]), ...sockets.flatMap(path => ['--ro-bind', proxy, path])];
 };
 export const isSocketPath = (path: string) => { try { return statSync(path).isSocket(); } catch { return false; } };
+/** The path as its canonical real path, or as given when nothing is there to resolve (bwrap resolves against its staging root). */
+const canonicalPath = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+/** The nearest directory of `path` that exists — the path itself when it is one, else its closest existing ancestor, or null when nothing up to `/` is there. A credential file is hidden by masking the directory that holds it. */
+const nearestExistingDirectory = (path: string): string | null => {
+  for (let current = resolve(path); ; current = dirname(current)) {
+    if (isDirectoryPath(current)) return current;
+    if (dirname(current) === current) return null;
+  }
+};
+
+/**
+ * The credential locations a confined session of this install must not read (GY-1856), with the
+ * session's own kept: the operator config home wholesale — Graphyard's install, master, worker,
+ * reviewer and producer directories all live under it — and every recorded credential path beside
+ * it, against the session's own token file and runtime login homes.
+ */
+export interface CredentialMask {
+  /** The operator config home, masked with an empty tmpfs. */
+  configHome: string;
+  /** Recorded credential paths beside it — the coordinator credential, the merge writer's deploy key, an upstream install's credential, the per-install `confinement.maskPaths` list — each hidden at the nearest directory that exists. */
+  extraPaths: readonly string[];
+  /** The session's own credential locations: its token file and its runtime login homes, re-exposed after the masks. */
+  own: readonly string[];
+}
+
+/**
+ * The credential mask a session of this install carries (GY-1856): everything this config records
+ * as a credential location that is not the session's own. `own` keeps the session's token file
+ * (the file `GRAPHYARD_TOKEN_FILE` names) and its runtime login homes (the values its launch sets
+ * on the runtime's home variable) readable; `home` overrides the operator config home (tests).
+ */
+export function credentialMaskFor(
+  config: { credentialFile?: string; confinement?: { maskPaths?: readonly string[] }; run?: { mergeWriter?: { deployKeyFile?: string } }; upstream?: { url?: string; credentialFile?: string } },
+  own: { credentialFile?: string | null; runtimeHomes?: readonly string[] },
+  home?: string,
+): CredentialMask {
+  const recorded = (path: string | undefined) => !!path && isAbsolute(path) ? [path] : [];
+  return {
+    configHome: configHome(home),
+    extraPaths: [...recorded(config.credentialFile), ...recorded(config.run?.mergeWriter?.deployKeyFile), ...recorded(config.upstream?.credentialFile), ...(config.confinement?.maskPaths ?? []).flatMap(path => recorded(path))],
+    own: [own.credentialFile ?? null, ...(own.runtimeHomes ?? [])].filter((path): path is string => !!path && isAbsolute(path)),
+  };
+}
+
+/**
+ * The bubblewrap words that hide the install's credential locations from the session (GY-1856):
+ * each masked directory becomes an empty tmpfs, so every credential under it is unreadable —
+ * `test -r` fails, and no content is reachable to print. The session's own paths are not hidden
+ * here; they are re-exposed after the masks (`readOnlyMountWrapper`). Only a location that exists
+ * is masked — the config home when it is a directory, a recorded path at the nearest directory
+ * that holds it — so a stale recorded path never masks a broad ancestor that holds unrelated
+ * files. A candidate that would hide a protected path — the coordinator checkout or the session's
+ * own directory — is dropped, `/` is never masked, and each candidate is named by its canonical
+ * real path, as the process-launch masks are (bwrap builds mount points only where every
+ * component resolves inside the namespace).
+ */
+export const credentialMaskWords = (mask: CredentialMask | undefined, protect: readonly string[]): readonly string[] => {
+  if (!mask) return [];
+  const hides = (path: string) => !protect.some(p => p === path || withinCheckout(p, path));
+  const candidates = [isDirectoryPath(mask.configHome) ? mask.configHome : null, ...mask.extraPaths.filter(path => isAbsolute(path) && existsSync(path))];
+  const unhidden = [...new Set(candidates.filter((path): path is string => !!path)
+    .map(path => nearestExistingDirectory(path))
+    .filter((path): path is string => !!path && path !== '/')
+    .map(canonicalPath)
+    .filter(path => path !== '/' && isDirectoryPath(path) && hides(path)))];
+  // A path already covered by a wider candidate is not masked again: the config home's tmpfs hides everything under it.
+  const directories = unhidden.filter(path => !unhidden.some(other => other !== path && withinCheckout(path, other)));
+  return directories.flatMap(path => ['--tmpfs', path]);
+};
+/** The session's own credential paths that exist here, canonical: what the wrapper re-exposes after the masks. */
+const keptCredentialPaths = (mask: CredentialMask | undefined): string[] =>
+  [...new Set((mask?.own ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath))];
 /** Where `graphyard-secrets-bus.socket` listens: `$GRAPHYARD_SECRETS_BUS`, else `graphyard-secrets-bus` in the user's runtime directory. */
 export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): string | null =>
   env.GRAPHYARD_SECRETS_BUS || (env.XDG_RUNTIME_DIR ? join(env.XDG_RUNTIME_DIR, 'graphyard-secrets-bus') : uid === undefined ? null : `/run/user/${uid}/graphyard-secrets-bus`);
@@ -200,7 +275,7 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
  * the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[] }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
   const gitDir = checkoutGitDirectory(root);
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -212,7 +287,11 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = withinCheckout(directory, root) ? [directory] : [];
   const bwrap = input.bwrap ?? 'bwrap';
-  const masks = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
+  // GY-1856: the install's credential locations are hidden from the session, and its own — its
+  // token file read-only, its runtime login homes writable — are re-exposed last, so a later bind
+  // shadows the mask that covered them.
+  const kept = keptCredentialPaths(input.credentialMask);
+  const masks = [...processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]), ...credentialMaskWords(input.credentialMask, [root, directory])];
   // GY-2967: every ref transaction a session runs — commit, merge, reset, branch -f, update-ref, a
   // cherry-pick's cleanup — takes the common git directory's packed-refs lock once anything has
   // packed a ref (git gc, git pack-refs), and rewrites packed-refs under that lock, so keeping the
@@ -236,7 +315,8 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
     ...ownGitState.flatMap(path => ['--ro-bind', path, path]),
     ...[...sharedDirectories, ...own, ...(input.writable ?? []).filter(isDirectoryPath)].flatMap(path => ['--bind', path, path]),
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
-    ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]), '--'];
+    ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]),
+    ...kept.flatMap(path => isDirectoryPath(path) ? ['--bind', path, path] : ['--ro-bind', path, path]), '--'];
 }
 
 /** The one refusal text for a launch whose coordinator confinement cannot be applied (GY-888): the head names the runtime and the checkout, `problem` says what is missing. */
@@ -292,7 +372,7 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}) });
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,
     detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };
