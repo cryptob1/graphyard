@@ -13,7 +13,6 @@ import { closeRequest } from '../src/cli/master-close.js';
 import { isClosed, isDelivered, type Principal, type Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import type { Services } from '../src/server/routes.js';
-import { homeNumbers } from '../web/home-numbers.js';
 import { plainStatus } from '../src/model/plain-status.js';
 import ShippedPage from '../web/pages/shipped.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
@@ -66,9 +65,6 @@ after(async () => { http?.close(); await store?.close(); await database?.stop();
 
 test('integration:close-obsolete — a stuck item closed as obsolete is terminal, audited, not delivered and not stuck', async () => {
   const work = await patch(await released('obsolete noise'), { blocker: 'Nobody will ever answer this' });
-  const before = await store.workSnapshot();
-  const now = Date.parse(before.now);
-  assert.equal(homeNumbers(before.work, now).stuck, 1, 'the fixture is on the Stuck list');
   const closed = await ok(coordinator, `work/${work.key}/close`, { kind: 'obsolete', reason: 'Auto-generated noise' }) as Work;
   assert.equal(closed.stage, 'done');
   assert.deepEqual({ ...closed.closure, at: undefined }, { kind: 'obsolete', reason: 'Auto-generated noise', ref: null, by: coordinator.id, at: undefined, from: 'ready' });
@@ -79,8 +75,6 @@ test('integration:close-obsolete — a stuck item closed as obsolete is terminal
   assert.equal(entry.payload.details.reason, 'Auto-generated noise');
   // Every open list and every delivered count leaves it out; only the closed count names it.
   const snapshot = await store.workSnapshot();
-  const numbers = homeNumbers(snapshot.work, Date.parse(snapshot.now));
-  assert.deepEqual([numbers.open, numbers.stuck, numbers.shippedThisWeek], [0, 0, 0]);
   assert.equal(plainStatus(closed, Date.now()).tone, 'shipped');
   assert.match(plainStatus(closed, Date.now()).sentence, /^Closed as obsolete: Auto-generated noise/);
   // The dashboard: nothing under Shipped, one row in the closed history below it.

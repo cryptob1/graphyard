@@ -96,7 +96,7 @@ test('unit:landability-github-snapshot — a github-observed candidate keeps the
   assert.deepEqual(landabilityRefusals(evaluateLandability(tried, [tried], new Date(start)), 'acceptance'), reasons);
 });
 
-test('unit:advisory-tests-selection — scripts/ci-tests.mjs exports the advisory budget tests; the trials\' affected selection leaves them out, `advisory` lists them, and the github CI selection still runs them', () => {
+test('unit:advisory-tests-selection — scripts/ci-tests.mjs exports the advisory budget tests; the trials\' affected selection leaves them out and `advisory` lists them', () => {
   assert.deepEqual(advisoryTests, []);
   const cli = (...args: string[]) => execFileSync('node', ['scripts/ci-tests.mjs', ...args], { cwd: root, encoding: 'utf8' }).split('\n').filter(Boolean);
   const affected = cli('affected', 'package.json');
@@ -104,7 +104,7 @@ test('unit:advisory-tests-selection — scripts/ci-tests.mjs exports the advisor
   for (const advisory of advisoryTests) assert.ok(!affected.includes(advisory), `${advisory} is not in the trial's selection`);
   assert.equal(affected.length - 1, listTestFiles().length - advisoryTests.length, 'everything else in the full selection still runs');
   assert.deepEqual(cli('advisory'), [`advisory: ${advisoryTests.length} advisory budget test file(s)`, ...advisoryTests]);
-  for (const advisory of advisoryTests) assert.ok(listTestFiles().includes(advisory), `${advisory} stays in github's pre-merge selection`);
+  for (const advisory of advisoryTests) assert.ok(listTestFiles().includes(advisory), `${advisory} stays in the suite the trial shards`);
 });
 
 test('integration:advisory-failure-files-nothing — after the merge writer delivers a head the loop runs the advisory tests once on its merge commit, and a failing one files no work item and prints one log line; nothing is reverted', async () => {

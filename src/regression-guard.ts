@@ -82,47 +82,6 @@ const myersHunks = (a: number[], b: number[], offset: number): DiffHunk[] | null
 
 const sameLines = (a: number[], b: number[]) => a.length === b.length && a.every((line, index) => line === b[index]);
 
-export function threeWayMerge(base: Buffer, ours: Buffer, theirs: Buffer): ThreeWayMerge {
-  const lines = new Map<string, number>(), byId: Buffer[] = [];
-  const ids = (content: Buffer) => splitLines(content).map(line => {
-    const key = line.toString('latin1');
-    let id = lines.get(key);
-    if (id === undefined) { id = byId.push(line); lines.set(key, id); }
-    return id;
-  });
-  const baseLines = ids(base), oursLines = ids(ours), theirsLines = ids(theirs);
-  const oursHunks = myersHunks(baseLines, oursLines, 0), theirsHunks = myersHunks(baseLines, theirsLines, 0);
-  if (!oursHunks || !theirsHunks) return { clean: false, content: null };
-  const tagged = [...oursHunks.map(hunk => ({ ...hunk, side: 0 as const })), ...theirsHunks.map(hunk => ({ ...hunk, side: 1 as const }))].sort((x, y) => x.aStart - y.aStart || x.aLen - y.aLen);
-  const out: number[] = [];
-  let baseAt = 0, conflict = false;
-  for (let index = 0; index < tagged.length && !conflict;) {
-    const first = tagged[index];
-    let regionEnd = first.aStart + first.aLen, next = index + 1;
-    const region = [first];
-    while (next < tagged.length && tagged[next].aStart <= regionEnd) { regionEnd = Math.max(regionEnd, tagged[next].aStart + tagged[next].aLen); region.push(tagged[next]); next++; }
-    while (baseAt < first.aStart) out.push(baseLines[baseAt++]);
-    const spans = (side: 0 | 1, lines: number[]) => {
-      const own = region.filter(hunk => hunk.side === side), from = own[0], to = own[own.length - 1];
-      return lines.slice(from.bStart - (from.aStart - first.aStart), to.bStart + to.bLen + (regionEnd - (to.aStart + to.aLen)));
-    };
-    const only = (side: 0 | 1, lines: number[]) => { for (const hunk of region) out.push(...lines.slice(hunk.bStart, hunk.bStart + hunk.bLen)); };
-    if (region.every(hunk => hunk.side === 0)) only(0, oursLines);
-    else if (region.every(hunk => hunk.side === 1)) only(1, theirsLines);
-    else {
-      const baseRegion = baseLines.slice(first.aStart, regionEnd), oursRegion = spans(0, oursLines), theirsRegion = spans(1, theirsLines);
-      if (sameLines(oursRegion, theirsRegion) || sameLines(baseRegion, theirsRegion)) out.push(...oursRegion);
-      else if (sameLines(baseRegion, oursRegion)) out.push(...theirsRegion);
-      else conflict = true;
-    }
-    baseAt = regionEnd;
-    index = next;
-  }
-  if (conflict) return { clean: false, content: null };
-  while (baseAt < baseLines.length) out.push(baseLines[baseAt++]);
-  return { clean: true, content: Buffer.concat(out.map(id => byId[id - 1])) };
-}
-
 /**
  * Delivered work items whose observed diff covers the path. A pull request the provider reports
  * merged shipped its files whether or not its delivery is recorded yet.

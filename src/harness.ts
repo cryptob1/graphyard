@@ -359,25 +359,9 @@ export async function trustAgyFolder(directory: string, environment: Record<stri
   }
 }
 
-/**
- * Runtimes Graphyard accepts in a profile but cannot yet start unattended: none has both a known
- * flag or variable that suppresses its approval and trust prompts for an interactive session and a
- * command-line way to hand that session its first request (Kimi and Amp take a prompt only in a
- * one-shot mode that exits, so their request would have to be pasted, which a session may rightly
- * refuse). Each is refused before launch, naming the runtime, rather than started into a session
- * that waits for a keypress no one sends (GY-184). A runtime moves out of this list by gaining a
- * recipe above and a request contract in master.ts `launchRequestContracts`.
- */
-export const refusedLaunchKinds = ['kimi', 'amp', 'devin', 'cline', 'omp', 'mastracode', 'kiro', 'droid', 'grok', 'hermes', 'kilo', 'qodercli', 'maki'] as const;
 export class LaunchRefusedError extends Error { constructor(readonly kind: string, message?: string) {
   super(message ?? `Graphyard refuses to launch the ${kind} runtime: it has no non-interactive launch contract for ${kind} (no-approval flags and a first request on its command line), so the session would stop at its own approval or trust prompt or never receive its instruction. Choose a runtime with a launch recipe (${Object.keys(nonInteractiveLaunch).join(', ')}) for this profile or registry role.`);
 } }
-/** The runtime's launch recipe, or a refusal naming the runtime when there is none. */
-export function assertLaunchRecipe(kind: string): LaunchRecipe {
-  const recipe = nonInteractiveLaunch[kind];
-  if (!recipe) throw new LaunchRefusedError(kind);
-  return recipe;
-}
 /**
  * The launch contract a registry runtime brings with it (model/registry.ts): its own startup
  * arguments and environment are that runtime's no-approval mode, registered by the operator who
@@ -527,9 +511,6 @@ export function harnessDecision(plan: Pick<HarnessPlan, 'allow' | 'deny'>, comma
   return parts.length && allowed.every(Boolean) ? { decision: 'allow', rule: allowed[0]! } : { decision: 'ask', rule: null };
 }
 
-/** The one GraphQL write a session may make: resolving a review thread (the master's audit, the reviewer's verdict). */
-export const resolveThreadScript = (root: string) => resolve(root, 'scripts/resolve-thread.mjs');
-
 // The master's own loop, and nothing else. A harness allowlist is a prompt policy, not an
 // authority boundary: branch protection and Graphyard's required check remain the enforcement.
 export function masterHarnessPlan(input: { harness: string; root: string; cliPath: string; repository: string; baseBranch: string; credentialHome: string }): HarnessPlan {
@@ -556,7 +537,6 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     { rule: 'Bash(gh api user)', why: 'Name the GitHub identity an audit entry attributes an administration action to.' },
     { rule: 'Bash(gh api user/installations*)', why: 'Read the control-plane App\'s installation and the permissions it grants, before and after an installation acceptance. Installation writes have no API path the master may take directly; master browser installation-accept is the only one.' },
     { rule: 'Bash(gh api apps/*)', why: 'Read the permissions a public App record requests, to verify an App permission update.' },
-    { rule: `Bash(node ${resolveThreadScript(input.root)}:*)`, why: 'Resolve a review thread the master has audited. The wrapper sends only resolveReviewThread, so it cannot merge or change protection.' },
     { rule: 'Bash(jq:*)', why: 'Filter the JSON that the commands above print, without leaving the session.' },
     { rule: 'Read(./.graphyard/master-actions/**)', why: 'Read the recorded steps, screenshots, and audit ledger of browser administration flows.' },
     { rule: 'Write(./.graphyard/profiles/**)', why: 'Write the worker and reviewer profile files the master installs with master worker add and master reviewer add.' },
