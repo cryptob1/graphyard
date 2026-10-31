@@ -85,3 +85,38 @@ test('a refused answer keeps everything the operator typed: the card clears only
   await expect(card).toHaveCount(1);
   await expect(note).toHaveValue('Cap it at €30 and bill the staging project');
 });
+
+test('a real-world check keeps the photo the person chose: a 1 MiB image posts whole, and an unreadable one holds the answer', async ({ page }) => {
+  const check = { id: '6c1d9f5e-8e9b-4a7f-8b66-1d2e3f4a5b6c', proof: 'human:receipt-prints', criterion: 'AC-1', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: 1, ask: 'A receipt prints on the shop printer', steps: ['Make this check on commit aaaaaaaaaaaa'], at: '2026-01-01T00:00:00Z', requestedBy: 'graphyard', answer: null };
+  const work = { ...parked, blocker: null, humanRequest: null, humanRequests: [], humanProofs: [check] };
+  const posted: any[] = [];
+  await page.route('**/api/**', async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === '/api/sign-in') return route.fulfill({ json: { token: 'browser-human', actor: { id: 'operator', role: 'admin', sessionKind: 'human' }, expiresAt: '2026-01-01T14:00:00Z' } });
+    if (route.request().method() === 'POST') { posted.push(route.request().postDataJSON()); return route.fulfill({ json: work }); }
+    if (path.endsWith('/status')) return route.fulfill({ json: { actor: { id: 'operator', role: 'admin', sessionKind: 'human' }, humanOnly: openHumanOnly([{ work: work as never }], Date.parse(now)), github: true, reviewProviders: ['github'], repository: 'fixture/repository', jobs: [] } });
+    if (path.endsWith('/work-snapshot')) return route.fulfill({ json: { work: [work], now } });
+    if (path.endsWith('/board')) return route.fulfill({ json: boardFromStatus([work as never], Date.parse(now), { humanOnly: openHumanOnly([{ work: work as never }], Date.parse(now)) }) });
+    return route.fulfill({ json: path.endsWith('/work') ? [work] : [] });
+  });
+  await page.goto('/#sign-in=one-time-code-from-graphyard-login');
+  await page.getByRole('button', { name: 'Every request and answer →' }).click();
+  const card = page.locator('.human-request'), pass = card.getByRole('button', { name: 'Pass, with this note…' }), photo = card.getByLabel('Photo (optional)');
+  await card.getByRole('textbox', { name: 'Note for GY-7' }).fill('Printed clean');
+  await expect(pass).toBeEnabled();
+
+  const original = await page.evaluateHandle(() => FileReader.prototype.readAsDataURL);
+  await page.evaluate(() => { FileReader.prototype.readAsDataURL = function () { setTimeout(() => this.onerror?.(new ProgressEvent('error') as ProgressEvent<FileReader>)); }; });
+  await photo.setInputFiles({ name: 'broken.jpg', mimeType: 'image/jpeg', buffer: Buffer.from('broken') });
+  await expect(card.getByRole('alert')).toContainText('could not be read');
+  await expect(pass).toBeDisabled();
+  await page.evaluate(read => { FileReader.prototype.readAsDataURL = read; }, original);
+
+  const bytes = Buffer.alloc(1024 * 1024, 7);
+  await photo.setInputFiles({ name: 'receipt.jpg', mimeType: 'image/jpeg', buffer: bytes });
+  await expect(pass).toBeEnabled();
+  await expect(card.getByRole('alert')).toHaveCount(0);
+  await pass.click();
+  await expect.poll(() => posted.length).toBe(1);
+  expect(posted[0]).toEqual({ request: check.id, outcome: 'pass', note: 'Printed clean', photo: { name: 'receipt.jpg', mediaType: 'image/jpeg', bytes: bytes.toString('base64') } });
+});

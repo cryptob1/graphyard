@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useRef, useState } from 'react';
 import { humanDecisionLabel, humanOnlyRefusal, humanProofRule, openHumanOnly, recommendedFirst, type HumanOnlyChoice, type HumanOnlyPost, type HumanRequestRow } from '../../src/model/human-request';
 import { formatDuration } from '../../src/model/duration';
 import { shortShas } from '../../src/model/format';
@@ -69,7 +69,19 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
   const [secret, setSecret] = useState('');
   const [photo, setPhoto] = useState<{ name: string; mediaType: string; bytes: string } | null>(null);
   const check = row.rule === humanProofRule.kind;
-  const choosePhoto = async (file: File | undefined) => setPhoto(file ? { name: file.name, mediaType: file.type, bytes: btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer()))) } : null);
+  // No answer goes out while the chosen photo is being read or could not be read, so one never loses it silently.
+  const [photoRead, setPhotoRead] = useState<'none' | 'reading' | 'read' | 'failed'>('none');
+  const chosenPhoto = useRef<File | null>(null);
+  const choosePhoto = (file: File | null) => {
+    chosenPhoto.current = file;
+    setPhoto(null);
+    setPhotoRead(file ? 'reading' : 'none');
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => { if (chosenPhoto.current === file) { setPhoto({ name: file.name, mediaType: file.type, bytes: String(reader.result).split(',')[1] }); setPhotoRead('read'); } };
+    reader.onerror = () => { if (chosenPhoto.current === file) setPhotoRead('failed'); };
+    reader.readAsDataURL(file);
+  };
   const post: HumanOnlyPost = row.answer.post;
   // The recommended choice comes first, labelled, and is the form's default: Enter takes it (GY-1410).
   const choices = recommendedFirst(row.choices ?? []);
@@ -84,7 +96,7 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
     const body = { ...choice.body, ...(choice.note && note.trim() ? { [choice.note]: note.trim() } : {}), ...(choice.input === 'secret' ? { secret } : {}), ...(photo ? { photo } : {}) };
     void (send ? send(body) : answer('', body));
   };
-  const ready = (choice: HumanOnlyChoice) => !busy && (choice.input !== 'text' || !!note.trim()) && (choice.input !== 'secret' || !!secret);
+  const ready = (choice: HumanOnlyChoice) => !busy && photoRead !== 'reading' && photoRead !== 'failed' && (choice.input !== 'text' || !!note.trim()) && (choice.input !== 'secret' || !!secret);
   return <div className="card human-request">
     <div className="card-top"><button className="text-button" onClick={open}>{row.work} <span data-title>{row.title}</span></button><span title={`Asked ${row.request.at}`}>Waiting {formatDuration(row.waitedMs / 60000)}</span></div>
     <h3>{shortShas(humanAsk(row.request))}</h3>
@@ -96,7 +108,8 @@ export function RequestCard({ row, refusal, busy, open, answer, send, signIn }: 
       {choices.length > 0 && <form onSubmit={event => { event.preventDefault(); if (recommended && ready(recommended)) choose(recommended); }}>
         {choices.some(choice => choice.input === 'secret') && <label>Value to provide (sealed to the requesting host, never stored as typed)<input type="password" autoComplete="off" value={secret} onChange={event => setSecret(event.target.value)}/></label>}
         {choices.some(choice => choice.note) && <textarea aria-label={`Note for ${row.work}`} placeholder="Note (optional; needed for a choice ending in …)" value={note} onChange={event => setNote(event.target.value)} rows={2}/>}
-        {check && <label>Photo (optional)<input type="file" accept="image/png,image/jpeg" onChange={event => void choosePhoto(event.target.files?.[0])}/></label>}
+        {check && <label>Photo (optional)<input type="file" accept="image/png,image/jpeg" onChange={event => choosePhoto(event.target.files?.[0] ?? null)}/></label>}
+        {photoRead === 'failed' && <p role="alert" className="muted">That photo could not be read. Choose it again or clear it to answer.</p>}
         {/* The shared wrapping action row: buttons wrap at any width, down to 375 px. */}
         <div className="pulse-actions human-choices">{choices.map(choice => <button key={choice.label} type={choice === recommended ? 'submit' : 'button'} className={choice.declines ? 'text-button' : undefined}
           data-preselected={choice === recommended || undefined} aria-pressed={choice === recommended ? true : undefined} autoFocus={choice === recommended} disabled={!ready(choice)}
