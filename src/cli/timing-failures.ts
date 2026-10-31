@@ -1,9 +1,9 @@
 import { z } from 'zod';
 
-// A timing-dependent assertion that went over its budget, as a test run reports it. The CI `test`
-// job annotates its own run with each one (tests/helpers/timing-report.ts) for whoever reads that
-// run. Graphyard reads nothing back (GY-2010): check-run annotations were a GitHub API read, and the
-// merge writer's own trial is the only test gate.
+// A timing-dependent assertion that went over its budget, as a test run reports it. The helper
+// that annotated the CI `test` run with each one is gone (GY-3008), so they surface only in the
+// run's own output. Graphyard reads nothing back (GY-2010): check-run annotations were a GitHub API
+// read, and the merge writer's own trial is the only test gate.
 
 /**
  * A timing-dependent assertion that went over its budget, as the CI run reported it on the failed
