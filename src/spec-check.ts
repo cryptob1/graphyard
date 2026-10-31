@@ -20,6 +20,8 @@ import {
 import { selectReviewerProfile } from './auto-dispatch.js';
 import { anchorSessionCheckout as anchorCheckout, readReviewLedger, reviewerCredentialDirectory, sessionWritable, simplicityParagraph, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
+import { credentialMaskFor } from './master/confinement.js';
+import { runtimeLoginHomes } from './master/profiles.js';
 import { writeSpecCheckBinding } from './spec-check-post.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchMs } from './model/spec-check.js';
 import type { Work } from './model.js';
@@ -112,14 +114,16 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       const writable = await sessionWritable(root, config, checkout.directory);
       const launch = accountLaunch(profile, selected.account, { writable });
       const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, checkout: checkout.worktree });
-      await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true);
+      // The same mask every reviewer launch runs under: the operator's config home and the loop's credentials stay hidden.
+      const credentialMask = credentialMaskFor(config, { runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
       const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
       const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
         '--label', `${work.key} spec check · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], run));
       pane = created.pane;
       await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args],
         specCheckPrompt(config, work, await readVendorPrompts(), checkout.worktree, baseTip), run,
-        { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role });
+        { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask });
       return { work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {
       // A launch that never became a session leaves no pane and no token material behind; the checkout is the sweep's.
