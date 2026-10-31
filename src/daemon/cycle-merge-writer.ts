@@ -64,14 +64,15 @@ export const mergeWriterStateSchema = z.object({
   advisory: z.lazy(() => advisoryStateSchema).optional(),
   /**
    * GY-2990: the last served commit whose required cases passed, the reverts a failing serve
-   * already caused (each keyed by the serve it answered, so one serve reverts once and a filed
-   * re-land is never filed twice; a merge reverts once altogether, so a serve that still fails
+   * already caused (each keyed by the serve it answered, so one serve reverts once, and carrying
+   * its failing case, so an owed re-land is filed whatever is served later, and never twice; a merge reverts once altogether, so a serve that still fails
    * after its revert never reverts the same merge again), and the revert held when its own
    * trial failed. Absent until the serve-revert step first runs.
    */
   serveRevert: z.object({
     lastVerified: shaField.nullable().default(null),
-    reverts: z.array(z.object({ serve: shaField, culprit: z.string().max(100), mergeSha: shaField, revertSha: shaField, reland: z.string().max(100).nullable(), at: instant }).strict()).max(20).default([]),
+    reverts: z.array(z.object({ serve: shaField, culprit: z.string().max(100), mergeSha: shaField, revertSha: shaField, reland: z.string().max(100).nullable(),
+      failingCase: z.string().max(500), failingStep: z.string().max(2000).nullable(), failingReason: z.string().max(2000).nullable(), at: instant }).strict()).max(20).default([]),
     held: z.object({ serve: shaField, culprit: z.string().max(100), reason: z.string().max(2000), at: instant }).strict().nullable().default(null),
     /**
      * GY-2990 rework: the last revert attempt that needs another try (a trial failing only
@@ -559,11 +560,40 @@ async function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWrit
       failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason });
   } catch (error) { note = `; filing its re-land failed and is retried: ${message(error)}`; }
   if (!reland && !note) note = '; the re-land is filed once the loop can file';
-  revertState.reverts = [...revertState.reverts, { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland, at: at() }].slice(-20);
+  revertState.reverts = [...revertState.reverts, { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland,
+    failingCase: revert.failingCase.slice(0, 500), failingStep: revert.failingStep?.slice(0, 2000) ?? null, failingReason: revert.failingReason?.slice(0, 2000) ?? null, at: at() }].slice(-20);
   if (revertState.held?.serve === revert.serve) revertState.held = null;
   writer.lastMergeAt = at();
   action('done', `Reverted ${flight.key}'s merge ${short(revert.mergeSha)} from ${reads.baseBranch} as ${short(revert.revertSha)} after served ${short(revert.serve)} failed the required case ${revert.failingCase}${reland ? `; filed ${reland}` : note}`);
   return true;
+}
+
+/**
+ * Files every re-land a pushed revert still owes, from the failing case its record carries — so
+ * a filing that failed is retried whatever is served afterwards, and adoption by title keeps it
+ * to one item. Answers whether the state changed.
+ */
+async function fileOwedRelands(cycle: ServeRevertCycle, reads: MergeWriterReads): Promise<boolean> {
+  const { state, snapshot, performed } = cycle;
+  let changed = false;
+  for (const done of state.mergeWriter.serveRevert?.reverts ?? []) {
+    if (done.reland) continue;
+    const culprit = snapshot.work.find(entry => entry.key === done.culprit);
+    if (!culprit) continue;
+    const key = `serve-revert:${done.serve}`, attempts = (state.actions[key]?.attempts ?? 0) + 1, at = new Date(cycle.now()).toISOString();
+    try {
+      const reland = await fileServeReland(cycle, reads, { ...done, culprit });
+      if (!reland) continue;
+      done.reland = reland;
+      performed.push(storeAction(state, key, { kind: 'merge', work: done.culprit, principal: null, state: 'done',
+        detail: `Filed ${reland} for the revert of ${done.culprit}'s merge ${done.mergeSha.slice(0, 12)}`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }));
+    } catch (error) {
+      performed.push(storeAction(state, key, { kind: 'merge', work: done.culprit, principal: null, state: 'failed',
+        detail: `Filing the re-land for the revert of ${done.culprit}'s merge failed and is retried: ${message(error)}`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }));
+    }
+    changed = true;
+  }
+  return changed;
 }
 
 /**
@@ -593,32 +623,8 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   }
   if (!check || check.verified || !check.case || !revertState.lastVerified || serve === revertState.lastVerified) return false;
   const failing = { serve, failingCase: check.case, failingStep: check.step, failingReason: check.reason };
-  const done = revertState.reverts.find(entry => entry.serve === serve);
-  if (done) {
-    // One serve reverts once: only its re-land may still be owed.
-    if (done.reland) return false;
-    const culprit = snapshot.work.find(entry => entry.key === done.culprit) ?? null;
-    if (!culprit || !reads.createWork) {
-      if (culprit) {
-        const adopted = snapshot.work.find(entry => entry.title === relandTitle(culprit) || entry.title.startsWith(`${relandTitle(culprit)}:`));
-        if (adopted) { done.reland = adopted.key; return true; }
-      }
-      return false;
-    }
-    try {
-      const reland = await fileServeReland(cycle, reads, { serve: done.serve, culprit, mergeSha: done.mergeSha, revertSha: done.revertSha,
-        failingCase: failing.failingCase, failingStep: failing.failingStep, failingReason: failing.failingReason });
-      if (!reland) return false;
-      done.reland = reland;
-      performed.push(storeAction(state, `serve-revert:${serve}`, { kind: 'merge', work: done.culprit, principal: null, state: 'done',
-        detail: `Filed ${reland} for the revert of ${done.culprit}'s merge ${done.mergeSha.slice(0, 12)}`.slice(0, 1900), attempts: (state.actions[`serve-revert:${serve}`]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() }));
-      return true;
-    } catch (error) {
-      performed.push(storeAction(state, `serve-revert:${serve}`, { kind: 'merge', work: done.culprit, principal: null, state: 'failed',
-        detail: `Filing the re-land for the revert of ${done.culprit}'s merge failed and is retried: ${message(error)}`.slice(0, 1900), attempts: (state.actions[`serve-revert:${serve}`]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() }));
-      return true;
-    }
-  }
+  // One serve reverts once.
+  if (revertState.reverts.some(entry => entry.serve === serve)) return false;
   if (revertState.held?.serve === serve || flights.has(state)) return false;
   // A serve the guard already answered reads nothing until the serve or the baseline moves.
   if (revertState.answered?.serve === serve && revertState.answered.lastVerified === revertState.lastVerified) return false;
@@ -775,6 +781,7 @@ export async function mergeWriterStep(cycle: Cycle) {
   // GY-2990: a served commit that fails live verification reverts only the item that broke it.
   // The attempt runs beside the cycle like a merge (its trial and leased push), so once one is
   // in flight the replay and reconcile below wait — `flights.has(state)` guards them already.
+  if (await fileOwedRelands(cycle, reads)) changed = true;
   if (await serveRevertAttempt(cycle, reads)) changed = true;
   // GY-1852: a write whose reply was lost is replayed first; the snapshot predates it, so nothing new starts in the cycle that settled one.
   const replayed = !flights.has(state) && await replayUnconfirmed(cycle, reads.record);

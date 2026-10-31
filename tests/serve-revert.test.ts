@@ -455,7 +455,7 @@ test('unit:revert-only-the-failing-item — a serve still failing on its answere
   const effects = { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects;
   const { state, cycle } = loopState(config, clock);
   state.mergeWriter.serveRevert = { lastVerified: verified,
-    reverts: [{ serve: served, culprit: 'GY-3002', mergeSha: served, revertSha, reland: 'GY-3003', at: new Date(clock.nowMs).toISOString() }],
+    reverts: [{ serve: served, culprit: 'GY-3002', mergeSha: served, revertSha, reland: 'GY-3003', failingCase: 'case-beta', failingStep: null, failingReason: null, at: new Date(clock.nowMs).toISOString() }],
     held: null, retry: null, answered: null };
   const step = () => mergeWriterStep({ ...cycle(work), effects });
 
@@ -470,4 +470,43 @@ test('unit:revert-only-the-failing-item — a serve still failing on its answere
   assert.equal(clock.fetches, fetches);
   assert.equal(tried.length, 0);
   assert.equal(tipOf(origin), revertSha);
+});
+
+test('unit:revert-only-the-failing-item — a re-land whose filing failed is filed once the pushed revert serves and passes', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-owed-reland');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const servedFile = join(coordinator, '.graphyard', 'served.json');
+  const tried: unknown[] = [], filed: RelandInput[] = [];
+  const reads = loopReads(coordinator, origin, servedFile, clock, () => passTrial, tried, filed);
+  let down = true;
+  const createWork = reads.createWork!;
+  reads.createWork = async input => { if (down) throw new Error('control plane unavailable'); return createWork(input); };
+  const effects = { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects;
+  const { state, cycle } = loopState(config, clock);
+  const step = () => mergeWriterStep({ ...cycle(work), effects });
+
+  await servedBaseline(coordinator, verified);
+  await step();
+  await servedFixture(coordinator, served, 'case-beta');
+  await step();
+  await mergeWriterIdle(state);
+  await step();
+  const revert = state.mergeWriter.serveRevert!.reverts[0]!;
+  assert.equal(tipOf(origin), revert.revertSha);
+  assert.equal(revert.reland, null);
+  assert.equal(filed.length, 0);
+
+  // The deploy unit serves the pushed revert and it passes; the owed filing still goes through, once.
+  await servedBaseline(coordinator, revert.revertSha);
+  down = false;
+  await step();
+  await step();
+  assert.equal(state.mergeWriter.serveRevert!.lastVerified, revert.revertSha);
+  assert.equal(revert.reland, 'GY-3003');
+  assert.equal(filed.length, 1);
+  assert.equal(filed[0]!.title, 'Re-land GY-3002: beta page');
+  assert.deepEqual(filed[0]!.criteria.at(-1)!.proofs, ['e2e:case-beta']);
 });
