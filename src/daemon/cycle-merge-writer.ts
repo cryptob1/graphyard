@@ -43,13 +43,21 @@ export const unconfirmedRecordSchema = z.object({ key: z.string().max(100), id: 
 export type UnconfirmedRecord = z.infer<typeof unconfirmedRecordSchema>;
 /** GY-2053: the newest attempt progress the writer's own summary keeps, so a multi-attempt flight keeps showing movement. */
 const attemptProgressSchema = z.object({ at: instant, what: z.string().max(2000) }).strict();
+/**
+ * GY-2990: what a serve revert in flight is answering, persisted before its trial so a restart after
+ * the push still settles it: the failing serve, the reverted merge, the revert commit and the tip it
+ * was made on.
+ */
+const revertFlightSchema = z.object({ serve: shaField, mergeSha: shaField, revertSha: shaField, baseTip: shaField,
+  failingCase: z.string().max(500), failingStep: z.string().max(2000).nullable(), failingReason: z.string().max(2000).nullable() }).strict();
+type RevertFlight = z.infer<typeof revertFlightSchema>;
 /** `state.mergeWriter`: when the writer last delivered, the heads owed a merge oldest first (a trial-timeout yield last, GY-2079), the merge in flight, the newest refusals, the reworks still to be confirmed, and the heads yielding their queue turn. */
 export const mergeWriterStateSchema = z.object({
   lastMergeAt: instant.nullable().default(null),
   queue: z.array(z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, submittedAt: instant, waitingMs: z.number().int().min(0) }).strict()).max(mergeWriterKeptQueue).default([]),
-  /** The merge in flight; `attempt` is the id its record keys carry (GY-1852), persisted before its first write. `step` (GY-2963) is where its trial is, with the instant the step began. */
+  /** The merge in flight; `attempt` is the id its record keys carry (GY-1852), persisted before its first write. `step` (GY-2963) is where its trial is, with the instant the step began; `revert` (GY-2990) marks a serve revert. */
   inFlight: z.object({ key: z.string().max(100), id: z.string().max(100), head: shaField, startedAt: instant, attempt: z.string().max(100).optional(),
-    step: z.string().max(100).optional(), stepStartedAt: instant.optional() }).strict().nullable().default(null),
+    step: z.string().max(100).optional(), stepStartedAt: instant.optional(), revert: revertFlightSchema.optional() }).strict().nullable().default(null),
   refusals: z.array(z.object({ key: z.string().max(100), head: shaField, reason: z.string().max(2000), at: instant }).strict()).max(mergeWriterKeptRefusals).default([]),
   reworks: z.array(pendingReworkSchema).max(mergeWriterKeptReworks).default([]),
   /** GY-2053: the newest attempt progress — a retrial's intent, a trial verdict, a push, a reconcile — recorded beside every ledger write a flight or reconcile makes, so the movement the summary reports advances inside a long flight. Absent until a write records it. */
@@ -122,11 +130,12 @@ export interface MergeWriterReads extends MergePorts {
    */
   serveRecord?(): Promise<{ commit: string; check: { verified: boolean; case: string | null; step: string | null; reason: string | null } | null } | null>;
   /**
-   * GY-2990: files the re-land item (`POST /api/work` as the master's operator-agent identity);
-   * answers what the control plane filed. Absent, the pushed revert stands without its re-land
-   * until a loop that can file adopts it.
+   * GY-2990: files the re-land item (`POST /api/work` as the master's operator-agent identity)
+   * under `idempotencyKey`, the same on every retry, so a filing whose reply was lost is never
+   * filed twice; answers what the control plane filed. Absent, the pushed revert stands without
+   * its re-land until a loop that can file adopts it.
    */
-  createWork?(input: RelandInput): Promise<{ key?: string } | null>;
+  createWork?(input: RelandInput, idempotencyKey: string): Promise<{ key?: string } | null>;
 }
 /** The idempotency key one recorded step keeps across retries. */
 export { mergeRecordKey } from '../merge-writer/executor.js';
@@ -297,8 +306,8 @@ const advisoryFailures = (failed: readonly string[]) => [...new Set(failed.filte
 /** What a serve-revert flight (GY-2990) settled as: the pushed revert, a held revert, or one to try again. */
 export type RevertSettled = { ok: true } | { ok: false; reason: string; retry?: boolean };
 interface Flight { key: string; id: string; head: string; startedAt: string; settled: { results: BatchResult[] } | { error: unknown } | { revert: RevertSettled } | null;
-  /** The serve-revert flight's context (GY-2990): the failing serve, the reverted merge and the revert commit beside the cycle. */
-  revert?: { serve: string; mergeSha: string; failingCase: string; failingStep: string | null; failingReason: string | null; revertSha: string; baseTip: string } }
+  /** The serve-revert flight's context (GY-2990), as `state.mergeWriter.inFlight.revert` persists it. */
+  revert?: RevertFlight }
 const flights = new WeakMap<DaemonState, Flight>();
 /** Resolves once the merge in flight for `state` has settled; for the step's tests. */
 /** The item previews this loop process serves, by item key (GY-1902). */
@@ -510,30 +519,14 @@ type ServeRevertCycle = Pick<Cycle, 'state' | 'effects' | 'now' | 'snapshot' | '
 const serveRevertState = (state: DaemonState) => state.mergeWriter.serveRevert ??= { lastVerified: null, reverts: [], held: null, retry: null, answered: null };
 
 /**
- * Files the re-land for a pushed revert: an item already titled `Re-land GY-N` is adopted, so a
- * filing whose reply was lost is never filed twice; otherwise the loop files it through
- * `createWork`. Null when neither names one — a loop without the filing route leaves the pushed
- * revert standing until one that can file adopts it.
- */
-async function fileServeReland(cycle: Pick<ServeRevertCycle, 'snapshot'>, reads: MergeWriterReads,
-  input: { serve: string; culprit: Work; mergeSha: string; revertSha: string; failingCase: string; failingStep: string | null; failingReason: string | null }): Promise<string | null> {
-  const expected = relandTitle(input.culprit);
-  const adopted = cycle.snapshot.work.find(entry => entry.title === expected || entry.title.startsWith(`${expected}:`));
-  if (adopted) return adopted.key;
-  if (!reads.createWork) return null;
-  const filed = await reads.createWork(relandItemFor(input.culprit, { ...input, baseBranch: reads.baseBranch }));
-  return filed?.key ?? null;
-}
-
-/**
- * Settles a serve-revert flight: the pushed revert is recorded with its filed (or still owed)
- * re-land, a held revert is kept with its reason for master status to name, and anything else —
+ * Settles a serve-revert flight: the pushed revert is recorded owing its re-land
+ * (`fileOwedRelands` files it this same cycle), a held revert is kept with its reason for master status to name, and anything else —
  * a trial that never settled or a push the base move rejected — is tried again. Answers whether
  * the state changed.
  */
-async function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWriterReads, flight: Flight, settled: RevertSettled): Promise<boolean> {
-  const { state, snapshot, performed } = cycle;
-  const revert = flight.revert!, writer = state.mergeWriter, revertState = serveRevertState(state);
+function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWriterReads, flight: { key: string; head: string; revert: RevertFlight }, settled: RevertSettled) {
+  const { state, performed } = cycle;
+  const revert = flight.revert, writer = state.mergeWriter, revertState = serveRevertState(state);
   const at = () => new Date(cycle.now()).toISOString();
   const action = (actionState: 'done' | 'failed', detail: string) => performed.push(storeAction(state, mergeWriterActionKey(flight.key, flight.head),
     { kind: 'merge', work: flight.key, principal: null, state: actionState, detail: detail.slice(0, 1900), attempts: (state.actions[mergeWriterActionKey(flight.key, flight.head)]?.attempts ?? 0) + 1, epoch: null, cycle: state.cycle, at: at() }));
@@ -552,26 +545,35 @@ async function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWrit
     action('failed', `Held: ${settled.reason}`);
     return true;
   }
-  const culprit = snapshot.work.find(entry => entry.id === flight.id) ?? null;
-  let reland: string | null = null, note = '';
-  try {
-    if (!culprit) note = '; the re-land names no item: its culprit left the snapshot';
-    else reland = await fileServeReland(cycle, reads, { serve: revert.serve, culprit, mergeSha: revert.mergeSha, revertSha: revert.revertSha,
-      failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason });
-  } catch (error) { note = `; filing its re-land failed and is retried: ${message(error)}`; }
-  if (!reland && !note) note = '; the re-land is filed once the loop can file';
-  revertState.reverts = [...revertState.reverts, { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland,
-    failingCase: revert.failingCase.slice(0, 500), failingStep: revert.failingStep?.slice(0, 2000) ?? null, failingReason: revert.failingReason?.slice(0, 2000) ?? null, at: at() }].slice(-20);
+  revertState.reverts = [...revertState.reverts, { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland: null,
+    failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason, at: at() }].slice(-20);
   if (revertState.held?.serve === revert.serve) revertState.held = null;
   writer.lastMergeAt = at();
-  action('done', `Reverted ${flight.key}'s merge ${short(revert.mergeSha)} from ${reads.baseBranch} as ${short(revert.revertSha)} after served ${short(revert.serve)} failed the required case ${revert.failingCase}${reland ? `; filed ${reland}` : note}`);
+  action('done', `Reverted ${flight.key}'s merge ${short(revert.mergeSha)} from ${reads.baseBranch} as ${short(revert.revertSha)} after served ${short(revert.serve)} failed the required case ${revert.failingCase}`);
+}
+
+/**
+ * A serve revert the persisted in-flight entry names but no flight in this process runs: the loop
+ * restarted beside it. The base holding the revert commit settles it as pushed, so its re-land is
+ * still owed and it never reverts again; otherwise nothing landed and the attempt starts afresh. An
+ * unreachable base keeps the entry, and nothing new starts until it reads. Answers whether the
+ * state changed.
+ */
+async function reconcileServeRevert(cycle: ServeRevertCycle, reads: MergeWriterReads): Promise<boolean> {
+  const writer = cycle.state.mergeWriter, inFlight = writer.inFlight;
+  if (!inFlight?.revert || flights.has(cycle.state)) return false;
+  let pushed: boolean;
+  try { await reads.fetch(); pushed = await reads.holds(inFlight.revert.revertSha); } catch { return false; }
+  writer.inFlight = null;
+  if (pushed) settleServeRevertFlight(cycle, reads, { key: inFlight.key, head: inFlight.head, revert: inFlight.revert }, { ok: true });
   return true;
 }
 
 /**
  * Files every re-land a pushed revert still owes, from the failing case its record carries — so
- * a filing that failed is retried whatever is served afterwards, and adoption by title keeps it
- * to one item. Answers whether the state changed.
+ * a filing that failed is retried whatever is served afterwards. An item already titled `Re-land
+ * GY-N` is adopted, and the filing's idempotency key names the reverted merge, so a reply lost
+ * before the snapshot shows the item still files one. Answers whether the state changed.
  */
 async function fileOwedRelands(cycle: ServeRevertCycle, reads: MergeWriterReads): Promise<boolean> {
   const { state, snapshot, performed } = cycle;
@@ -582,7 +584,9 @@ async function fileOwedRelands(cycle: ServeRevertCycle, reads: MergeWriterReads)
     if (!culprit) continue;
     const key = `serve-revert:${done.serve}`, attempts = (state.actions[key]?.attempts ?? 0) + 1, at = new Date(cycle.now()).toISOString();
     try {
-      const reland = await fileServeReland(cycle, reads, { ...done, culprit });
+      const expected = relandTitle(culprit);
+      const adopted = snapshot.work.find(entry => entry.title === expected || entry.title.startsWith(`${expected}:`));
+      const reland = adopted?.key ?? (await reads.createWork?.(relandItemFor(culprit, { ...done, baseBranch: reads.baseBranch }), `serve-reland:${done.mergeSha}`))?.key;
       if (!reland) continue;
       done.reland = reland;
       performed.push(storeAction(state, key, { kind: 'merge', work: done.culprit, principal: null, state: 'done',
@@ -606,7 +610,7 @@ async function fileOwedRelands(cycle: ServeRevertCycle, reads: MergeWriterReads)
  */
 async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterReads): Promise<boolean> {
   const { state, snapshot, performed } = cycle;
-  if (!reads.git || !reads.serveRecord) return false;
+  if (!reads.git || !reads.serveRecord || state.mergeWriter.inFlight?.revert) return false;
   const git = reads.git, writer = state.mergeWriter, revertState = serveRevertState(state);
   const at = () => new Date(cycle.now()).toISOString();
   let record: Awaited<ReturnType<NonNullable<MergeWriterReads['serveRecord']>>>;
@@ -622,7 +626,7 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
     return true;
   }
   if (!check || check.verified || !check.case || !revertState.lastVerified || serve === revertState.lastVerified) return false;
-  const failing = { serve, failingCase: check.case, failingStep: check.step, failingReason: check.reason };
+  const failing = { serve, failingCase: check.case.slice(0, 500), failingStep: check.step?.slice(0, 2000) ?? null, failingReason: check.reason?.slice(0, 2000) ?? null };
   // One serve reverts once.
   if (revertState.reverts.some(entry => entry.serve === serve)) return false;
   if (revertState.held?.serve === serve || flights.has(state)) return false;
@@ -666,12 +670,13 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
     return true;
   }
   const key = culprit.item.key, id = culprit.item.id, revertSha = revert.revertSha, startedAt = at();
-  const entry: Flight = { key, id, head: revertSha, startedAt, settled: null,
-    revert: { serve, mergeSha: culprit.mergeSha, failingCase: failing.failingCase, failingStep: failing.failingStep, failingReason: failing.failingReason, revertSha, baseTip } };
-  // The flight is published only once its in-flight entry is persisted (GY-1852): a failed
-  // persist leaves nothing in flight and the next cycle starts afresh.
+  const context: RevertFlight = { ...failing, mergeSha: culprit.mergeSha, revertSha, baseTip };
+  const entry: Flight = { key, id, head: revertSha, startedAt, settled: null, revert: context };
+  // The flight is published only once its in-flight entry, naming the revert, is persisted
+  // (GY-1852): a failed persist leaves nothing in flight and the next cycle starts afresh, and a
+  // restart past the push is settled from the entry (`reconcileServeRevert`).
   const attempt = randomUUID();
-  writer.inFlight = { key, id, head: revertSha, startedAt, attempt, step: 'revert trial', stepStartedAt: startedAt };
+  writer.inFlight = { key, id, head: revertSha, startedAt, attempt, step: 'revert trial', stepStartedAt: startedAt, revert: context };
   try { await cycle.effects.persist(state); } catch { writer.inFlight = null; return false; }
   flights.set(state, entry);
   const onStep = (step: string) => {
@@ -730,12 +735,12 @@ export async function mergeWriterStep(cycle: Cycle) {
     flights.delete(state);
     writer.inFlight = null; changed = true;
     if (flight.revert) {
-      // GY-2990: a serve-revert flight settles its pushed revert (and files its re-land), holds
+      // GY-2990: a serve-revert flight settles its pushed revert, holds
       // it, or owes its retrial. A trial that threw settles as an owed retrial too — never as a
       // merge of the culprit's key under the revert sha, which would dirty the culprit's records.
       const revert: RevertSettled = 'revert' in flight.settled ? flight.settled.revert
         : { ok: false, reason: `the revert trial failed before it was recorded: ${message('error' in flight.settled ? flight.settled.error : 'no verdict')}`, retry: true };
-      if (await settleServeRevertFlight(cycle, reads, flight, revert)) changed = true;
+      settleServeRevertFlight(cycle, reads, { key: flight.key, head: flight.head, revert: flight.revert }, revert);
     } else {
       // A batch (GY-2088) settles each of its heads as a merge of its own.
       const results: BatchResult[] = 'error' in flight.settled ? [{ work: { key: flight.key, id: flight.id } as Work, error: flight.settled.error }] : (flight.settled as { results: BatchResult[] }).results;
@@ -781,6 +786,7 @@ export async function mergeWriterStep(cycle: Cycle) {
   // GY-2990: a served commit that fails live verification reverts only the item that broke it.
   // The attempt runs beside the cycle like a merge (its trial and leased push), so once one is
   // in flight the replay and reconcile below wait — `flights.has(state)` guards them already.
+  if (await reconcileServeRevert(cycle, reads)) changed = true;
   if (await fileOwedRelands(cycle, reads)) changed = true;
   if (await serveRevertAttempt(cycle, reads)) changed = true;
   // GY-1852: a write whose reply was lost is replayed first; the snapshot predates it, so nothing new starts in the cycle that settled one.
@@ -788,7 +794,7 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (replayed) changed = true;
   // A merge that landed this cycle starts nothing new: the loop upgrades onto it between cycles, and a
   // trial started now would die in that restart and run again (12 of 17 merges on 2026-10-18 lost one so).
-  if (!flights.has(state) && !replayed && !delivered) {
+  if (!flights.has(state) && !writer.inFlight?.revert && !replayed && !delivered) {
     if ((await reads.merger()) !== 'control-plane') {
       if (writer.queue.length) { writer.queue = []; changed = true; }
     } else {

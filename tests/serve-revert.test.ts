@@ -4,8 +4,9 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { readServeRecord } from '../src/serve-app.js';
-import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, emptyMergeWriterState, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
+import { mergeWriterIdle, mergeWriterStateSchema, mergeWriterStep, mergeWriterSummary, emptyMergeWriterState, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { emptyDaemonState, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { daemonEffects } from '../src/daemon/effects-production.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Cycle } from '../src/daemon/cycle.js';
 import { relandItemFor, runServeRevert, selectServeCulprit, serveRangeCommits, type RelandInput, type ServeRevertPorts } from '../src/merge-writer/serve-revert.js';
@@ -483,7 +484,7 @@ test('unit:revert-only-the-failing-item — a re-land whose filing failed is fil
   const reads = loopReads(coordinator, origin, servedFile, clock, () => passTrial, tried, filed);
   let down = true;
   const createWork = reads.createWork!;
-  reads.createWork = async input => { if (down) throw new Error('control plane unavailable'); return createWork(input); };
+  reads.createWork = async (input, key) => { if (down) throw new Error('control plane unavailable'); return createWork(input, key); };
   const effects = { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects;
   const { state, cycle } = loopState(config, clock);
   const step = () => mergeWriterStep({ ...cycle(work), effects });
@@ -509,4 +510,141 @@ test('unit:revert-only-the-failing-item — a re-land whose filing failed is fil
   assert.equal(filed.length, 1);
   assert.equal(filed[0]!.title, 'Re-land GY-3002: beta page');
   assert.deepEqual(filed[0]!.criteria.at(-1)!.proofs, ['e2e:case-beta']);
+});
+
+test('unit:revert-only-the-failing-item — a re-land filing whose reply is lost files one item: every retry carries the same idempotency key', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-lost-reply');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const reads = loopReads(coordinator, origin, join(coordinator, '.graphyard', 'served.json'), clock, () => passTrial, [], []);
+  // The control plane's receipts: a key it holds answers its stored item; the first reply is lost after the commit.
+  const receipts = new Map<string, { key: string }>(), posts: string[] = [];
+  reads.createWork = async (_input, key) => {
+    posts.push(key);
+    const first = !receipts.has(key);
+    if (first) receipts.set(key, { key: `GY-${3003 + receipts.size}` });
+    if (first) throw new Error('socket hang up');
+    return receipts.get(key)!;
+  };
+  const { state, cycle } = loopState(config, clock);
+  const step = () => mergeWriterStep({ ...cycle(work), effects: { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects });
+
+  await servedBaseline(coordinator, verified);
+  await step();
+  await servedFixture(coordinator, served, 'case-beta');
+  await step();
+  await mergeWriterIdle(state);
+  await step();
+  // The settling cycle asks once, and the snapshot does not show the item it filed.
+  assert.equal(posts.length, 1);
+  assert.equal(state.mergeWriter.serveRevert!.reverts[0]!.reland, null);
+  await step();
+  assert.equal(posts.length, 2);
+  assert.equal(posts[1], posts[0]);
+  assert.equal(receipts.size, 1);
+  assert.equal(state.mergeWriter.serveRevert!.reverts[0]!.reland, 'GY-3003');
+});
+
+/** The loop's ports with a real read of what the base holds, for the restart cases. */
+function restartReads(coordinator: string, origin: string, clock: { nowMs: number; fetches: number }, trial: () => Promise<MergeTrialRun> | MergeTrialRun, tried: unknown[], filed: RelandInput[]) {
+  const reads = loopReads(coordinator, origin, join(coordinator, '.graphyard', 'served.json'), clock, trial, tried, filed);
+  reads.holds = async sha => { try { git(coordinator, 'merge-base', '--is-ancestor', sha, 'origin/main'); return true; } catch { return false; } };
+  return reads;
+}
+/** The state a restarted loop reads back: what was persisted, with nothing of the old process's flight. */
+const restarted = (state: DaemonState) => ({ ...state, mergeWriter: mergeWriterStateSchema.parse(JSON.parse(JSON.stringify(state.mergeWriter))) });
+
+test('unit:revert-only-the-failing-item — a restart after the push settles the revert from its persisted entry: one re-land, and no second revert, even once the revert serves and passes', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-restart-pushed');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const tried: unknown[] = [], filed: RelandInput[] = [];
+  const effects = { mergeWriter: restartReads(coordinator, origin, clock, () => passTrial, tried, filed), persist: async () => {} } as unknown as DaemonEffects;
+  const { state, cycle } = loopState(config, clock);
+
+  await servedBaseline(coordinator, verified);
+  await mergeWriterStep({ ...cycle(work), effects });
+  await servedFixture(coordinator, served, 'case-beta');
+  await mergeWriterStep({ ...cycle(work), effects });
+  await mergeWriterIdle(state);
+  // The push landed; the loop dies before the cycle that would settle it, and the revert serves and passes meanwhile.
+  const revertSha = tipOf(origin);
+  assert.equal(state.mergeWriter.inFlight?.revert?.revertSha, revertSha);
+  assert.deepEqual(state.mergeWriter.serveRevert!.reverts, []);
+  await servedBaseline(coordinator, revertSha);
+
+  const after = restarted(state);
+  await mergeWriterStep({ ...cycle(work), state: after, effects });
+  await mergeWriterStep({ ...cycle(work), state: after, effects });
+  assert.equal(after.mergeWriter.inFlight, null);
+  assert.equal(after.mergeWriter.serveRevert!.lastVerified, revertSha);
+  const reverts = after.mergeWriter.serveRevert!.reverts;
+  assert.deepEqual(reverts.map(entry => [entry.culprit, entry.revertSha, entry.reland]), [['GY-3002', revertSha, 'GY-3003']]);
+  assert.equal(filed.length, 1);
+  assert.deepEqual(filed[0]!.criteria.at(-1)!.proofs, ['e2e:case-beta']);
+  assert.equal(tried.length, 1);
+  assert.equal(tipOf(origin), revertSha);
+});
+
+test('unit:revert-only-the-failing-item — a restart before the push starts the revert afresh, and an unreadable base starts nothing until it reads', async t => {
+  const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-restart-unpushed');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const clock = { nowMs: Date.parse('2030-06-01T00:00:00Z'), fetches: 0 };
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  const tried: unknown[] = [], filed: RelandInput[] = [];
+  // The first process's trial never ends: the loop dies inside it.
+  let dying = true;
+  const reads = restartReads(coordinator, origin, clock, () => dying ? new Promise<MergeTrialRun>(() => {}) : passTrial, tried, filed);
+  const effects = { mergeWriter: reads, persist: async () => {} } as unknown as DaemonEffects;
+  const { state, cycle } = loopState(config, clock);
+
+  await servedBaseline(coordinator, verified);
+  await mergeWriterStep({ ...cycle(work), effects });
+  await servedFixture(coordinator, served, 'case-beta');
+  await mergeWriterStep({ ...cycle(work), effects });
+  await new Promise(resolve => setTimeout(resolve, 50));
+  assert.equal(tried.length, 1);
+  assert.equal(tipOf(origin), served);
+
+  dying = false;
+  const after = restarted(state);
+  const persisted = after.mergeWriter.inFlight;
+  const fetch = reads.fetch;
+  reads.fetch = async () => { throw new Error('origin unreachable'); };
+  await mergeWriterStep({ ...cycle(work), state: after, effects });
+  assert.deepEqual(after.mergeWriter.inFlight, persisted, 'the entry stands while the base cannot be read');
+  assert.equal(tried.length, 1);
+
+  reads.fetch = fetch;
+  await mergeWriterStep({ ...cycle(work), state: after, effects });
+  await mergeWriterIdle(after);
+  await mergeWriterStep({ ...cycle(work), state: after, effects });
+  assert.equal(tried.length, 2);
+  const reverts = after.mergeWriter.serveRevert!.reverts;
+  assert.equal(reverts.length, 1);
+  assert.equal(tipOf(origin), reverts[0]!.revertSha);
+  assert.equal(filed.length, 1);
+});
+
+test('unit:revert-only-the-failing-item — the production filing route sends the idempotency key it is given', async t => {
+  const root = await temporaryDirectory('serve-revert-filing-root'), outside = await temporaryDirectory('serve-revert-filing-token');
+  t.after(() => Promise.all([rm(root, { recursive: true, force: true }), rm(outside, { recursive: true, force: true })]));
+  git(root, 'init', '-q');
+  const credentialFile = join(outside, 'operator.token');
+  await writeFile(credentialFile, `${'o'.repeat(40)}\n`, { mode: 0o600 });
+  const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(outside, 'coordinator.token'), cliPath: '/bin/graphyard',
+    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [],
+    operatorAgent: { id: 'graphyard-master-operator', credentialFile } });
+  const sent: (string | null)[] = [];
+  const fetcher = (async (_url: string, init: RequestInit) => { sent.push(new Headers(init.headers).get('Idempotency-Key')); return new Response(JSON.stringify({ key: 'GY-3003' })); }) as unknown as typeof fetch;
+  const effects = daemonEffects(root, config, { snapshot: async () => ({ work: [], now: '' }), mutate: async () => ({}), fetcher });
+  const input = { title: 'Re-land GY-1', type: 'feature', priority: 1, description: 'd', criteria: [], dependencies: [], reason: 'r' } as RelandInput;
+  const answers = [await effects.mergeWriter!.createWork!(input, 'serve-reland:abc'), await effects.mergeWriter!.createWork!(input, 'serve-reland:abc')];
+  assert.deepEqual(sent, ['serve-reland:abc', 'serve-reland:abc']);
+  assert.deepEqual(answers, [{ key: 'GY-3003' }, { key: 'GY-3003' }]);
 });

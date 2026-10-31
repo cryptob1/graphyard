@@ -36,10 +36,10 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
   const fetcher = deps.fetcher ?? fetch;
   const mutate = deps.mutate;
   /** One call as the master's own operator-agent identity — the identity that applies its decisions. */
-  const asOperatorAgent = async (path: string, body: unknown) => {
+  const asOperatorAgent = async (path: string, body: unknown, idempotencyKey: string = randomUUID()) => {
     const config = current();
     const token = await agentToken(root, config, 'operatorAgent');
-    const response = await fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
+    const response = await fetcher(`${config.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey }, body: JSON.stringify(body), signal: AbortSignal.timeout(30_000) });
     const text = await response.text();
     let result: any; try { result = JSON.parse(text); } catch { result = response.ok ? undefined : { text: text.slice(0, 200) }; }
     if (!response.ok) throw new RefusedResponse(`Graphyard refused ${path} (${response.status}): ${refusedBodyDetail(result)}`, response.status, result);
@@ -165,7 +165,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const });
       return { ...reads,
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
-        ...(current().operatorAgent ? { createWork: (input: RelandInput) => asOperatorAgent('work', input) } : {}),
+        ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),
       };
     },
     adoptRuns: loopRunAdoption(root, current, deps.fetcher),
