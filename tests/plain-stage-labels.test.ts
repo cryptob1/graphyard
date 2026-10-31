@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import { itemLine } from '../src/cli/master-status.js';
-import { liveFailingLine, plainStage, plainStageLines, plainStages, type PlainStage, type ServeView } from '../src/model/plain-stage.js';
+import type { PlainStage, ServeView } from '../src/model/plain-stage.js';
 import { prSteps } from '../src/model/pr-steps.js';
 import { noRelease, type ReleaseView } from '../src/model/release.js';
 import type { Work } from '../src/model/work.js';
@@ -39,6 +39,7 @@ const withDeployment = (work: Work): Work => ({
 } as unknown as Work);
 
 test('unit:plain-stage-labels — every derived stage maps to exactly one plain label, and master status items carry it', async () => {
+  const { liveFailingLine, plainStage, plainStageLines, plainStages } = await import('../src/model/plain-stage.js');
   // Each open stage has one plain label; done is refined by the release and the serve verdict below.
   const byStage: Record<Stage, string> = {
     backlog: 'Not started', ready: 'Not started', build: 'Building',
