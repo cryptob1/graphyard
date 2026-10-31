@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from 'node:child_process';
+import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { lstat, mkdir, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { configHome, installDirectory } from '../install/secrets.js';
@@ -52,14 +52,99 @@ export const runProcess: ProcessRunner = (command, args, options) => new Promise
 });
 
 /**
- * GY-2997: a ProcessRunner that runs under confinement words (the merge trial's bubblewrap mask).
- * Shell command steps keep `sh -c` semantics; non-shell (agent-browser) words stay argv after the wrapper.
+ * GY-2997: the node host one confined session runs inside its namespace, with `runProcess`'s
+ * semantics for every invocation it is asked: one request line on stdin, one reply line on stdout
+ * with how the invocation ended. It is the namespace's first process, so the namespace lives past
+ * each invocation — the browser one agent-step invocation daemonizes is still there for the next —
+ * and when it dies, the namespace and everything in it die with it.
  */
-export const confinedProcessRunner = (wrapper: readonly string[] = [], base: ProcessRunner = runProcess): ProcessRunner =>
-  (command, args, options) => !wrapper.length ? base(command, args, options)
-    : options.shell
-      ? base(wrapper[0]!, [...wrapper.slice(1), 'sh', '-c', command], { ...options, shell: false })
-      : base(wrapper[0]!, [...wrapper.slice(1), command, ...args], { ...options, shell: false });
+const sessionHost = `'use strict';
+const { spawn } = require('node:child_process');
+const running = new Map(); let chunk = '';
+const reply = message => { try { process.stdout.write(JSON.stringify(message) + '\\n'); } catch { /* the reader is gone */ } };
+const kill = child => { try { process.kill(-child.pid, 'SIGKILL'); } catch { try { child.kill('SIGKILL'); } catch { /* already gone */ } } };
+const dispatch = request => {
+  if (request.cancel !== undefined) { const entry = running.get(request.cancel); if (entry) kill(entry.child); return; }
+  const argv = request.shell ? ['sh', '-c', request.command] : [request.command].concat(request.args || []);
+  let child;
+  try { child = spawn(argv[0], argv.slice(1), { cwd: request.cwd, env: request.env, stdio: ['ignore', 'pipe', 'pipe'], detached: true }); }
+  catch (error) { reply({ id: request.id, code: null, output: error.message, timedOut: false }); return; }
+  const chunks = []; let size = 0, timedOut = false;
+  const keep = piece => { chunks.push(piece); size += piece.length; while (size - chunks[0].length >= 4000000) size -= chunks.shift().length; };
+  child.stdout.on('data', keep); child.stderr.on('data', keep);
+  running.set(request.id, { child });
+  const timer = request.timeoutMs === undefined ? null : setTimeout(() => { timedOut = true; kill(child); }, request.timeoutMs);
+  const done = ended => { if (timer) clearTimeout(timer); running.delete(request.id); reply({ id: request.id, code: ended.code, output: Buffer.concat(chunks).toString('utf8') + (ended.error || ''), timedOut }); };
+  child.on('error', error => done({ code: null, error: error.message }));
+  child.on('close', code => done({ code }));
+};
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', piece => {
+  chunk += piece; let at;
+  while ((at = chunk.indexOf('\\n')) >= 0) {
+    const line = chunk.slice(0, at); chunk = chunk.slice(at + 1);
+    if (!line.trim()) continue;
+    try { dispatch(JSON.parse(line)); } catch { /* not a request */ }
+  }
+});`;
+
+export interface ConfinedSession { run: ProcessRunner; close(): Promise<void> }
+
+/**
+ * GY-2997: a session of step invocations under confinement words (the merge trial's bubblewrap
+ * mask). No words: `base` itself, `close` nothing. With words, one bubblewrap process — the masks,
+ * the fresh /proc, `--die-with-parent`, its own PID namespace — holds that namespace across every
+ * invocation: each `run` is answered by the node host inside it, so an agent leg's browser outlives
+ * each invocation (the leg's invocations share one `--session`), and `close` ends the namespace
+ * with everything in it. A host that cannot start or that ended answers every waiting invocation
+ * with that fact, and the next one starts a fresh host.
+ */
+export const confinedSession = (wrapper: readonly string[] = [], base: ProcessRunner = runProcess): ConfinedSession => {
+  if (!wrapper.length) return { run: base, close: async () => {} };
+  let host: ChildProcess | null = null, next = 0, unread = '';
+  const pending = new Map<number, (result: ProcessResult) => void>();
+  const settleAll = (output: string) => { const waiting = [...pending.values()]; pending.clear(); for (const settle of waiting) settle({ code: null, output, timedOut: false }); };
+  const start = (): ChildProcess | null => {
+    let begun: ChildProcess;
+    try { begun = spawn(wrapper[0]!, [...wrapper.slice(1), process.execPath, '-e', sessionHost], { stdio: ['pipe', 'pipe', 'pipe'] }); }
+    catch { host = null; settleAll('the confined session host could not start'); return null; }
+    begun.stdout!.setEncoding('utf8');
+    begun.stdout!.on('data', piece => { unread += piece; let at;
+      while ((at = unread.indexOf('\n')) >= 0) {
+        const line = unread.slice(0, at); unread = unread.slice(at + 1);
+        let reply: { id?: unknown; code?: unknown; output?: unknown; timedOut?: unknown };
+        try { reply = JSON.parse(line); } catch { continue; }
+        const id = typeof reply.id === 'number' ? reply.id : null;
+        if (id === null) continue;
+        const settle = pending.get(id);
+        if (!settle) continue;
+        pending.delete(id);
+        settle({ code: typeof reply.code === 'number' ? reply.code : null, output: typeof reply.output === 'string' ? reply.output : '', timedOut: reply.timedOut === true });
+      } });
+    begun.on('error', () => { if (host === begun) { host = null; settleAll('the confined session host could not start'); } });
+    begun.on('close', () => { if (host === begun) { host = null; settleAll('the confined session host ended'); } });
+    host = begun;
+    return begun;
+  };
+  const run: ProcessRunner = (command, args, options) => new Promise(resolve => {
+    const current = host ?? start();
+    if (!current || !current.stdin || current.stdin.destroyed) { resolve({ code: null, output: 'the confined session host is not running', timedOut: false }); return; }
+    const id = ++next;
+    const cancel = () => { try { current.stdin!.write(`${JSON.stringify({ cancel: id })}\n`); } catch { /* the host is gone; its ending settles this invocation */ } };
+    const settle = (result: ProcessResult) => { options.signal?.removeEventListener('abort', cancel); resolve(result); };
+    pending.set(id, settle);
+    try { current.stdin.write(`${JSON.stringify({ id, command, args, cwd: options.cwd, env: options.env, timeoutMs: options.timeoutMs, shell: options.shell })}\n`); }
+    catch { pending.delete(id); settle({ code: null, output: 'the confined session host is not running', timedOut: false }); return; }
+    if (options.signal?.aborted) cancel(); else options.signal?.addEventListener('abort', cancel, { once: true });
+  });
+  const close = async () => {
+    const current = host; host = null;
+    if (!current) return;
+    settleAll('the confined session host was closed');
+    await new Promise<void>(accept => { current.once('close', () => accept()); try { current.kill('SIGKILL'); } catch { accept(); } });
+  };
+  return { run, close };
+};
 
 /** The last `keptOutputLines` lines of a process's output. */
 export function lastLines(output: string, count = keptOutputLines) {
