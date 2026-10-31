@@ -95,7 +95,7 @@ test('unit:queue-validation-is-merge-substate — a candidate the merge writer h
   const running = evaluated(work('GY-1', commit('c1'), { checks: [{ name: 'test', result: 'in_progress', appId: 15368 }] }, null), []);
   assert.equal(running.stage, 'test', 'stage comes from the candidate\'s own gates');
   assert.equal(prSteps(running, now.getTime()).current, 'checking');
-  assert.equal(prSteps(running, now.getTime()).label, 'Testing');
+  assert.equal(prSteps(running, now.getTime()).label, 'Testing · 0 of 1 checks done');
   assert.deepEqual(checkStates(running), [{ name: 'test', state: 'running' }]);
 
   const passed = evaluated(work('GY-1', commit('c1'), {}, 'reconciled'), []);

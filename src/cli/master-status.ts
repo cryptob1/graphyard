@@ -8,15 +8,14 @@ import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport } from '../deploy-watch.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
-import { plainStage, serveView, type ServeView } from '../model/plain-stage.js';
-import { noRelease, type ReleaseView } from '../model/release.js';
+import { plainStage } from '../model/plain-stage.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 
 /** One open item's line: its plain stage (GY-2988), its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
-export function itemLine(item: Work, now: number, launched: AttemptLaunch | null = null, release: ReleaseView = noRelease, serve: ServeView = { serves: false, check: null }) {
+export function itemLine(item: Work, now: number, launched: AttemptLaunch | null = null) {
   const lease = item.lease && Date.parse(item.lease.expiresAt) > now ? item.lease : null;
-  return { key: item.key, title: item.title, stage: plainStage(item, release, serve), attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, head: short(item.candidate?.sha),
+  return { key: item.key, title: item.title, stage: plainStage(item), attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, head: short(item.candidate?.sha),
     blocker: item.blocker ?? (item.humanRequest && !item.humanRequest.answer ? `waits on a human: ${item.humanRequest.needed}` : null) };
 }
 
@@ -59,15 +58,13 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const recorded = state?.controlPlane ?? null;
   const open = snapshot.work.filter(item => item.stage !== 'done');
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
-  // GY-2988: items name their stage in plain words; the serving block supplies GY-2983's verdict for Live*.
-  const serve = serveView({ serving });
   return {
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
     masterSession: masterSummary(state?.master ?? emptyMasterSession(), now, masterAgent),
-    items: open.map((item, index) => itemLine(item, now, launched[index], noRelease, serve)),
+    items: open.map((item, index) => itemLine(item, now, launched[index])),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
     sessions,
