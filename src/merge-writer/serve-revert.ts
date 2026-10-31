@@ -1,10 +1,11 @@
 // Concern: the merge writer's answer to a served commit that fails live verification (GY-2990) —
 // revert only the item that broke it, and file that item's re-land. Delivered work is immutable,
 // so nothing is undone in history: when the served commit fails a required case and the last
-// verified commit passed, the merges between them name their items (each merge's ledger record,
-// else the `Merge GY-N` subject the writer gave it); the culprit is the one whose own `e2e:`
-// proof names the failing case, else the newest of those merges. The revert is a commit on the
-// base tip that takes exactly that merge back out, made without a worktree like the trial's own
+// verified commit passed, the landings between them — merge commits and fast-forwarded heads alike
+// — name their items (each landing's ledger merge sha, else the `Merge GY-N` subject the writer
+// gave it); the culprit is the one whose own `e2e:` proof names the failing case, else the newest
+// landing when every landing names its item. The revert is a commit on the base tip that takes
+// exactly that landing back out, made without a worktree like the trial's own
 // merges, and rides the writer's normal trial (as a proofless pseudo-item) and push. The loop files one `Re-land GY-N` item
 // carrying the original criteria plus the failing case, linked to GY-N and the failing serve.
 import type { Work } from '../model.js';
@@ -16,58 +17,85 @@ export type ServeRevertGit = (args: string[], env?: Record<string, string>) => P
 
 /** The failing serve: the served commit and the required case it failed, as the serve pass recorded it. */
 export interface ServeFailure { serve: string; failingCase: string; failingStep: string | null; failingReason: string | null }
-/** One merge commit between the last verified commit (exclusive) and the served commit (inclusive), oldest first. */
-export interface ServeRangeMerge { sha: string; subject: string }
+/** One commit on the first-parent chain between the last verified commit (exclusive) and the served commit (inclusive), oldest first, with its first parent. */
+export interface ServeRangeCommit { sha: string; parent: string; merge: boolean; subject: string }
+/**
+ * One landing in that range: the commits from `before` (exclusive) to `sha` (inclusive) one item
+ * brought onto main — a merge commit, or the head itself when main fast-forwarded to it — and the
+ * item, null when nothing names it.
+ */
+export interface ServeLanding { sha: string; before: string; subject: string; item: Work | null }
 
 const fullSha = /^[0-9a-f]{40}$/;
 
 /**
- * The merge commits on the first-parent chain from `lastVerified` (exclusive) to `served`
- * (inclusive), oldest first. Throws when either end is unknown to the checkout, so the caller —
- * the loop step, whose failure runs again next cycle — waits for the fetch that names them.
+ * Every commit on the first-parent chain from `lastVerified` (exclusive) to `served` (inclusive),
+ * oldest first: merge commits and fast-forwarded heads alike. Throws when either end is unknown to
+ * the checkout, so the caller — the loop step, whose failure runs again next cycle — waits for the
+ * fetch that names them.
  */
-export async function serveRangeMerges(git: ServeRevertGit, lastVerified: string, served: string): Promise<ServeRangeMerge[]> {
-  const out = (await git(['log', '--first-parent', '--reverse', '--merges', '--format=%H%x00%s', `${lastVerified.toLowerCase()}..${served.toLowerCase()}`, '--'])).split('\n');
+export async function serveRangeCommits(git: ServeRevertGit, lastVerified: string, served: string): Promise<ServeRangeCommit[]> {
+  const out = (await git(['log', '--first-parent', '--reverse', '--format=%H%x00%P%x00%s', `${lastVerified.toLowerCase()}..${served.toLowerCase()}`, '--'])).split('\n');
   return out.map(line => line.trim()).filter(Boolean).map(line => {
-    const tab = line.indexOf('\0');
-    const sha = (tab < 0 ? line : line.slice(0, tab)).trim().toLowerCase(), subject = tab < 0 ? '' : line.slice(tab + 1);
-    if (!fullSha.test(sha)) throw new Error(`git log answered no merge sha in ${line.slice(0, 80)}`);
-    return { sha, subject };
+    const [sha = '', parents = '', ...subject] = line.split('\0');
+    const [parent = ''] = parents.trim().toLowerCase().split(/\s+/);
+    if (!fullSha.test(sha.trim().toLowerCase()) || !fullSha.test(parent)) throw new Error(`git log answered no commit and parent in ${line.slice(0, 80)}`);
+    return { sha: sha.trim().toLowerCase(), parent, merge: parents.trim().split(/\s+/).length > 1, subject: subject.join('\0') };
   });
 }
 
-/** The item a merge commit landed for: its ledger's merge sha first, else the `Merge GY-N` subject the writer gave it. */
-export function serveMergeOwner(merge: ServeRangeMerge, work: readonly Work[]): Work | null {
-  const ledged = work.find(item => item.mergeLedger?.mergeSha?.toLowerCase() === merge.sha);
+/** The item a landing commit is for: its ledger's merge sha first (the head itself for a fast-forward), else the `Merge GY-N` subject the writer gave it. */
+export function serveMergeOwner(commit: Pick<ServeRangeCommit, 'sha' | 'subject'>, work: readonly Work[]): Work | null {
+  const ledged = work.find(item => item.mergeLedger?.mergeSha?.toLowerCase() === commit.sha);
   if (ledged) return ledged;
-  const key = /^Merge (GY-\d+)\b/.exec(merge.subject)?.[1]?.toUpperCase();
+  const key = /^Merge (GY-\d+)\b/.exec(commit.subject)?.[1]?.toUpperCase();
   return key ? work.find(item => item.key.toUpperCase() === key) ?? null : null;
 }
 
 /**
- * The merge that broke the serve: the one whose item's own `e2e:` proof names the failing case
- * (an `e2e:NAME` proof is the case file `e2e/cases/NAME.json`, so `e2e:<case>` is the case), else
- * the newest of the merges in range. Null when no merge in range names a known item.
+ * The range's commits grouped into landings: each commit an item owns closes the landing that
+ * began after the previous one, so a fast-forwarded head carries its own commits. A merge commit
+ * nothing owns (with any unowned commits before it), and commits after the last owned one, are
+ * landings with no item.
  */
-export function selectServeCulprit(merges: readonly ServeRangeMerge[], work: readonly Work[], failingCase: string): { item: Work; mergeSha: string } | null {
-  const owned = merges.map(merge => ({ merge, item: serveMergeOwner(merge, work) })).filter(entry => entry.item) as { merge: ServeRangeMerge; item: Work }[];
-  if (!owned.length) return null;
-  const named = owned.find(({ item }) => e2eProofsOf(item).some(proof => proof.slice(4) === failingCase));
-  const { merge, item } = named ?? owned[owned.length - 1]!;
-  return { item, mergeSha: merge.sha };
+export function serveLandings(commits: readonly ServeRangeCommit[], work: readonly Work[]): ServeLanding[] {
+  const landings: ServeLanding[] = [];
+  let before = commits[0]?.parent ?? '', open = false;
+  for (const commit of commits) {
+    const item = serveMergeOwner(commit, work);
+    if (item || commit.merge) { landings.push({ sha: commit.sha, before, subject: commit.subject, item }); before = commit.sha; open = false; }
+    else open = true;
+  }
+  const last = commits[commits.length - 1];
+  if (last && open) landings.push({ sha: last.sha, before, subject: last.subject, item: null });
+  return landings;
+}
+
+/**
+ * The landing that broke the serve: the one whose item's own `e2e:` proof names the failing case
+ * (an `e2e:NAME` proof is the case file `e2e/cases/NAME.json`, so `e2e:<case>` is the case), else
+ * the newest landing — but only when every landing in range names its item, so a bystander is
+ * never reverted for a landing nothing names. Null otherwise.
+ */
+export function selectServeCulprit(commits: readonly ServeRangeCommit[], work: readonly Work[], failingCase: string): { item: Work; mergeSha: string; before: string; subject: string } | null {
+  const landings = serveLandings(commits, work);
+  const named = landings.find(({ item }) => item && e2eProofsOf(item).some(proof => proof.slice(4) === failingCase));
+  const landing = named ?? (landings.length && landings.every(entry => entry.item) ? landings[landings.length - 1]! : null);
+  return landing?.item ? { item: landing.item, mergeSha: landing.sha, before: landing.before, subject: landing.subject } : null;
 }
 
 /**
  * The commit that takes exactly `mergeSha` back out of `baseTip`, made without a worktree: the
- * three-way merge of the tip with the merge's first parent against the merge itself (`--merge-base`
- * is the merge, what `git revert -m 1` applies), committed with the merge writer's author. A conflicted revert names
+ * three-way merge of the tip with the first-parent tip before the landing against the landing itself
+ * (`--merge-base` is the landing: for a merge commit what `git revert -m 1` applies, for a
+ * fast-forward every commit the head brought), committed with the merge writer's author. A conflicted revert names
  * its paths instead — the loop holds it, since no trial can judge a commit that was never made.
  */
-export async function revertMergeCommit(git: ServeRevertGit, input: { mergeSha: string; baseTip: string; subject: string }): Promise<{ revertSha: string } | { conflict: string[] }> {
-  const mergeSha = input.mergeSha.toLowerCase(), baseTip = input.baseTip.toLowerCase();
-  if (!fullSha.test(mergeSha) || !fullSha.test(baseTip)) throw new Error('A serve revert names the merge and the base tip by their full 40-hex shas');
+export async function revertMergeCommit(git: ServeRevertGit, input: { mergeSha: string; before: string; baseTip: string; subject: string }): Promise<{ revertSha: string } | { conflict: string[] }> {
+  const mergeSha = input.mergeSha.toLowerCase(), before = input.before.toLowerCase(), baseTip = input.baseTip.toLowerCase();
+  if (![mergeSha, before, baseTip].every(sha => fullSha.test(sha))) throw new Error('A serve revert names the landing, the tip before it and the base tip by their full 40-hex shas');
   let out: string;
-  try { out = (await git(['merge-tree', '--write-tree', '--merge-base', mergeSha, baseTip, `${mergeSha}^1`])).split('\0')[0]!.trim(); }
+  try { out = (await git(['merge-tree', '--write-tree', '--merge-base', mergeSha, baseTip, before])).split('\0')[0]!.trim(); }
   catch (error) {
     // Exit 1 is a conflicted merge, like the trial's own (trial.ts `trialMerge`): the tree id,
     // then the conflicted paths, then the informational messages.
@@ -174,13 +202,12 @@ export async function trialAndPushRevert(ports: Pick<ServeRevertPorts, 'trial' |
  * the re-land rides as null and the loop files it from the recorded revert.
  */
 export async function runServeRevert(ports: ServeRevertPorts, input: ServeFailure & { lastVerified: string; baseTip: string; baseBranch: string; work: readonly Work[]; alreadyReverted?: readonly string[] }): Promise<ServeRevertResult> {
-  const merges = await serveRangeMerges(ports.git, input.lastVerified, input.serve);
-  if (!merges.length) return { outcome: 'up-to-date' };
-  const culprit = selectServeCulprit(merges, input.work, input.failingCase);
-  if (!culprit) return { outcome: 'unattributed', merges: merges.map(merge => merge.sha) };
+  const commits = await serveRangeCommits(ports.git, input.lastVerified, input.serve);
+  if (!commits.length) return { outcome: 'up-to-date' };
+  const culprit = selectServeCulprit(commits, input.work, input.failingCase);
+  if (!culprit) return { outcome: 'unattributed', merges: serveLandings(commits, input.work).map(landing => landing.sha) };
   if (input.alreadyReverted?.some(sha => sha.toLowerCase() === culprit.mergeSha)) return { outcome: 'already-reverted', culprit: culprit.item, mergeSha: culprit.mergeSha };
-  const subject = merges.find(merge => merge.sha === culprit.mergeSha)?.subject ?? `Merge ${culprit.item.key}`;
-  const revert = await revertMergeCommit(ports.git, { mergeSha: culprit.mergeSha, baseTip: input.baseTip, subject });
+  const revert = await revertMergeCommit(ports.git, { mergeSha: culprit.mergeSha, before: culprit.before, baseTip: input.baseTip, subject: culprit.subject });
   if ('conflict' in revert) return { outcome: 'held', culprit: culprit.item, mergeSha: culprit.mergeSha,
     reason: `the revert of ${culprit.item.key}'s merge ${culprit.mergeSha.slice(0, 12)} does not apply cleanly on ${input.baseTip.slice(0, 12)}: ${revert.conflict.slice(0, 20).join(', ')}` };
   const files = (await ports.git(['diff', '--name-only', input.baseTip, revert.revertSha])).split('\n').map(line => line.trim()).filter(Boolean);

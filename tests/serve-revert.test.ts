@@ -8,7 +8,7 @@ import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, emptyMergeWriterS
 import { emptyDaemonState, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Cycle } from '../src/daemon/cycle.js';
-import { relandItemFor, runServeRevert, selectServeCulprit, serveRangeMerges, type RelandInput, type ServeRevertPorts } from '../src/merge-writer/serve-revert.js';
+import { relandItemFor, runServeRevert, selectServeCulprit, serveRangeCommits, type RelandInput, type ServeRevertPorts } from '../src/merge-writer/serve-revert.js';
 import type { MergeTrialRun } from '../src/merge-writer/executor.js';
 import { baseFailureHoldMs } from '../src/merge-writer/executor.js';
 import { mergeWriterInFlight } from '../src/daemon/cycle-merge-writer.js';
@@ -118,9 +118,9 @@ test('unit:revert-only-the-failing-item — the served commit fails the case one
   const failing = await servedFixture(coordinator, served, 'case-beta');
 
   // The range holds both merges, oldest first; the culprit is the item whose e2e: proof names the failing case.
-  const range = await serveRangeMerges(async args => git(coordinator, ...args), verified, served);
-  assert.deepEqual(range.map(merge => merge.sha), [mergeA, served]);
-  assert.deepEqual(selectServeCulprit(range, work, 'case-beta'), { item: work[1], mergeSha: served });
+  const range = await serveRangeCommits(async args => git(coordinator, ...args), verified, served);
+  assert.deepEqual(range.map(commit => commit.sha), [mergeA, served]);
+  assert.deepEqual(selectServeCulprit(range, work, 'case-beta'), { item: work[1], mergeSha: served, before: mergeA, subject: 'Merge GY-3002: beta page' });
 
   const filed: RelandInput[] = [];
   const result = await runServeRevert(ports(coordinator, origin, passTrial, filed),
@@ -155,10 +155,10 @@ test('unit:revert-only-the-failing-item — the served commit fails the case one
 test('unit:revert-only-the-failing-item — the failing case names the older item, and an unnamed case falls back to the newest merge', async t => {
   const { base, origin, coordinator, verified, mergeA, served, work } = await fixture('serve-revert-selection');
   t.after(() => rm(base, { recursive: true, force: true }));
-  const range = await serveRangeMerges(async args => git(coordinator, ...args), verified, served);
+  const range = await serveRangeCommits(async args => git(coordinator, ...args), verified, served);
 
   // The older item's proof names the failing case: the older merge is the culprit, not the newest.
-  assert.deepEqual(selectServeCulprit(range, work, 'case-alpha'), { item: work[0], mergeSha: mergeA });
+  assert.deepEqual(selectServeCulprit(range, work, 'case-alpha'), { item: work[0], mergeSha: mergeA, before: verified, subject: 'Merge GY-3001: alpha page' });
   const filed: RelandInput[] = [];
   const older = await runServeRevert(ports(coordinator, origin, passTrial, filed),
     { ...(await servedFixture(coordinator, served, 'case-alpha')), lastVerified: verified, baseTip: served, baseBranch: 'main', work });
@@ -168,6 +168,43 @@ test('unit:revert-only-the-failing-item — the failing case names the older ite
   assert.equal(show(origin, olderSha, 'b.txt'), 'beta\n');
   assert.equal(filed.length, 1);
   assert.equal(filed[0]!.title, 'Re-land GY-3001: alpha page');
+});
+
+test('unit:revert-only-the-failing-item — an item main fast-forwarded to behind an earlier merge commit is the culprit its case names, and only its commits come back out', async t => {
+  const { base, origin, coordinator, verified, work } = await fixture('serve-revert-fast-forward');
+  t.after(() => rm(base, { recursive: true, force: true }));
+  // GY-3004's head holds main's tip on its first-parent chain, so the writer lands it by fast-forward: two commits, no merge commit.
+  const pusher = join(base, 'pusher');
+  git(pusher, 'reset', '-q', '--hard', 'origin/main');
+  await writeFile(join(pusher, 'c.txt'), 'gamma\n');
+  git(pusher, 'add', '.');
+  git(pusher, 'commit', '-q', '-m', 'gamma one');
+  await writeFile(join(pusher, 'd.txt'), 'delta\n');
+  git(pusher, 'add', '.');
+  git(pusher, 'commit', '-q', '-m', 'gamma two');
+  git(pusher, 'push', '-q', 'origin', 'HEAD:main');
+  const served = git(pusher, 'rev-parse', 'HEAD'), mergeB = git(pusher, 'rev-parse', 'HEAD~2');
+  git(coordinator, 'fetch', '-q', 'origin');
+  const all = [...work, item('GY-3004', 'gamma page', ['unit:gamma', 'e2e:case-gamma'], served)];
+  const range = await serveRangeCommits(async args => git(coordinator, ...args), verified, served);
+  assert.equal(range.length, 4);
+  assert.deepEqual(selectServeCulprit(range, all, 'case-gamma'), { item: all[2], mergeSha: served, before: mergeB, subject: 'gamma two' });
+  // A landing nothing names never lets an unnamed case fall back to a bystander.
+  assert.equal(selectServeCulprit(range, work, 'case-unknown'), null);
+  assert.equal(selectServeCulprit(range, all, 'case-unknown')?.item.key, 'GY-3004');
+
+  const filed: RelandInput[] = [];
+  const result = await runServeRevert(ports(coordinator, origin, passTrial, filed),
+    { ...(await servedFixture(coordinator, served, 'case-gamma')), lastVerified: verified, baseTip: served, baseBranch: 'main', work: all });
+  assert.equal(result.outcome === 'reverted' && result.culprit.key, 'GY-3004');
+  const revertSha = result.outcome === 'reverted' ? result.revertSha : '';
+  assert.equal(tipOf(origin), revertSha);
+  assert.equal(show(origin, revertSha, 'c.txt'), null);
+  assert.equal(show(origin, revertSha, 'd.txt'), null);
+  assert.equal(show(origin, revertSha, 'a.txt'), 'alpha\n');
+  assert.equal(show(origin, revertSha, 'b.txt'), 'beta\n');
+  assert.equal(git(origin, 'rev-parse', 'main~1'), served);
+  assert.equal(filed[0]!.title, 'Re-land GY-3004: gamma page');
 });
 
 test('unit:revert-only-the-failing-item — a merge already reverted is never reverted twice: the serve still failing re-applies nothing', async t => {
@@ -194,8 +231,8 @@ test('unit:revert-only-the-failing-item — a merge already reverted is never re
 test('unit:revert-only-the-failing-item — a failing case no item names reverts the newest merge, and a failing trial holds the revert', async t => {
   const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-fallback');
   t.after(() => rm(base, { recursive: true, force: true }));
-  const range = await serveRangeMerges(async args => git(coordinator, ...args), verified, served);
-  assert.deepEqual(selectServeCulprit(range, work, 'case-gamma'), { item: work[1], mergeSha: served });
+  const range = await serveRangeCommits(async args => git(coordinator, ...args), verified, served);
+  assert.equal(selectServeCulprit(range, work, 'case-gamma')?.mergeSha, served);
 
   // A revert whose own trial fails is held: nothing is pushed and no re-land is filed.
   const filed: RelandInput[] = [];
