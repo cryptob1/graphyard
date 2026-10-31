@@ -338,7 +338,7 @@ export async function recordProductReviewByHand(services: Services, actor: Princ
 // answered an earlier gaps verdict is judged here from the standing check, never taken from the poster.
 export const specCheckLaunchEvent = 'spec-check.launch', specCheckVerdictEvent = 'spec-check.verdict';
 
-export const specCheckLaunchBodySchema = z.object({ reviewer: identifier, tokenHash: hex64, expiresAt: instant }).strict();
+export const specCheckLaunchBodySchema = z.object({ reviewer: identifier, tokenHash: hex64, expiresAt: instant, policyRevision: z.number().int().min(0) }).strict();
 
 export const specCheckBodySchema = z.object({
   verdict: z.enum(specVerdicts),
@@ -363,7 +363,7 @@ export async function recordSpecCheckLaunch(services: Services, actor: Principal
     const expiresAt = new Date(Math.min(Date.parse(data.expiresAt), now.getTime() + launchTokenBoundMs)).toISOString();
     // One launch stands per item: a relaunch replaces the earlier registration and withdraws its token.
     const withdraw = work!.specCheckLaunch ? [work!.specCheckLaunch.tokenHash] : [];
-    const launch: SpecCheckLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt };
+    const launch: SpecCheckLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt, policyRevision: data.policyRevision };
     work!.specCheckLaunch = launch;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, specCheckLaunchEvent, JSON.stringify({ key: work!.key, ...launch })]);
     await save(db, work!, actor.id, `${specCheckLaunchEvent}.recorded`, now, { launch: launch.id, reviewer: launch.reviewer });
@@ -383,7 +383,7 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', `${work!.key} is done; its spec check is history`, 409);
-    let reviewer: string;
+    let reviewer: string, policyRevision = work!.policyRevision;
     if (data.token) {
       const launch = work!.specCheckLaunch;
       demand(launch, `${work!.key} has no registered spec-check launch; a report is posted only by the session Graphyard launched`, 409);
@@ -392,6 +392,9 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
       demand(actor.role === 'reader' && actor.id === launch!.reviewer, `This report is posted as ${actor.id}, not as the registered spec checker ${launch!.reviewer}`, 403);
       demand(Date.parse(launch!.expiresAt) > now.getTime(), `${work!.key}'s spec-check launch expired at ${launch!.expiresAt}; the loop launches the check again`, 403);
       reviewer = launch!.reviewer;
+      // The report judged the revision the session was handed: one master requirements revised
+      // meanwhile leaves it stale, and the loop runs the check again.
+      policyRevision = launch!.policyRevision;
       change = { withdraw: [launch!.tokenHash] };
     } else {
       demand(actor.role === 'admin' || actor.role === 'coordinator', 'Only an admin or the loop\'s coordinator records a spec check by hand; a launched session posts as its token', 403);
@@ -402,7 +405,7 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
     // The re-check is a fact of the record: a report that lands while a gaps verdict stands is the
     // one re-check master requirements' revision ran; its own gaps verdict dispatches.
     const recheck = !!work!.specCheck && work!.specCheck.verdict === 'gaps';
-    const specCheck: SpecCheck = { policyRevision: work!.policyRevision, verdict: data.verdict, paraphrase: data.paraphrase, gaps: data.gaps, reviewer, at: now.toISOString(), ...(recheck ? { recheck: true } : {}) };
+    const specCheck: SpecCheck = { policyRevision, verdict: data.verdict, paraphrase: data.paraphrase, gaps: data.gaps, reviewer, at: now.toISOString(), ...(recheck ? { recheck: true } : {}) };
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, specCheckVerdictEvent, JSON.stringify({ key: work!.key, reviewer, verdict: data.verdict, gaps: data.gaps.length, recheck, policyRevision: specCheck.policyRevision })]);
     work!.specCheck = specCheck;
     work!.specCheckLaunch = null;

@@ -34,8 +34,16 @@ function feature(key: string, overrides: Partial<Work> = {}): Work {
   } as Work;
 }
 
+/** The checker's report, recorded as the control plane records it: bound to the revision its launch was handed, marked recheck when a gaps verdict already stands. */
+function post(item: Work, verdict: SpecVerdict) {
+  const recheck = !!item.specCheck && item.specCheck.verdict === 'gaps';
+  item.specCheck = { policyRevision: item.specCheckLaunch!.policyRevision, verdict, paraphrase: PARAPHRASE, gaps: verdict === 'gaps' ? [GAP] : [], reviewer: 'spec-checker', at, ...(recheck ? { recheck: true } : {}) };
+  item.specCheckLaunch = null;
+}
+
 /** Each item's loop state, kept across its drives as the running loop keeps it. */
 const states = new Map<string, DaemonState>();
+let launches = 0;
 
 /** Two loop rounds: the stubbed spec checker registers its launch and posts its verdict the way the control plane records them; a verdict that lands in round one is acted on in round two. */
 async function drive(item: Work, verdict: SpecVerdict | null) {
@@ -48,22 +56,19 @@ async function drive(item: Work, verdict: SpecVerdict | null) {
     const profile: WorkerProfile = { name: 'worker', principal: 'worker-principal', agentName: 'agent-worker', mode: 'launch', kind: 'codex', credentialFile: credential, agentArgs: [], approvals: 'auto', environment: {} };
     const master: MasterConfig = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: token, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [profile] });
     const work = [item];
-    const launched: string[] = [], checks: string[] = [];
+    const launched: string[] = [], checks: string[] = [], closed: string[] = [];
     const effects: DaemonEffects = {
       agents: () => [], credentials: async items => Object.fromEntries(items.map(entry => [entry.name, { available: true, reason: null }])),
       snapshot: async () => ({ work, now: at }),
-      closeSession: () => {},
+      closeSession: pane => { closed.push(pane); },
       dispatch: async launched_item => { launched.push(launched_item.key); },
       // The stubbed spec checker: one session per owed check — its launch is registered on the
-      // item (as the control plane records it), and its report lands bound to the current
-      // revision, marked recheck when a gaps verdict already stands.
+      // item (as the control plane records it), and its report, when it has one, lands at once.
       launchSpecCheck: async checked => {
-        checks.push(checked.key);
-        checked.specCheckLaunch = { id: `launch-${checked.key}`, reviewer: 'spec-checker', requester: 'master', tokenHash: 'f'.repeat(64), at, expiresAt: new Date(clock + 3_600_000).toISOString() };
-        if (!verdict) return;
-        const recheck = !!checked.specCheck && checked.specCheck.verdict === 'gaps';
-        checked.specCheckLaunch = null;
-        checked.specCheck = { policyRevision: checked.policyRevision, verdict, paraphrase: PARAPHRASE, gaps: verdict === 'gaps' ? [GAP] : [], reviewer: 'spec-checker', at, ...(recheck ? { recheck: true } : {}) };
+        checks.push(checked.key); launches += 1;
+        checked.specCheckLaunch = { id: `launch-${launches}`, reviewer: 'spec-checker', requester: 'master', tokenHash: 'f'.repeat(64), at, expiresAt: new Date(clock + 3_600_000).toISOString(), policyRevision: checked.policyRevision };
+        if (verdict) post(checked, verdict);
+        return { pane: `pane-${launches}` };
       },
       persist: async () => {},
     };
@@ -71,7 +76,7 @@ async function drive(item: Work, verdict: SpecVerdict | null) {
     states.set(item.key, state);
     await runCycle(master, state, effects, () => clock);
     await runCycle(master, state, effects, () => clock);
-    return { launched, checks, refusal: specCheckRefusal(item) };
+    return { launched, checks, closed, refusal: specCheckRefusal(item) };
   } finally { await rm(directory, { recursive: true, force: true }); }
 }
 
@@ -142,7 +147,23 @@ test('unit:spec-check-before-dispatch — a launch that expires unreported is re
   const item = feature('GY-15');
   await drive(item, null);
   item.specCheckLaunch = { ...item.specCheckLaunch!, expiresAt: new Date(clock - 1).toISOString() };
-  const { checks, launched } = await drive(item, null);
+  const expired = item.specCheckLaunch!.id.replace('launch', 'pane');
+  const { checks, launched, closed } = await drive(item, null);
   assert.deepEqual(checks, ['GY-15'], 'the expired launch is replaced by one fresh session');
   assert.deepEqual(launched, []);
+  assert.deepEqual(closed, [expired], 'the expired session closes before its replacement launches; the replacement stands open');
+});
+
+test('unit:spec-check-before-dispatch — a report on requirements revised while the check ran is stale, and the loop runs the check again', async () => {
+  const item = feature('GY-16');
+  await drive(item, null);
+  const first = item.specCheckLaunch!.id.replace('launch', 'pane');
+  item.policyRevision += 1;
+  post(item, 'ready');
+  assert.equal(item.specCheck!.policyRevision, 1, 'the report judged the revision its launch was handed');
+  assert.match(specCheckRefusal(item)!, /Spec check of the revised requirements has not reported/);
+  const { checks, launched, closed } = await drive(item, 'ready');
+  assert.deepEqual(checks, ['GY-16'], 'the revised requirements get their own check');
+  assert.deepEqual(launched, ['GY-16'], 'whose ready verdict dispatches');
+  assert.deepEqual(closed, [first, `pane-${launches}`], 'each checker pane closes once, after its report lands');
 });

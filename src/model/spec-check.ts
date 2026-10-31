@@ -29,9 +29,9 @@ export interface SpecCheck {
   recheck?: boolean;
 }
 
-/** The one launch standing for an item's spec check: the loop launches no second session while it stands unexpired (a relaunch replaces it and withdraws its token). */
+/** The one launch standing for an item's spec check: the loop launches no second session while it stands unexpired (a relaunch replaces it and withdraws its token). Its report judges the policy revision the session was handed, whatever master requirements revises meanwhile. */
 export interface SpecCheckLaunch {
-  id: string; reviewer: string; requester: string; tokenHash: string; at: string; expiresAt: string;
+  id: string; reviewer: string; requester: string; tokenHash: string; at: string; expiresAt: string; policyRevision: number;
 }
 
 declare module './work.js' {
@@ -42,6 +42,9 @@ declare module './work.js' {
     specCheckLaunch?: SpecCheckLaunch | null;
   }
 }
+
+/** How long a spec-check launch stands: its token's life, after which the loop closes the session and launches again. */
+export const specCheckLaunchMs = 3_600_000;
 
 /** Who owes one: a feature item that is not a "No user-facing change" item — EGM skips small clear fixes. */
 export const needsSpecCheck = (work: Pick<Work, 'type' | 'description'>): boolean =>

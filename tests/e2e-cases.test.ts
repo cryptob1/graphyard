@@ -107,7 +107,7 @@ test('unit:e2e-case-format — a case is a JSON file under e2e/cases/ with id, t
 
 test('unit:e2e-case-proofs-resolve-on-fresh-registry — every e2e: proof a case under e2e/cases/ cites names a scenario src/scenarios.ts ships, whose case file of that id defines the same case, so create never refuses it on a fresh registry', async () => {
   // GY-1800: imported here so a tree without the fixture revisions fails this case, not the file.
-  const { fixtureCases, shippedScenarioRevisions } = await import('../src/scenarios.js');
+  const { fixtureCases, specCheckShownCase, shippedScenarioRevisions } = await import('../src/scenarios.js');
   const shipped = await loadCases(root);
   // Only a revision shipped in code exists on a fresh registry before the required cases run: a case
   // file is registered by `graphyard e2e sync`, which no release candidate's uat job runs first, so a
@@ -124,7 +124,7 @@ test('unit:e2e-case-proofs-resolve-on-fresh-registry — every e2e: proof a case
   assert.deepEqual(unresolved, [], 'a proof naming a scenario src/scenarios.ts does not ship makes create answer 409 on a fresh registry (GY-1800)');
   // A scenario shipped in code from a case definition is exactly the case file of that id, so sync revises it from the file later.
   assert.ok(fixtureCases, 'src/scenarios.ts ships the fixture cases');
-  for (const definition of fixtureCases()) {
+  for (const definition of [...fixtureCases(), specCheckShownCase()]) {
     const entry = shipped.find(candidate => candidate.definition.id === definition.id);
     assert.ok(entry, `e2e/cases/${definition.id}.json ships beside its revision`);
     assert.deepEqual(scenarioDefinition(entry), scenarioDefinition({ file: entry.file, definition }));

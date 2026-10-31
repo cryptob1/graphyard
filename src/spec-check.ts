@@ -11,7 +11,7 @@ import type { ChildRun } from './child-runner.js';
 import type { FleetProbe } from './fleet.js';
 import type { SandboxExec } from './worker-sandbox.js';
 import {
-  accountLaunch, allocateManagedCheckout, autonomousSession, createdHerdrTab,
+  accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab,
   herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, prepareSessionHarness, readCredentialFile,
   selectAccount, sessionAgentName, startAgentSession,
   type PromptDelivery, type StartBounds,
@@ -20,7 +20,7 @@ import { selectReviewerProfile } from './auto-dispatch.js';
 import { anchorSessionCheckout as anchorCheckout, reviewerCredentialDirectory, sessionWritable, simplicityParagraph, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { writeSpecCheckBinding } from './spec-check-post.js';
-import { needsSpecCheck, specCheckCurrent } from './model/spec-check.js';
+import { needsSpecCheck, specCheckCurrent, specCheckLaunchMs } from './model/spec-check.js';
 import type { Work } from './model.js';
 
 /** The vendored EGM reviewer prompts, read from the coordinator checkout at launch. */
@@ -67,7 +67,7 @@ export interface SpecCheckLaunchResult { work: string; profile: string; agentNam
  */
 export async function launchSpecCheck(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: ChildRun; probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
-  registerLaunch?: (work: Work, launch: { reviewer: string; tokenHash: string; expiresAt: string }) => Promise<{ launch: string }>;
+  registerLaunch?: (work: Work, launch: { reviewer: string; tokenHash: string; expiresAt: string; policyRevision: number }) => Promise<{ launch: string }>;
 } = {}): Promise<SpecCheckLaunchResult> {
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('A spec-check launch requires a valid Graphyard snapshot clock');
@@ -82,14 +82,14 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
   // The base branch tip, as it stands now: what the item's named files look like before any worker starts.
   let baseTip: string;
   try {
-    await Promise.resolve(run?.('git', ['-C', root, 'fetch', '--no-write-fetch-head', 'origin', config.baseBranch]));
-    baseTip = String(await Promise.resolve(run?.('git', ['-C', root, 'rev-parse', 'FETCH_HEAD']))).trim();
-    if (!/^[0-9a-f]{40}$/.test(baseTip)) throw new Error(`git rev-parse FETCH_HEAD answered ${baseTip || 'nothing'}`);
+    await Promise.resolve(run?.('git', ['-C', root, 'fetch', '--quiet', 'origin', config.baseBranch]));
+    baseTip = String(await Promise.resolve(run?.('git', ['-C', root, 'rev-parse', '--verify', `refs/remotes/origin/${config.baseBranch}^{commit}`]))).trim();
+    if (!/^[0-9a-f]{40}$/.test(baseTip)) throw new Error(`git rev-parse refs/remotes/origin/${config.baseBranch} answered ${baseTip || 'nothing'}`);
   } catch (error) { throw new Error(`Reading the base branch tip for ${work.key}'s spec check failed: ${error instanceof Error ? error.message : String(error)}`); }
   const id = randomUUID();
   const token = randomBytes(32).toString('hex');
   const tokenHash = createHash('sha256').update(token, 'utf8').digest('hex');
-  const expiresAt = new Date(now + 3_600_000).toISOString();
+  const expiresAt = new Date(now + specCheckLaunchMs).toISOString();
   const checkout = await allocateManagedCheckout(root, config, 'review', work.key, baseTip, id);
   try { await anchorCheckout(root, checkout.directory, run); } catch { /* the session still starts */ }
   const agentName = sessionAgentName(profile, { id });
@@ -101,7 +101,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
     try {
       // The control plane registers the launch before the session starts: the reviewer, the token
       // hash, the expiry. A launch it refuses starts nothing and writes no credential.
-      await (dependencies.registerLaunch ?? registerControlPlaneLaunch(config))(work, { reviewer: profile.agentName, tokenHash, expiresAt });
+      await (dependencies.registerLaunch ?? registerControlPlaneLaunch(config))(work, { reviewer: profile.agentName, tokenHash, expiresAt, policyRevision: work.policyRevision });
       await mkdir(sessionDirectory, { recursive: true, mode: 0o700 });
       await writeSpecCheckBinding(sessionDirectory, { repository: config.repository, key: work.key, workId: work.id, policyRevision: work.policyRevision, reviewer: profile.agentName, url: config.url, token });
       const writable = await sessionWritable(root, config, checkout.directory);
@@ -117,7 +117,8 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
         { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role });
       return { work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {
-      // A launch that never became a session leaves no token material behind; the checkout is the sweep's.
+      // A launch that never became a session leaves no pane and no token material behind; the checkout is the sweep's.
+      if (pane) await closeHerdrPane(pane, run).catch(() => {});
       await rm(sessionDirectory, { recursive: true, force: true }).catch(() => {});
       throw error;
     }
@@ -126,7 +127,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
 
 /** The default registration: `POST /api/work/:id/spec-check-launch` with the loop's coordinator credential, keyed on the launch so a retry replays. */
 function registerControlPlaneLaunch(config: { url: string; credentialFile: string }) {
-  return async (work: Work, launch: { reviewer: string; tokenHash: string; expiresAt: string }): Promise<{ launch: string }> => {
+  return async (work: Work, launch: { reviewer: string; tokenHash: string; expiresAt: string; policyRevision: number }): Promise<{ launch: string }> => {
     const token = await readCredentialFile(config.credentialFile);
     const response = await fetch(`${config.url}/api/work/${encodeURIComponent(work.id)}/spec-check-launch`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `spec-check-launch:${launch.tokenHash}` }, body: JSON.stringify(launch), signal: AbortSignal.timeout(30_000) });
     const result = await response.json().catch(() => ({})) as { launch?: string; error?: string };

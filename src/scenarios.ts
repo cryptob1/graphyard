@@ -1,6 +1,4 @@
 import { createHash } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
 import { z } from 'zod';
 import { admin, demand, type Principal } from './model.js';
@@ -93,15 +91,33 @@ export const fixtureCases = (): E2eCase[] => [
  * GY-2992: the spec-check-shown dashboard case. Its created feature item cites
  * `e2e:spec-check-shown` (a user-facing feature carries an e2e proof), so — for GY-1800's reason —
  * revision 1 ships here: on a fresh registry no e2e sync has run yet, and create would refuse the
- * proof naming a scenario the registry lacks. The file under `e2e/cases/` stays the source e2e
- * sync revises later; it is read at call time, so the shipped revision is exactly the file's.
+ * proof naming a scenario the registry lacks. It is defined in code, exactly as its file under
+ * `e2e/cases/` defines it, because the released image carries no `e2e/`; the file stays the source
+ * e2e sync revises later.
  */
 export const specCheckShownScenario = 'spec-check-shown';
-const specCheckShownCaseFile = fileURLToPath(new URL('../e2e/cases/spec-check-shown.json', import.meta.url));
-export function specCheckShownRevision(createdAt = new Date().toISOString(), createdBy = 'graphyard'): Scenario {
-  const definition: E2eCase = caseSchema.parse(JSON.parse(readFileSync(specCheckShownCaseFile, 'utf8')));
-  return shippedCaseRevision(definition, createdAt, createdBy);
-}
+export const specCheckShownCase = (): E2eCase => caseSchema.parse({
+  id: "spec-check-shown", title: "A feature item shows its spec check: the paraphrase, the gaps and the verdict",
+  description: "A released feature item is checked before a worker starts (GY-2992): a fresh-context reviewer restates the item and names its gaps. The case records a spec check — a gaps verdict with its paraphrase and gaps, bound to the policy revision it judged — on a feature item through the same route an operator or the loop uses, reads it back on the API, and opens the item in the dashboard, where the Spec check panel shows the paraphrase, the gaps and the verdict.",
+  tags: ["api", "dashboard", "spec-check"], target: "uat", required: true,
+  steps: [
+    {"kind": "http", "name": "create the feature item", "method": "POST", "path": "/api/work", "body": {"title": "E2E case {{case}} run {{run}}", "description": "The export flow moves behind the settings screen, added by the spec-check-shown E2E case so a feature item can carry a recorded spec check.", "type": "feature", "priority": 3, "criteria": [{"id": "AC-1", "text": "A signed-up user can export their data from the settings screen", "proofs": ["e2e:spec-check-shown"]}], "policy": {"checks": ["test"], "review": true}}, "status": 200, "save": {"id": "id", "key": "key"}},
+    {"kind": "http", "name": "record the spec check: a gaps verdict with its paraphrase and gaps, on the revision it judged", "method": "POST", "path": "/api/work/{{id}}/spec-check", "body": {"reviewer": "spec-checker", "verdict": "gaps", "paraphrase": "The change moves the export flow behind the settings screen; AC-1 is proven by the e2e case that signs up and exports.", "gaps": ["AC-1 does not say which of the two export buttons the flow starts from"]}, "status": 200},
+    {"kind": "http", "name": "the item answers its spec check bound to the revision", "method": "GET", "path": "/api/work/{{id}}", "status": 200, "expect": [{"path": "specCheck.verdict", "equals": "gaps"}, {"path": "specCheck.reviewer", "equals": "spec-checker"}, {"path": "specCheck.paraphrase", "type": "string"}, {"path": "specCheck.gaps.0", "equals": "AC-1 does not say which of the two export buttons the flow starts from"}, {"path": "specCheck.policyRevision", "equals": 1}]},
+    {"kind": "browser", "name": "sign in to the dashboard", "action": "open", "path": "/"},
+    {"kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}"},
+    {"kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false},
+    {"kind": "browser", "name": "unfold the backlog group and open the item", "action": "click", "text": "Backlog", "exact": false},
+    {"kind": "browser", "action": "click", "text": "E2E case {{case}} run {{run}}", "exact": false},
+    {"kind": "browser", "name": "the spec check panel shows the verdict", "action": "expectText", "text": "Spec check", "exact": false, "role": "heading"},
+    {"kind": "browser", "name": "the verdict reads as gaps", "action": "expectText", "text": "Gaps"},
+    {"kind": "browser", "name": "the paraphrase the reviewer gave is shown", "action": "expectText", "text": "The change moves the export flow behind the settings screen", "exact": false},
+    {"kind": "browser", "name": "the gap the reviewer named is shown", "action": "expectText", "text": "AC-1 does not say which of the two export buttons the flow starts from", "exact": false},
+    {"kind": "browser", "name": "the panel says what a gaps verdict holds", "action": "expectText", "text": "held at ready until master requirements revises the item", "exact": false},
+  ],
+});
+export const specCheckShownRevision = (createdAt = new Date().toISOString(), createdBy = 'graphyard'): Scenario =>
+  shippedCaseRevision(specCheckShownCase(), createdAt, createdBy);
 
 /** Revision 1 of a case shipped in code: exactly the revision `e2e sync` registers from its file under `e2e/cases/`. The timestamp is real (GY-2964): a seeded revision never reads as the epoch. */
 export function shippedCaseRevision(definition: E2eCase, createdAt = new Date().toISOString(), createdBy = 'graphyard'): Scenario {
