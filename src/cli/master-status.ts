@@ -69,7 +69,9 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent),
     items: open.map((item, index) => itemLine(item, now, launched[index])),
     ...(personalScopes > 0 ? { personalScopes: `${personalScopes} items in personal scopes` } : {}),
-    mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
+    mergeWriter: (({ queue, inFlight, lastMergeAt, refusals, serveRevert }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null,
+      // GY-2990: a revert that failed its own trial is held here, with the serve and reason that held it.
+      serveRevert: serveRevert?.held ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,
     sessions,
     freeWorkers: health.filter(entry => entry.healthy).map(entry => entry.profile.name),

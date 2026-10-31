@@ -7,6 +7,7 @@ import { Engine } from '../src/engine.js';
 import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import type { Principal, Work } from '../src/model.js';
+import { relandItemFor } from '../src/merge-writer/serve-revert.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const alice: Principal = { id: 'alice', role: 'admin', sessionKind: 'human' };
@@ -69,6 +70,14 @@ test('unit:masters-dispatch-owned-items the shared loop releases each scope\'s b
     release: async item => { released.push(item.key); },
   } as DaemonEffects);
   for (const item of backlog) assert.equal(released.filter(key => key === item.key).length, 1, `${item.key} is released once`);
+});
+
+test('unit:masters-dispatch-owned-items a reverted item\'s re-land stays with its owner', async () => {
+  const failure = { serve: 'a'.repeat(40), failingCase: 'smoke', failingStep: null, failingReason: null, mergeSha: 'b'.repeat(40), baseBranch: 'main' };
+  const reland = relandItemFor(await create('alice'), failure);
+  assert.equal(reland.owner, 'alice');
+  assert.equal((await engine.execute(alice, 'create', null, reland, randomUUID())).owner, 'alice');
+  assert.equal('owner' in relandItemFor(await create(), failure), false);
 });
 
 test('unit:masters-dispatch-owned-items owner changes are transactional requirements, preserve criteria and append history', async () => {
