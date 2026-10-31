@@ -14,7 +14,7 @@ const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
 /** One open item's line: its stage, its attempt (and the one it resumed, GY-2971), who holds it, the head it submitted, and what blocks it. */
 export function itemLine(item: Work, now: number, launched: AttemptLaunch | null = null) {
   const lease = item.lease && Date.parse(item.lease.expiresAt) > now ? item.lease : null;
-  return { key: item.key, title: item.title, stage: item.stage, attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, head: short(item.candidate?.sha),
+  return { key: item.key, title: item.title, stage: item.stage, attempt: attemptLabel(item.epoch, launched), owner: lease?.owner ?? null, humanOwner: item.owner ?? null, head: short(item.candidate?.sha),
     blocker: item.blocker ?? (item.humanRequest && !item.humanRequest.answer ? `waits on a human: ${item.humanRequest.needed}` : null) };
 }
 
@@ -27,6 +27,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     unreachable = error instanceof Error ? error.message : String(error);
     return { work: [] as Work[], now: new Date().toISOString() };
   }), observeHerdrAgents(), inspectWorkerCredentials(root, master.workers), readDaemonState(root, master).catch(() => null)]);
+  snapshot.work = snapshot.work.filter(item => (item.owner ?? null) === (master.forPerson ?? null));
   const now = Date.parse(snapshot.now) || Date.now();
   // The managed repository's release health reads only what its own deployment records as served,
   // and only a record that names this repository as the one it serves. The control plane's deploy
@@ -45,7 +46,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     ...(report.serve ? { pending: report.pending, serve: report.serve } : { serve: null }),
   };
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
-  const masterAgent = state?.master.agentName ? runtime.agents.find(agent => agent.name === state.master.agentName || (!!state.master.pane && agent.pane_id === state.master.pane)) : undefined;
+  const session = master.forPerson ? state?.personalMasters[master.forPerson] : state?.master;
+  const masterAgent = session?.agentName ? runtime.agents.find(agent => agent.name === session.agentName || (!!session.pane && agent.pane_id === session.pane)) : undefined;
   const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;
   const sessions = snapshot.work.flatMap(item => (item.sessions ?? []).filter(session => session.state === 'running')
     .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null,
@@ -62,7 +64,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
-    masterSession: masterSummary(state?.master ?? emptyMasterSession(), now, masterAgent),
+    masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent),
     items: open.map((item, index) => itemLine(item, now, launched[index])),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,

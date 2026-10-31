@@ -1,3 +1,4 @@
+import { sessionName } from '../../session-name.js';
 // Concern: the authenticated master session every `graphyard master` subcommand after init runs in.
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +13,9 @@ export const unhandled = Symbol('unhandled master subcommand');
 /** Every master subcommand authenticates with the coordinator credential the master keeps for itself, never the repository connection file. */
 export async function openMasterSession(context: CliContext, root: string) {
   const { id, args, print } = context;
-  const master = await loadMasterConfig(root);
+  const stored = await loadMasterConfig(root);
+  const person = process.env.GRAPHYARD_FOR_PERSON;
+  const master = person ? { ...stored, forPerson: person, masterAgentName: sessionName(stored.masterAgentName, person) } : stored;
   const masterToken = await readCredentialFile(master.credentialFile);
   const masterApi = async (path: string, credential = masterToken, timeoutMs = 30_000, headers: Record<string, string> = {}) => {
     const response = await fetch(`${master.url}/api/${path}`, { headers: { ...headers, Authorization: `Bearer ${credential}` }, signal: AbortSignal.timeout(timeoutMs) });
@@ -21,6 +24,15 @@ export async function openMasterSession(context: CliContext, root: string) {
     return response.json();
   };
   const masterMutation = async (path: string, data: unknown, requestId: string = randomUUID(), credential: string = masterToken) => {
+    if (person) {
+      const itemPath = /^work\/([^/]+)\//.exec(path);
+      if (itemPath && (await masterApi(`work/${itemPath[1]}`)).owner !== person) throw new Error(`This master works only items owned by ${person}`);
+      if (path === 'work') {
+        const intent = data as { owner?: string | null };
+        if (intent.owner !== undefined && intent.owner !== person) throw new Error(`This master creates items owned by ${person}`);
+        data = { ...intent, owner: person };
+      }
+    }
     const response = await fetch(`${master.url}/api/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${credential}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: JSON.stringify(data), signal: AbortSignal.timeout(30_000) });
     const result = await response.json(); if (!response.ok) { const error = new Error(JSON.stringify(result)); (error as any).confirmedRefusal = response.status >= 400 && response.status < 500; throw error; } return result;
   };

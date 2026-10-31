@@ -1,0 +1,11 @@
+{
+  "id": "per-owner-now-page",
+  "title": "Each signed-in person has a Now page of exactly their items",
+  "description": "Three signed-in browser sessions share a board: Alice sees her two items, Bob sees his one, and Charlie sees an empty Now page. Every row carries its stage and next step; unowned items remain on the shared board.",
+  "tags": ["dashboard", "ownership"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    { "kind": "command", "name": "exercise personal Now pages in signed-in browser sessions", "run": "npm run test:browser -- browser-tests/per-owner-now-page.spec.ts", "timeoutSeconds": 180 }
+  ]
+}

@@ -3,7 +3,7 @@ import type { Work } from '../model.js';
 import type { SessionHandle, SessionHandleInput } from '../model/sessions.js';
 import type { ExhaustionSignal, PartialWork } from '../model/capacity.js';
 import type { RegistrySlot } from '../master/registry-slot.js';
-import type { WorkerProfile, HerdrAgent, ProfileAccountHealth } from '../master.js';
+import type { MasterConfig, WorkerProfile, HerdrAgent, ProfileAccountHealth } from '../master.js';
 import type { MasterSessionEffects } from '../master/master-session.js';
 import { type DaemonAction, type DaemonState, type LoopRelease, storeAction } from './state.js';
 import type { MergeWriterReads } from './cycle-merge-writer.js';
@@ -96,6 +96,7 @@ export interface DaemonEffects {
   dispatchTick?: (snapshot: { work: Work[]; now: string }) => Promise<unknown>;
   /** The loop's own master session (GY-898): absent, none is launched. */
   masterSession?: MasterSessionEffects;
+  personalMasterSession?: (config: MasterConfig) => MasterSessionEffects;
   /** The control-plane merge executor's reads (cycle-merge-writer.ts); absent, the merge writer does nothing. */
   mergeWriter?: MergeWriterReads | null;
   /** The headless runs a restart left running (GY-453). */

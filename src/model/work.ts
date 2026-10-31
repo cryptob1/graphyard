@@ -46,6 +46,7 @@ export const observationWindowSchema = z.object({
 }).strict();
 export type ObservationWindow = z.infer<typeof observationWindowSchema>;
 export const createSchema = z.object({
+  owner: z.string().trim().min(1).max(200).nullable().optional(),
   title: z.string().min(1).max(200), description: z.string().max(20000).default(''),
   /** One plain sentence a person can read first on the item page (GY-2011); optional on master create, set from a plan item's `plain` at release. */
   summary: z.string().trim().min(1).max(400).optional(),

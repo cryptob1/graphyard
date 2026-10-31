@@ -370,6 +370,8 @@ export const supervisionModes = ['autonomous', 'supervised'] as const;
 export type Supervision = typeof supervisionModes[number];
 export const promotionCommand = 'graphyard master promote --admin-token-stdin (after graphyard master reviewer setup and master reviewer add)';
 export const masterConfigSchema = forwardTolerant(z.object({
+  forPerson: z.string().trim().min(1).max(200).optional(),
+  people: z.array(z.string().trim().min(1).max(200)).optional(),
   version: z.literal(1),
   // Absent is autonomous, so every existing master.json loads and is written back unchanged.
   supervision: z.enum(supervisionModes).optional(),
