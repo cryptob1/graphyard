@@ -1,6 +1,5 @@
 import type { Work } from './work.js';
 import type { QueueCarry, TipMerge } from './carry.js';
-import type { BaseBreak } from '../master/base-break-refresh.js';
 
 /** The carry decisions on record that moved bindings onto `sha`, under the current policy: a base refresh's. */
 export function onto(work: Pick<Work, 'baseRefresh' | 'policyRevision'>, sha: string): QueueCarry[] {
@@ -38,8 +37,6 @@ export interface BaseRefresh {
   trigger?: RefreshTrigger;
   /** The coordinator's request this refresh answered (GY-528), when it was one; see `BaseRefreshRequest`. */
   requested?: { by: string; at: string; reason: string } | null;
-  /** The base-branch breakage a `base breakage` refresh answered (GY-793): the failing tests, the base that broke them and the tip that fixed them. */
-  baseBreak?: BaseBreak | null;
   /**
    * With a conflict (GY-1200): when a conflict was first recorded for this same head and policy
    * revision. A refresh onto each new base tip rewrites `at`, so on a base that moves often `at`
@@ -63,7 +60,7 @@ export function conflictSince(previous: Pick<BaseRefresh, 'from' | 'policyRevisi
  * `baseRefresh`, not in it, so an approval an earlier refresh carried onto the head still binds until this one runs.
  */
 export interface BaseRefreshRequest { head: string; base: string; policyRevision: number; by: string; at: string; reason: string }
-/** Why a branch was written by the control plane rather than by its worker (GY-375, GY-528, GY-793). */
+/** Why a branch was written by the control plane rather than by its worker (GY-375, GY-528). */
 export type RefreshTrigger = 'conflict confirmed' | 'base failure repaired' | 'base breakage';
 
 /**
