@@ -136,7 +136,10 @@ test('unit:loop-releases-backlog-to-concurrency — one cycle at concurrency 2 r
   const state: DaemonState = emptyDaemonState(config);
   await runCycle(config, state, effects);
   assert.deepEqual(released, [first.key, independent.key], 'priority order, dependencies respected');
-  assert.deepEqual(claims, [`${first.key}@one`, `${independent.key}@two`], 'both released items are dispatched the same cycle');
+  // The two launches run concurrently on the launcher, so the order their claims complete in races
+  // (GY-2993's merge trial flipped it); what the cycle owes is the (item, profile) pairs, which
+  // priority and profile availability decide.
+  assert.deepEqual([...claims].sort(), [`${first.key}@one`, `${independent.key}@two`].sort(), 'both released items are dispatched the same cycle');
   assert.equal((await reload(dependent.id)).ready, false, 'the dependent item is left in the backlog');
   assert.equal((await reload(parked.id)).ready, false, 'a parked item is never released');
   for (const item of [first, independent]) {
