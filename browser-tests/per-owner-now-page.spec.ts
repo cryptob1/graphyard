@@ -47,12 +47,12 @@ for (const person of ['alice', 'bob', 'charlie']) {
     for (const item of work.filter(item => !('owner' in item) || item.owner !== person || item.stage === 'done')) {
       await expect(page.getByRole('button', { name: `${item.key} · ${item.title}`, exact: true })).toHaveCount(0);
     }
-    // The shared board remains available beside Now, and shows the human owner on each card.
+    // The shared board remains available beside Now; owned cards name the human owner, unowned ones do not.
     await page.getByRole('navigation', { name: 'Pages in this section' }).getByRole('button', { name: 'Work', exact: true }).click();
     await expect(page.getByRole('heading', { name: 'Work', exact: true, level: 1 })).toBeVisible();
     if (person === 'alice') {
       await expect(page.locator('[data-row="GY-1"] .row-owner')).toHaveText('Owner · alice');
-      await expect(page.locator('[data-row="GY-4"] .row-owner')).toHaveText('Owner · Nobody yet');
+      await expect(page.locator('[data-row="GY-4"] .row-owner')).toHaveCount(0);
     }
   });
 }

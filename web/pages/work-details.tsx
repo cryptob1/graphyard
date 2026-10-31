@@ -179,7 +179,7 @@ export default function WorkDetails({ item, work, status, token, observedAt, job
     <button type="button" className="text-button back" autoFocus onClick={() => setSelected(null)}>← Back</button>
     <div className="item-head">
       <div className="item-title">
-        <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}<span>Owner · {item.owner ?? 'Nobody yet'}</span><span>{item.type.replace(/^./, c => c.toUpperCase())} · priority {item.priority}</span>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
+        <div className="item-meta"><span className="mono">{item.key}</span>{group && <StatusBadge group={group}/>}{item.owner && <span>Owner · {item.owner}</span>}<span>{item.type.replace(/^./, c => c.toUpperCase())} · priority {item.priority}</span>{timedGroups.has(group ?? 'shipped') && <StatusAge held={held}/>}</div>
         <h1 data-title data-plain-summary={plainSentence ? 'true' : 'false'}>{plainLead}</h1>
         {plainSentence && plainSentence !== item.title && <p className="item-title-full muted">{item.title}</p>}
       </div>
