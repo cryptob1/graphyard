@@ -34,11 +34,12 @@ test('unit:reviewer-static-criteria — generated GitHub, control-plane and post
   ];
   for (const prompt of prompts) {
     for (const criterion of criteria) assert.ok(prompt.includes(`[${criterion.id}] ${criterion.text}`));
-    assert.match(prompt, /state that judgement for every criterion/);
-    assert.match(prompt, /Assess the code and test coverage without running builds, tests, or servers/);
-    assert.match(prompt, /exact-head test and E2E execution belongs to the automated merge trial gate/);
-    assert.match(prompt, /Post APPROVE or REQUEST_CHANGES on that assessment/);
-    assert.match(prompt, /absence of a reviewer-run test is not a blocker and requires no human step/);
+    assert.match(prompt, /state each judgement in the review body/);
+    assert.match(prompt, /Do not run builds, tests or servers/);
+    assert.match(prompt, /Post APPROVE or REQUEST_CHANGES before the automated merge trial/);
+    assert.match(prompt, /from code and test coverage, including bound E2E cases/);
+    assert.match(prompt, /missing later trusted results do not block review/);
+    assert.match(prompt, /no human step/);
     assert.match(prompt, /do not run the project's build, tests, or servers/);
     assert.match(prompt, /AC-2, AC-3 check one case/);
     assert.match(prompt, /inspect the implementation and test coverage for other seeds or inputs/);

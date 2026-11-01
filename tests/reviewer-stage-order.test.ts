@@ -21,12 +21,12 @@ test('integration:reviewer-stage-order — GY-3044 briefs allow approval before 
   ];
   for (const prompt of prompts) {
     for (const criterion of criteria) assert.ok(prompt.includes(`[${criterion.id}] ${criterion.text}`));
-    assert.match(prompt, /Pre-merge review judges the implementation and the adequacy of the bound E2E cases before that trial runs/);
-    assert.match(prompt, /missing trusted results from the later trial are not a blocking review finding/);
-    assert.match(prompt, /Missing or inadequate test implementation or coverage can still be BLOCKING/);
-    assert.match(prompt, /merge writer must run and pass every required exact-head E2E proof before updating main/);
-    assert.match(prompt, /never waive an acceptance gate or ask an implementation worker to submit trusted evidence/);
-    assert.match(prompt, /Post APPROVE or REQUEST_CHANGES on that assessment/);
+    assert.match(prompt, /from code and test coverage, including bound E2E cases/);
+    assert.match(prompt, /missing later trusted results do not block review/);
+    assert.match(prompt, /missing or inadequate test implementation can/);
+    assert.match(prompt, /merge writer must pass every required exact-head test\/E2E proof before updating main/);
+    assert.match(prompt, /Never waive gates or ask workers for trusted evidence/);
+    assert.match(prompt, /Post APPROVE or REQUEST_CHANGES before the automated merge trial/);
     assert.doesNotMatch(prompt, /checks one case|check one case/);
   }
 });
