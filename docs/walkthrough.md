@@ -30,3 +30,5 @@ ffmpeg -v error -i docs/diagrams/how-graphyard-works.gif -f null -
 `integration:documentation-validation` invokes the docs checker, renders sample frames with the actual renderer, and exercises chapter navigation, scrubbing and playback. It needs Chromium; media decoding stays outside the test suite. Also inspect decoded frames at 0, 15, 28, 55, 75, 90, 103 and 116 seconds for clipping, legibility and correct role labels. Open the HTML to check the static explanation and controls. README links to the committed GIF and MP4.
 
 SVG diagrams use a different generator: edit `scripts/render-docs-diagrams.mjs` and run `node scripts/render-docs-diagrams.mjs`.
+
+The [rewrite review](../scripts/walkthrough/rewrite-review.md) records the reviewed files, word counts and validation results.

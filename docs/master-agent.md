@@ -25,7 +25,7 @@ Optional item `owner` names a human, separate from the worker lease. Set with cr
 
 The systemd watchdog receives a ping after each completed cycle (`src/supervisor.ts`). It restarts a hung loop; it does not prove commits are merging, diagnose failed tests or decide repairs.
 
-At this worktree's base, the loop adopts or launches a master and replaces exited or provider-limited panes. It does not prompt an existing master about delivery failures. GY-3047's submitted candidate `ca55ddb7c2a7` adds prompts for changed blockers, failed operations, review/proof launches, shared-base failures and deployment failures, plus a bounded heartbeat while open work remains. That candidate is pending work, not evidence that a deployed install has it. Check the serving and loaded commits before relying on those wakes.
+At source snapshot `1eb4f41b9a91`, the loop adopts or launches a master and replaces exited or provider-limited panes. It does not prompt an existing master about delivery failures. GY-3047's submitted candidate `ca55ddb7c2a7` adds prompts for changed blockers, failed operations, review/proof launches, shared-base failures and deployment failures, plus a bounded heartbeat while open work remains. That candidate is pending work, not evidence that a deployed install has it. Check the serving and loaded commits before relying on those wakes.
 
 Completed cycles and a pane marked `working` alone establish no delivery progress. Diagnose failures with all gates intact.
 

@@ -72,4 +72,10 @@ Legacy `/api/validation/import` requires external-runs:import, is idempotent by 
 
 ## Evidence reuse and replay
 
-A reuse policy allows compatible settled passes on identical pins. `validation reuse decision.json` names workId, expectedWorkRevision, proof, policy `{id,revision}` and buildAttestationId. `validation replay REQUEST ATTEMPT` preserves evaluator/time/outcome and grants no authority; evaluator-error reruns at most twice, fail never does. `validation analytics` reports outcomes, faults and cost.
+A reuse policy allows the newest compatible settled pass on identical pins:
+
+```json
+{"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,"freshnessSeconds":86400,"artifacts":"identical","relevant":{"dependencies":["package.json","**/package.json"],"lockfiles":["package-lock.json"],"buildInputs":["Dockerfile","tsconfig.json"],"configuration":["config/**"],"migrations":["migrations/**"],"services":{"api":["src/**"]}},"ignorable":["docs/**"]}
+```
+
+Relevant services must cover every service; changed relevant or unknown paths refuse. `validation reuse decision.json` names workId, expectedWorkRevision, proof, policy `{id,revision}` and buildAttestationId. `validation replay REQUEST ATTEMPT` preserves evaluator/time/outcome and grants no authority; evaluator-error reruns at most twice, fail never does. `validation analytics` reports outcomes, faults and cost.

@@ -24,7 +24,7 @@ A fresh-context reviewer restates each feature's result, proofs and gaps before 
 
 ## From intent to work items
 
-The master files with `master create`; the loop releases eligible backlog by priority and capacity. `master release` pulls out of order. Park held work; items dispatch whole.
+The master files with `master create`; the loop releases eligible backlog by priority and capacity. `master release` pulls out of order. Keep held work blocked; items dispatch whole.
 
 For example, a check fails on both main and a change. The writer holds it as a base failure. The master diagnoses the check and advances repair work; a worker fixes it, then trials resume with gates intact. See [current versus pending wake support](master-agent.md#master-wake-and-delivery-progress).
 
