@@ -73,6 +73,12 @@ test('unit:production-watch-build-serving — the watch observes the serving com
         assert.notEqual(status.productionEnvironment, 'legacy-production');
       };
       await readStatus();
+      const removedRoute = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/production-environment`, {
+        method: 'POST', headers: { Authorization: `Bearer ${credential.token}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ environment: 'legacy-production' }),
+      });
+      assert.equal(removedRoute.status, 404, 'the retired environment publication route is not served');
+      assert.equal((await store.pool.query("SELECT count(*)::int AS count FROM events WHERE kind='production.environment'")).rows[0].count, 0, 'the retired route writes no environment ledger value');
       // An old installation may retain the ledger value the deleted route once wrote.
       // Status must work both without that record and with a conflicting historical value.
       await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'production.environment', JSON.stringify({ environment: 'legacy-production' })]);
