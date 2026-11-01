@@ -31,15 +31,13 @@ Launches take the first account under `run.quotaCeilingPercent`, else fail over;
 
 ### A pane stopped on its provider's limit is absent (GY-2949)
 
-Each cycle reads the master pane's recent output with the same limit-notice judge workers use. A usage or session limit notice (`You've hit your session limit · resets 1:30am`) is treated as absent: the account is held until the parsed reset (the hold rides every selection, so the spent plan is not asked again), the pane closes, and the role's next account launches the master in the same cycle. A pane whose runtime reports exited is closed and relaunched the same way, with no hold. `master status` shows the session's state on its one page: `working`, `idle` (Herdr reports the pane idle), `limited until T` while the hold stands, and `absent` once the pane is closed with no hold standing.
+Each cycle reads the master pane's recent output with the same limit-notice judge workers use. A usage or session limit notice (`You've hit your session limit · resets 1:30am`) is treated as absent: the account is held until the parsed reset (the hold rides every selection, so the spent plan is not asked again), the pane closes, and the role's next account launches the master in the same cycle. Exited panes relaunch without a hold. `master status` shows the session's state on its one page: `working`, `idle` (Herdr reports the pane idle), `limited until T` while the hold stands, and `absent` once the pane is closed with no hold standing.
 
 ### A closed Herdr workspace is replaced
 
-Each cycle checks `herdrWorkspace` against `herdr workspace list`, as does the next reload after any launch refused with `workspace_not_found`. A workspace Herdr no longer lists is replaced in `.graphyard/master.json` by the one `masterAgentName` runs in (else the first listed), recorded as a `config` action with its reason, and items blocked on dispatches into the closed workspace are unblocked.
+Each cycle checks `herdrWorkspace` against `herdr workspace list`, as does the next reload after any launch refused with `workspace_not_found`. A missing workspace is replaced in `.graphyard/master.json` by `masterAgentName`’s workspace (else the first listed), recorded as a `config` action; blocked dispatches unblock.
 
 ### The request is the session's first message
-
-Never pasted.
 
 #### How the request reaches the runtime
 
@@ -76,14 +74,11 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted
 
 **The attempt bound is a progress bound** (GY-2961): an attempt whose worktree shows a new commit or changed files within the last 20 minutes, and whose lease renews, runs past the bound and is stopped only at the **ceiling** (default 8h); one with neither is stopped at the **bound** (default 130min since the claim). Each cycle the loop reads the attempt's worktree and records what changed on the session handle, so the control plane's renewal refusal counts the same progress. The stop keeps the attempt's uncommitted work as one WIP commit on its branch — a successor receives the diff — and releases the lease. The launch brief names the end instant, the rule and the ceiling (`run.attemptBoundMinutes` / `run.attemptCeilingMinutes` set both per install), and `master status` shows each live attempt's remaining time. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown; from 130min renewal refused as the backstop when no progress of either kind is on the record. Open scope asks exempt.
 
-### The launch reads short; the procedure loads on demand (GY-2972)
+### One continuing master conversation
 
-A launched session's standing text is the short AGENTS.md block plus its role brief; each names the `guide TOPIC` topics its role needs instead of restating their procedure, and `node $GRAPHYARD_CLI guide TOPIC` (topics: claim, sync, complete, park, blocked, review, proof, master) prints it. The topics moved the older, longer text verbatim, so no rule changed. Word counts before (the item's base commit) and after, rendered with the fixed inputs tests/agents-guide.test.ts pins:
+Claude and Codex masters resume their current native conversation on the same account/runtime. Another account/runtime starts a successor: its request names the predecessor's runtime, account, native id, full read-only transcript and last unanswered person input (explicitly `none` when answered). A successful successor supersedes its predecessor: A→B→A continues B, never stale A. Failed launches retain the current conversation for retry; failed native resumes never fall back fresh. Unsupported master runtimes refuse explicitly.
 
-| Text | Before | After |
-| --- | --- | --- |
-| AGENTS.md block | 678 | 101 |
-| Worker brief | 662 | 453 |
-| Reviewer brief | 795 | 553 |
-| Producer brief | 732 | 501 |
-| Master brief | 356 | 246 |
+`master.continuity` persists current/predecessor identities independently of registry allocations. `.graphyard/master-records/` holds full native transcripts, mounted read-only without granting another account home or credentials. `.graphyard/launch/LAUNCH.inputs.jsonl` records launch/wake/retry origins before submission, joined to native input events by unique markers. Tools and partial output never answer a person; a completed assistant final after the input batch does. Pre-upgrade/adopted sessions recover native records from their recorded account and import known delivery origins; failed recovery retains state.
+
+`master-session-resumes` and `master-continues-after-failover` run credential-free runtime fixtures under bubblewrap, inspecting reopened records and confined transcript reads.
+
