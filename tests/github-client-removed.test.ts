@@ -262,7 +262,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   for (const text of [...actions, summary]) assert.doesNotMatch(text, /Main guard|main guard|GitHub (request )?budget|githubBudget/, `no Main guard or GitHub budget line: ${text.slice(0, 300)}`);
   const status = await request(coordinator, 'status');
   assert.equal(status.status, 200);
-  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
+  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions', 'reviewerApps']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
   assert.equal(status.body.mergeWriter.merger, 'control-plane', 'and reports the merge writer');
   for (const path of ['src/cli/master-status.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
 });

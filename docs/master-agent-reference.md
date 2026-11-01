@@ -9,6 +9,8 @@ Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choi
 
 `graphyard master promote --admin-token-stdin` provisions the master's operator-agent identity.
 
+Reviewers launch with `master reviewer add FILE` profiles and post verdicts through the control plane with a token bound to that launch and candidate. No reviewer GitHub App, installation binding or App credential is needed; `master reviewer setup` and `bind` are removed. Older master configs with `githubAppId` and `mergeMethod` still load.
+
 ## Typed actions
 
 `nextAction`: `dispatch`/`request-review`/`request-rework`/`resync`/`reclaim`/`merge`; a gate refusal is its reason string.

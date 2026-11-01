@@ -48,7 +48,7 @@ export async function detectRuntimes(transport: Transport, home = homedir(), tab
 }
 
 export interface WorkerProfileDraft { name: string; principal: string; agentName: string; mode: 'launch'; kind: string; credentialFile: string; agentArgs: string[]; environment: Record<string, string> }
-export interface ReviewerProfileDraft { name: string; runtime: string; reviewerApp: string; timeoutSeconds: number }
+export interface ReviewerProfileDraft { name: string; runtime: string; timeoutSeconds: number }
 
 /** One worker principal to one runtime, round-robin, so no two sessions share a credential. */
 export function workerProfiles(installId: string, principals: string[], runtimes: DetectedRuntime[], tokenFileFor: (principal: string) => string): WorkerProfileDraft[] {
