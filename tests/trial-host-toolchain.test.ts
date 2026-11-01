@@ -16,7 +16,7 @@ async function fixture(build = "console.log('build passed')") {
   writeFileSync(join(root, 'build.cjs'), build);
   const git = (...args: string[]) => execFileSync('git', ['-C', root, ...args], { env: { ...process.env, ...identity }, encoding: 'utf8' }).trim();
   git('init', '-q', '-b', 'main'); git('add', '.'); git('commit', '-qm', 'fixture');
-  return { root, base: await temporaryDirectory('toolchain-trials'), mergeSha: git('rev-parse', 'HEAD'), changedFiles: ['build.cjs'], timeoutMs: 30_000, checkoutRoots: [], environment: { PATH: process.env.PATH!, HOME: process.env.HOME! } };
+  return { root, base: await temporaryDirectory('toolchain-trials'), mergeSha: git('rev-parse', 'HEAD'), changedFiles: ['build.cjs'], timeoutMs: 30_000, temporaryRoots: [], checkoutRoots: [], environment: { PATH: process.env.PATH!, HOME: process.env.HOME! } };
 }
 
 test('unit:trial-finds-host-toolchain — mise directories follow host HOME/XDG defaults and explicit MISE values win', () => {
