@@ -31,11 +31,13 @@ Checked live source for dispatch, trial acceptance, supervision and serving: mas
 
 Validation:
 
-- npm run build passed.
-- npm run docs:check passed after regeneration.
-- Six related regression files ran 40 cases: 39 passed. The existing unit:executor-trial-runs-criterion-tests case failed outside changed files because this sandbox cannot create `/home/vish/.gy/tmp/gy-*` (EROFS). Retrying the merge-executor file with TMPDIR=/var/tmp hit the same fixed fallback. This is separate from the passing documentation proof.
-- graphyard verify GY-3048 passed integration:documentation-validation; the check fails against base. It exercises the actual renderer and browser controls, populated opening and constant frame dimensions.
-- MP4: H.264, 1200×838, 120.1 seconds. GIF: 800×559, 416 encoded frames, 120.1 seconds. ffprobe inspected both; ffmpeg decoded both fully without errors.
-- Visually inspected MP4 frames at 0, 15, 28, 55, 75, 90, 103 and 116 seconds, plus decoded GIF opening and later failure scene. Captions fit, roles remain distinct and the first frame is populated. Local fonts remove rendering's network dependency.
+- Epoch 3: npm run build passed.
+- Epoch 3: npm run docs:check passed after regeneration.
+- Previous attempt only: six related regression files ran 40 cases: 39 passed. The existing unit:executor-trial-runs-criterion-tests case failed outside changed files because this sandbox cannot create `/home/vish/.gy/tmp/gy-*` (EROFS). Retrying the merge-executor file with TMPDIR=/var/tmp hit the same fixed fallback. This is separate from the passing documentation proof.
+- Epoch 3: graphyard verify GY-3048 passed integration:documentation-validation; the check fails against base. It exercises the actual renderer and browser controls, populated opening and constant frame dimensions.
+- Epoch 3 regenerated both assets from 1201 frames at 10 fps. MP4: H.264, 1200×838, 120.1 seconds. GIF: 800×559, 416 encoded frames, 120.1 seconds. ffprobe inspected both; ffmpeg decoded both fully without errors.
+- Epoch 3 visually inspected MP4 frames at 0, 15, 28, 55, 75, 90, 103 and 116 seconds, plus decoded GIF opening and later failure scene. Captions fit, roles remain distinct and the first frame is populated. Local fonts remove rendering's network dependency.
 
 Reproduce with [the rendering guide](../../docs/walkthrough.md).
+
+Self-review: AC-1 met (roles, autonomy, concrete failure and shipped wake behavior); AC-2 met (storyboard, regenerated media, decode and visual inspection); AC-3 met (all handwritten guides reviewed, concise rewrite, counts and working generated indexes/links). No blocking finding remains.
