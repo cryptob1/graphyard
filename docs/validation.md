@@ -53,6 +53,8 @@ Container writes; attestor, collector read; never add the runner account. Collec
 
 **Required `uat` cases run on every deploy** (`GRAPHYARD_UAT_URL`, `GRAPHYARD_SUITE_DETAIL`; static sites loop back `GRAPHYARD_UAT_STATIC`); `e2e record REPORT` records attempts ([`e2e:record` agent](delivery.md#e2e-record-credential)).
 
+Graphyard's trial server (`scripts/e2e-serve.mjs`) manages `cryptob1/graphyard`, so its fresh database lists the shipped scenarios, including the required capacity-limit-redispatch case. That case runs the capacity hold and silent-exhaustion tests through the port-reserving test runner.
+
 ## Release verdicts
 
 One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun**; **blocked**; **pending** (blocks only if a delivered outcome shares it or `e2e.pendingOutcomes: blocking`). Only failed or unaccepted flaky required cases block. `POST /api/validation/import` (`external-runs:import` producers) records an external run, idempotent per `producer`+`runId`, only at a commit the retired release cut tagged `rc/`; it gates nothing.

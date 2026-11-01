@@ -7,11 +7,12 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 - `tests/master.test.ts`, `tests/master-daemon.test.ts`, `tests/managed-worktree-root.test.ts`.
 - `tests/rework-review-findings.test.ts`: a control-plane CHANGES_REQUESTED rework reason carries BLOCKING findings (else the body) into `lastRework` and the worker brief.
 - `tests/five-step-cycle.test.ts`: the cycle is snapshot, close, dispatch, merge writer, persist.
+- `tests/trial-merge.test.ts`: a failed trial grounds candidate rework through the merge writer, with no base-break refresh wait.
 - `tests/deploy-unit.test.ts`: graphyard-deploy.service (`upgrade --watch`) and the loop's restart onto the tip it serves.
 
 ## Drive
 
-`node bin/graphyard.mjs master status` reads the loop's view; launches are exercised in tests with injected preparers, probes and Herdr runners, never real panes. Restart a running loop with `master restart`: with this install's unit (rooted here, its effective ExecStart running `master run`) up, stopping or restart-queued it restarts through `systemctl --user restart` of that unit, never a second, unsupervised loop.
+`node bin/graphyard.mjs master status` reads the loop's view; tests inject preparers, probes and Herdr runners, never real panes. `master restart` uses `systemctl --user restart` for this install's unit (rooted here, ExecStart running `master run`) when up, stopping or restart-queued; it never starts a second, unsupervised loop.
 
 ## Invariants
 

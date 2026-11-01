@@ -295,17 +295,6 @@ export const masterRunSchema = z.object({
   launchConcurrency: z.number().int().min(1).max(20).optional(),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
-  /**
-   * Automatic bot reviewers whose review of a head the reviewer launch waits for, so their inline
-   * findings are open threads the reviewer judges in the same round rather than arriving after its
-   * approval and costing a rework round each (GY-163). A bot with nothing to say posts no review,
-   * so `awaitReviewersMinutes` bounds the wait from the review request; 0 turns it off.
-   * Unset: the Codex connector, for 8 minutes (`defaultAwaitReviewers`). The duration is the
-   * master's to tune (`master config awaitReviewersMinutes=0`, an empty value restores the
-   * default). The login list stays the operator's, edited in .graphyard/master.json.
-   */
-  awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
-  awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
   // How long a candidate's push-triggered acceptance run has before the loop dispatches the proof
   // workflow as a fallback, so a busy CI queue does not get a duplicate run per head; unset, 0.
   proofDispatchGraceMinutes: z.number().int().min(0).max(1440).optional(),
@@ -506,13 +495,6 @@ export function assertMasterBinding(config: MasterConfig, status: any) {
 
 /** The coordinator checkout the CLI launcher at `cliPath` runs from: `<root>/bin/graphyard.mjs`. */
 export const coordinatorCheckoutRoot = (cliPath: string) => dirname(dirname(cliPath));
-/**
- * GY-2179: the checkout's own launcher for a launcher in a held snapshot under
- * `<root>/.graphyard/held-cli/<sha>/` — `<root>/bin/graphyard.mjs` — and any other launcher as given.
- * While the pin stands the checkout's launcher loads the snapshot's modules, so a setup run then
- * would otherwise record a snapshot the next pin change removes.
- */
-export const checkoutLauncherOf = (cliPath: string) => cliPath.replace(/\/\.graphyard\/held-cli\/[^/]+\/(bin\/graphyard\.mjs)$/, '/$1');
 /** The checkout areas whose files the loop and the executors load; untracked files under them are uncommitted source, not scratch. */
 export const coordinatorSourcePrefixes = ['src/', 'scripts/', 'bin/', 'tests/', 'docs/'];
 export const coordinatorSourceFiles = ['package.json', 'package-lock.json', 'tsconfig.json'];

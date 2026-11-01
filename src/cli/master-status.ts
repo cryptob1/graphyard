@@ -10,6 +10,7 @@ import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage } from '../model/plain-stage.js';
 import { specCheckCurrent } from '../model/spec-check.js';
+import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
@@ -63,6 +64,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const trialTests = trialTestGateStatus(root);
   const recorded = state?.controlPlane ?? null;
   const open = snapshot.work.filter(item => item.stage !== 'done');
+  const stalled = stalledDelivery(open);
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
   return {
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
@@ -70,6 +72,8 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
     masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent),
+    delivery: stalled.length ? { state: 'stalled', reason: stalled.map(cause => cause.detail).join('\n'), nextAction: stalledDeliveryAction }
+      : { state: state?.mergeWriter.inFlight ? 'validating' : 'no shared base failure', reason: null, nextAction: null },
     items: open.map((item, index) => itemLine(item, now, launched[index])),
     ...(personalScopes > 0 ? { personalScopes: `${personalScopes} items in personal scopes` } : {}),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals, serveRevert }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null,

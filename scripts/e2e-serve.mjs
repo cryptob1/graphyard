@@ -38,6 +38,7 @@ try {
   await writeFile(paths.portFile, String(await freePort()));
   await writeFile(paths.environment, JSON.stringify({
     PORT: String(e2eServePort), HOST: '127.0.0.1',
+    GITHUB_REPOSITORY: 'cryptob1/graphyard',
     GRAPHYARD_REPOSITORY_ROOT: delivery.root,
     GRAPHYARD_PRINCIPALS: JSON.stringify([
       { id: 'e2e-operator', role: 'admin', sessionKind: 'human', token },

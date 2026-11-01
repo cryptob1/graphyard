@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { daemonEffects } from '../src/daemon/effects.js';
-import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { attributeFailures, baseFailureReason, baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstFailingAssertion, crashedProcessLine, firstParentHolds, mergeOne, mergeQueue, nextToMerge, parseBaseFailureReason, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, replayUnconfirmed, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { attributeFailures, baseFailureReason, baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstFailingAssertion, crashedProcessLine, firstParentHolds, mergeOne, mergeQueue, nextToMerge, parseBaseFailureReason, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, supersededIntentReason, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { defaultDeployKeyFile, defaultMergeWriterRetrials, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { deliveredReason, otherHeadRefusal, unheldShaRefusal, unintendedShaRefusal } from '../src/server/merge-record.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
@@ -518,7 +518,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-executor-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_executor_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository); engine.submissionObserver = null
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -651,6 +651,107 @@ test('integration:executor-reconcile-after-crash — killed between the push and
   assert.equal(nextToMerge([w4doc], snapshotLedger([w4doc]), start)?.key, w4.key, 're-queued');
   assert.equal(trialFailedGround(w4doc), null, 'and not reworked');
   assert.deepEqual(w4doc.gates.find(gate => gate.name === 'test')!.reasons, [trialRefusal(heads[4]!, third.delivery!.mergeSha)], 'the refusal reopens the test gate');
+});
+
+test('unit:superseded-intent-settles — an item resubmitted with a new head while its intent on the old head is open settles through the real merge-record route: the next cycle records the old intent refused, the queue unblocks, another head merges, and the new head is trialled; a superseded intent the base holds settles refused without delivering; a 409 is adopted at once, not replayed', async () => {
+  // Fresh branches (8, 9, 10): the fixture's own 1-7 are reserved by the earlier tests.
+  const branchHead = async (n: number, file: string) => {
+    const worktree = join(checkout, '.graphyard', 'worktrees', `GY-${n}-1`);
+    git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${n}-1`, worktree, baseTip);
+    git(worktree, 'config', 'user.email', 't@example.com'); git(worktree, 'config', 'user.name', 'T');
+    return commit(worktree, file, `export const value${n} = ${n};\n`, `change ${n}`);
+  };
+  /** A submission on a fresh branch, mirroring submittedItem. */
+  const submitBranchHead = async (n: number, head: string) => {
+    let item = await engine.execute(admin, 'create', null, { type: 'chore', title: `Superseded fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
+    item = await engine.execute(admin, 'ready', item.id, {}, randomUUID());
+    const pulled = await engine.pullAssignment(worker, { work: item.id }, randomUUID());
+    assert.ok(pulled.assigned, JSON.stringify(pulled.refused)); item = pulled.assigned!;
+    await engine.execute(worker, 'workspace', item.id, { epoch: 1, host: 'test', path: `/tmp/exec-${n}`, branch: `graphyard/gy-${n}-1` }, randomUUID());
+    return engine.execute(worker, 'submit', item.id, { epoch: 1, head }, randomUUID());
+  };
+  /** A genuine resubmission: rework, a new claim, a fresh commit on the branch, submit. */
+  const resubmit = async (item: Work, n: number) => {
+    await engine.execute(admin, 'rework', item.id, { reason: `${item.key} tries a new head`, previousWorkerStopped: true }, randomUUID());
+    const pulled = await engine.pullAssignment(worker, { work: item.id }, randomUUID());
+    assert.ok(pulled.assigned, `rework of ${item.key} is claimable again: ${JSON.stringify(pulled.refused)}`);
+    const epoch = pulled.assigned!.lease!.epoch;
+    await engine.execute(worker, 'workspace', item.id, { epoch, host: 'test', path: `/tmp/exec-resub-${n}`, branch: `graphyard/gy-${n}-1` }, randomUUID());
+    const head = await commit(join(checkout, '.graphyard', 'worktrees', `GY-${n}-1`), `src/resub-${n}.ts`, `export const resub${n} = ${epoch};\n`, `resubmission of GY-${n}`);
+    return engine.execute(worker, 'submit', item.id, { epoch, head }, randomUUID());
+  };
+  // The other item is filed first, so it leads the queue once the block lifts.
+  const head8 = await branchHead(8, 'src/eight.ts');
+  const other = await submitBranchHead(8, head8);
+  const head9 = await branchHead(9, 'src/nine.ts');
+  const w = await submitBranchHead(9, head9);
+  const { reads, trials } = fixtureReads();
+  // AC-1: an open intent on the old head while the item already has a new one.
+  const tipA = await reads.fetch();
+  const mergedA = await reads.merge(head9, tipA);
+  assert.ok('mergeSha' in mergedA);
+  const mergeA = (mergedA as { mergeSha: string }).mergeSha;
+  await record(w, { kind: 'intent', head: head9, baseTip: tipA, mergeSha: mergeA, risk: 'normal', at: iso(start) });
+  const resubmitted = await resubmit(w, 9);
+  const newHead = resubmitted.candidate!.sha;
+  assert.notEqual(newHead, head9);
+  let docA = await document(w.id);
+  assert.equal(docA.mergeLedger?.state, 'intent', 'the old intent is still open');
+  assert.deepEqual(mergeQueue([docA, await document(other.id)], snapshotLedger([docA, await document(other.id)]), start).blockedBy, docA.key, 'the open intent blocks the queue');
+  // The next cycle records the old intent refused through the real route.
+  const settled = await reconcileIntents(reads, [docA, await document(other.id)], snapshotLedger([docA, await document(other.id)]));
+  assert.deepEqual(settled, [{ key: w.key, mergeSha: mergeA, outcome: 'requeued' }]);
+  docA = await document(w.id);
+  assert.deepEqual([docA.mergeLedger?.state, docA.mergeLedger?.head], ['refused', head9]);
+  assert.equal(docA.mergeLedger?.refusal?.reason, supersededIntentReason(w.key, head9, newHead));
+  assert.equal(docA.stage === 'done', false, 'refusing the old head delivers nothing');
+  // The queue is no longer blocked: the older head merges, then the new head is trialled.
+  const after = mergeQueue([docA, await document(other.id)], snapshotLedger([docA, await document(other.id)]), start);
+  assert.deepEqual([after.blockedBy, after.next?.key], [null, other.key]);
+  const mergedOther = await mergeOne(reads, await document(other.id));
+  assert.equal(mergedOther.outcome, 'merged', "another item's head merges once the block lifts");
+  const mergedNew = await mergeOne(reads, await document(w.id));
+  assert.equal(mergedNew.outcome, 'merged');
+  assert.ok(trials.some(input => input.mergeSha === (mergedNew as { mergeSha: string }).mergeSha && input.mergeSha !== mergeA), 'the new head was trialled on its own merge commit');
+  const doneA = await document(w.id);
+  assert.deepEqual([doneA.stage, doneA.delivery?.mergeSha], ['done', (mergedNew as { mergeSha: string }).mergeSha]);
+  // AC-2: a superseded intent whose merge commit the base holds settles refused, never delivered.
+  const head10 = await branchHead(10, 'src/ten.ts');
+  const wC = await submitBranchHead(10, head10);
+  const tipC = await reads.fetch();
+  const mergedC = await reads.merge(head10, tipC);
+  assert.ok('mergeSha' in mergedC);
+  const mergeC = (mergedC as { mergeSha: string }).mergeSha;
+  await record(wC, { kind: 'intent', head: head10, baseTip: tipC, mergeSha: mergeC, risk: 'normal', at: iso(start) });
+  assert.equal(await reads.push(mergeC, tipC), 'pushed');
+  await record(wC, { kind: 'pushed', mergeSha: mergeC, pushedAt: iso(start) });
+  const resubmittedC = await resubmit(wC, 10);
+  assert.ok(firstParents().includes(mergeC), 'the base holds the superseded merge commit');
+  const settledC = await reconcileIntents(reads, [await document(wC.id)], snapshotLedger([await document(wC.id)]));
+  assert.deepEqual(settledC, [{ key: wC.key, mergeSha: mergeC, outcome: 'requeued' }]);
+  const docC = await document(wC.id);
+  assert.deepEqual([docC.mergeLedger?.state, docC.delivery ?? null], ['refused', null], 'settled without marking the newer head delivered');
+  assert.notEqual(docC.stage, 'done');
+  assert.equal(docC.mergeLedger?.refusal?.reason, supersededIntentReason(wC.key, head10, resubmittedC.candidate!.sha));
+  assert.equal(mergeQueue([docC], snapshotLedger([docC]), start).blockedBy, null, 'the queue is unblocked');
+  // A 409 on a merge record is adopted at once, not replayed: the loop's mutation path reports it
+  // as a bare Error with only confirmedRefusal, no numeric status (cli/master/session.ts).
+  const state = emptyDaemonState(config);
+  state.mergeWriter.unconfirmed = [{ key: docC.key, id: wC.id, attempt: 'a9', write: 0,
+    event: { kind: 'refused', head: head10, reason: 'a stale write of the superseded head' }, sentAt: iso(start), replays: 0, lastError: 'socket hang up' }];
+  let sends = 0;
+  const productionShapedRecord: MergePorts['record'] = async (item, event) => {
+    sends++;
+    const answer = await request(token(coordinator), `work/${item.id}/merge-record`, event, mergeRecordKey(item, event));
+    if (answer.status !== 200) throw Object.assign(new Error(JSON.stringify(answer.body)), { confirmedRefusal: true });
+    return answer.body;
+  };
+  const performed: { detail: string }[] = [];
+  const replayed = await replayUnconfirmed({ state, now: () => start, snapshot: { work: [await document(wC.id)] }, performed } as unknown as Parameters<typeof replayUnconfirmed>[0], productionShapedRecord);
+  assert.equal(replayed, true);
+  assert.equal(sends, 1, 'the refused write is sent once, never replayed');
+  assert.equal(state.mergeWriter.unconfirmed, undefined, 'a 409 answer leaves nothing owed');
+  assert.ok(performed.some(action => /was refused/.test(action.detail) && /never sent again/.test(action.detail)), JSON.stringify(performed.map(action => action.detail)));
 });
 
 test('integration:merge-record-delivers-in-one-transaction — POST /api/work/:id/merge-record is the coordinator\'s alone; intent and pushed re-fold the ledger onto the item and move its gates, and reconciled sets stage done and the delivery, settles the delivered item, deletes its jobs row and saves as merge-writer.delivered, in one transaction, replaying under its key', async () => {
