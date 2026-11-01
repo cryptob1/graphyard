@@ -18,6 +18,10 @@ import ShippedPage from '../web/pages/shipped.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // `graphyard master close`: obsolete, duplicate and superseded items leave every open list and
 // every delivered count, in one audited transaction, against a real Postgres and the real routes.
 const repository = 'owner/close-work';
@@ -41,7 +45,7 @@ const ok = async (principal: Principal, path: string, body?: unknown) => {
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 const events = async (work: Work) => (await store.pool.query('SELECT actor, kind, payload FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows as { actor: string; kind: string; payload: any }[];
 async function released(title: string): Promise<Work> {
-  const work = await ok(operator, 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:close'] }] }) as Work;
+  const work = await ok(operator, 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:close', 'e2e:fixture'] }] }) as Work;
   return ok(operator, `work/${work.id}/ready`, {});
 }
 /** Write a field the control plane would have set, directly, as the fixture for what closing must clear. */

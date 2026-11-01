@@ -1,0 +1,15 @@
+{
+  "id": "complete-owned-recheck-scratch",
+  "title": "Complete rechecks use owned writable home and scratch",
+  "description": "Runs the actual CLI inside a read-only operator-home boundary: reproduces the former EROFS with the real runner's tmpfs relocation, submits a passing exact selection, refuses a genuine selected failure, and preserves runner-fault handling and owned-path cleanup.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "CLI completion with read-only operator HOME and genuine selected failure",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/complete-owned-recheck-scratch.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

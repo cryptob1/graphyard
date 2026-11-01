@@ -14,6 +14,10 @@ import { observationWorkers } from '../src/server/main.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-1675: an install with no GitHub App observes every open candidate from its own checkout, one
  * job per item every twenty seconds. Across many cycles, several items, a base tip that moves and
@@ -53,7 +57,7 @@ after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if 
 
 /** An item claimed by the worker on its own linked worktree, with one commit there. */
 async function claimed(n: number, file = `src/item-${n}.ts`) {
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Observed ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Observed ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));

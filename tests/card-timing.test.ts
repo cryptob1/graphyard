@@ -22,6 +22,10 @@ import WorkDetails from '../web/pages/work-details.js';
 import WorkCard from '../web/components/work-card.js';
 import { groupOf, timedGroups } from '../web/groups.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-108: every work card carries how long it has held its current status, always, and says so
 // in red past the one configured threshold. The renders here read the views the way a person
 // does — visible text, no interaction — and the engine case drives a real item through a retry
@@ -208,7 +212,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 test('integration:status-duration-tracks-real-progress — a retry loop, a heartbeat and an observation leave the clock running; only entering a new status restarts it', async () => {
   const id = () => randomUUID();
   let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Card timing', 
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] }, id());
   item = await engine.execute(operator, 'ready', item.id, {}, id());
 
   // Waiting for a worker. The observation time is the reader's, so the same recorded item is

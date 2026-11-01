@@ -1,11 +1,9 @@
 // Concern: GY-2989 — the product review a user-facing feature owes before its merge. Code review
 // checks that a change is correct; a product review judges in the whole app's context that it is a
 // good idea: a reviewer session walks the head's preview — or the served app against the head's
-// diff where no preview runs — and approves, requests changes, or rejects. Bugs, chores and "No
-// user-facing change" items owe none.
+// diff where no preview runs — and approves, requests changes, or rejects. Bugs and chores owe none.
 import { repositoryPolicy, type RepositoryPolicy } from './repository-policy.js';
 import type { Work } from './work.js';
-import { optsOutOfE2e } from './user-facing.js';
 
 export const productVerdicts = ['approved', 'changes-requested', 'rejected'] as const;
 export type ProductVerdict = typeof productVerdicts[number];
@@ -33,9 +31,9 @@ declare module './work.js' {
   }
 }
 
-/** Who owes one: a feature a user can see — it carries an `e2e:` proof and does not opt out. */
-export function needsProductReview(work: Pick<Work, 'type' | 'description' | 'criteria'>): boolean {
-  return work.type === 'feature' && work.criteria.some(criterion => criterion.proofs.some(proof => proof.startsWith('e2e:'))) && !optsOutOfE2e(work.description);
+/** Who owes one: a feature a user can see — it carries an `e2e:` proof, which every item must (GY-3037). */
+export function needsProductReview(work: Pick<Work, 'type' | 'criteria'>): boolean {
+  return work.type === 'feature' && work.criteria.some(criterion => criterion.proofs.some(proof => proof.startsWith('e2e:')));
 }
 
 const short = (sha: string) => sha.slice(0, 12);

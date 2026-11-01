@@ -16,6 +16,10 @@ import { parseLocalScopeDiff } from '../src/sync.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-128: the recovery the control plane authorizes for an ejected or contaminated tip — reset
 // the assigned branch to the reviewed head, sync it onto the base, push — must be executable by
 // the worker session it dispatches. Each test is named for the proof it produces.
@@ -115,8 +119,8 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
   commit(seed, 'README.md', 'base', 'Seed'); commit(seed, 'src-own.txt', 'own v0', 'Own file'); commit(seed, 'src-foreign.txt', 'foreign v0', 'Foreign file');
   git(seed, 'push', '-q', 'origin', 'main');
 
-  let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Contaminated rework', criteria: [{ id: 'AC-1', text: 'Own change', proofs: ['unit:own'] }] }, randomUUID());
-  const foreign: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Foreign unlanded', criteria: [{ id: 'AC-1', text: 'Foreign change', proofs: ['unit:foreign'] }] }, randomUUID());
+  let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Contaminated rework', criteria: [{ id: 'AC-1', text: 'Own change', proofs: ['unit:own', 'e2e:fixture'] }] }, randomUUID());
+  const foreign: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Foreign unlanded', criteria: [{ id: 'AC-1', text: 'Foreign change', proofs: ['unit:foreign', 'e2e:fixture'] }] }, randomUUID());
   const itemBranch = `graphyard/${work.key.toLowerCase()}-1`, pr = 4128;
   // The observer reads the real origin, as the provider would: the PR head, the base tip and the diff between them.
   const observeOrigin = async () => {
@@ -225,7 +229,7 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
 
 test('integration:unrunnable-remedy-reported — a blocker naming a command no launched session may run is reported in master status as a Graphyard defect', async () => {
   const blocked = async (title: string, reason: (branch: string) => string) => {
-    let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+    let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
     const itemBranch = `graphyard/${work.key.toLowerCase()}-${work.epoch}`;
