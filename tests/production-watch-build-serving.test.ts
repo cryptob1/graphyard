@@ -53,8 +53,6 @@ test('unit:production-watch-build-serving — the watch observes the serving com
     const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('production-watch-serving'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
     await database.initialise(); await database.start(); await database.createDatabase('production_watch_serving_test');
     const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/production_watch_serving_test`); await store.init();
-    // The ledger value a master published before the route was deleted: still on the record, never read.
-    await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'production.environment', JSON.stringify({ environment: 'legacy-production' })]);
     const { watch } = watchOf({ built: 1, deployments: [deployment('d-live', 'success', sha(4))] });
     await watch.tick(true);
     const admin: Principal = { id: 'serving-admin', role: 'admin', sessionKind: 'human' };
@@ -63,14 +61,22 @@ test('unit:production-watch-build-serving — the watch observes the serving com
     const http = server(engine, [credential], null, { production: watch });
     await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
     try {
-      const response = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/status`, { headers: { Authorization: `Bearer ${credential.token}` } });
-      assert.equal(response.status, 200);
-      const status = await response.json() as { production: { serving: string | null; servingSource: string | null; observedAt: string | null }; productionEnvironment: string };
-      assert.equal(status.production.serving, sha(4), 'the provider record of what production serves is observed in status');
-      assert.equal(status.production.servingSource, 'provider');
-      assert.ok(status.production.observedAt, 'the watch reports when it last looked');
-      assert.equal(status.productionEnvironment, 'production', 'status names the process configuration, not the ledger value');
-      assert.notEqual(status.productionEnvironment, 'legacy-production');
+      assert.equal((await store.pool.query("SELECT count(*)::int AS count FROM events WHERE kind='production.environment'")).rows[0].count, 0);
+      const readStatus = async () => {
+        const response = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/status`, { headers: { Authorization: `Bearer ${credential.token}` } });
+        assert.equal(response.status, 200);
+        const status = await response.json() as { production: { serving: string | null; servingSource: string | null; observedAt: string | null }; productionEnvironment: string };
+        assert.equal(status.production.serving, sha(4), 'the provider record of what production serves is observed in status');
+        assert.equal(status.production.servingSource, 'provider');
+        assert.ok(status.production.observedAt, 'the watch reports when it last looked');
+        assert.equal(status.productionEnvironment, 'production', 'status names the process configuration, not the ledger value');
+        assert.notEqual(status.productionEnvironment, 'legacy-production');
+      };
+      await readStatus();
+      // An old installation may retain the ledger value the deleted route once wrote.
+      // Status must work both without that record and with a conflicting historical value.
+      await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'production.environment', JSON.stringify({ environment: 'legacy-production' })]);
+      await readStatus();
     } finally {
       await new Promise<void>(resolve => http.close(() => resolve()));
       await store.close(); await database.stop();
