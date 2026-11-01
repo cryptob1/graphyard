@@ -24,8 +24,8 @@ const call = async (path, credential, body) => {
 
 let item = await call('work', token, {
   title: `Scratch delivery ${randomUUID()}`, type: 'chore',
-  description: 'No user-facing change: exercise delivery in the disposable local repository.',
-  criteria: [{ id: 'AC-1', text: 'The submitted change works', proofs: ['unit:scratch-delivery'] }],
+  description: 'Exercise delivery in the disposable local repository.',
+  criteria: [{ id: 'AC-1', text: 'The submitted change works and is served', proofs: ['unit:scratch-delivery', 'e2e:scratch-delivery'] }],
   policy: { checks: ['test'], review: true },
 });
 const work = `work/${item.id}`;
@@ -89,6 +89,7 @@ try {
   const trial = events.find(event => event.kind === 'trial');
   assert.equal(trial.build, 'pass');
   assert.deepEqual(trial.proofs['unit:scratch-delivery'], { executed: 1, failed: 0 });
+  assert.deepEqual(trial.proofs['e2e:scratch-delivery'], { executed: 1, failed: 0 });
   const tip = (await defaultChildRun('git', ['--git-dir', origin, 'rev-parse', 'refs/heads/main'])).trim();
   assert.equal(tip, merged.mergeSha, 'the bare origin holds the merge commit');
   assert.equal(await git('show', `${tip}:src/store/change.mjs`), change.trim());

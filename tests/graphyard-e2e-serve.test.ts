@@ -87,6 +87,7 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
       assert.equal(refused.mergeLedger.state, 'intent');
       assert.equal(refused.mergeLedger.trial.build, 'pass', 'the fault reaches the real push after a passing build');
       assert.deepEqual(refused.mergeLedger.trial.proofs['unit:scratch-delivery'], { executed: 1, failed: 0 });
+      assert.deepEqual(refused.mergeLedger.trial.proofs['e2e:scratch-delivery'], { executed: 1, failed: 0 }, 'the served scratch head passes its E2E check before the push fails');
     });
 
     process.kill(-child.pid!, 'SIGTERM');
