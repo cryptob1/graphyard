@@ -156,8 +156,8 @@ export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: r
   return null;
 }
 
-// A reviewer session holds no Graphyard identity: it reads a candidate and posts one GitHub
-// verdict with a short-lived reviewer-App token, so it needs no principal and no credential file.
+// A reviewer session reads a candidate and posts one control-plane verdict with a one-time
+// token, so it needs no principal credential file.
 export const reviewerProfileSchema = z.object({
   name: profileName,
   agentName: sessionNameField,

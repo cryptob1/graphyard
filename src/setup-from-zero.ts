@@ -22,7 +22,7 @@ import { readServeRecord, serveRecordPath } from './serve-app.js';
 export const setupSteps = {
   install: 'docs/setup-from-zero.md step 3 (install the control plane)',
   app: 'docs/setup-from-zero.md step 4 (register the GitHub App)',
-  reviewer: 'docs/setup-from-zero.md step 4 (reviewer and revert-approver Apps)',
+  reviewer: 'docs/setup-from-zero.md step 4 (control-plane reviews)',
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
   releaseFiling: 'issue GRAPHYARD_RELEASE_TOKEN to an operator agent holding no capability, scoped to this repository (graphyard operator-agent setup FILE --token-stdin)',

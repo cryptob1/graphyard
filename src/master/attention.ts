@@ -36,12 +36,9 @@ export interface AttentionItem extends AttentionOwner { subject: string; text: s
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string): AttentionOwner => ({ role, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', human: true, humanOnly, next });
 /** The sources of installation attention. */
-export const installationSources = ['app-permissions', 'held-jobs', 'delegation-limits', 'production'] as const;
+export const installationSources = ['held-jobs', 'delegation-limits', 'production'] as const;
 /** The owner of one installation attention line, by the source that raised it. */
 export function installationOwner(source: typeof installationSources[number], text: string, productionBranch: string | null = null): AttentionOwner {
-  // Reinstating a suspended App installation is an account decision on the operator's GitHub account.
-  if (source === 'app-permissions') return /suspended/i.test(text) ? humanOwner('spending money or opening third-party accounts', 'Reinstate the suspended GitHub App installation from the account that owns it')
-    : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
   if (source === 'held-jobs') return agentOwner('control plane', 'Nothing to run: held jobs resume once graphyard master browser installation-accept grants the permission');
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
   // Production may track a release branch of its own: the fix is the deployment of what production

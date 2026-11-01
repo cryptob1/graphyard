@@ -50,7 +50,7 @@ export async function fleet(reviewer: Record<string, unknown>, automatic: string
   const root = await temporaryDirectory('auto-review'), credentialDirectory = await temporaryDirectory('auto-review-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC', run: { worktreeRoot: await temporaryDirectory('review-checkouts', join(process.cwd(), '.graphyard')) } }, coordinatorStatus as typeof fetch);
   await saveReviewerProfile(root, reviewer);
   await saveReviewerProfile(root, { name: 'spare-reviewer', agentName: 'review-spare', kind: 'claude' });
   if (automatic) {

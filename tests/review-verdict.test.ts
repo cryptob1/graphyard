@@ -508,7 +508,7 @@ async function reviewerMaster(label: string) {
   try {
     execFileSync('git', ['init', '-q', root]);
     execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
-    await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'workspace-graphyard' });
+    await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'workspace-graphyard', run: { worktreeRoot: await temporaryDirectory('review-checkouts', join(process.cwd(), '.graphyard')) } });
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
     return { root, credentials };
   } catch (error) { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); throw error; }
