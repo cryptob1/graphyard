@@ -6,7 +6,7 @@ import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { launchAuthorization } from '../repository-setup.js';
-import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
+import { type HarnessPlan, type HarnessRule, repositoryClaudeConfig, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
 import { foreignUnitText, initialiseUnitsCommand, userUnitDirectory, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, perInstallUnits, proposedInstallUnits, readInstallUnits, recordInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
@@ -175,12 +175,14 @@ async function repositoryCarriesClaudeSettings(root: string) {
   for (const name of ['settings.json', 'settings.local.json']) {
     try { await lstat(resolve(root, '.claude', name)); return true; } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   }
-  return false;
+  // Folder trust checks ancestors too. An isolated HOME can put durable scratch below a
+  // different account's settings; exclude those project sources rather than trusting them.
+  return !!await repositoryClaudeConfig(root);
 }
 /**
  * Writes the role file and returns the runtime arguments that load it instead of the repository's
- * settings. A Claude session under a repository that carries no project settings inherits nothing
- * and is launched with its profile arguments unchanged. Loading only the user settings also leaves
+ * settings. A Claude session whose repository and ancestors carry no project settings inherits
+ * nothing and is launched with its profile arguments unchanged. Loading only the user settings also leaves
  * out the repository's AGENTS.md, so such a session carries the launch authorization written there
  * (repository-setup.ts launchAuthorization) as its role text, loaded from the session's role file.
  */
