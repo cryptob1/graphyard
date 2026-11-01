@@ -149,7 +149,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, 120, repository);
-  engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine.submissionObserver = null
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = controlPlane(engine, credentials, null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
