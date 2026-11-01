@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { chmodSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
+import { ChildProcessError, defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { runTrial, trialHomeVariables, trialHiddenPaths, trialAttempts, TrialRunnerError } from '../src/merge-writer/trial.js';
 import { mergeOne, trialFailureReason, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import type { Work } from '../src/model.js';
@@ -81,13 +81,24 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
   ]) {
     const events: MergeRecordEvent[] = [];
     const invocations: string[][] = [];
-    const run: ChildRun = (command, args, options) => {
+    const run: ChildRun = async (command, args, options) => {
       if (command === 'npm') {
         invocations.push(args);
         if (diagnostic.startsWith('bwrap:')) {
           // Spawn the real confinement wrapper successfully, then fail its toolchain exec.
           assert.ok(options?.wrapper?.length);
-          return defaultChildRun(command, args, { ...options, env: { ...options?.env, PATH: emptyPath } });
+          try {
+            await defaultChildRun(command, args, { ...options, env: { ...options?.env, PATH: emptyPath } });
+          } catch (error) {
+            assert.ok(error instanceof ChildProcessError);
+            assert.equal(error.cause, undefined, 'bubblewrap itself must have started');
+            assert.equal(error.signal, null);
+            assert.equal(error.timedOut, false);
+            assert.ok(error.status !== null && error.status > 0);
+            assert.equal(error.stderr.trim(), diagnostic);
+            throw error;
+          }
+          assert.fail('bubblewrap must fail to exec missing npm');
         }
         throw Object.assign(new Error('cannot start'), { status: diagnostic.includes('mise ERROR') ? 1 : 127, stderr: diagnostic });
       }
