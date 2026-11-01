@@ -367,8 +367,19 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   assert.deepEqual(readdirSync(shared).sort(), ['.git', 'node_modules'], 'the host\'s tmp is left as it was');
   assert.deepEqual(readdirSync(clean), [], 'and nothing of the trials is left in the clean root');
   if (usable) {
-    // A root that gains a package.json while the trial runs may have shadowed its lookups: no verdict, every directory removed.
-    const poisoning = await trial({ 'tests/a.test.ts': 'x\n', 'poison-root': '' }, ['tests/a.test.ts'], 'poisons its root', { retries: 0 });
+    // The candidate cannot poison its host parent: the OS refuses the write.
+    const denied = await trial({ 'tests/a.test.ts': 'x\n', 'poison-root': '' }, ['tests/a.test.ts'], 'cannot poison its root');
+    const refused = await denied.run();
+    assert.equal(refused.build, 'fail', refused.logTail);
+    assert.match(refused.logTail, /EROFS|Read-only file system/);
+    assert.deepEqual(readdirSync(clean), [], 'the ungranted parent stays unchanged');
+    // A separate host process could still contaminate the parent during a trial. Inject that
+    // host write outside the child wrapper; the guard must return no verdict and clean up.
+    const poisoning = await trial({ 'tests/a.test.ts': 'x\n' }, ['tests/a.test.ts'], 'host poisons its root', { retries: 0, run: async (command, args, options) => {
+      const output = await defaultChildRun(command, args, options);
+      if (command === 'npm' && args.join(' ') === 'run build') writeFileSync(join(clean, 'package.json'), '{}');
+      return output;
+    } });
     await assert.rejects(poisoning.run(), (error: unknown) => error instanceof TrialEnvironmentError && error.root === clean && /gained a node_modules, \.git or package\.json/.test(error.message));
     assert.deepEqual(readdirSync(clean), ['package.json'], 'its directories are removed all the same');
     rmSync(join(clean, 'package.json'));
