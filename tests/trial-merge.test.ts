@@ -756,8 +756,8 @@ test('unit:trial-merge — a failed trial grounds a rework for the candidate and
   const work = { ...item, stage: evaluated.stage, gates: evaluated.gates, violations: evaluated.violations };
   assert.equal(trialFailedGround(work), `the merge writer's trial of candidate ${head.slice(0, 12)} failed (${reason})`);
   const rework = trialFailureRework(work, head, reason);
-  assert.match(rework.reason, /returns to a worker/);
-  assert.equal(rework.input.binding, `${head}:merge-writer-trial-failed`);
+  assert.equal(rework.reason, `GY-3008: the merge writer's trial of candidate ${head.slice(0, 12)} failed: ${reason}. Nothing but a new head can pass the trial, so the item returns to a worker.`);
+  assert.deepEqual(rework.input, { previousWorkerStopped: true, binding: `${head}:merge-writer-trial-failed` });
   const account = actionAccount(work, [work], now);
   assert.equal(account.action, null, 'the merge writer answers the refused trial; no executor row asks for a new head yet');
   assert.deepEqual(account.wait, { kind: 'session', on: 'merge-writer', detail: `GY-3008 is queued for the merge writer, which trials and pushes it: merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}` });

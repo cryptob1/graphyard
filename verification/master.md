@@ -7,6 +7,7 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 - `tests/master.test.ts`, `tests/master-daemon.test.ts`, `tests/managed-worktree-root.test.ts`.
 - `tests/rework-review-findings.test.ts`: a control-plane CHANGES_REQUESTED rework reason carries BLOCKING findings (else the body) into `lastRework` and the worker brief.
 - `tests/five-step-cycle.test.ts`: the cycle is snapshot, close, dispatch, merge writer, persist.
+- `tests/trial-merge.test.ts`: a failed trial grounds candidate rework through the merge writer, with no base-break refresh wait.
 - `tests/deploy-unit.test.ts`: graphyard-deploy.service (`upgrade --watch`) and the loop's restart onto the tip it serves.
 
 ## Drive
