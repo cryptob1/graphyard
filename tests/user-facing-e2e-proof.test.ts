@@ -10,6 +10,9 @@ import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 import { defineScenario } from '../src/scenarios.js';
+import { server } from '../src/server.js';
+import { parseCase } from '../src/e2e/case.js';
+import { runCases } from '../src/e2e/runner.js';
 
 // GY-3037: every item owes an end-to-end proof — a new case or an existing one, with no chore
 // exemption and no opt-out.
@@ -44,6 +47,23 @@ before(async () => {
     steps: ['open /'], expected: ['the change is shown'], environment: 'any', runner: 'graphyard-e2e', testPath: 'e2e/cases/home-shows-change.json' }, id());
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
+
+test('unit:every-item-owes-e2e-proof — the shipped E2E cases exercise filing against the served API', async () => {
+  const token = 'e2e-filing-test-'.padEnd(40, 'x');
+  engine.principals = [operator];
+  const http = server(engine, [{ ...operator, token }]);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  try {
+    const cases = ['every-item-owes-e2e', 'create-work-item'].map(name => {
+      const file = `e2e/cases/${name}.json`;
+      return { file, definition: parseCase(file, readFileSync(file, 'utf8')) };
+    });
+    const report = await runCases(cases, { url: `http://127.0.0.1:${(http.address() as any).port}`, token, withholdSecrets: true });
+    assert.equal(report.failed, 0, JSON.stringify(report.cases));
+    assert.equal(report.passed, 2);
+    assert.equal(report.cases[0].executed, 9);
+  } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
+});
 
 test('unit:every-item-owes-e2e-proof — create refuses a chore, a bug and a feature without an e2e: proof, naming the case format', async () => {
   for (const type of ['chore', 'bug', 'feature'] as const) {

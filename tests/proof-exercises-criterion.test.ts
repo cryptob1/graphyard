@@ -16,8 +16,8 @@ import { nextAction } from '../src/model/next-action.js';
 import { neededRework } from '../src/daemon/rework.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-135: a proof that passes against an unchanged tree proves nothing. A pass is trusted only
 // beside the producer's run of the same proof failing against a tree with its criterion's

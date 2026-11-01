@@ -26,8 +26,8 @@ import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1524: the control-plane merge executor — one serial queue, intent before push, the trial on the
 // exact merged tree, the deploy-key push leased on the tested tip, and the reconcile of what a crash left open.
@@ -274,7 +274,7 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
     }
     return '';
   });
-  const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', run: runner.run, remove: async () => {}, cores: 2 });
+  const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', temporaryRoots: [await temporaryDirectory('executor-trial')], run: runner.run, remove: async () => {}, cores: 2 });
   assert.deepEqual(listed, ['tests/a.test.ts', 'tests/proof.test.ts'], 'the affected file once, plus the proof file the selection lacked');
   assert.deepEqual(runnerArgs.slice(runnerArgs.indexOf('tests/helpers/run-tests.ts') + 1, runnerArgs.indexOf('--files-from')), ['--test-reporter=tap', '--test-reporter-destination=stdout'], 'the run is read as TAP');
   assert.deepEqual(verdict.proofs, { 'unit:alpha-works': { executed: 2, failed: 0 }, 'integration:beta-holds': { executed: 1, failed: 1 }, 'unit:never-ran': { executed: 0, failed: 0 } }, 'cases are attributed by title prefix, a proof whose name is a prefix of another counts only its own');

@@ -11,8 +11,8 @@ import { routedParkCommand } from '../src/cli/session-commands.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1816: GY-1814's release-soak fix sat parked under goals and priorities on a question that was
 // never the operator's — its worker asked whether AC-1 should be rewritten to match GY-1762's test

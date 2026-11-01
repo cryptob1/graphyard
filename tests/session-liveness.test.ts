@@ -18,8 +18,8 @@ import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-sta
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // Time-bomb allowance (GY-1694): boundAt 2026-09-01 is config fixture and the 2026-09-21 instants are explicit past now/at arguments; the Date.now()-relative offsets (tomorrow, over) move with the wall clock.
 
@@ -66,7 +66,7 @@ async function created(overrides: Record<string, unknown> = {}) {
   return engine.execute(operator, 'create', null, { type: 'chore',  title: `Session liveness ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }], ...overrides }, randomUUID());
 }
 /** An item whose only proof is a manual one no producer may run, so its candidate raises a review request and no producer request. */
-const reviewOnly = { criteria: [{ id: 'AC-1', text: 'Read it', proofs: ['manual:by-hand'] }] };
+const reviewOnly = { criteria: [{ id: 'AC-1', text: 'Read it', proofs: ['manual:by-hand', 'e2e:fixture'] }] };
 async function submitted(overrides: Record<string, unknown> = {}) {
   let item = await engine.execute(operator, 'ready', (await created(overrides)).id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());

@@ -27,7 +27,7 @@ Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `
 
 ### File every item with an e2e: proof
 
-Every item carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — new or existing, run by the merge trial against the served head. There is no chore exemption and no opt-out sentence: `master create` and `master requirements` refuse anything else, naming the case format ([validation](validation.md)). Loop repairs and follow-ups name `e2e:create-work-item` beside their own proof, and an onboarding item names the repository's first case.
+Every item carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — new or existing, run by the merge trial against the served head. There is no chore exemption and no opt-out sentence: `master create` and `master requirements` refuse anything else, naming the case format ([validation](validation.md)). Loop repairs name `e2e:create-work-item`; follow-ups reuse delivered cases (legacy items: `create-work-item`); onboarding names the repository's first case.
 
 ### Session liveness is reconciled, not trusted
 

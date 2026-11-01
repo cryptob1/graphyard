@@ -144,18 +144,19 @@ export function wholeFindings(rest: string, read: readonly string[], cut = 2000)
 /**
  * The follow-up item one BLOCKING finding of a post-merge review files (AC-4): a bug at priority 1,
  * its origin naming the delivered item and its merge commit, reviewed like any item. The delivered
- * item itself is never reopened. Its proof names `e2e:create-work-item` beside the finding's unit
- * proof (GY-3037): every item owes an end-to-end proof, and the case — an existing one — runs
- * against the served head, so a fix that lands keeps the control plane's own API working.
+ * item itself is never reopened. It reuses the delivered item's E2E cases beside the finding's unit
+ * proof (GY-3037), so other repositories run their own cases; legacy Graphyard items with no E2E
+ * proof use create-work-item.
  */
-export function postMergeFollowUp(delivered: Pick<Work, 'key' | 'title' | 'policy'>, mergeSha: string, finding: PostMergeFinding, index: number) {
+export function postMergeFollowUp(delivered: Pick<Work, 'key' | 'title' | 'policy'> & Partial<Pick<Work, 'criteria'>>, mergeSha: string, finding: PostMergeFinding, index: number) {
   const others = finding.paths.filter(path => path !== finding.path);
   const where = finding.path ? ` in ${finding.path}${finding.line ? `:${finding.line}` : ''}${others.length ? ` (also ${others.join(', ')})` : ''}` : '';
+  const e2e = delivered.criteria?.flatMap(criterion => criterion.proofs).filter(proof => proof.startsWith('e2e:')) ?? [];
   return {
     title: `Post-merge review of ${delivered.key} (${mergeSha.slice(0, 12)}): ${finding.text.slice(0, 120)}`.slice(0, 200),
     description: `The post-merge review of ${delivered.key} ("${delivered.title}"), delivered as merge commit ${mergeSha}, found this BLOCKING${where}:\n\n${finding.text}\n\nFix it on its own head; the delivered item is not reopened.`,
     type: 'bug' as const, priority: 1,
-    criteria: [{ id: 'AC-1', text: `The finding is fixed: ${finding.text.slice(0, 1500)}`, proofs: [`unit:post-merge-follow-up-${index + 1}`, 'e2e:create-work-item'] }],
+    criteria: [{ id: 'AC-1', text: `The finding is fixed: ${finding.text.slice(0, 1500)}`, proofs: [`unit:post-merge-follow-up-${index + 1}`, ...(e2e.length ? [...new Set(e2e)] : ['e2e:create-work-item'])] }],
     policy: { checks: delivered.policy?.checks ?? ['test', 'typecheck'], review: true },
     origin: { reviewFollowUps: { parent: delivered.key, findings: [{ path: finding.path, text: finding.text.slice(0, 2000), ref: mergeSha }] } },
   };

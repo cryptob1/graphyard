@@ -10,8 +10,8 @@ import { appliedReworkBrief } from '../src/master/rework-brief.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-2874: the master applies intent with its own identity at once, and a lapsed lease ends the attempt.
 const operator: Principal = { id: 'operator', role: 'admin' };
@@ -32,7 +32,7 @@ before(async () => {
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
-const criteria = [{ id: 'AC-1', text: 'The first behaviour holds', proofs: ['unit:first'] }, { id: 'AC-2', text: 'The second behaviour holds', proofs: ['unit:second'] }];
+const criteria = [{ id: 'AC-1', text: 'The first behaviour holds', proofs: ['unit:first', 'e2e:fixture'] }, { id: 'AC-2', text: 'The second behaviour holds', proofs: ['unit:second'] }];
 const create = (title: string) => engine.execute(operator, 'create', null, { title, type: 'chore', priority: 2, criteria, dependencies: [], policy: { checks: ['test'], review: true } }, id());
 const events = async (work: Work) => (await store.pool.query('SELECT kind, payload FROM events WHERE work_id=$1 ORDER BY seq', [work.id])).rows as { kind: string; payload: unknown }[];
 const retired = /^(decision|escalation|quarantine|launch|settle|autosettle|recover|resolve)\b/;

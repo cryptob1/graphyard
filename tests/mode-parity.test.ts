@@ -16,8 +16,8 @@ import { foldMergeLedger, mergeTrialKind } from '../src/model/merge-ledger.js';
 import type { Observation, Work } from '../src/model/work.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1528: mode parity. One fixture item runs through evaluate (the landability verdict, and the
 // engine's own submit operation below) and dispatch (the auto-dispatch reconciliation). Under the github merger its

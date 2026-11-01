@@ -95,3 +95,8 @@ test('unit:self-filed-items-name-a-case — onboarding preserves a repository\'s
   assert.equal(await onboardingFirstCase(root), 'existing');
   assert.deepEqual(JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8')).e2e.serve, servePolicy.e2e.serve);
 });
+
+test('unit:self-filed-items-name-a-case — a follow-up in another repository reuses the delivered application cases', () => {
+  const item = postMergeFollowUp({ ...delivered, criteria: [{ id: 'AC-1', text: 'The application works', proofs: ['e2e:application-home', 'unit:works'] }] }, sha('e'), finding, 0);
+  assert.deepEqual(item.criteria[0].proofs, ['unit:post-merge-follow-up-1', 'e2e:application-home']);
+});

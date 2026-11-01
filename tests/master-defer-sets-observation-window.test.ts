@@ -12,8 +12,8 @@ import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1740 AC-1: `graphyard master defer GY-N NOT-BEFORE REASON` holds an unleased post-deploy follow-up on its
 // observation window and clears its recorded blocker in one write, recorded under the operator agent's name.
@@ -89,7 +89,7 @@ test('integration:master-defer-sets-observation-window — master defer sets the
   const fresh = await blocked();
   await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore: new Date(await now() - day).toISOString(), reason: 'past' }, randomUUID()), /already passed/);
   await assert.rejects(engine.execute(operatorAgent, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore: new Date(await now() + 31 * day).toISOString(), reason: 'far' }, randomUUID()), /more than 30 days/);
-  const ordinary = await blocked([{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves'] }]);
+  const ordinary = await blocked([{ id: 'AC-1', text: 'Behaves', proofs: ['integration:behaves', 'e2e:fixture'] }]);
   await assert.rejects(engine.execute(operatorAgent, 'window', ordinary.id, { expectedRevision: ordinary.revision, notBefore, reason: 'not a follow-up' }, randomUUID()), /owes no post-deploy observation/);
   // A worker may never set a window this way.
   await assert.rejects(engine.execute(worker, 'window', fresh.id, { expectedRevision: fresh.revision, notBefore, reason: 'a worker' }, randomUUID()), /Coordinator permission required/);

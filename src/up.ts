@@ -11,7 +11,7 @@ import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMeth
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { sshOrigin } from './merger-mode.js';
 import { fileOnboardingWork, onboardingChecks, onboardingFirstCase } from './onboarding.js';
-import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
+import { findOnboardingWork, onboardingBranch, onboardingCasePath, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './evidence-replay.js';
 import { recordSupervision } from './master/config.js';
@@ -1579,7 +1579,7 @@ export async function redeemSignInClaim(link: string, fetcher: typeof fetch = fe
 }
 
 /** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
-export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json'] as const;
+export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', onboardingCasePath] as const;
 export { onboardingBranch };
 /** The onboarding files every apply writes; a publish without one refuses (GY-1480). */
 export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;

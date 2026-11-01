@@ -9,8 +9,8 @@ import * as model from '../src/model.js';
 import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1694/GY-1799: the 2026-10-13 instants are the fixture's own clock, judged against the explicit `now` below: the daemon cycle is handed that `now`, and the delivered-observation close reads its clock from the fixture-clocked store the test hands it (src/server/close.ts judges the worker lease against the transaction's `now`), so nothing judges the fixture against the wall clock and the file holds no wall-clock reading to allow.
 

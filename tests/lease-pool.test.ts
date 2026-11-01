@@ -17,8 +17,8 @@ import { renewalGraceMs, supervise } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
-setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-558: lease renewals timed out waiting for a connection behind slow report and observation
 // queries, and live workers lost their leases. Each test is named for the proof it produces.
@@ -89,7 +89,7 @@ test('unit:lease-pool-isolated — renewal, claim, complete, blocked and defer o
     const work = await claimed(engine, 'isolated-renewal');
     const open = await ready(engine, 'isolated-claim');
     // GY-1726: a post-deploy follow-up whose reading cannot exist yet, deferred by its worker under the same exhaustion.
-    const followUp = await engine.execute(engineer, 'claim', (await ready(engine, 'isolated-defer', [{ id: 'AC-1', text: 'The serving release reads clean', proofs: ['manual:lease-pool-on-serving-release'] }])).id, {}, randomUUID());
+    const followUp = await engine.execute(engineer, 'claim', (await ready(engine, 'isolated-defer', [{ id: 'AC-1', text: 'The serving release reads clean', proofs: ['manual:lease-pool-on-serving-release', 'e2e:fixture'] }])).id, {}, randomUUID());
     // Every pool but the lease pool — the general pool, and the report pool where the store has one —
     // is held to its last connection, as slow report and observation queries held it in production.
     const others = Object.entries(store).filter((entry): entry is [string, pg.Pool] => entry[1] instanceof pg.Pool && entry[1] !== store.leasePool);
