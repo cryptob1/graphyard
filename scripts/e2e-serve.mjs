@@ -15,6 +15,7 @@ import { createServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { localPaths, startLocalRuntime } from '../src/install/local-runtime.ts';
+import { deliveryFixture } from './e2e-delivery-fixture.mjs';
 
 const e2eServePort = 4391;
 
@@ -30,16 +31,23 @@ const removeDirectory = () => Promise.all([rm(directory, { recursive: true, forc
 const paths = localPaths(directory);
 let runtime;
 try {
+  const delivery = await deliveryFixture(directory);
+  const workerToken = randomBytes(24).toString('hex'), coordinatorToken = randomBytes(24).toString('hex');
   await mkdir(paths.postgres, { recursive: true, mode: 0o700 });
   await writeFile(paths.passwordFile, randomBytes(24).toString('hex'), { mode: 0o600 });
   await writeFile(paths.portFile, String(await freePort()));
   await writeFile(paths.environment, JSON.stringify({
     PORT: String(e2eServePort), HOST: '127.0.0.1',
-    GRAPHYARD_PRINCIPALS: JSON.stringify([{ id: 'e2e-operator', role: 'admin', sessionKind: 'human', token }]),
+    GRAPHYARD_REPOSITORY_ROOT: delivery.root,
+    GRAPHYARD_PRINCIPALS: JSON.stringify([
+      { id: 'e2e-operator', role: 'admin', sessionKind: 'human', token },
+      { id: 'e2e-worker', role: 'worker', token: workerToken },
+      { id: 'e2e-coordinator', role: 'coordinator', token: coordinatorToken },
+    ]),
   }), { mode: 0o600 });
   runtime = await startLocalRuntime(directory);
   await mkdir('.graphyard', { recursive: true });
-  await writeFile(seedFile, JSON.stringify({ databaseUrl: runtime.databaseUrl }), { mode: 0o600 });
+  await writeFile(seedFile, JSON.stringify({ databaseUrl: runtime.databaseUrl, delivery: { ...delivery, workerToken, coordinatorToken } }), { mode: 0o600 });
   // The trial waits for /healthz?ready to answer 200: mutations are refused until startup validation completes.
   console.log(`Graphyard e2e serve at ${runtime.url} on a database in ${directory}`);
 } catch (error) {

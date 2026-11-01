@@ -1,0 +1,17 @@
+{
+  "id": "delivery-pipeline",
+  "title": "An item goes from claim to a pushed merge on a scratch install",
+  "description": "Against the head served by e2e-serve, create, claim and submit an exact head, record an independent review, run the real merge writer's build and test trial, and read the delivered commit from the local bare origin's main. No network or installation credential.",
+  "tags": ["api", "delivery"],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "command",
+      "name": "claim, submit, review, trial and push a scratch change",
+      "run": "node --import tsx scripts/e2e-delivery-pipeline.mjs {{token}}",
+      "timeoutSeconds": 180
+    }
+  ]
+}
