@@ -22,11 +22,13 @@ export const masterRecords = (root: string) => resolve(root, '.graphyard/master-
 export const masterInputs = (root: string, launch: string) => resolve(root, '.graphyard/launch', `${launch}.inputs.jsonl`);
 
 /** Supported native formats, rather than silently launching a master that cannot continue. */
-export function assertConversationRuntime(kind: string) {
+export function assertConversationRuntime(kind: string): asserts kind is 'claude' | 'codex' {
   if (kind !== 'claude' && kind !== 'codex') throw new Error(`Master conversation continuity is unsupported for runtime ${kind}; supported master runtimes are claude and codex. The previous conversation is retained; configure the master role with a supported runtime.`);
 }
-export const conversationArgs = (kind: string, nativeId: string | null, resume: boolean) =>
-  kind === 'claude' ? [resume ? '--resume' : '--session-id', nativeId!] : resume ? ['resume', nativeId!] : [];
+export function conversationArgs(kind: string, nativeId: string | null, resume: boolean) {
+  assertConversationRuntime(kind);
+  return kind === 'claude' ? [resume ? '--resume' : '--session-id', nativeId!] : resume ? ['resume', nativeId!] : [];
+}
 
 /** Persist before submission, including each delivery retry. The marker joins origin to native input. */
 export async function graphyardInput(origins: string, origin: 'launch' | 'wake' | 'retry', text: string) {

@@ -87,6 +87,7 @@ test('unit:master-session-resumes — an adopted pre-upgrade Claude record impor
     { type: 'user', uuid: 'person', message: { content: 'A person still needs an answer' } },
     { type: 'user', uuid: 'wake', message: { content: 'Legacy wake' } },
   ].map(row => JSON.stringify(row)).join('\n'));
+  await writeFile(join(folder, 'newer-unrelated.jsonl'), JSON.stringify({ type: 'user', uuid: 'other', message: { content: 'An unrelated conversation in the same account and directory' } }));
   const adopted = await adoptConversation(root, { runtime: 'claude', account: 'legacy', environment: { CLAUDE_CONFIG_DIR: home },
     prompts: [{ origin: 'launch', text: 'Legacy launcher request' }, { origin: 'wake', text: 'Legacy wake' }] });
   assert.equal(adopted.current.nativeId, 'legacy-native');

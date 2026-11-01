@@ -163,6 +163,8 @@ test('e2e:master-continues-after-failover — cross-account/runtime, A-to-B-to-A
     assert.match(codex.request, /Last unanswered person message: "Cross-runtime question"/);
     assert.match(codex.predecessor, /Cross-runtime question/);
     assert.equal(codex.otherHomeReadable, false); assert.equal(codex.recordWritable, false);
+    await f.emit({ final: true });
+    assert.equal(await captureConversation(f.state.master.continuity!.current), null, 'the inherited response turn completed');
     await f.emit({ input: 'This one is answered', final: true });
     assert.equal(await captureConversation(f.state.master.continuity!.current), null);
     await f.stop(); await f.reload(); f.select(1); await f.launch();
