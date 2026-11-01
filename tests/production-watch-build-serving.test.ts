@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import EmbeddedPostgres from 'embedded-postgres';
-import { DEPLOYMENT_GRACE_MS, ENDPOINT_FRESH_MS, ProductionWatch } from '../src/production-watch.js';
+import { DEPLOYMENT_GRACE_MS, ENDPOINT_FRESH_MS, productionProvider, ProductionWatch } from '../src/production-watch.js';
 import { buildIdentity } from '../src/protocol-version.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -18,6 +18,38 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const sha = (index: number) => index.toString(16).padStart(40, '0');
 const T0 = Date.parse('2026-10-07T04:45:00Z');
+
+test('unit:production-watch-build-serving — the configured Railway adapter supplies serving state, and without its credentials the build supplies it without external reads', async () => {
+  const requests: { url: string; headers: Headers; body: any }[] = [];
+  const fetcher: typeof fetch = async (url, init) => {
+    requests.push({ url: String(url), headers: new Headers(init?.headers), body: JSON.parse(String(init?.body)) });
+    return Response.json({ data: { deployments: { edges: [{ node: {
+      id: 'railway-live', status: 'SUCCESS', createdAt: new Date(T0).toISOString(),
+      meta: { commitHash: sha(4), branch: 'main' },
+    } }] } } });
+  };
+  const env = { RAILWAY_SERVICE_ID: 'service', RAILWAY_ENVIRONMENT_ID: 'environment' };
+  const observe = async (provider: ReturnType<typeof productionProvider>) => {
+    const { store } = memoryStore([]);
+    return new ProductionWatch(store, { provider, build: buildIdentity({ GRAPHYARD_BUILD_SHA: sha(1) }), baseBranch: 'main', now: () => T0 }).tick(true);
+  };
+  const unconfigured = productionProvider(env, fetcher);
+  assert.equal(unconfigured, null);
+  const fallback = await observe(unconfigured);
+  assert.equal(fallback.serving, sha(1));
+  assert.equal(fallback.servingSource, 'build');
+  assert.equal(requests.length, 0, 'no deployment API is read without a configured provider');
+
+  const report = await observe(productionProvider({ ...env, RAILWAY_TOKEN: 'fixture-project-token' }, fetcher));
+  assert.equal(report.serving, sha(4));
+  assert.equal(report.servingSource, 'provider');
+  assert.equal(report.provider, 'railway');
+  assert.equal(report.error, null);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url, 'https://backboard.railway.com/graphql/v2');
+  assert.equal(requests[0].headers.get('Project-Access-Token'), 'fixture-project-token');
+  assert.deepEqual(requests[0].body.variables.input, { serviceId: 'service', environmentId: 'environment' });
+});
 
 /** The ledger queries the watch issues, in memory. */
 function memoryStore(work: Work[]) {
