@@ -9,15 +9,13 @@ Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choi
 
 `graphyard master promote --admin-token-stdin` provisions the master's operator-agent identity.
 
-## GitHub administration through the browser
-
-Graphyard's one remote credential is the merge writer's deploy key ([install](install.md)). `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing credential. `master harness claude|codex --apply` writes rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`.
-
 ## Typed actions
 
 `nextAction`: `dispatch`/`request-review`/`request-rework`/`resync`/`reclaim`/`merge`; a gate refusal is its reason string.
 
 ## Recovery
+
+`master browser` is removed. If an older control plane reports App permissions or held integration jobs, the master uses `graphyard install --repo OWNER/NAME --plan`, then `--apply`, to install the merge writer's deploy key in place of the retired App integration.
 
 A dead supervisor's lease lapses; the close step keeps what the attempt had not committed on its branch and records it for the redispatch's handoff, then reconciles the lease and the item is claimable again.
 

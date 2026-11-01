@@ -229,10 +229,7 @@ export function masterPrompt(config: MasterConfig): string {
   const reviewInstruction = supervised
     ? `Independent review starts on its own: when a candidate passes the build gate, node ${config.cliPath} master run launches a reviewer session for its exact head and the control plane merges it once every gate passes. It launches no other session; never review or approve a candidate yourself, never launch a reviewer, and never submit evidence.`
     : `Independent review and proof collection start on their own: master run launches them for each candidate's exact head. Read findings and route rework; never launch or perform a review yourself, and never submit evidence.`;
-  const administrationInstruction = config.browser
-    ? `GitHub administration of ${config.repository} is yours: when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions or installation-accept, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
-    : `No browser profile is configured: App permission updates and installation acceptance stay with the operator, and master status records that as a setup attention item naming node ${config.cliPath} master init --token-stdin --browser-profile PROFILE; never ask the operator in chat, leave the item to master status.`;
-  return `${prompt} ${reviewInstruction} ${administrationInstruction}`;
+  return `${prompt} ${reviewInstruction}`;
 }
 
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: ChildRun) {

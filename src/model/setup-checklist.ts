@@ -15,7 +15,7 @@ export type SetupAction =
   | { kind: 'connect'; label: string; role: RequiredSetupRole }
   | { kind: 'wait'; label: string };
 
-export type SetupItemId = 'github-app' | 'reviewer-app' | `account:${RequiredSetupRole}` | 'master-loop';
+export type SetupItemId = `account:${RequiredSetupRole}` | 'master-loop';
 export interface SetupItem {
   id: SetupItemId;
   title: string;
@@ -69,17 +69,14 @@ function roleReady(fleet: any, role: RequiredSetupRole) {
  */
 /** SUPERVISED (GY-1501, `up --local`): as the live loop names it in the status (`setup.supervision`); the checklist is the same either way (GY-1978). */
 export const statusSupervised = (status: any | null) => status?.setup?.supervision === 'supervised';
-/** Where the pull-request-era installer served its GitHub App page; a status from before GY-2010 may still name it. */
 /**
- * CONTROL-PLANE MERGER (GY-1553): the control plane is the only merge writer, so no GitHub App opens
- * pull requests and no reviewer App signs reviews: those items pass as not required. No GitHub
- * branch protection is used. `doctor`'s setup-from-zero checks (src/setup-from-zero.ts) say the
- * same words for the same ids.
+ * The checklist for STATUS (the control plane's `/api/status` answer, or null while it does not
+ * answer). Items stay in the order a new installation completes them. The control plane is the only
+ * merge writer (GY-1553): no GitHub App opens pull requests and no reviewer App signs reviews, so
+ * the checklist judges accounts and the coordinator alone.
  */
-export const mergerNotRequired = 'not required (merger: control-plane)';
 export function setupChecklist(status: any | null): SetupItem[] {
-  const notRequired = (id: SetupItemId, title: string): SetupItem => ({ id, title, done: true, human: false, line: mergerNotRequired, action: null });
-  return [notRequired('github-app', 'GitHub App'), notRequired('reviewer-app', 'Reviewer App'), ...accountItems(status)];
+  return accountItems(status);
 }
 function accountItems(status: any | null): SetupItem[] {
   const items: SetupItem[] = [];

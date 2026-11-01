@@ -61,7 +61,7 @@ function dependencies(root: string, w: QuotedWorld): UpDependencies {
   };
 }
 
-const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null, merger: 'control-plane' });
+const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, master: 'claude' });
 
 /** A root whose up state records every step but the master loop done, so a run reaches that step alone. */
 async function resumedRoot(label: string) {
@@ -91,7 +91,7 @@ test('unit:unit-launcher-quoted-path — a loop unit whose ExecStart quotes a CL
 
   // What `master init` writes, through the real renderer: the CLI path that holds whitespace is
   // quoted, and that quoting is exactly what a bare whitespace split misread.
-  const render = (launcher: string) => loopUnitText({ root, cliPath: launcher, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null });
+  const render = (launcher: string) => loopUnitText({ root, cliPath: launcher, repository: 'acme/shop', intervalSeconds: 30, installDir });
   await writeFile(unitFile, render(cliPath));
   const current = await readFile(unitFile, 'utf8');
   assert.match(current, new RegExp(`^ExecStart=.* "${escape(cliPath)}" master run$`, 'm'), 'the renderer quotes the CLI path that holds whitespace');

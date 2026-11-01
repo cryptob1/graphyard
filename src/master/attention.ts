@@ -37,9 +37,11 @@ export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: 
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', human: true, humanOnly, next });
 /** The sources of installation attention. */
 export const installationSources = ['held-jobs', 'delegation-limits', 'production'] as const;
+/** Recovery for an older control plane still reporting its retired App integration. */
+export const retiredAppRemedy = "Run graphyard install --repo OWNER/NAME --plan, then --apply to install the merge writer's deploy key in place of the retired GitHub App integration";
 /** The owner of one installation attention line, by the source that raised it. */
 export function installationOwner(source: typeof installationSources[number], text: string, productionBranch: string | null = null): AttentionOwner {
-  if (source === 'held-jobs') return agentOwner('control plane', 'Nothing to run: held jobs resume once graphyard master browser installation-accept grants the permission');
+  if (source === 'held-jobs') return agentOwner('master', retiredAppRemedy);
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
   // Production may track a release branch of its own: the fix is the deployment of what production
   // tracks (GY-1207). The branch is the one the watch reported (GRAPHYARD_PRODUCTION_BRANCH when set), never a fixed name (GY-1256).

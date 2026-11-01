@@ -148,8 +148,8 @@ export function installRequestFromArgs(args: string[]) {
  * installation with no installer-created worker and no own Herdr instance was applied with --observe-only.
  *
  * `sourceRoot` (GY-2168) names the checkout the image builds from, instead of the running CLI's
- * own code root: a redeploy the loop or `graphyard upgrade` starts may load a held snapshot at
- * another commit, and the image it builds must hold the deployed commit's tree, stamped with that
+ * own code root: a redeploy the loop or `graphyard upgrade` starts may target another commit,
+ * and the image it builds must hold the deployed commit's tree, stamped with that
  * commit, so `/healthz?strict` reports the deployed commit after the step.
  */
 export function redeployArguments(record: InstallRecord, image: string, sourceRoot: string | null = null) {

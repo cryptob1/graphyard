@@ -98,7 +98,7 @@ function dependencies(root: string, events: UpEvent[], w: UpWorld): UpDependenci
   };
 }
 
-const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null, merger: 'control-plane' });
+const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, master: 'claude' });
 
 /** A root whose up state records every step but the master loop done, so a run reaches that step alone. */
 async function resumedRoot(label: string) {
@@ -216,23 +216,23 @@ test('unit:up-replaces-loop-on-other-code — the master-loop step rewrites a lo
 /** GY-1859: AC-1 on a pinned install, through supervisor's loopUnitText and repository-setup's reading and liftLoopPins. */
 async function pinnedReplacement() {
   const { runUp } = await up();
-  const { readLoopCode, liftLoopPins } = await repositorySetup();
+  const { readLoopCode, liftLoopPins, removeHeldCliPin } = await repositorySetup();
   const { loopUnitText } = await import('../src/supervisor.js');
   const { knownGoodCli, knownGoodState } = await import('../src/master/known-good.js');
-  const { heldCliSnapshotAt, heldLauncherOf } = await import('../src/daemon/held-cli.js');
+  const { access } = await import('node:fs/promises');
   const units: InstallUnits = perInstallUnits('acme/shop');
   const attempt = async (lift: boolean) => {
     const base = await temporaryDirectory(`graphyard-up-loop-pinned-${lift ? 'lifted' : 'kept'}`);
     const root = await resumedRoot(`graphyard-up-loop-pinned-root-${lift}`), installDir = join(base, 'install'), unitDirectory = join(base, 'units'), home = join(base, 'home');
-    const cliPath = join(base, 'cli', 'bin', 'graphyard.mjs'), snapshot = heldCliSnapshotAt(root, OLD_COMMIT);
-    for (const directory of [join(installDir, 'coordinator'), unitDirectory, home, join(snapshot, 'src')]) await mkdir(directory, { recursive: true });
+    const cliPath = join(base, 'cli', 'bin', 'graphyard.mjs'), snapshot = join(root, '.graphyard', 'held-cli', OLD_COMMIT.slice(0, 12));
+    for (const directory of [join(installDir, 'coordinator'), unitDirectory, home, join(snapshot, 'src'), join(root, '.graphyard')]) await mkdir(directory, { recursive: true });
     await writeFile(join(installDir, 'coordinator', 'state.json'), JSON.stringify({ sha: OLD_COMMIT, pinnedAt: 'an earlier promotion', previous: null }));
     await writeFile(join(snapshot, 'src', 'cli.ts'), '// the held snapshot\n');
     await writeFile(join(root, '.graphyard', 'held-cli.json'), JSON.stringify({ commit: OLD_COMMIT, root: snapshot }));
-    // What `master init --replace-supervisor` writes: the real renderer, reading the pins as installLoopSupervisor does.
-    const render = () => loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: heldLauncherOf(root) });
+    // What `master init --replace-supervisor` writes: the real renderer after any lift.
+    const render = () => loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir });
     const unitFile = join(unitDirectory, units.master);
-    await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null }));
+    await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir }));
     assert.match(await readFile(unitFile, 'utf8'), new RegExp(`ExecStart=\\S+ ${quote(knownGoodCli(installDir))} master run`), 'the pinned unit starts the known-good coordinator');
     // The loop reports the commit of whichever launcher its unit starts: this CLI's, or the pin's.
     const loaded = async () => (await readFile(unitFile, 'utf8')).includes(`${cliPath} master run`) ? COMMIT : OLD_COMMIT;
@@ -244,6 +244,7 @@ async function pinnedReplacement() {
     const deps = dependencies(root, events, w);
     const outcome = await runUp(request(), { ...deps,
       loopCode: read,
+      removeHeldCliPin: async () => removeHeldCliPin(root),
       liftLoopPins: lift ? async () => liftLoopPins(root, { installDir }) : undefined,
       cli: async (args, options = {}) => {
         if (args[0] === 'master' && args[1] === 'init') { w.calls.push({ args }); await writeFile(unitFile, render()); return { code: 0, stdout: '{"supervisor":{"state":"updated"}}' }; }
@@ -260,9 +261,9 @@ async function pinnedReplacement() {
   assert.doesNotMatch(lifted.unit, /coordinator\/current|held-cli/, 'neither the pin nor the held snapshot is started');
   assert.equal(knownGoodState(lifted.installDir), null, 'the pin is lifted');
   assert.ok(JSON.parse(await readFile(join(lifted.installDir, 'coordinator', 'lifted.json'), 'utf8')).sha === OLD_COMMIT, 'and its record is kept beside it');
-  assert.equal(heldLauncherOf(lifted.root), null, 'the held pointer is lifted');
+  await assert.rejects(() => access(join(lifted.root, '.graphyard', 'held-cli.json')), 'the stale held-cli pin is removed');
   const note = lifted.events.find(event => event.kind === 'note' && event.text.startsWith('master-loop: lifted')) as { text: string } | undefined;
-  assert.match(note?.text ?? '', new RegExp(`known-good pin at ${OLD_COMMIT.slice(0, 12)}.* and the held snapshot at ${OLD_COMMIT.slice(0, 12)}`), 'the step names what it lifted');
+  assert.match(note?.text ?? '', new RegExp(`known-good pin at ${OLD_COMMIT.slice(0, 12)}`), 'the step names what it lifted');
   assert.ok(lifted.events.some(event => event.kind === 'note' && event.text.includes(`at ${COMMIT.slice(0, 12)}`)), 'and the commit the loop now reports');
 }
 
@@ -277,7 +278,7 @@ test('unit:up-rewrites-self-managed-loop-on-the-managed-checkout — when Graphy
   const cliPath = join(base, 'cli', 'bin', 'graphyard.mjs'), managedPath = join(root, 'bin', 'graphyard.mjs');
   for (const directory of [unitDirectory, home, installDir]) await mkdir(directory, { recursive: true });
   const unitFile = join(unitDirectory, units.master);
-  await writeFile(unitFile, loopUnitText({ root, cliPath: managedPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null }));
+  await writeFile(unitFile, loopUnitText({ root, cliPath: managedPath, repository: 'acme/shop', intervalSeconds: 30, installDir }));
   assert.match(await readFile(unitFile, 'utf8'), new RegExp(`ExecStart=\\S+ ${quote(managedPath)} master run`), 'the loop starts the managed checkout\'s launcher');
   // Each checkout's HEAD; the loop reports the commit of the launcher its unit starts.
   const run = (_command: string, args: string[]) => args[2] === 'rev-parse' ? `${args[1] === root ? OLD_COMMIT : COMMIT}\n` : '';
@@ -296,7 +297,7 @@ test('unit:up-rewrites-self-managed-loop-on-the-managed-checkout — when Graphy
   const outcome = await runUp(request(), { ...deps,
     loopCode: read,
     cli: async (args, options = {}) => {
-      if (args[0] === 'master' && args[1] === 'init') { w.calls.push({ args }); await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir, heldLauncher: null })); return { code: 0, stdout: '{"supervisor":{"state":"updated"}}' }; }
+      if (args[0] === 'master' && args[1] === 'init') { w.calls.push({ args }); await writeFile(unitFile, loopUnitText({ root, cliPath, repository: 'acme/shop', intervalSeconds: 30, installDir })); return { code: 0, stdout: '{"supervisor":{"state":"updated"}}' }; }
       return deps.cli(args, options);
     } });
   assert.equal(outcome.exitCode, 0, outcome.next);
@@ -608,7 +609,7 @@ test('unit:up-validates-the-checkout-it-installs — the clean-checkout prefligh
   await mkdir(join(repository, '.graphyard'), { recursive: true });
   // master.json still records the obsolete checkout A; this run is CLI B.
   await writeFile(join(repository, '.graphyard', 'master.json'), JSON.stringify({ url: SERVER, cliPath: join(a, 'bin', 'graphyard.mjs') }));
-  const read = () => upDependencies(repository, join(b, 'bin', 'graphyard.mjs'), request(), () => {}, () => null, () => null).cliCheckout!();
+  const read = () => upDependencies(repository, join(b, 'bin', 'graphyard.mjs'), request(), () => {}).cliCheckout!();
 
   // Clean B, dirty obsolete A: the migration is not refused for A's work.
   await dirty(a);
@@ -617,4 +618,18 @@ test('unit:up-validates-the-checkout-it-installs — the clean-checkout prefligh
   git(a, 'checkout', '--', '.');
   await dirty(b);
   assert.deepEqual(await read(), { root: b, dirty: ['bin/graphyard.mjs'] }, 'dirty work in this CLI\'s own checkout is found');
+});
+
+test('unit:launcher-runs-checkout — up removes a stale launcher pointer even when the loop step is already complete', async () => {
+  const { runUp } = await up();
+  const { removeHeldCliPin } = await repositorySetup();
+  const root = await recordedRoot('up-current-stale-launcher');
+  const pin = join(root, '.graphyard', 'held-cli.json');
+  await writeFile(pin, JSON.stringify({ root: '/obsolete-snapshot' }));
+  const w = world([cleanReading()]);
+  const outcome = await runUp(request(), { ...dependencies(root, [], w), removeHeldCliPin: () => removeHeldCliPin(root) });
+  assert.equal(outcome.exitCode, 0, outcome.next);
+  const { access } = await import('node:fs/promises');
+  await assert.rejects(() => access(pin), { code: 'ENOENT' });
+  assert.equal(named(w, ['master', 'restart']).length, 0);
 });

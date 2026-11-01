@@ -5,19 +5,18 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { setupMaster } from '../src/master.js';
-import { mergerNotRequired, setupChecklist } from '../src/model/setup-checklist.js';
-import { setupFromZeroChecks, setupLine, setupSteps } from '../src/setup-from-zero.js';
+import { setupChecklist } from '../src/model/setup-checklist.js';
+import { setupFromZeroChecks } from '../src/setup-from-zero.js';
 import { applyProposal, managedInstructions, scanProposal, setupRepository } from '../src/repository-setup.js';
 import { guideText } from '../src/guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
- * GY-1553 AC-4: the control plane is the only merge writer, so for every unsupervised install the
- * Setup checklist items and doctor's setup-from-zero checks `github-app` and `reviewer-app` pass as
- * `not required (merger: control-plane)`, no branch-protection item is judged, and the AGENTS.md
- * worker block tells the worker to submit with `complete GY-N EPOCH --head SHA`.
+ * GY-1553 AC-4, retired further by GY-3003: the control plane is the only merge writer, so the
+ * Setup checklist and doctor's setup-from-zero checks name no GitHub App or reviewer App step at
+ * all, no branch-protection item is judged, and the AGENTS.md worker block tells the worker to
+ * submit with `complete GY-N EPOCH --head SHA`.
  */
-const notRequired = ['github-app', 'reviewer-app'] as const;
 /** A fresh install with no App and no reviewer App, only a worker account; an old `github` mergeWriter changes nothing. */
 const bare = (supervision = 'autonomous') => ({
   actor: { role: 'admin' }, github: false, githubAppId: null, githubRepository: null, baseBranch: 'main',
@@ -26,27 +25,20 @@ const bare = (supervision = 'autonomous') => ({
   mergeWriter: { merger: 'github' },
 });
 
-test('unit:setup-checklist-control-plane — the Setup checklist passes github-app and reviewer-app as not required for every install, supervised or not, judges no branch protection and no merger', () => {
-  assert.equal(mergerNotRequired, 'not required (merger: control-plane)');
+test('unit:setup-checklist-control-plane — the Setup checklist names no GitHub App or reviewer App step for any install, judges no branch protection and no merger', () => {
   const control = setupChecklist(bare());
-  assert.deepEqual(control.map(item => item.id), ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'master-loop']);
-  for (const id of notRequired) {
-    const item = control.find(entry => entry.id === id)!;
-    assert.deepEqual({ done: item.done, line: item.line, action: item.action, human: item.human }, { done: true, line: mergerNotRequired, action: null, human: false }, `${id} reads as passed and asks nothing`);
-  }
+  assert.deepEqual(control.map(item => item.id), ['account:worker', 'account:reviewer', 'master-loop']);
   assert.equal(control.find(item => item.id === 'account:worker')!.done, true, 'the worker account is still judged');
   assert.equal(control.find(item => item.id === 'account:reviewer')!.done, false, 'the reviewing account is still required');
   // GY-1978: a supervised install's heads are reviewed by an agent and merged by the control plane too, so its checklist is the same.
   assert.deepEqual(setupChecklist(bare('supervised')), control, 'supervision changes no step');
 });
 
-test('unit:setup-checklist-control-plane — doctor\'s setup-from-zero checks print PASS github-app and reviewer-app as not required for an unsupervised install, naming their steps, and judge no branch protection or merger', async () => {
+test('unit:setup-checklist-control-plane — doctor\'s setup-from-zero checks name no GitHub App, reviewer App or branch-protection line for an unsupervised install', async () => {
   const root = await temporaryDirectory('merger-control-plane-setup');
   const checks = await setupFromZeroChecks({ root, env: {}, status: bare(), environments: join(root, 'none'), sandbox: () => null });
-  assert.deepEqual(checks.map(check => check.id).slice(0, 4), ['control-plane', 'credentials-file', 'github-app', 'reviewer-app'], 'the lines keep their order');
-  const lines = checks.filter(check => (notRequired as readonly string[]).includes(check.id));
-  assert.deepEqual(lines.map(setupLine), ['PASS github-app: not required (merger: control-plane)', 'PASS reviewer-app: not required (merger: control-plane)']);
-  assert.deepEqual(lines.map(check => check.step), [setupSteps.app, setupSteps.reviewer], 'each line still names its checklist step');
+  assert.deepEqual(checks.map(check => check.id), ['control-plane', 'credentials-file', 'agent-environments', 'worker-sandbox']);
+  assert.ok(!checks.some(check => check.id === 'github-app' || check.id === 'reviewer-app'), 'no App line');
   assert.ok(!checks.some(check => check.id === 'branch-protection' || check.id === 'merger'), 'no branch protection or merger line');
 });
 

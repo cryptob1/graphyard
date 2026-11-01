@@ -78,6 +78,12 @@ test('unit:setup-checks-consistent — a reachable plane with no credential is r
   assert.equal((await plane(true)).step, setupSteps.install);
 
   const checks = await setupFromZeroChecks({ ...base, reachable: true });
+  // GY-3003 AC-2: doctor's setup checklist names no GitHub App, reviewer App, release token,
+  // reviewpolicy or github-setup step — those lines are gone, not passing.
+  for (const check of checks) {
+    assert.ok(!['github-app', 'reviewer-app', 'release-filing'].includes(check.id), check.id);
+    assert.ok(!/GitHub App|reviewer App|GRAPHYARD_RELEASE_TOKEN|reviewpolicy|github-setup/.test(`${check.step} ${check.detail}`), check.detail);
+  }
   const readiness = (first: string) => ({ next: 'Set GRAPHYARD_URL and GRAPHYARD_TOKEN …', items: [{ id: 'repository', status: first === 'repository' ? 'missing' : 'ready' }, { id: 'server', status: 'missing' }] });
   assert.match(setupNext(readiness('server'), checks), /^FAIL control-plane: reachable, credential missing: .*\(fix: docs\/setup-from-zero\.md step 3/);
   assert.equal(setupNext(readiness('repository'), checks), 'Set GRAPHYARD_URL and GRAPHYARD_TOKEN …', 'an earlier step keeps its own recovery');
