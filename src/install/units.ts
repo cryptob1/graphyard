@@ -191,9 +191,7 @@ export function foreignUnitText(text: string, root: string, home = homedir()): s
   const script = execStart ? systemdCommandLineWords(execStart).find(part => /\/scripts\/graphyard-executor\.mjs$/.test(part)) : undefined;
   // A unit an older install wrote to run this package's executor script, working in ROOT, is ROOT's.
   const packaged = workingDirectory && script && canonical(script) === canonical(packageExecutorScript);
-  // GY-1790: the entry held under ROOT's own .graphyard/held-cli/ is ROOT's — a snapshot restart points the slots at it while the checkout stands dirty.
-  const held = !!script && canonical(dirname(dirname(dirname(script)))) === join(own, '.graphyard', 'held-cli');
-  if (script && !packaged && !held && canonical(dirname(dirname(script))) !== own) return dirname(dirname(script));
+  if (script && !packaged && canonical(dirname(dirname(script))) !== own) return dirname(dirname(script));
   return null;
 }
 
