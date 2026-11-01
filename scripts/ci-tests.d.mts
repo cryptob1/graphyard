@@ -4,8 +4,6 @@ export type DependencyMap = Map<string, string[]>;
 export const defaultShardCount: number;
 export const repositoryRoot: string;
 export function listTestFiles(root?: string): string[];
-export const advisoryTests: string[];
-export function isAdvisoryTest(file: string): boolean;
 export function shardFiles(files: string[], count?: number): string[][];
 export function parseShard(text: string): { index: number; count: number };
 export function fileEdges(file: string, text: string, files: Set<string>, directories: Map<string, string[]>): Set<string>;

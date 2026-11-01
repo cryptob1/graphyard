@@ -12,7 +12,7 @@ import { assertOutsideWorktrees, autonomousSession, dispatchWork, herdrWorkspace
 import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
-import { writeHarnessPermissions } from '../src/harness.js';
+import { repositoryClaudeConfig, writeHarnessPermissions } from '../src/harness.js';
 import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
@@ -343,8 +343,9 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const masterDeny = rules(master, 'deny');
     assert.equal(denied(masterDeny, 'git push origin graphyard/gy-69-4'), true, 'the master cannot push');
     assert.equal(denied(masterDeny, `gh api --method POST repos/owner/project/pulls/69/reviews -f commit_id=${H} -f event=APPROVE`), true, 'the master cannot post a verdict');
-    // Without repository Claude settings there is nothing to inherit, and the profile arguments are unchanged.
-    assert.deepEqual((await prepareSessionHarness(root, config, { role: 'producer', kind: 'claude', profile: 'p' })).args, []);
+    // An ancestor's settings also require isolation, even before this repository has its own.
+    const inherited = await prepareSessionHarness(root, config, { role: 'producer', kind: 'claude', profile: 'p' });
+    assert.deepEqual(inherited.args, await repositoryClaudeConfig(root) ? ['--setting-sources', 'user', '--settings', inherited.file] : []);
     // Install the master's rules where Claude Code loads them for every session under the repository.
     await writeHarnessPermissions(root, master, true);
 

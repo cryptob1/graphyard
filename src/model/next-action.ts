@@ -10,7 +10,6 @@ import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextAc
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
 import { livenessCarry } from './liveness.js';
-import { baseBreakWait } from '../master/base-break-refresh.js';
 
 // The vocabulary lives in `action-kinds.ts` and the accounting vocabulary in
 // `action-account.ts`; each is re-exported here so what an item needs next is still read from
@@ -225,7 +224,6 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
         { kind: 'request-review', provider: work.policy.reviewProvider ?? 'github', requestId: request?.id ?? null, pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision },
         binding, failing.name, refusal);
     }
-    if (kind === 'request-rework') { const broken = baseBreakWait(work, failing.name); if (broken) return waits(broken, failing.name, refusal); } // GY-793: refreshed onto the tip that fixed it, never reworked
     if (kind === 'request-rework') return make('request-rework', `${key} needs a new head: ${detail}`,
       { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
     if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${detail}`, resyncInputs(work), binding, failing.name, refusal);

@@ -34,7 +34,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('coordinator-proofs-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('coordinator_proofs');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/coordinator_proofs`); await store.init();
-  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 

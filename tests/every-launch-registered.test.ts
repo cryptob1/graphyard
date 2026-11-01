@@ -53,7 +53,7 @@ async function host() {
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', herdrWorkspace: 'wA',
     operatorAgent: { id: 'graphyard-master-operator', credentialFile: await credential('operator') },
     reviewer: { appId: 4242, installationId: 99, slug: 'graphyard-reviewer', credentialFile: '/outside/reviewer.json', boundAt: '2026-09-01T00:00:00.000Z' },
-    reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto' }], run: { reviewerProfile: 'claude-reviewer', awaitReviewersMinutes: 0 } });
+    reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude', kind: 'claude', approvals: 'auto' }], run: { reviewerProfile: 'claude-reviewer' } });
   await mkdir(join(root, '.graphyard'));
   await writeFile(join(root, '.graphyard/master.json'), JSON.stringify(master), { mode: 0o600 });
   return { root, master, cleanup: () => Promise.all([rm(root, { recursive: true, force: true }), rm(secrets, { recursive: true, force: true })]) };

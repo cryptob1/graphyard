@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { demand, type Evidence, type Principal, type Work } from '../model.js';
 import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, mergeTrialStepKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
-import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from '../model/merge-authorization.js';
+import { reconciliationRefusalPrefix } from '../model/merge-authorization.js';
 import { save } from '../store.js';
 import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
@@ -23,8 +23,8 @@ import type { Services } from './routes.js';
  * `intent`, `trial` (the executor's own record, whose proof counts the fold keeps beside the state, GY-1528), `pushed`, `reconciled` and
  * `refused`. Every record re-folds the item's ledger into `work.mergeLedger`, which the gates read
  * where they read GitHub's checks and mergeability for a control-plane observation (GY-1523), and
- * saves the item. A `reconciled` delivers the item exactly as a direct merge does (direct-merge.ts
- * `sweepDirectMerges`): stage done, the delivery, `settleDelivered`, the jobs
+ * saves the item. A `reconciled` delivers the item: stage done, the delivery, `settleDelivered`,
+ * the jobs
  * row gone, all in the one transaction, saved as `merge-writer.delivered`; one for a merge commit
  * the base branch does not hold is refused, since nothing landed, and so is one (or a `pushed`)
  * for a merge commit the item's own open intent of its submitted head does not name, since a
@@ -148,7 +148,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       const mergedAt = work!.mergeLedger?.pushedAt ?? now.toISOString();
       const observation = work!.observation;
       if (observation) work!.observation = { ...observation, merged: true, mergeSha: data.mergeSha, mergedAt };
-      work!.violations = work!.violations.filter(entry => entry !== unauthorizedMergeViolation && !entry.startsWith(reconciliationRefusalPrefix));
+      work!.violations = work!.violations.filter(entry => !entry.startsWith(reconciliationRefusalPrefix));
       work!.stage = 'done'; work!.stageEnteredAt = now.toISOString();
       work!.delivery = { mergedAt, mergeSha: data.mergeSha, authorizationRevision: work!.revision };
       // What the delivery still owes, in the same transaction: nothing retries against it (GY-185).
