@@ -22,7 +22,7 @@ CI proofs publish via one producer principal; its posted run binding is Graphyar
 
 The watch reads Railway directly when its service, environment and API token are configured. Without a Railway token it reports the running build identity and makes no deployment API request; there is no GitHub deployment fallback.
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; the serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; the launcher always runs the checkout's own code (every `up` removes a stale `.graphyard/held-cli.json`, even when the loop is already current).
+Provider-reported deployment failures raise `delivery.deployment-incident`; unequal serving and merge commits remain pending. The serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; the launcher always runs the checkout's own code (every `up` removes a stale `.graphyard/held-cli.json`, even when the loop is already current).
 
 ### Serving the managed repository's app
 

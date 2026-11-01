@@ -286,17 +286,6 @@ export const masterRunSchema = z.object({
   launchConcurrency: z.number().int().min(1).max(20).optional(),
   reviewerProfile: profileName.optional(),
   producerTimeoutMinutes: z.number().int().min(5).max(1440).default(120),
-  /**
-   * Automatic bot reviewers whose review of a head the reviewer launch waits for, so their inline
-   * findings are open threads the reviewer judges in the same round rather than arriving after its
-   * approval and costing a rework round each (GY-163). A bot with nothing to say posts no review,
-   * so `awaitReviewersMinutes` bounds the wait from the review request; 0 turns it off.
-   * Unset: the Codex connector, for 8 minutes (`defaultAwaitReviewers`). The duration is the
-   * master's to tune (`master config awaitReviewersMinutes=0`, an empty value restores the
-   * default). The login list stays the operator's, edited in .graphyard/master.json.
-   */
-  awaitReviewers: z.array(z.string().trim().min(1).max(100)).max(10).optional(),
-  awaitReviewersMinutes: z.number().int().min(0).max(60).optional(),
   // How long a candidate's push-triggered acceptance run has before the loop dispatches the proof
   // workflow as a fallback, so a busy CI queue does not get a duplicate run per head; unset, 0.
   proofDispatchGraceMinutes: z.number().int().min(0).max(1440).optional(),

@@ -26,8 +26,8 @@ const head = 'a'.repeat(40), base = 'b'.repeat(40);
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 const queries: string[] = [];
 before(async () => {
-  // An offset no other file takes: two files sharing a port fail whichever starts second.
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3005;
+  // Stay inside the runner's reserved 200-port window, so concurrent trials cannot collide.
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 197;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-ledger-delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
@@ -106,6 +106,9 @@ test('unit:merge-ledger — the merge writer\'s record is the one delivery: reco
 test('unit:five-step-cycle — reconciliation never reads retired merge windows on cold or repeated passes', async () => {
   const fresh = new Engine(store, 120, 'owner/project');
   queries.length = 0;
+  await fresh.reconcile();
+  const item = await submitted();
+  await fresh.observe(item.id, item.revision, observation(item));
   await fresh.reconcile();
   await fresh.reconcile();
   assert.ok(queries.length > 0, 'the passes reached the database');
