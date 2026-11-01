@@ -622,10 +622,9 @@ export class Engine {
     // GY-2010: an item a stored adoption (GY-1849) still names completes as a head like any other:
     // its replacement commit is read from the shared object store, never from the pull request.
     if (!work || work.stage === 'done' || !workspace) return null;
-    // A stale, expired or superseded owner reaches the transaction's lease refusal; do not
-    // demand a merge-writer checkout (or refuse on observation) first.
-    if (!work.lease || work.lease.owner !== actor.id || work.lease.epoch !== data.epoch
-      || Date.parse(work.lease.expiresAt) <= Date.now()) return null;
+    // A superseded owner reaches the transaction's lease refusal before observation. Leave
+    // expiry to that transaction: a recorded renewal fault may still keep this lease live.
+    if (!work.lease || work.lease.owner !== actor.id || work.lease.epoch !== data.epoch) return null;
     if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
     demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });

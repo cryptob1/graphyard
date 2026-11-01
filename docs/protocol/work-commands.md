@@ -22,6 +22,8 @@ No endpoint sets lifecycle state.
 
 Claims last 120s, renewed every ≤30s; owner mutations carry epoch. Register branch, path, host first.
 
+`complete GY-N EPOCH` submits the worktree's HEAD, as does a bare `--head`; `--head SHA` names another commit. Head observation happens before the submission transaction; that transaction checks lease expiry, including recorded renewal grace.
+
 ### Watch
 
 `graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss SIGTERM→SIGKILLs the process group. Calls ride 5xx/408/429 with backoff; refusals stop at once; on exit `watch` ends the attempt with cause; a dead supervisor's lease lapses and the item is claimable again. Workers get no remote credential and push nothing.

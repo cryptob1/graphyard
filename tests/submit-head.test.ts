@@ -6,7 +6,7 @@ import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
-import { Engine } from '../src/engine.js';
+import { Engine, renewalFaultEvent } from '../src/engine.js';
 import { mergeWriterStatus } from '../src/merger-mode.js';
 import { operatorAgentRoutes } from '../src/server/routes/operator-agents.js';
 import { matchRoute } from '../src/server/routes.js';
@@ -94,6 +94,23 @@ test('unit:submit-head — submit takes exactly one of pr or head; the merger is
   assert.deepEqual(submitted.submission, { epoch: 1, pr: (await numbers())[0].number });
   assert.equal(submitted.observation?.source, 'control-plane');
   assert.equal(submitted.lease, null, 'the head submission ends the lease');
+});
+
+test('unit:submit-head — a recorded renewal fault lets complete observe and submit the head during lease grace; an expired lease without a fault is refused', async () => {
+  for (const graced of [true, false]) {
+    const w = await assigned(graced ? 91 : 92);
+    const expiresAt = new Date(Date.now() - 1000).toISOString();
+    await store.pool.query(`UPDATE work_items SET document=jsonb_set(document, '{lease,expiresAt}', to_jsonb($2::text)) WHERE id=$1`, [w.id, expiresAt]);
+    if (graced) await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
+      [w.id, worker.id, renewalFaultEvent, JSON.stringify({ owner: worker.id, epoch: 1, at: new Date(Date.parse(expiresAt) - 1000).toISOString(), error: 'connection terminated' })]);
+    const submit = () => engine.execute(worker, 'submit', w.id, { epoch: 1, head }, randomUUID());
+    if (graced) {
+      const submitted = await submit();
+      assert.equal(submitted.candidate?.sha, head);
+      assert.equal(submitted.observation?.source, 'control-plane');
+      assert.equal(submitted.lease, null);
+    } else await assert.rejects(submit(), /Lease missing, expired, or superseded/);
+  }
 });
 
 test('integration:change-number-allocated-once — a head submission allocates one change number per (work, head), sets candidate and submission from it, ends the lease in the same transaction, replays from its receipt and refuses a head the object store lacks naming the branch ref', async () => {
