@@ -317,7 +317,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   // A launch that fails *after* the choice gives its session back on every path, not only the
   // worker's: the review launch registration fails here, and its account and the role's one slot are
   // free again at once rather than at the two-hour session cap.
-  await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['claude-fresh'], concurrency: 1 }, reason: 'one reviewer at a time' });
+  await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['claude-fresh'], concurrency: 1, policy: { args: ['--setting-sources', 'user'] } }, reason: 'one reviewer at a time' });
   await saveReviewerProfile(root, { name: 'reviewer-a', agentName: 'review-a', kind: 'claude' });
   const head = 'a'.repeat(40), reviewed = reviewWork('GY-960', head);
   await assert.rejects(launchReview(root, reviewed, 'reviewer-a', [], new Date().toISOString(),

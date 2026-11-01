@@ -784,7 +784,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (typeof error === 'object' && error) attemptContext.set(error, { phase, phases: enter() });
     throw error;
   }
-  const home = join(checkout.directory, 'home');
+  // Keep HOME beside the trial's short scratch paths: session-directory homes make
+  // nested fixtures and Herdr's Unix sockets exceed their path bounds.
+  const home = join(temporary!, 'home');
   await mkdir(home);
   const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
   const env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };

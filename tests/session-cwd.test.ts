@@ -122,7 +122,7 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
     const home = await temporaryDirectory('session-cwd-claude-home');
     try {
       const stub = herdr();
-      await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', environment: { CLAUDE_CONFIG_DIR: home } });
+      await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'], environment: { CLAUDE_CONFIG_DIR: home } });
       await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: stub.run, registerLaunch, requestId: 'review-request' });
       assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the review');
       const pane = paneCwd(stub.tabs[0]);
@@ -151,7 +151,7 @@ test('unit:session-cwd-own-checkout — a producer session opens its pane and st
     try {
       const stub = herdr();
       const proof = 'integration:session-cwd-producer';
-      await saveProducerProfile(root, { name: 'producer-claude', principal: 'proof-runner', agentName: 'produce-claude', kind: 'claude', credentialFile: await fixture.token('producer'), environment: { CLAUDE_CONFIG_DIR: home } },
+      await saveProducerProfile(root, { name: 'producer-claude', principal: 'proof-runner', agentName: 'produce-claude', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: await fixture.token('producer'), environment: { CLAUDE_CONFIG_DIR: home } },
         async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
       const request = { id: 'produce-request', kind: 'producer', sha: H, baseSha: B, policyRevision: 1, pr: 866, group: 'integration', proofs: [proof], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
       const item = work({ criteria: [{ id: 'AC-1', text: 'Own checkout', proofs: [proof] }], implementers: ['implementer'], autoDispatch: { review: null, producers: [request], history: [] } } as Partial<Work>);

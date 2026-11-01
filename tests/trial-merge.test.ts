@@ -265,6 +265,8 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
   assert.ok(seen.keys.includes('KEPT'));
   assert.deepEqual([seen.global, seen.nosystem], ['/dev/null', '1']);
   assert.notEqual(seen.home, '/home/me', 'the child\'s home is the trial\'s own fresh one (GY-2997)');
+  assert.equal(seen.home, join(seen.tmpdir, 'home'), 'the isolated home uses the short scratch root, so nested fixture sockets fit');
+  assert.equal(existsSync(seen.home), false, 'the isolated home is removed with the trial scratch');
   assert.notEqual(seen.tmpdir, '/var/tmp', 'the host\'s TMPDIR is withheld (GY-1549); the trial\'s own replaces it (GY-1565)');
 });
 
@@ -353,8 +355,8 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     assert.ok(!child.cwd.startsWith(`${shared}/`), `the ${outcome} trial's checkout is never made in the poisoned tmp`);
     const near = probe === durable && usable ? `${clean}/${trialCheckoutPrefix}` : `${base}/`;
     assert.ok(child.cwd.startsWith(near) && child.cwd.endsWith('/checkout'), `its checkout is made in ${near}: ${child.cwd}`);
-    // npm, which runs the build, keeps node's compile cache in the tmpdir it is given; nothing else is there.
-    assert.deepEqual(child.tmpEntries.filter(entry => entry !== 'node-compile-cache'), [], 'it is empty when the suite starts: no node_modules, no .git');
+    // The isolated home lives here too; npm may also keep node's compile cache here.
+    assert.deepEqual(child.tmpEntries.filter(entry => entry !== 'node-compile-cache'), ['home'], 'only the isolated home is present: no node_modules, no .git');
     assert.equal(existsSync(child.tmpdir), false, `it is removed with the checkout after a ${outcome}`);
     assert.equal(existsSync(tempOwnerMarker(child.tmpdir)), false, `its owner marker goes with it after a ${outcome}`);
     assert.equal(existsSync(child.cwd), false, `the checkout goes with it after a ${outcome}`);
