@@ -2,15 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { chmod, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { CliContext } from '../src/cli/context.js';
 
-// GY-1925, GY-2999: complete submits a commit — the named one, else the worktree's HEAD — and attempts
-// no git push, so a worker sandbox that cannot push (OpenSSH refuses its user namespace's /etc/ssh)
-// still completes. A pull request number is refused. A pre-push hook that records every attempt and
-// then fails makes "a push would fail" deterministic and "no push was attempted" observable.
+// GY-1925: explicit --head submission attempts no git push, so a worker sandbox that cannot
+// push still completes. A pre-push hook records and fails every attempt, making the no-push
+// assertion observable. GY-2999 default-head and PR-refusal regressions live in complete-default-head.
 
 const git = (cwd: string, ...args: string[]) => {
   const result = spawnSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' });
@@ -35,7 +34,7 @@ async function repository(branch: string) {
   return { attempts, head: git(work, 'rev-parse', 'HEAD'), work };
 }
 
-test('unit:complete-head-no-push — complete GY-N EPOCH --head SHA attempts no git push and submits the head even though every push would fail', async () => {
+test('unit:complete-explicit-head-no-push — complete GY-N EPOCH --head SHA attempts no git push and submits the head even though every push would fail', async () => {
   const { completeCommand } = await import('../src/cli/complete.js');
   const { attempts, head, work } = await repository('graphyard/gy-1-1');
   const calls: { path: string; body: unknown }[] = [], printed: any[] = [];
@@ -51,13 +50,4 @@ test('unit:complete-head-no-push — complete GY-N EPOCH --head SHA attempts no 
   await completeCommand.run({ ...context, args: ['1', '--head'] } as CliContext, { id: 'id-1', key: 'GY-1' } as never);
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
   assert.equal(existsSync(attempts), false, 'complete --head attempted a git push');
-  // With no --head at all it submits that same HEAD.
-  calls.length = 0;
-  await completeCommand.run({ ...context, args: ['1'] } as CliContext, { id: 'id-1', key: 'GY-1' } as never);
-  assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
-  assert.equal(existsSync(attempts), false, 'complete attempted a git push');
-  // A pull request number is refused, the refusal naming --head, and nothing is submitted.
-  calls.length = 0;
-  await assert.rejects(completeCommand.run({ ...context, args: ['1', '12'] } as CliContext, { id: 'id-1', key: 'GY-1' } as never), /--head/);
-  assert.deepEqual(calls, []);
 });
