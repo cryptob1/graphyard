@@ -12,6 +12,10 @@ import { piRunner } from '../src/runner/pi.js';
 import { runConfinement } from '../src/runner/roles.js';
 import { graphyardTools } from '../src/runner/payloads.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { setupMaster } from '../src/master/config.js';
+import { startMaster } from '../src/master/harness.js';
+import { runtimeLoginHomes } from '../src/master/profiles.js';
+import { startedAtOnce } from './helpers/launch-shell.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
 async function fixture(maskedCoordinator = false) {
@@ -326,6 +330,62 @@ test('integration:worker-control-socket-isolation — declared TCP host executor
     assert.equal(reached, 0, 'the disposable TCP host executor received no connection');
     assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+for (const kind of ['codex', 'claude'] as const) for (const inherited of [false, true]) test(`integration:worker-home-deletion-regression — master start ${kind} preserves its ${inherited ? 'inherited' : 'default'} login without granting operator HOME`, async () => {
+  const f = await fixture();
+  const variable = kind === 'codex' ? 'CODEX_HOME' : 'CLAUDE_CONFIG_DIR';
+  const login = inherited ? f.runtime : join(f.home, `.${kind}`);
+  mkdirSync(login, { recursive: true }); writeFileSync(join(login, 'login'), 'existing-login');
+  const bin = join(f.base, 'bin'); mkdirSync(bin);
+  const executable = join(bin, kind);
+  writeFileSync(executable, `#!${process.execPath}
+    import fs from 'node:fs'; import assert from 'node:assert/strict';
+    assert.equal(process.env.${variable}, ${JSON.stringify(login)});
+    assert.equal(fs.readFileSync(process.env.${variable} + '/login', 'utf8'), 'existing-login');
+    fs.writeFileSync(process.env.${variable} + '/state', 'updated');
+    assert.notEqual(process.env.HOME, ${JSON.stringify(f.home)});
+    fs.writeFileSync(process.env.HOME + '/scratch', 'own');
+    for (const file of ${JSON.stringify([join(f.home, 'sentinel'), join(f.unrelated, 'sentinel')])})
+      assert.throws(() => fs.writeFileSync(file, 'bad'), error => error.code === 'EROFS');
+  `);
+  chmodSync(executable, 0o700);
+  git(f.root, 'remote', 'add', 'origin', 'https://github.com/owner/project.git');
+  await setupMaster(f.root, { url: 'https://graphyard.example', token: 'fixture-token-'.padEnd(40, 'x'),
+    cliPath: join(process.cwd(), 'bin/graphyard.mjs'), credentialDirectory: f.config },
+    async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 })));
+  const previous = { HOME: process.env.HOME, [variable]: process.env[variable] };
+  let launched = 0;
+  const environment: Record<string, string> = { PATH: `${bin}:${process.env.PATH}` };
+  try {
+    process.env.HOME = f.home;
+    if (inherited) process.env[variable] = login; else delete process.env[variable];
+    await startMaster(f.root, kind, [], [], async (_program, args) => {
+      if (args[0] === 'tab' && args[1] === 'create') {
+        args.forEach((word, index) => {
+          if (word === '--env') {
+            const entry = args[index + 1], at = entry.indexOf('=');
+            environment[entry.slice(0, at)] = entry.slice(at + 1);
+          }
+        });
+        return JSON.stringify({ result: { pane_id: 'fixture-master' } });
+      }
+      if (args[0] === 'pane' && args[1] === 'run') {
+        launched++;
+        // Use exactly the account-null launch environment with the production master boundary.
+        const confined = await masterSessionConfinement(kind, f.root, {}, runtimeLoginHomes(environment), environment);
+        run(confined.wrapper, f.root, '/bin/bash', ['-ec', args[3]], environment);
+      }
+      return startedAtOnce(args) ?? '{}';
+    });
+    assert.equal(launched, 1);
+    assert.equal(readFileSync(join(login, 'state'), 'utf8'), 'updated');
+    assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
+  } finally {
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name]; else process.env[name] = value;
+    }
+  }
 });
 
 for (const homeVariable of ['CUSTOM_AGENT_HOME', 'HOME', 'XDG_CACHE_HOME']) test(`integration:worker-home-deletion-regression — a registered master runtime preserves assigned ${homeVariable} while sibling accounts stay read-only`, async () => {

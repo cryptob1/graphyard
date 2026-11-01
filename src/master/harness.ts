@@ -251,7 +251,12 @@ export async function startMaster(root: string, kind: WorkerProfile['kind'], age
     // The master runs with its runtime's broadest approval mode too; the harness rules above, not
     // runtime prompts, say what it may do. Codex's sandbox is widened to the private state the
     // master's own commands write beside its credential, and its tab carries the recipe's variables.
-    const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment: {} }, null, { writable: [dirname(config.credentialFile)] });
+    // Pin the existing login before confinement replaces the operator HOME with private scratch.
+    // Only the selected runtime directory is granted, never the operator home itself.
+    const environment: Record<string, string> = kind === 'codex'
+      ? { CODEX_HOME: resolve(process.env.CODEX_HOME || resolve(homedir(), '.codex')) }
+      : kind === 'claude' ? { CLAUDE_CONFIG_DIR: resolve(process.env.CLAUDE_CONFIG_DIR || resolve(homedir(), '.claude')) } : {};
+    const launch = accountLaunch({ kind, approvals: 'auto', agentArgs, environment }, null, { writable: [dirname(config.credentialFile)] });
     const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', root, '--label', `Graphyard master · ${config.repository}`, '--env', 'GRAPHYARD_MASTER=1', ...Object.entries(launch.environment).flatMap(([key, value]) => ['--env', `${key}=${value}`]), '--no-focus'], run));
     pane = created.pane; tabId = created.tab;
     // The master starts on its own request too; a runtime without that contract is prompted
