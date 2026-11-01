@@ -3,7 +3,6 @@ import { type Work, type AgentReview, reviewProviderOf } from '../model.js';
 import { baseRefreshConflict, pendingBaseRefresh } from '../model/base-refresh.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
-import { mechanicalRework, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { reworkBriefMax } from '../master/rework-brief.js';
 import { failedHumanProof } from '../model/human-proof.js';
 
@@ -88,10 +87,10 @@ export interface Rework { reason: string; binding: string }
 export const reworkReasonMax = 2000;
 /**
  * The rework one item needs right now, or null: a head nothing can carry forward — a base conflict,
- * a standing change request, a failed or unexercised proof, spent producers or a planned mechanical fix — goes back to a worker. Every blocking review finding reworks
+ * a standing change request, a failed or unexercised proof, spent producers — goes back to a worker. Every blocking review finding reworks
  * the head once per submission, with no cap.
  */
-export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = [], mechanical: readonly MechanicalFixRequest[] = []): Rework | null {
+export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = []): Rework | null {
   if (work.stage === 'done' || work.reworkRequested) return null;
   const conflict = baseRefreshConflict(work);
   if (conflict) return { reason: `${work.key}: ${conflict}. Only a fresh attempt can resolve it, so the candidate returns to a worker.`, binding: `${work.candidate!.sha}:conflict` };
@@ -105,7 +104,7 @@ export function neededRework(work: Work, exhausted: readonly ExhaustedProof[] = 
     const room = reworkReasonMax - work.key.length - 2 - tail.length;
     return { reason: `${work.key}: ${verdict.reason.length > room ? `${verdict.reason.slice(0, room - cut.length)}${cut}` : verdict.reason}${tail}`, binding: `${work.candidate!.sha}:verdict:${verdict.reviewer}` };
   }
-  return proofRework(work) ?? exhaustedProofRework(work, exhausted) ?? mechanicalRework(work, mechanical);
+  return proofRework(work) ?? exhaustedProofRework(work, exhausted);
 }
 
 /**
