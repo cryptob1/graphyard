@@ -855,11 +855,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // Bubblewrap can start successfully but fail to exec npm: a plain nonzero exit without a
   // spawn cause or signal. Its diagnostic still means the host toolchain never started.
   const wrapperExecFailed = /^bwrap: execvp (?:node|npm|npx): No such file or directory\s*$/m;
-  // Mise shims and a missing node/npm cannot start the host toolchain; no install/build verdict exists.
+  // Only known mise shim startup diagnostics belong to the host; project mise task errors remain build failures.
   const toolchainStartFailed = (ended: Ended) => {
     if (ended.ok) return false;
     const diagnostic = ended.out.replace(ansiEscape, '');
-    return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR\b|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
+    return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR (?:Config files in .+ are not trusted|No version is set for tool (?:node|npm|npx))\s*$|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
   };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));

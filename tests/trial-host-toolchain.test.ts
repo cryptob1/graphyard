@@ -146,9 +146,13 @@ test('unit:trial-build-failure-names-cause — a real build failure refuses with
   assert.equal(refused.outcome, 'refused');
   const refusal = events.at(-1);
   assert.equal(refusal?.kind === 'refused' && refusal.reason, reason);
-  // A missing build dependency is still the merge's failure, unlike missing npm/node.
-  for (const executable of ['tsc', 'node-gyp', 'npm-run-all', 'node-sass']) {
-    const diagnostic = `sh: 1: ${executable}: not found`;
+  // Project dependencies and mise task definitions still fail the merge after npm/node starts.
+  for (const diagnostic of [
+    ...['tsc', 'node-gyp', 'npm-run-all', 'node-sass'].map(executable => `sh: 1: ${executable}: not found`),
+    'mise ERROR task not found: lint',
+    'mise ERROR No version is set for tool python',
+    'mise ERROR failed to parse task config',
+  ]) {
     const missing = await fixture(`console.error(${JSON.stringify(diagnostic)}); process.exit(1)`);
     const missingResult = await runTrial(missing);
     assert.equal(missingResult.build, 'fail', diagnostic);
