@@ -209,7 +209,10 @@ test('integration:sandbox-probe-inside-confinement-fails-launch — the sandbox 
     const ro = args.findIndex((word, index) => word === '--ro-bind' && args[index + 1] === fixture.main);
     assert.deepEqual(args.slice(ro, ro + 3), ['--ro-bind', fixture.main, fixture.main]);
     assert.ok(args.includes(fixture.gitDir) && args.includes(join(fixture.commonDir, 'objects')), 'the worker\'s own Git paths are re-exposed writable');
-    assert.deepEqual(args.slice(args.indexOf('--') + 1, args.indexOf('--') + 3), ['codex', 'sandbox']);
+    const socketPolicy = args.indexOf('/usr/bin/python3');
+    assert.ok(socketPolicy > args.indexOf('--'), 'the socket policy runs inside the mounts before the runtime probe');
+    const runtime = args.indexOf('--', socketPolicy);
+    assert.deepEqual(args.slice(runtime + 1, runtime + 3), ['codex', 'sandbox']);
     assert.ok(args.some(arg => arg.includes(`"${fixture.commonDir}"="write"`)), 'the probe\'s sandbox grants the common Git directory for packed-refs (GY-2977)');
 
     // A confinement that lets the sandbox start passes the same probe through to it.
