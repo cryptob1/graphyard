@@ -1,5 +1,5 @@
 // Concern: `graphyard master status` — one page: the managed repository's served commit against its base tip (only what a deployment provider records; unconfigured when none does), each open item, the merge writer, live sessions and free worker profiles.
-import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents } from '../master.js';
+import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents, readSessionScreen } from '../master.js';
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { daemonSummary, emptyMasterSession, masterSummary, profileHealth, readDaemonState } from '../master-daemon.js';
@@ -10,6 +10,7 @@ import { trialTestGateStatus } from '../merge-writer/trial.js';
 import { attemptLabel, readAttemptLaunch, type AttemptLaunch } from '../master/session-resume.js';
 import { plainStage } from '../model/plain-stage.js';
 import { specCheckCurrent } from '../model/spec-check.js';
+import { stalledDelivery, stalledDeliveryAction } from '../daemon/master-stalled-delivery.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 
 const short = (sha: string | null | undefined) => sha ? sha.slice(0, 12) : null;
@@ -29,7 +30,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
     if (typeof error?.status === 'number') throw error;
     unreachable = error instanceof Error ? error.message : String(error);
     return { work: [] as Work[], now: new Date().toISOString() };
-  }), observeHerdrAgents(), inspectWorkerCredentials(root, master.workers), readDaemonState(root, master).catch(() => null)]);
+  }), observeHerdrAgents(run), inspectWorkerCredentials(root, master.workers), readDaemonState(root, master).catch(() => null)]);
   // The install master lists only unowned items; count personal scopes so the operator still sees them.
   const personalScopes = master.forPerson ? 0 : snapshot.work.filter(item => item.owner).length;
   snapshot.work = snapshot.work.filter(item => (item.owner ?? null) === (master.forPerson ?? null));
@@ -53,6 +54,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const health = state ? profileHealth(master.workers, credentials, runtime.agents, state, now, snapshot.work) : [];
   const session = master.forPerson ? state?.personalMasters[master.forPerson] : state?.master;
   const masterAgent = session?.agentName ? runtime.agents.find(agent => agent.name === session.agentName || (!!session.pane && agent.pane_id === session.pane)) : undefined;
+  const masterScreen = session?.agentName ? await readSessionScreen(masterAgent?.pane_id ?? session.agentName, run) : undefined;
   const loop = state ? daemonSummary(state, now, master.run.intervalSeconds * 1000, master.hostId, masterAgent) : null;
   const sessions = snapshot.work.flatMap(item => (item.sessions ?? []).filter(session => session.state === 'running')
     .map(session => ({ work: item.key, id: session.id, kind: session.kind, pane: session.pane, live: runtime.available ? runtime.agents.some(agent => !!session.pane && agent.pane_id === session.pane) : null,
@@ -63,13 +65,16 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
   const trialTests = trialTestGateStatus(root);
   const recorded = state?.controlPlane ?? null;
   const open = snapshot.work.filter(item => item.stage !== 'done');
+  const stalled = stalledDelivery(open);
   const launched = await Promise.all(open.map(item => readAttemptLaunch(root, item.key)));
   return {
     controlPlane: unreachable || recorded ? { reachable: !unreachable, error: unreachable ?? recorded?.error ?? null, unreachableSince: recorded?.unreachableSince ?? null, lastExitReason: recorded?.exitReason ?? null, freeDisk: recorded?.freeDisk ?? null, restartedAt: recorded?.restartedAt ?? null, restart: recorded?.restart ?? null } : { reachable: true },
     serving,
     loop: loop ? { state: loop.liveness.state, detail: loop.liveness.detail, cycle: loop.cycle, steps: loop.metrics?.steps ?? null } : { state: 'absent', detail: 'The loop cursor cannot be read' },
     // The loop's own master session (GY-2949): working / idle / `limited until T` while the account hold stands / absent.
-    masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent),
+    masterSession: masterSummary(session ?? emptyMasterSession(), now, masterAgent, masterScreen),
+    delivery: stalled.length ? { state: 'stalled', reason: stalled.map(cause => cause.detail).join('\n'), nextAction: stalledDeliveryAction }
+      : { state: state?.mergeWriter.inFlight ? 'validating' : 'no shared base failure', reason: null, nextAction: null },
     items: open.map((item, index) => itemLine(item, now, launched[index])),
     ...(personalScopes > 0 ? { personalScopes: `${personalScopes} items in personal scopes` } : {}),
     mergeWriter: (({ queue, inFlight, lastMergeAt, refusals, serveRevert }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null,

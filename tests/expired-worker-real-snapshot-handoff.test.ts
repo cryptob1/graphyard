@@ -15,6 +15,10 @@ import { masterConfigSchema, workerPrompt, type MasterConfig } from '../src/mast
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-2956: the control plane's own reconciliation clears a lapsed lease within one of its ticks,
 // long before the loop's next snapshot, so GY-2953's close-step path — which acts only when the
 // snapshot still carries the expired lease — never ran: a supervisor-ended unsubmitted attempt was
@@ -77,7 +81,7 @@ test('integration:expired-worker-real-snapshot-handoff — a supervisor-ended un
   const filed = await ok(operator, 'POST', 'work', {
     title: 'Keep a reconciled attempt\'s partial work',
     type: 'chore',
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-real-snapshot-handoff'] }],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-real-snapshot-handoff', 'e2e:fixture'] }],
   }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});
 

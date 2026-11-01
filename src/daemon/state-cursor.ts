@@ -48,8 +48,11 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   // GY-2087: the shadow gate's verdicts an older loop kept are dropped, not carried.
   // GY-2186, GY-2873: records of retired machinery an older loop kept are dropped, not carried, so
   // they do not ride forward for ever.
+  // GY-3002: the per-merge advisory trial's owed/ran ledger an older cursor kept under the strict
+  // mergeWriter object is dropped with them.
   const { shadow: _shadow, diagnoses: _diagnoses, faults: _faults, doctor: _doctor, dispatchFailures: _dispatchFailures, stepStalls: _stepStalls, ...stored } = JSON.parse(raw);
   for (const action of Object.values<Record<string, unknown>>(stored.actions ?? {})) delete action.faultClass;
+  delete (stored.mergeWriter as Record<string, unknown> | undefined)?.advisory;
   const state = toleratedStateSchema().parse(stored);
   if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
   return state;

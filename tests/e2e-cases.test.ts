@@ -105,13 +105,12 @@ test('unit:e2e-case-format — a case is a JSON file under e2e/cases/ with id, t
   await assert.rejects(loadCases(dir), /e2e\/cases\/bad\.json: tags\.0: a tag is lower-case/);
 });
 
-test('unit:e2e-case-proofs-resolve-on-fresh-registry — every e2e: proof a case under e2e/cases/ cites names a scenario src/scenarios.ts ships, whose case file of that id defines the same case, so create never refuses it on a fresh registry', async () => {
+test('unit:e2e-case-proofs-resolve-on-fresh-registry — every e2e: proof a shipped case cites binds a case on the head and can be filed before sync, pinning a shipped revision when one exists', async () => {
   // GY-1800: imported here so a tree without the fixture revisions fails this case, not the file.
   const { fixtureCases, specCheckShownCase, shippedScenarioRevisions } = await import('../src/scenarios.js');
   const shipped = await loadCases(root);
-  // Only a revision shipped in code exists on a fresh registry before the required cases run: a case
-  // file is registered by `graphyard e2e sync`, which no release candidate's uat job runs first, so a
-  // proof whose scenario only a case file defines still makes create answer 409 there.
+  // New cases need not be registered before filing (GY-2973); the head must hold every bound
+  // case, and an existing shipped revision must still be pinned before any sync.
   const defined = new Set(shippedScenarioRevisions().map(scenario => scenario.id));
   const caseFiles = new Set(shipped.map(entry => entry.definition.id));
   const proofs = (value: unknown): string[] => typeof value === 'string' ? (value.startsWith('e2e:') ? [value] : [])
@@ -119,9 +118,14 @@ test('unit:e2e-case-proofs-resolve-on-fresh-registry — every e2e: proof a case
   const cited = new Map<string, string[]>();
   for (const entry of shipped) for (const proof of new Set(proofs(entry.definition.steps))) cited.set(proof, [...(cited.get(proof) ?? []), entry.file]);
   assert.ok((cited.get('e2e:fixture-static-home')?.length ?? 0) >= 2, "GOAL-1's required cases cite e2e:fixture-static-home");
-  const unresolved = [...cited].filter(([proof]) => !defined.has(proof.slice('e2e:'.length)))
-    .map(([proof, files]) => `${proof} (cited by ${files.join(', ')}${caseFiles.has(proof.slice('e2e:'.length)) ? '; e2e/cases/ defines it, but only e2e sync registers a case file' : ''})`);
-  assert.deepEqual(unresolved, [], 'a proof naming a scenario src/scenarios.ts does not ship makes create answer 409 on a fresh registry (GY-1800)');
+  const fresh = new Engine(store, 120, 'cryptob1/graphyard');
+  for (const [proof, files] of cited) {
+    assert.ok(caseFiles.has(proof.slice(4)), `${proof} cited by ${files.join(', ')} has a case on the head`);
+    const work = await fresh.execute(operator, 'create', null, { type: 'chore', title: `Fresh registry ${proof}`,
+      criteria: [{ id: 'AC-1', text: 'The bound case passes', proofs: [proof] }] }, randomUUID());
+    assert.deepEqual(work.criteria[0].proofs, [proof]);
+    assert.equal(work.scenarioRequirements.length, defined.has(proof.slice(4)) ? 1 : 0, 'shipped revisions pin; new cases wait for sync');
+  }
   // A scenario shipped in code from a case definition is exactly the case file of that id, so sync revises it from the file later.
   assert.ok(fixtureCases, 'src/scenarios.ts ships the fixture cases');
   for (const definition of [...fixtureCases(), specCheckShownCase()]) {
@@ -459,7 +463,7 @@ test('unit:e2e-command-and-agent-steps — a case accepts command and agent step
   assert.match(refusal(file, { ...http200('general'), steps: [{ kind: 'shell', run: 'true' }] })!, /steps\.0\.kind: /);
   assert.match(refusal(file, { ...http200('general'), steps: [{ kind: 'browser', action: 'click', role: 'button' }, { kind: 'http', method: 'GET', path: '/', status: 200 }] })!, /steps\.0\.text: a browser click step needs text/);
   const shipped = await loadCases(root);
-  // Contract UI cases stay http|browser-only; GY-1708's optional capacity-limit-redispatch may use command.
+  // Contract UI cases stay http|browser-only; GY-1708's capacity-limit-redispatch may use command.
   const contractIds = new Set(['sign-in', 'create-work-item', 'board', 'work-item-detail', 'tests-page']);
   assert.ok(shipped.filter(entry => contractIds.has(entry.definition.id)).every(entry =>
     entry.definition.secrets.length === 0 && entry.definition.steps.every(step => step.kind === 'http' || step.kind === 'browser')),

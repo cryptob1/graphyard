@@ -10,6 +10,10 @@ import { managedInstructions } from '../src/repository-setup.js';
 import { guideText } from '../src/guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Each test is named for the proof it produces, so acceptance evidence maps to
 // one executed case per required proof.
 const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
@@ -18,7 +22,7 @@ const replacement: Principal = { id: 'engineer-b', role: 'worker', sessionKind: 
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 let pr = 900;
 const id = () => randomUUID();
-const input = (title: string) => ({ title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+const input = (title: string) => ({ title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] });
 const reload = async (work: Work) => (await store.list()).find(item => item.id === work.id)!;
 const events = async (work: Work, kind: string) => (await store.events(work.id)).filter(event => event.kind === kind);
 const merge = (work: Work) => work.gates.find(gate => gate.name === 'merge')!;

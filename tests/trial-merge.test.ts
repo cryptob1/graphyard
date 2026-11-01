@@ -14,6 +14,10 @@ import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { processPidNamespace, processStartTicks, tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
+import { evaluate, type Work } from '../src/model.js';
+import { actionAccount } from '../src/model/next-action.js';
+import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
+import { trialFailureRework } from '../src/daemon/cycle-merge-writer.js';
 
 // GY-1522: the merge writer's trial merge — the exact merge commit made in the object store, and its
 // build and affected tests run in a detached, credential-free checkout that is always removed.
@@ -730,4 +734,44 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
   }
   assert.deepEqual(trialExcludedRoots('/var/tmp', '/home/me'), ['/tmp', '/var/tmp', '/home/me/.gy/tmp'], 'every temporary root keeps the checkout out');
   assert.ok(most <= 2, `the folder never held more than ${most} entries after a trial`);
+});
+
+// GY-3008: deleting the dead base-break refresh must leave a failed trial's rework path intact —
+// the merge writer grounds and requests the rework; next-action waits on it, never on a base-break hold.
+test('unit:trial-merge — a failed trial grounds a rework for the candidate and next-action waits on the merge writer, never a base-break hold', () => {
+  assert.equal(existsSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/master/base-break-refresh.ts')), false,
+    'the base-break refresh module is gone');
+  const now = new Date('2026-10-31T12:00:00.000Z');
+  const head = 'c'.repeat(40), base = 'a'.repeat(40);
+  const reason = `${trialFailurePrefix}: tests tests/policy.test.ts`;
+  const item = {
+    id: 'gy-3008', key: 'GY-3008', title: 'Delete the base-break refresh', description: '', type: 'chore', priority: 3, dependencies: [],
+    criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:trial-merge'] }], policy: { checks: ['test'], review: true },
+    stage: 'test', revision: 1, policyRevision: 1, createdAt: now.toISOString(), updatedAt: now.toISOString(),
+    stageEnteredAt: now.toISOString(), ready: true, epoch: 1, lease: null,
+    workspaces: [{ host: 'machine', path: '/tmp/gy-3008', branch: 'graphyard/gy-3008-1', epoch: 1, owner: 'agent' }],
+    candidate: { sha: head, baseSha: base, pr: 1, branch: 'graphyard/gy-3008-1', author: 'agent' },
+    submission: { epoch: 1, pr: 1 }, reworkRequested: false, scenarioRequirements: [],
+    evidence: [{ id: 'e', proof: 'unit:trial-merge', sha: head, baseSha: base, policyRevision: 1, producer: 'ci', trusted: true, result: 'pass', executed: 1, skipped: 0, at: now.toISOString() }],
+    observation: {
+      candidate: { sha: head, baseSha: base, pr: 1, branch: 'graphyard/gy-3008-1', author: 'agent' },
+      checks: [{ name: 'test', result: 'success', appId: 15368 }],
+      reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED' }],
+      merged: false, mergeSha: null, mergeable: true, protected: true, prState: 'open', draft: false,
+      baseTip: base, baseTree: 'b'.repeat(40), baseTipContained: true, files: ['src/model/next-action.ts'], scopeFiles: [], at: now.toISOString(),
+    },
+    blocker: null, gates: [], violations: [],
+    mergeLedger: { key: 'GY-3008', state: 'refused', head, baseTip: base, mergeSha: null, risk: null, intentAt: now.toISOString(),
+      pushedAt: null, observedTip: null, refusal: { kind: 'merge', reason }, events: 2 },
+  } as unknown as Work;
+  const evaluated = evaluate(item, [item], now);
+  const work = { ...item, stage: evaluated.stage, gates: evaluated.gates, violations: evaluated.violations };
+  assert.equal(trialFailedGround(work), `the merge writer's trial of candidate ${head.slice(0, 12)} failed (${reason})`);
+  const rework = trialFailureRework(work, head, reason);
+  assert.equal(rework.reason, `GY-3008: the merge writer's trial of candidate ${head.slice(0, 12)} failed: ${reason}. Nothing but a new head can pass the trial, so the item returns to a worker.`);
+  assert.deepEqual(rework.input, { previousWorkerStopped: true, binding: `${head}:merge-writer-trial-failed` });
+  const account = actionAccount(work, [work], now);
+  assert.equal(account.action, null, 'the merge writer answers the refused trial; no executor row asks for a new head yet');
+  assert.deepEqual(account.wait, { kind: 'session', on: 'merge-writer', detail: `GY-3008 is queued for the merge writer, which trials and pushes it: merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}` });
+  assert.notEqual(account.wait?.on, 'graphyard', 'no base-break wait stands in for the rework');
 });

@@ -1,0 +1,15 @@
+{
+  "id": "post-merge-review-slot-release",
+  "title": "Completed reviewer releases the only reviewer slot",
+  "description": "Runs normal completion and existing orphan recovery, plus the real daemon effects factory with HTTP registry and disk ledger reads for ordinary COMMENTED and post-merge reviewers, with registry selection at reviewer concurrency one, including a delivered item omitted from open work, unchanged verdict and requirements, live panes, launch grace and unreadable inventory.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "post-merge reviewer slot release regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/orphaned-registry-sessions.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

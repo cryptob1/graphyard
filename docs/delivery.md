@@ -11,7 +11,7 @@ Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `obs
 
 ### One delivery path
 
-Exact-head gates merge; the deploy unit deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)).
+Exact-head gates merge; the deploy unit deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)). Trial commands prefer the running Node installation over host version-manager shims, so the fresh trial home needs no host mise trust configuration. A successful merge runs its trial before pushing; it schedules no advisory trial afterwards. Older cursors drop the retired advisory run ledger when read.
 
 ## Managed repositories
 
