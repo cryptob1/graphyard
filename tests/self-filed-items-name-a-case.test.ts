@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
+import { freePort } from '../src/cli/test-isolation.js';
 import { applyDelivery } from '../src/repository-setup.js';
 import * as onboarding from '../src/onboarding.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
@@ -31,7 +32,7 @@ const finding = { text: 'the guard reads the stale copy', path: 'src/guard.ts', 
 let pg: EmbeddedPostgres, store: Store, engine: Engine;
 const operator = { id: 'operator', role: 'admin' as const };
 before(async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 197;
+  const port = await freePort();
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('self-filed-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('self_filed');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/self_filed`); await store.init();
