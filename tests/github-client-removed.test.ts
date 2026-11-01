@@ -221,7 +221,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   };
   const master = config(), state = emptyDaemonState(master);
   const reads = mergeWriterReads(master, checkout, run, { base: managed, record, merger: async () => 'control-plane', trial });
-  const effects = { ...baseEffects(async () => [(await store.workDocument(work.id))!], () => clock), mergeWriter: { ...reads, advisory: undefined } } as unknown as DaemonEffects;
+  const effects = { ...baseEffects(async () => [(await store.workDocument(work.id))!], () => clock), mergeWriter: reads } as unknown as DaemonEffects;
   const realFetch = globalThis.fetch, requested: string[] = [];
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => { const target = String(input instanceof Request ? input.url : input); requested.push(target); return realFetch(input, init); }) as typeof fetch;
   const actions: string[] = [];
@@ -291,7 +291,7 @@ test('unit:shadow-gate-removed — the shadow gate is gone: its modules and rout
   const run: ChildRun = (command, args, options) => { children.push([command, ...args]); return defaultChildRun(command, args, options); };
   const reads = mergeWriterReads(master, checkout, run, { base: managed, record: async () => { throw new Error('nothing to record'); }, merger: async () => 'control-plane', trial: async () => { throw new Error('nothing to trial'); } });
   // A shadow port that throws on any touch: a cycle that ran the old gate fails here.
-  const effects = { ...baseEffects(async () => [], () => clock), mergeWriter: { ...reads, advisory: undefined } } as unknown as DaemonEffects;
+  const effects = { ...baseEffects(async () => [], () => clock), mergeWriter: reads } as unknown as DaemonEffects;
   await runCycle(master, state, effects, () => clock);
   await mergeWriterIdle(state);
   assert.ok(!children.some(args => args.some(arg => arg.startsWith('graphyard/') || arg.includes('refs/heads/graphyard/'))), `no worker branch was fetched: ${JSON.stringify(children)}`);
