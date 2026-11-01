@@ -904,7 +904,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // a head is the deployed control plane's policy, which an install reads from graphyard.json —
       // so the install runs again once, this run, before the item that carries it is filed.
       const firstCase: string[] = typeof applied?.delivery?.firstCase === 'string' ? [applied.delivery.firstCase] : [];
-      if (applied?.delivery?.serve === true) {
+      if (applied?.delivery?.serve === true || firstCase.length) {
         const result = await deps.cli(installArgs('--apply'));
         claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
         if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
