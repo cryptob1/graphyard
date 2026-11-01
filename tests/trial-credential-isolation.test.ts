@@ -131,18 +131,21 @@ test(`${proof} — a background process one agent-step invocation starts is stil
   const checkout = await temporaryDirectory('trial-credential-agent-checkout', tmpdir());
   const env = { PATH: process.env.PATH! };
   const wrapper = trialConfinement(trialHiddenPaths(key, { GRAPHYARD_CONFIG_HOME: join(host, '.config', 'graphyard') }), [checkout]);
-  // The host is the namespace's PID 1, whose /proc/1/environ every child can read: it carries the
-  // caller's credential-free environment, never this process's own.
+  // The host carries the caller's credential-free environment. Landlock may additionally deny
+  // reading PID 1's environment across the sandbox boundary.
   process.env.COORDINATOR_SENTINEL = 'coordinator-secret';
-  const session = confinedSession(wrapper, { ...env, HOST_SENTINEL: 'trial-env' });
+  const session = confinedSession([...wrapper, '/bin/sh', '-c', 'env > "$1/host.env"; shift; exec "$@"', 'host', checkout], { ...env, HOST_SENTINEL: 'trial-env' });
   try {
     // An agent leg's `open` daemonizes a browser that must outlive the invocation: this is that
     // process — a background loop that stamps a heartbeat into the checkout every 0.3 s.
     const open = await session.run('(while :; do date +%s%N > heartbeat; sleep 0.3; done) < /dev/null > /dev/null 2>&1 & echo $! > alive.pid', [], { cwd: checkout, env, timeoutMs: 30_000, shell: true });
     assert.equal(open.code, 0, open.output);
+    const inherited = readFileSync(join(checkout, 'host.env'), 'utf8');
+    assert.match(inherited, /HOST_SENTINEL=trial-env/, 'the host carries the environment the caller handed it');
+    assert.doesNotMatch(inherited, /coordinator-secret/, 'the host never inherits the coordinator environment');
     const next = await session.run(`kill -0 "$(cat alive.pid)" && echo alive; tr '\\0' '\\n' < /proc/1/environ; cat ${JSON.stringify(key)}`, [], { cwd: checkout, env, timeoutMs: 30_000, shell: true });
     assert.match(next.output, /\balive\b/, `the process one invocation started is alive for the next: ${JSON.stringify(next.output)}`);
-    assert.match(next.output, /HOST_SENTINEL=trial-env/, 'the host carries the environment the caller handed it');
+    assert.match(next.output, /HOST_SENTINEL=trial-env|\/proc\/1\/environ: Permission denied/, 'PID 1 exposes only the trial environment or refuses the read');
     assert.doesNotMatch(next.output, /coordinator-secret/, 'the host never carries this process\'s own environment, or /proc/1/environ leaks it');
     assert.doesNotMatch(next.output, /fixture-deploy-key/, 'the masks still hold across the session');
   } finally { await session.close(); delete process.env.COORDINATOR_SENTINEL; }

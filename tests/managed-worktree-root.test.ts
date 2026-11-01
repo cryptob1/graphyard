@@ -163,8 +163,9 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     assert.notEqual(fallback, defaultWorktreeRoot(join(scratch, 'second-clone'), 'owner/project', { GRAPHYARD_DATA_HOME: '/srv/graphyard' }), 'two clones never reclaim each other\'s checkouts');
     assert.equal(worktreeRoot(root, { repository: 'owner/project', run: {} }, { GRAPHYARD_DATA_HOME: '/srv/graphyard' }), fallback);
 
-    // No generated prompt and no code path hardcodes /tmp: a prompt for a root elsewhere never
-    // mentions it, and the sources that place checkouts hold no such literal. This checkout's own
+    // No generated prompt or checkout allocation hardcodes /tmp. The filesystem/socket boundary
+    // names private namespace aliases there; their host source is the allocated session scratch.
+    // This checkout's own
     // path is an input, not something generated: the launcher and the runner's default data root
     // (GRAPHYARD_DATA_HOME, tests/helpers/run-tests.ts) sit under it, and a shadow trial checks the
     // merge out under /var/tmp/gy-c* (GY-1639), so it is read out of the prompt before the check.
@@ -180,7 +181,15 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     const split = async (directory: string) => (await readdir(join(sources, directory))).filter(name => name.endsWith('.ts')).map(name => `${directory}/${name}`);
     for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', ...await split('master'), 'master-daemon.ts', ...await split('daemon'), 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {
       const code = (await readFile(join(sources, file), 'utf8')).split('\n').filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
-      assert.doesNotMatch(code, /['"`]\/tmp\b|tmpdir\(\)/, `${file} places nothing under the temporary directory`);
+      assert.doesNotMatch(code, /tmpdir\(\)/, `${file} never allocates from the host temporary directory`);
+      if (!['master/confinement.ts', 'master/socket-confinement.ts'].includes(file))
+        assert.doesNotMatch(code, /['"`]\/tmp\b/, `${file} places nothing under the temporary directory`);
+    }
+    for (const own of [produced.checkout, reviewed.checkout]) {
+      const wrapper = (await import('../src/master/confinement.js')).readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: own });
+      for (const alias of ['/tmp', '/var/tmp']) {
+        assert.ok(wrapper.some((word, index) => word === '--bind' && wrapper[index + 1] === join(own, '.graphyard', 'scratch') && wrapper[index + 2] === alias), 'temporary aliases bind only the allocated session scratch');
+      }
     }
   } finally { await cleanup(); }
 });

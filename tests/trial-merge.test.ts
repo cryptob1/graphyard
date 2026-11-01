@@ -353,8 +353,8 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     assert.ok(!child.cwd.startsWith(`${shared}/`), `the ${outcome} trial's checkout is never made in the poisoned tmp`);
     const near = probe === durable && usable ? `${clean}/${trialCheckoutPrefix}` : `${base}/`;
     assert.ok(child.cwd.startsWith(near) && child.cwd.endsWith('/checkout'), `its checkout is made in ${near}: ${child.cwd}`);
-    // npm, which runs the build, keeps node's compile cache in the tmpdir it is given; nothing else is there.
-    assert.deepEqual(child.tmpEntries.filter(entry => entry !== 'node-compile-cache'), [], 'it is empty when the suite starts: no node_modules, no .git');
+    // The namespace prepares private HOME/runtime directories; npm may add its compile cache.
+    assert.deepEqual(child.tmpEntries.filter(entry => !['node-compile-cache', 'home', 'runtime'].includes(entry)), [], 'only namespace scratch exists when the suite starts: no node_modules, no .git');
     assert.equal(existsSync(child.tmpdir), false, `it is removed with the checkout after a ${outcome}`);
     assert.equal(existsSync(tempOwnerMarker(child.tmpdir)), false, `its owner marker goes with it after a ${outcome}`);
     assert.equal(existsSync(child.cwd), false, `the checkout goes with it after a ${outcome}`);

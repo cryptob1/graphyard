@@ -4,6 +4,7 @@ import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, st
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { slotsDirectoryVariable } from './verification-slots.js';
+import { confinedRuntimeArgs } from '../worker-sandbox.js';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
 import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, nonInteractiveLaunch } from '../harness.js';
@@ -245,6 +246,7 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
 export const launchProgram = (kind: string) => nonInteractiveLaunch[kind]?.program ?? kind;
 /** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime, its arguments and the file references. */
 export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = []) {
+  if (wrap.length) args = confinedRuntimeArgs(kind, args);
   const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
   const own = launchRequestContracts[kind];
   const request = files.request && own ? own(requestReference) : undefined;

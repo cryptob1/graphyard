@@ -155,8 +155,9 @@ export function trialConfinement(hidden: readonly string[], reexposed: readonly 
   // Its own PID namespace and a fresh /proc, so no host process's /proc/<pid>/root leads back past the masks.
   const scratch = binds.at(-1);
   if (!scratch) throw new Error('A trial sandbox requires an allocated writable directory');
-  // Keep short scratch paths for test Unix sockets while preserving the allocated home/caches.
-  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch, { ...environment, ...trialTemporaryVariables('/tmp') }, binds),
+  // Keep the short allocated temporary path in the child: nested trials and cleanup
+  // must refer to their own allocation, including through the namespace aliases.
+  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch, environment, binds),
     ...masks, ...readable.filter(existsSync).map(path => realpathSync(path)).flatMap(path => ['--ro-bind', path, path]),
     ...binds.flatMap(path => ['--bind', path, path]),
     ...processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), secretsBus: null }, []), '--',

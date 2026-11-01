@@ -69,8 +69,11 @@ test('unit:worker-sandbox-grants-git-admin-dir — every runtime that takes a sa
     // admin directory, and the built grant writes every path.
     if (codexInstalled) {
       const base = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: {} }, null, { writable: [fixture.commonDir] }).args;
-      assert.throws(() => verifyWorkerSandbox({ kind: 'codex', args: base }, fixture.worktree, writablePaths(paths)), (error: any) => error instanceof WorkerSandboxError && error.path === fixture.gitDir);
-      assert.deepEqual(verifyWorkerSandbox({ kind: 'codex', args: grantWorkerPaths('codex', base, writablePaths(paths), fixture.worktree) }, fixture.worktree, writablePaths(paths)).verified, writablePaths(paths));
+      const environment = { TMPDIR: fixture.root };
+      // Give this standalone native-sandbox fixture private app-server socket storage too.
+      const native: SandboxExec = (command, args, options) => execFileSync('bwrap', ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc', '--bind', fixture.root, fixture.root, '--bind', fixture.root, '/tmp', '--', command, ...args], { ...options, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      assert.throws(() => verifyWorkerSandbox({ kind: 'codex', args: base, environment }, fixture.worktree, writablePaths(paths), native), (error: any) => error instanceof WorkerSandboxError && error.path === fixture.gitDir);
+      assert.deepEqual(verifyWorkerSandbox({ kind: 'codex', args: grantWorkerPaths('codex', base, writablePaths(paths), fixture.worktree), environment }, fixture.worktree, writablePaths(paths), native).verified, writablePaths(paths));
     }
   } finally { await rm(fixture.root, { recursive: true, force: true }); }
 });
@@ -213,11 +216,12 @@ test('integration:sandbox-probe-inside-confinement-fails-launch — the sandbox 
     assert.ok(socketPolicy > args.indexOf('--'), 'the socket policy runs inside the mounts before the runtime probe');
     const runtime = args.indexOf('--', socketPolicy);
     assert.deepEqual(args.slice(runtime + 1, runtime + 3), ['codex', 'sandbox']);
-    assert.ok(args.some(arg => arg.includes(`"${fixture.commonDir}"="write"`)), 'the probe\'s sandbox grants the common Git directory for packed-refs (GY-2977)');
+    assert.ok(args.some((arg, index) => arg === '--bind' && args[index + 1] === fixture.commonDir), 'the outer sandbox grants the common Git directory for packed-refs');
+    assert.deepEqual(args.slice(runtime + 3, runtime + 5), ['-P', ':danger-full-access'], 'Codex uses the established OS boundary without nesting bubblewrap');
 
     // A confinement that lets the sandbox start passes the same probe through to it.
     const wrapper = [bwrap, '--ro-bind', fixture.main, fixture.main, '--'];
-    const through: SandboxExec = (cmd, words, options) => { assert.equal(cmd, bwrap); assert.deepEqual(words.slice(0, 4), wrapper.slice(1)); return codexLikeSandbox([])(words[4], words.slice(5), options); };
+    const through: SandboxExec = (cmd, words) => { assert.equal(cmd, bwrap); assert.deepEqual(words.slice(0, 4), wrapper.slice(1)); assert.deepEqual(words.slice(4, 8), ['codex', 'sandbox', '-P', ':danger-full-access']); return 'writable\n'; };
     const granted = grantWorkerPaths('codex', ['--sandbox', 'workspace-write'], writablePaths(workerPaths(fixture.worktree)), fixture.worktree);
     assert.deepEqual(verifyWorkerSandbox({ kind: 'codex', args: granted, confinement: wrapper }, fixture.worktree, writablePaths(workerPaths(fixture.worktree)), through).verified, writablePaths(workerPaths(fixture.worktree)));
     // A runtime with no sandbox of its own is probed inside the confinement too, not from the launcher.

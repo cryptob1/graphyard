@@ -1,4 +1,5 @@
 import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
+import { confinedRuntimeArgs } from '../worker-sandbox.js';
 import { randomUUID } from 'node:crypto';
 import { closeSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -171,6 +172,7 @@ const quoted = (value: string) => `'${value.replace(/'/g, `'\\''`)}'`;
  * coordinator checkout the confinement makes read-only, so only the shell outside it can write there.
  */
 export function detachedLaunch(directory: string, id: string, command: string, args: string[], containment: RunContainment, confinement: readonly string[] = [], boundSeconds?: number) {
+  if (confinement.length) args = confinedRuntimeArgs(command, args);
   const files = runFiles(directory), pending = `${files.exit}.tmp`;
   const confined = confinement.map(word => `${quoted(word)} `).join('');
   // A bound the run enforces on itself: a scratch run has no watcher once the process that

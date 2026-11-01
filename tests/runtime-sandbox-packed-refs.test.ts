@@ -70,7 +70,7 @@ const refUpdateScript = [
   'if printf x > "$root/.git/index" 2>/dev/null; then echo INDEX-WRITE-ALLOWED; else echo INDEX-WRITE-BLOCKED; fi',
 ].join('\n');
 
-test('unit:runtime-sandbox-ref-updates-on-packed-refs — inside the outer confinement wrapping each probeable runtime sandbox, every packed-ref update works: commit, merge, branch -f and update-ref -d each succeed while the coordinator\'s main and index stay refused; without the common-dir grant the Codex case fails on packed-refs.lock', async () => {
+test('unit:runtime-sandbox-ref-updates-on-packed-refs — Codex uses the outer filesystem and socket boundary: packed-ref commit, merge, branch and deletion work while coordinator main and index stay refused; a standalone native sandbox still needs the common-dir grant', async () => {
   const kinds = probeableRuntimes();
   assert.ok(kinds.includes('codex'), 'Codex is on PATH so its sandbox can be probed');
   if (process.platform !== 'linux') return;
@@ -86,10 +86,12 @@ test('unit:runtime-sandbox-ref-updates-on-packed-refs — inside the outer confi
         const oldWritable = writablePaths(paths).filter(path => path !== paths.commonDir);
         const oldArgs = grantWorkerPaths(kind, ['--sandbox', 'workspace-write'], oldWritable, worktree);
         const oldConf = await coordinatorConfinement({ kind, args: oldArgs, coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true, bwrap: 'bwrap' });
-        assert.equal(oldConf?.mechanism, 'read-only-mount');
+        // This negative fixture exercises the native sandbox alone, before the socket policy.
+        // Its private /tmp also avoids reaching any real app-server socket on the host.
+        const mounts = oldConf!.wrapper.slice(0, oldConf!.wrapper.indexOf('--') + 1);
         const oldInner = runtimeSandboxes[kind].probe(oldArgs, worktree, ['/bin/sh', '-c', refUpdateScript, 'sh', worktree, root, otherTip]);
-        const oldRun = spawnSync(oldConf!.wrapper[0], [...oldConf!.wrapper.slice(1), oldInner.command, ...oldInner.args],
-          { encoding: 'utf8', timeout: 240_000, killSignal: 'SIGKILL', cwd: worktree });
+        const oldRun = spawnSync(mounts[0], [...mounts.slice(1), oldInner.command, ...oldInner.args],
+          { encoding: 'utf8', timeout: 240_000, killSignal: 'SIGKILL', cwd: worktree, env: { ...process.env, TMPDIR: oldBase } });
         const oldOutput = `${oldRun.stdout}\n${oldRun.stderr}`;
         assert.ok(oldOutput.includes('packed-refs.lock') && /Read-only file system/.test(oldOutput),
           `without the common-dir grant Codex fails on packed-refs.lock EROFS: ${oldOutput.slice(0, 600)}`);
@@ -109,7 +111,7 @@ test('unit:runtime-sandbox-ref-updates-on-packed-refs — inside the outer confi
       const confinement = await coordinatorConfinement({ kind, args, coordinatorRoot: root, sessionDirectory: worktree, platform: 'linux', mountNamespaceWorks: true, bwrap: 'bwrap' });
       assert.ok(confinement, `${kind} worker launch carries a confinement`);
       assert.equal(confinement.mechanism, 'read-only-mount', `${kind} carries the outer mount once the common Git directory is granted`);
-      const inner = runtimeSandboxes[kind].probe(args, worktree, ['/bin/sh', '-c', refUpdateScript, 'sh', worktree, root, otherTip]);
+      const inner = runtimeSandboxes[kind].probe(args, worktree, ['/bin/sh', '-c', refUpdateScript, 'sh', worktree, root, otherTip], true);
       const run = spawnSync(confinement.wrapper[0], [...confinement.wrapper.slice(1), inner.command, ...inner.args],
         { encoding: 'utf8', timeout: 240_000, killSignal: 'SIGKILL', cwd: worktree });
       assert.equal(run.status, 0, `${kind} nested sandbox ran successfully: ${run.stderr}`);
