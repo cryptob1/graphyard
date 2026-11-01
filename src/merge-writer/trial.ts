@@ -852,6 +852,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   };
   // A child a signal ended, or one the host could not start or capture, says nothing about the merge.
   const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
+  // Mise shims and a missing node/npm cannot start the host toolchain; no install/build verdict exists.
+  const toolchainStartFailed = (ended: Ended) => !ended.ok && /^(?:mise ERROR\b|.*(?:env:|sh:).*\b(?:node|npm|npx)\b.*(?:not found|No such file or directory))/m.test(ended.out.replace(ansiEscape, ''));
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
@@ -918,7 +920,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
         else if (await holds('package-lock.json')) {
           const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
-          if (hostEnded(installed)) throw runnerFailure('install', installed);
+          if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
           if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
         const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
@@ -928,9 +930,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           enter('build');
           enterStep('build');
           const built = await child('build', 'npm', ['run', 'build']);
-          // Mise shims and a missing node/npm cannot start the host toolchain; no build verdict exists.
-          const startFailure = /^(?:mise ERROR\b|.*(?:env:|sh:).*\b(?:node|npm|npx)\b.*(?:not found|No such file or directory))/m.test(built.out.replace(ansiEscape, ''));
-          if (hostEnded(built) || !built.ok && startFailure) throw runnerFailure('build', built);
+          if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
         // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
