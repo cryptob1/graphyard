@@ -90,6 +90,20 @@ test('integration:worker-host-filesystem-isolation — all runtimes, terminal ro
   assert.equal(readFileSync(join(f.unrelated, 'sentinel'), 'utf8'), 'protected\n');
 });
 
+test('integration:worker-home-deletion-regression — the real regression remains executable inside the merge-trial boundary', async () => {
+  const f = await fixture();
+  // The merge writer runs this file under its own socket policy. A direct host
+  // run must exercise that composition too, rather than report a false pass
+  // while the bound E2E case cannot establish its inner sandbox in production.
+  const outer = trialConfinement([f.config], [f.base]);
+  run(outer, f.worktree, f.wrapper[0], [...f.wrapper.slice(1), process.execPath,
+    '-e', deniedOperations, f.home, f.unrelated, f.root, f.worktree]);
+  run(outer, f.worktree, f.wrapper[0], [...f.wrapper.slice(1), '/bin/sh', '-ec',
+    'echo nested > nested; git add nested; git -c user.name=Fixture -c user.email=fixture@example.invalid commit -qm nested']);
+  assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
+  assert.equal(readFileSync(join(f.worktree, 'nested'), 'utf8'), 'nested\n');
+});
+
 test('integration:worker-home-deletion-regression — the GY-3044 command scope mistake leaves fake HOME intact while editing, commits, builds, checks and allocated scratch cleanup work unattended', async () => {
   const f = await fixture();
   const before = git(f.worktree, 'rev-parse', 'HEAD');
