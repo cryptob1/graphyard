@@ -36,9 +36,4 @@ export function unclaimedLaunch(work: Pick<Work, 'epoch' | 'lease'>, handle: Pic
   const epoch = handleEpoch(handle);
   return Number.isFinite(epoch) && epoch > work.epoch && !(work.lease && work.lease.epoch >= epoch);
 }
-/** A handle nothing has observed yet whose launch is still under way: inside the launch grace, or held by its attempt's lease. */
-export function launchingSession(work: Pick<Work, 'lease'>, handle: Pick<SessionHandle, 'id' | 'kind' | 'principal' | 'epoch' | 'pane' | 'agentName' | 'state' | 'observed' | 'startedAt'>, clock: number, grace = sessionLaunchGraceMs) {
-  if (handle.state !== 'running' || handle.observed) return false;
-  const started = Date.parse(handle.startedAt);
-  return (Number.isFinite(started) && clock - started < grace) || launchHeldByLease(work, handle, clock);
-}
+

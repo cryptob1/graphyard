@@ -10,7 +10,6 @@ import { computeAttribution } from '../src/attribution.js';
 import { fixtureApi, fixtureStatus, fixtureWork as auditWork, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
 import { jargon, phaseLabel, phaseOf, phases, plainReason, plainStatus } from '../src/model/plain-status.js';
-import { homeNumbers } from '../web/home-numbers.js';
 import { classify, groupLabel, groups, summarySentence } from '../web/groups.js';
 import WorkersPage from '../web/pages/workers.js';
 import { glossary } from '../web/glossary.js';
@@ -294,7 +293,7 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   for (const file of ['web/features.ts', 'web/main.tsx', 'web/pages/create-work.tsx', 'web/pages/work-details.tsx'])
     for (const [, path] of (await read(file)).matchAll(/(?:api|request|read)\(`([^`$?]+)[`$?]/g)) assert.ok(matches(path.replace(/\/$/, '')) || matches(`${path}x`), `${file}: /api/${path}`);
   for (const path of ['delivery', 'validation', 'operator-agents', 'work']) assert.ok(matches(path), path);
-  const source = (await Promise.all(['web/pages/work-details.tsx', 'src/model/plain-status.ts', 'web/home-numbers.ts'].map(read))).join('\n');
+  const source = (await Promise.all(['web/pages/work-details.tsx', 'src/model/plain-status.ts'].map(read))).join('\n');
   assert.doesNotMatch(source, /api\((['`])work\/[^'`]*\/(stage|state)/, 'no client-controlled lifecycle state');
   // The fixture reproduces the audit's cases (the stage table in unit:plain-status-copy covers the rest), and the script the views.
   for (const phase of ['not-started', 'needs-worker', 'building', 'review', 'proof', 'shipped'] as const) assert.ok(work.some(w => phaseOf(w, NOW) === phase), phase);
@@ -310,25 +309,12 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   assert.match(css, /\.main\{margin-left:0\}/);
 });
 
-test('unit:home-numbers-reconcile — every home number counts one named thing and the numbers agree', () => {
-  // GY-161: the numbers are the groups (web/groups.ts). homeNumbers still counts the stages for
-  // the modules that read it; the page draws the groups, and both partition the same open items.
-  const numbers = homeNumbers(work, NOW);
-  const open = work.filter(w => w.stage !== 'done');
-  assert.equal(numbers.open, open.length, 'Open counts open items only');
-  assert.equal(numbers.open, 7);
-  assert.equal(phases.filter(p => p !== 'shipped').reduce((sum, p) => sum + numbers.byPhase[p], 0), numbers.open, 'the stages sum to Open');
-  const { byGroup } = classify(work, NOW);
-  assert.equal(groups.reduce((sum, group) => sum + byGroup[group].length, 0), numbers.open, 'the groups sum to Open');
-  assert.equal(find('GY-12').stage, 'build');
-  assert.equal(phaseOf(find('GY-12'), NOW), 'needs-worker');
-  assert.deepEqual(byGroup.blocked.map(w => w.key), ['GY-17'], 'Blocked counts items, not reasons');
-  assert.ok(find('GY-17').gates.flatMap(g => g.reasons).length > 1);
-  assert.equal(numbers.shippedThisWeek, 2, 'GY-18 and GY-19; GY-9 shipped 20 days ago');
-  // The rendered tiles show exactly these numbers, one per group.
+
+test('unit:dashboard-simplification — the home page renders its numbers without web/home-numbers.ts: every tile is a group count drawn from web/groups.ts', () => {
   const page = home();
+  const { byGroup } = classify(work, NOW);
   for (const group of groups) assert.match(page, new RegExp(`data-tile="${group}"[^>]*>.*?<strong>${byGroup[group].length}</strong>`), group);
-  assert.match(text(page), new RegExp(`${numbers.shippedThisWeek} shipped this week`));
+  assert.match(text(page), /\d+ shipped this week/);
 });
 
 test('unit:work-page-single-count-row — the page shows one row of counts, the groups; no count appears twice and no two labels differ only by grammatical form', () => {

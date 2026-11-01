@@ -233,25 +233,3 @@ export function parseContract(source: string, file = contractFile): ReleaseContr
 }
 export const loadContract = async (root: string) => parseContract(await readFile(join(root, contractFile), 'utf8'));
 
-/**
- * Pure: the pre-cut check (GY-1378). Every case an outcome binds exists, validates, targets uat and
- * is required, and every required case is bound to at least one outcome. Each refusal names the
- * outcome and the case, so a broken binding stops the cut instead of surfacing as a UAT failure.
- */
-export function checkContract(contract: ReleaseContract, inspected: Awaited<ReturnType<typeof inspectCases>>) {
-  const refusals: string[] = [];
-  for (const outcome of contract.outcomes) for (const id of outcome.cases) {
-    const bound = `outcome ${outcome.id} binds case ${id}`;
-    const invalid = inspected.invalid.find(entry => entry.id === id);
-    const found = inspected.cases.find(entry => entry.definition.id === id);
-    if (invalid) refusals.push(`${bound}, which is invalid: ${invalid.error.split('\n')[0]}`);
-    else if (!found) refusals.push(`${bound}, which does not exist under ${caseDirectory}/`);
-    else {
-      if (found.definition.target !== 'uat') refusals.push(`${bound}, which targets ${found.definition.target}, not uat`);
-      if (!found.definition.required) refusals.push(`${bound}, which is not required`);
-    }
-  }
-  for (const entry of inspected.cases) if (entry.definition.required && !contract.outcomes.some(outcome => outcome.cases.includes(entry.definition.id)))
-    refusals.push(`required case ${entry.definition.id} (${entry.file}) is bound to no outcome`);
-  return { passed: refusals.length === 0, outcomes: contract.outcomes.map(outcome => ({ id: outcome.id, cases: outcome.cases })), refusals };
-}

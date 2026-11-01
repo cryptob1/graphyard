@@ -117,10 +117,9 @@ const fixtureFiles = {
   // With a `kill-build` marker the build child dies on a signal, as a host out of memory ends it.
   'build.js': "const { existsSync } = require('node:fs'); console.log('ENV:' + JSON.stringify({ keys: Object.keys(process.env), global: process.env.GIT_CONFIG_GLOBAL, nosystem: process.env.GIT_CONFIG_NOSYSTEM, home: process.env.HOME, tmpdir: require('node:os').tmpdir(), tmpEntries: require('node:fs').readdirSync(require('node:os').tmpdir()), tmpVariables: [process.env.TMPDIR, process.env.TMP, process.env.TEMP], cwd: process.cwd() })); require('node:fs').writeFileSync(require('node:path').join(require('node:os').tmpdir(), 'build-scratch'), 'x'); if (existsSync('poison-root')) require('node:fs').writeFileSync(require('node:path').join(require('node:path').dirname(require('node:os').tmpdir()), 'package.json'), '{}'); if (existsSync('stick-tmp')) { const stuck = require('node:path').join(require('node:os').tmpdir(), 'stuck'); require('node:fs').mkdirSync(stuck); require('node:fs').writeFileSync(require('node:path').join(stuck, 'f'), 'x'); require('node:fs').chmodSync(stuck, 0o500); } if (existsSync('break-build')) { console.error('build broke'); process.exit(1); } if (existsSync('kill-build')) { console.error('build killed'); process.kill(process.pid, 'SIGKILL'); }\n",
   // The stand-in for scripts/ci-tests.mjs: `affected` answers the changed test files, or a full selection (every pre-merge
-  // file, never a soak) when package.json changed; with a `full-silent` marker it lists nothing for a full selection, as the
-  // script did before GY-1522. `select` lists the pre-merge suite, as the real one does outside Actions.
-  'scripts/ci-tests.mjs': "import { existsSync, readdirSync } from 'node:fs'; const [command, ...files] = process.argv.slice(2); const suite = () => readdirSync('tests').filter(name => name.endsWith('.test.ts') && !name.startsWith('soak')).sort().map(name => 'tests/' + name);\n"
-    + "if (command === 'select') console.log(suite().join('\\n')); else if (files.includes('package.json')) { console.log('full: package.json changes the install'); if (!existsSync('full-silent')) console.log(suite().join('\\n')); } else { console.log('affected: selected'); for (const file of files) if (file.startsWith('tests/')) console.log(file); }\n",
+  // file, never a soak) when package.json changed.
+  'scripts/ci-tests.mjs': "import { readdirSync } from 'node:fs'; const [command, ...files] = process.argv.slice(2); const suite = () => readdirSync('tests').filter(name => name.endsWith('.test.ts') && !name.startsWith('soak')).sort().map(name => 'tests/' + name);\n"
+    + "if (files.includes('package.json')) { console.log('full: package.json changes the install'); console.log(suite().join('\\n')); } else { console.log('affected: selected'); for (const file of files) if (file.startsWith('tests/')) console.log(file); }\n",
   // The stand-in runner: it runs only the listed files and refuses to run without a list. It writes the real runner's
   // per-file records under --durations (a `bad` file fails), names the tree it ran in (`tree-marker`), and ends as a
   // runner that names no failing test does: with a `crash` file listed it prints every credential-shaped variable it sees and exits 3 after
@@ -178,7 +177,7 @@ test('integration:trial-run-build-and-tests — the merge commit is checked out 
   assert.equal(existsSync(noBuild.base) ? readdirSync(noBuild.base).length : 0, 0, 'and after a failed build');
 });
 
-test('integration:trial-run-build-and-tests — a full selection runs exactly the pre-merge files ci-tests lists, never the release-candidate suites, and the verdict counts the files that ran; a merge whose own ci-tests lists none for a full selection gets them from `select`', async () => {
+test('integration:trial-run-build-and-tests — a full selection runs exactly the pre-merge files ci-tests lists, never the release-candidate suites, and the verdict counts the files that ran', async () => {
   const repo = await fixture();
   const suite = { 'tests/a.test.ts': 'x\n', 'tests/bad.test.ts': 'x\n', 'tests/soak-day.test.ts': 'x\n' };
   const full = repo.commitOnBase({ ...suite, 'package.json': JSON.stringify({ name: 'fixture', version: '2', scripts: { build: 'node build.js' } }) }, 'install change');
@@ -188,10 +187,6 @@ test('integration:trial-run-build-and-tests — a full selection runs exactly th
   assert.match(listed.result.logTail, /--files-from/, 'the runner always gets the list');
   assert.ok(!listed.result.logTail.includes('ok - tests/soak-day.test.ts'), `the soak never runs in a trial:\n${listed.result.logTail}`);
   assert.equal(existsSync(listed.base) ? readdirSync(listed.base).length : 0, 0);
-  const silent = repo.commitOnBase({ ...suite, 'full-silent': '', 'package.json': JSON.stringify({ name: 'fixture', version: '3', scripts: { build: 'node build.js' } }) }, 'older ci-tests');
-  const selected = await trialOf(repo, silent, ['package.json']);
-  assert.deepEqual(selected.result.tests, { passed: 1, failed: ['tests/bad.test.ts'], files: 2 }, selected.result.logTail);
-  assert.match(selected.result.logTail, /ci-tests\.mjs select/, 'the pre-merge suite comes from `select` when `affected` names no file');
 });
 
 test('integration:trial-run-build-and-tests — a trial checkout that cannot be removed is reported: runTrial rejects with TrialCleanupError naming the directory and carrying the verdict it reached, or the failure it met', async () => {
@@ -269,7 +264,7 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
   for (const name of withheld.filter(name => !['TMPDIR', 'TMP', 'TEMP'].includes(name))) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
   assert.ok(seen.keys.includes('KEPT'));
   assert.deepEqual([seen.global, seen.nosystem], ['/dev/null', '1']);
-  assert.equal(seen.home, '/home/me', 'the home stays');
+  assert.notEqual(seen.home, '/home/me', 'the child\'s home is the trial\'s own fresh one (GY-2997)');
   assert.notEqual(seen.tmpdir, '/var/tmp', 'the host\'s TMPDIR is withheld (GY-1549); the trial\'s own replaces it (GY-1565)');
 });
 

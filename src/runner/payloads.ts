@@ -75,7 +75,6 @@ export const piRuntimeSchema = z.object({
   /** Retired (GY-2874): the bound on one approver run; an existing master.json still loads. */
   approverTimeoutMinutes: z.unknown().optional(),
 }).strict().transform(({ approverTimeoutMinutes: _approverTimeoutMinutes, ...kept }) => kept);
-export type PiRuntime = z.infer<typeof piRuntimeSchema>;
 
 /** The runtime a narrow role launches on; the producer runs on Pi only for the unit group. */
 export function narrowRoleRuntime(run: { runtimes?: z.infer<typeof narrowRoleRuntimeSchema> } | undefined, role: 'producer', group?: string): NarrowRoleRuntime {
