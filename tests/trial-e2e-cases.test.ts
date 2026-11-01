@@ -202,17 +202,18 @@ test('unit:trial-serves-head-and-runs-bound-cases — a failing step refuses the
   assert.equal(linkedCases(work, null).linked[0].head, 'fail', 'the Tests panel shows the failing case');
 });
 
-test('unit:trial-serves-head-and-runs-bound-cases — an endpoint another application already answers is refused, never counted for the head', async () => {
+test('unit:trial-serves-head-and-runs-bound-cases — a host loopback listener cannot answer for or collide with the privately served head', async () => {
   const withCase = await commitFiles({ 'e2e/cases/home-shows-change.json': JSON.stringify(passingCase) });
   const merged = await trialMerge(gitOfRoot, { head: withCase, baseTip });
   assert.ok('mergeSha' in merged);
-  // Another application holds the serve URL and would pass the case on the head's behalf.
-  const other = createServer((_request, response) => { response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ message: 'served' })); });
+  // The host port remains occupied, while the trial serves its own private port.
+  let reached = 0;
+  const other = createServer((_request, response) => { reached++; response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ message: 'served' })); });
   await new Promise<void>(resolve => other.listen(servePort, '127.0.0.1', resolve));
   try {
     const run = await trial(merged.mergeSha, ['src/change.ts', 'e2e/cases/home-shows-change.json']);
-    assert.deepEqual(run.proofs['e2e:home-shows-change'], { executed: 0, failed: 1 });
-    assert.match(trialFailureReason({ run })!, /already answers before the serve command starts/);
+    assert.deepEqual(run.proofs['e2e:home-shows-change'], { executed: 1, failed: 0 });
+    assert.equal(reached, 0, 'neither readiness nor the case reached the host application');
   } finally { await new Promise<void>(resolve => other.close(() => resolve())); }
 });
 

@@ -1,14 +1,14 @@
 {
   "id": "worker-filesystem-isolation",
   "title": "Worker commands cannot change the operator home or escape through host command sockets",
-  "description": "Real bubblewrap namespaces exercise all launched roles and merge trials against disposable host-home and unrelated-project fixtures. The incident cleanup mistake leaves sentinels intact; allowed editing, Git, builds, checks, runtime state and scratch cleanup run without input. Host devices and command-launch sockets remain inaccessible.",
+  "description": "Real private-root merge-trial containers and nested bubblewrap namespaces exercise all launched roles against disposable host-home and unrelated-project fixtures. The incident cleanup mistake leaves sentinels intact; allowed editing, Git, builds, checks, runtime state and scratch cleanup run without input. Host devices and command-launch sockets remain inaccessible.",
   "tags": ["isolation", "workers"],
   "target": "any",
   "required": false,
   "steps": [{
     "kind": "command",
     "name": "Run the real filesystem, incident and socket regressions",
-    "run": "node --import tsx --test tests/worker-filesystem-isolation.test.ts",
+    "run": "node --import tsx --test tests/trial-container.test.ts tests/worker-filesystem-isolation.test.ts",
     "timeoutSeconds": 180
   }]
 }

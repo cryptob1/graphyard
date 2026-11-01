@@ -13,7 +13,7 @@ test('e2e:worker-filesystem-isolation — the bound command case runs the real h
   const root = join(import.meta.dirname, '..');
   const file = 'e2e/cases/worker-filesystem-isolation.json';
   const definition = parseCase(file, readFileSync(join(root, file), 'utf8'));
-  const scratch = await temporaryDirectory('fs-container');
+  const scratch = await temporaryDirectory('fs-container', root);
   const environment = { ...trialEnvironment(), HOME: scratch, TMPDIR: '/tmp', PATH: '/usr/local/bin:/usr/bin:/bin' };
   const session = confinedSession(trialContainerWords([root, scratch], trialContainerDependencies(root)), environment);
   let report;
@@ -21,5 +21,5 @@ test('e2e:worker-filesystem-isolation — the bound command case runs the real h
     root, url: 'http://unused.invalid', token: 'fixture-token',
     artifactsDirectory: await temporaryDirectory('fs-e2e'), processRunner: session.run, hostEnvironment: environment,
   }); } finally { await session.close(); }
-  assert.equal(report.cases[0]?.outcome, 'pass', JSON.stringify(report.cases[0]?.failingStep));
+  assert.equal(report.cases[0]?.outcome, 'pass', JSON.stringify(report.cases[0]));
 });

@@ -55,10 +55,12 @@ function run(wrapper: readonly string[], cwd: string, program: string, args: str
 const deniedOperations = `
 const fs = require('node:fs'), assert = require('node:assert/strict'), path = require('node:path');
 const [home, unrelated, root, worktree] = process.argv.slice(1);
-const deny = fn => assert.throws(fn, error => ['EROFS', 'EACCES', 'EPERM', 'EBUSY', 'EXDEV'].includes(error.code));
+const protectedVisible = true;
+const deny = fn => assert.throws(fn, error => ['EROFS', 'EACCES', 'EPERM', 'EBUSY', 'EXDEV', ...(!protectedVisible ? ['ENOENT'] : [])].includes(error.code));
 for (const directory of [home, unrelated, root]) {
   const file = path.join(directory, directory === root ? 'package.json' : 'sentinel');
-  assert.ok(fs.readFileSync(file).length, 'protected host files are visible');
+  if (protectedVisible) assert.ok(fs.readFileSync(file).length, 'protected host files are visible');
+  else assert.equal(fs.existsSync(file), false, 'host files are excluded from the private root');
   deny(() => fs.writeFileSync(path.join(directory, 'created'), 'bad'));
   deny(() => fs.writeFileSync(file, 'bad'));
   deny(() => fs.renameSync(file, file + '.moved'));
@@ -98,7 +100,7 @@ test('integration:worker-home-deletion-regression — the real regression remain
   // The bound E2E runner supplies the real outer container. Within that private
   // root, this extra mount namespace must still permit the session's mounts.
   // Socket Landlock belongs to the inner session, after its mounts.
-  const outer = ['bwrap', '--unshare-user', '--ro-bind', '/', '/', '--bind', f.base, f.base, '--'];
+  const outer = ['bwrap', '--unshare-user', '--unshare-pid', '--ro-bind', '/', '/', '--proc', '/proc', '--dev', '/dev', '--bind', f.base, f.base, '--'];
   run(outer, f.worktree, f.wrapper[0], [...f.wrapper.slice(1), process.execPath,
     '-e', deniedOperations, f.home, f.unrelated, f.root, f.worktree]);
   run(outer, f.worktree, f.wrapper[0], [...f.wrapper.slice(1), '/bin/sh', '-ec',
@@ -217,7 +219,7 @@ test('integration:worker-control-socket-isolation — host Docker, systemd and c
 });
 
 
-test('integration:worker-host-filesystem-isolation — runTrialAttempt restores a masked coordinator and shared dependencies read-only while only its allocated directories are writable', async () => {
+test('integration:worker-host-filesystem-isolation — runTrialAttempt excludes the coordinator and exposes only required Git and dependency state read-only', async () => {
   const f = await fixture(true);
   const dependency = join(f.root, 'node_modules', 'fixture-dependency');
   mkdirSync(dependency, { recursive: true });
@@ -233,7 +235,7 @@ test('integration:worker-host-filesystem-isolation — runTrialAttempt restores 
     const assert = require('node:assert/strict'), fs = require('node:fs');
     assert.equal(fs.readFileSync('built', 'utf8'), 'built');
     assert.throws(() => fs.readFileSync(${JSON.stringify(join(f.config, 'operator.token'))}), { code: 'ENOENT' });
-    { ${deniedOperations.replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
+    { ${deniedOperations.replace('const protectedVisible = true', 'const protectedVisible = false').replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
   `);
   git(f.root, 'add', 'package.json', 'package-lock.json', 'build.cjs', 'test.cjs');
   git(f.root, 'commit', '-qm', 'trial checks');
@@ -280,7 +282,7 @@ test('integration:worker-home-deletion-regression — cold-cache dashboard trial
     assert.equal(fs.readFileSync('built', 'utf8'), 'built');
     assert.equal(fs.readFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'utf8'), 'installed');
     assert.equal(fs.readFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'utf8'), 'cached');
-    { ${deniedOperations.replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
+    { ${deniedOperations.replace('const protectedVisible = true', 'const protectedVisible = false').replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
     console.log('browser cache consumed');
   `);
   git(f.root, 'add', 'package.json', 'package-lock.json', 'browser.cjs');
