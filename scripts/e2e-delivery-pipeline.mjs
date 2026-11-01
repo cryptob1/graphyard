@@ -33,8 +33,17 @@ await call(`${work}/ready`, token, {});
 const claim = await call('assignments/claim', workerToken, { work: item.id });
 assert.equal(claim.assigned?.id, item.id, JSON.stringify(claim));
 const epoch = claim.assigned.epoch, branch = `graphyard/${item.key.toLowerCase()}-${epoch}`;
-await git('fetch', '-q', 'origin', 'main');
-const baseTip = await git('rev-parse', 'origin/main');
+const trials = join(root, '..', 'trials');
+await mkdir(trials, { recursive: true });
+const events = [];
+const ports = mergeWriterReads({ baseBranch: 'main', repository: 'scratch/delivery', run: { mergeWriter: { deployKeyFile: join(trials, 'unused-key') } } }, root, defaultChildRun, {
+  base: trials, merger: async () => 'control-plane',
+  // These are the real trial and real children, with all scratch files under the serve directory.
+  trial: input => runMergeTrial({ ...input, checkoutRoots: [trials], temporaryRoots: [trials], retries: 0 }),
+  record: async (_item, event) => { await call(`${work}/merge-record`, coordinatorToken, event); events.push(event); },
+});
+
+const baseTip = await ports.fetch();
 const workspace = join(root, '..', item.key);
 await git('worktree', 'add', '-q', '-b', branch, workspace, baseTip);
 const workerGit = async (...args) => (await defaultChildRun('git', ['-C', workspace, ...args])).trim();
@@ -59,16 +68,6 @@ item = await call(work, token);
 assert.equal(item.observation.reviews[0].sha, head);
 assert.equal(item.observation.reviews[0].reviewer, 'e2e-independent-reviewer');
 assert.equal(nextToMerge([item], {}, Date.now())?.id, item.id, JSON.stringify(item.gates));
-
-const trials = join(root, '..', 'trials');
-await mkdir(trials, { recursive: true });
-const events = [];
-const ports = mergeWriterReads({ baseBranch: 'main', repository: 'scratch/delivery', run: { mergeWriter: { deployKeyFile: join(trials, 'unused-key') } } }, root, defaultChildRun, {
-  base: trials, merger: async () => 'control-plane',
-  // These are the real trial and real children, with all scratch files under the serve directory.
-  trial: input => runMergeTrial({ ...input, checkoutRoots: [trials], temporaryRoots: [trials], retries: 0 }),
-  record: async (_item, event) => { await call(`${work}/merge-record`, coordinatorToken, event); events.push(event); },
-});
 
 // Fault injection for AC-1: run the same case with the bare repository genuinely unwritable.
 async function writable(path, enabled) {

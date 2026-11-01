@@ -2,6 +2,7 @@
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun } from '../src/child-runner.ts';
+import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.ts';
 
 export async function deliveryFixture(directory) {
   const root = join(directory, 'repository'), origin = join(directory, 'origin.git');
@@ -19,6 +20,11 @@ export async function deliveryFixture(directory) {
   await git('commit', '-q', '-m', 'Scratch base');
   await defaultChildRun('git', ['init', '--bare', '-q', '-b', 'main', origin]);
   await git('remote', 'add', 'origin', origin);
-  await git('push', '-q', '-u', 'origin', 'main');
+  // Even fixture setup uses the merge writer's sole transport door.
+  const writer = mergeWriterReads({ baseBranch: 'main', repository: 'scratch/delivery', run: { mergeWriter: { deployKeyFile: join(directory, 'unused-key') } } }, root, defaultChildRun, {
+    merger: async () => 'control-plane', record: async () => {},
+  });
+  await writer.push((await git('rev-parse', 'HEAD')).trim(), '0'.repeat(40));
+  await writer.fetch();
   return { root, origin };
 }
