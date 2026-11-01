@@ -15,7 +15,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 /**
  * GY-1500: `graphyard install --provider local` (and `graphyard up --local`) runs the control plane
  * on this machine against an embedded Postgres cluster under ~/.config/graphyard/INSTALL/postgres,
- * supervised by a systemd user unit, with no Docker. Each test is named for the proof it produces.
+ * supervised by a systemd user unit. Docker is reserved for merge trials. Each test is named for the proof it produces.
  */
 // Loaded inside each test, so a tree without them fails as a test case, not at load.
 const local = () => import('../src/install/local.js');

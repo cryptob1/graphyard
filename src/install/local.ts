@@ -1,5 +1,5 @@
 // The local provider (GY-1500): the same server and Store code path as every other provider, on
-// this machine, against an embedded Postgres cluster under the install directory — no Docker.
+// this machine, against an embedded Postgres cluster under the install directory — the server and database need no Docker. Merge-trial commands use Docker.
 //
 // Everything it writes lives under ~/.config/graphyard/INSTALL/ like every provider's credentials:
 // postgres/ (0700) holds the cluster, its 0600 password file and its port, and local-server.json

@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap pyth
     && touch /etc/graphyard-trial
 # Native workspace-sandbox regression tool; no login or account is copied in.
 RUN npm install --global @openai/codex@0.166.0
+RUN find /usr/local/lib/node_modules/@openai -type f -name codex -exec ln -s '{}' /usr/local/bin/codex-linux-sandbox ';'
 USER node
 
 FROM node:24-bookworm-slim
