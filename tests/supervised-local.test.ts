@@ -175,7 +175,7 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   const supervised = withRoleDefaults(baseConfig({ supervision: 'supervised', ...identities, reviewers: [reviewer] }));
   assert.equal(supervised.reviewer, undefined); assert.equal(supervised.operatorAgent, undefined);
   // GY-1978: no pull request awaits the operator, so the reviewer profile answers every head in control-plane mode, which needs no App.
-  assert.equal(selectReviewerProfile(supervised, 'control-plane').profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
+  assert.equal(selectReviewerProfile(supervised).profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
   // The same identities in autonomous mode are kept.
   const autonomous = withRoleDefaults(baseConfig(identities));
   assert.ok(autonomous.reviewer && autonomous.operatorAgent);
