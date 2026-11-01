@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
-import { Store, save, rewriteDocument, lockItem, wakeJob, documentBefore, eventWorkSql } from './store.js';
+import { Store, save, rewriteDocument, lockItem, wakeJob, eventWorkSql } from './store.js';
 import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileRereadSql, reconcileRowLockSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
@@ -15,7 +15,6 @@ import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { onto } from './model/base-refresh.js';
-import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './model/merge-authorization.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { buildIdentity } from './protocol-version.js';
@@ -42,7 +41,6 @@ import { credentialBlockedReason, credentialFailure } from './worker-credential.
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { loopOwnedRefusal, ownerHoldRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
-import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
 import { mechanicalHoldUntil } from './mechanical-findings.js';
 import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
@@ -211,10 +209,6 @@ function endedBySubmission(work: Work, epoch: number) {
     demand(false, `Implementation lease for epoch ${epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
 }
 
-/** The violation an observed merge records when its gates had not passed on the merged head. */
-export { unauthorizedMergeViolation };
-/**
-}
 /**
  * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
  * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
@@ -256,39 +250,6 @@ async function revisionAt(db: { query: (text: string, values: unknown[]) => Prom
   return read && read.revision === revision ? read : null;
 }
 
-/**
- * Why the record as it stood before the merge cutoff does not deliver the observed merge, or
- * nothing when it does (GY-1235). GitHub merges; a merge is the delivery when the record showed the
- * merged head as its candidate on the merged pull request with every gate passed — build, review,
- * required checks — and no violation standing. GitHub's merge answers its own mergeability, so a
- * merge gate held only on GitHub computing or refusing mergeability does not refuse it. No merge
- * authorization, execution or observation age is read. Read for a delivery and for a reconciliation.
- */
-export function historicalAuthorizationRefusals(past: Work, _all: Work[], observation: Observation, _cutoff: number, _mergedTime: number, options: { reconciling?: boolean } = {}): string[] {
-  const refusals: string[] = [];
-  if (past.candidate?.sha !== observation.candidate.sha)
-    refusals.push(`the record named candidate ${past.candidate?.sha.slice(0, 12) ?? 'none'}, not the merged head ${observation.candidate.sha.slice(0, 12)}`);
-  if (past.submission?.pr !== observation.candidate.pr) refusals.push(`the record named pull request #${past.submission?.pr ?? 'none'}, not #${observation.candidate.pr}`);
-  // A reconciliation judges the merge that happened, so nothing that merge itself wrote can refuse
-  // it (GY-94): the unauthorized-merge violation it exists to clear, and a refusal of an earlier
-  // decision.
-  const circular = (violation: string) => options.reconciling && (violation === unauthorizedMergeViolation || violation.startsWith(reconciliationRefusalPrefix));
-  const githubAnswers = (reason: string) => reason === 'Pull request is not mergeable against the current base';
-  for (const gate of past.gates) {
-    const reasons = gate.name === 'merge' ? gate.reasons.filter(reason => !githubAnswers(reason)) : gate.reasons;
-    if (!gate.passed && reasons.length) refusals.push(`gate ${gate.name} had not passed: ${reasons.join('; ')}`);
-  }
-  for (const violation of past.violations.filter(violation => !circular(violation))) refusals.push(`violation stood: ${violation}`);
-  return refusals;
-}
-/** How a merge inside a direct-merge window (direct-merge.ts) was recorded as operator-authorized: `unmet` is what the record lacked. */
-export interface OperatorAuthorizedDelivery {
-  /** Who set the direct-merge window the merge fell inside, and why. */
-  operator: string; reason: string; unmet: string[];
-  cutoff: string; snapshotRevision: number; judgement: string; violation: string;
-  /** Always null: the statement that no merge execution authorized this merge. */
-  execution: null;
-}
 /** The ledger kind of a lease renewal that failed server-side (GY-558). */
 export const renewalFaultEvent = 'lease.renewal-failed';
 /** A lease carrying the server-side renewal fault that extended it (GY-558); cleared by the next renewal. */
@@ -584,8 +545,6 @@ async function adoptFollowUpWindow(db: Queryable, work: Work) {
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
-  /** The direct-merge window the deployment environment declares (direct-merge.ts), read once at construction. */
-  directMergeEnvironment: DirectMergeWindow | null = directMergeFromEnv();
   // The configured credential registry, used to report which required proof names
   // currently have an authorized producer. Authority itself lives in the grant store.
   principals: Principal[] = [];
@@ -1878,7 +1837,7 @@ export class Engine {
    * again, under the lock as their compact stand-ins from the in-process cache (`lockedRows`,
    * GY-1027: an open item's coordination projection, a settled delivery's work-index summary), so
    * the lock hold grows with neither the history nor the open items' histories. The first pass of
-   * a process reads every live document once. The opening also sweeps direct merges.
+   * a process reads every live document once.
    *
    * The pass then evaluates the items whose own row moved, plus those whose inputs elsewhere
    * did: a fleet face any writer moved (anything beyond a lease renewal: stage, queue,
@@ -2074,19 +2033,6 @@ export class Engine {
               fleet.set(document.id, { number, work: document, version: row.version, settled, face, due: null });
             }
             view();
-            // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
-            const swept = await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
-            if (swept.length) {
-              const after = await versionsOf(db);
-              for (const work of swept) {
-                const entry = fleet.get(work.id);
-                if (!entry) continue;
-                const face = fleetFace(work), fields = faceFields(entry.face, face);
-                this.noteFaceMove({ id: work.id, key: work.key, fields: fields.length ? fields : ['swept'] }, entry.face, work);
-                Object.assign(entry, { work, version: after.get(work.id) ?? '', face, due: null });
-              }
-              view();
-            }
             opened = true;
             return false;
           }
@@ -2366,39 +2312,6 @@ export class Engine {
       // GY-1523: a candidate the control plane observed itself carries a change number, not a pull
       // request number; a GitHub reading of the pull request that happens to bear it is not this candidate.
       if (work.observation?.source === 'control-plane' && observation.source === undefined) return work;
-      let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
-      // The instant the delivery was judged at: the last instant before the merge cutoff.
-      let evidenceAsOf: string | null = null;
-      let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
-      if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
-        const providerMergedTime = Date.parse(observation.mergedAt);
-        // GitHub merges (GY-1235): no execution or clock offset is issued, so the merge instant is
-        // GitHub's own and the cutoff the first instant after it.
-        const mergedTime = providerMergedTime;
-        const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
-        evidenceAsOf = new Date(cutoff - 1).toISOString();
-        // The record as it stood immediately before the merge: what the delivery judgement reads,
-        // and what a direct-merge window delivers. A snapshot whose own observation
-        // already reports this pull request merged was written after the merge, whatever its
-        // timestamp, and carries the merge's consequences, so it is never read (GY-94).
-        // A row stored as a delta (store/snapshot-delta.ts) is read as the document it stands for.
-        const past = await documentBefore(db, id, new Date(cutoff),
-          record => !(record.observation?.merged && record.observation.candidate?.pr === observation.candidate.pr));
-        const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
-        // GitHub's merge of a head whose every gate passed on that head is the delivery.
-        if (past && !historical.length) { authorizedSnapshot = past; authorizationRevision = past.revision; }
-        // An observed merge of a head whose gates had not passed is a recorded violation that every
-        // later observation re-derives from immutable history. Inside a direct-merge window the
-        // operator owns every merge into the base branch: it is delivered as operator-authorized,
-        // naming the setting and who set it (direct-merge.ts).
-        const directMerge = !authorizedSnapshot && observation.mergeSha ? coveringWindow(await directMergeWindows(db, this.directMergeEnvironment), providerMergedTime) : null;
-        if (directMerge) {
-          const snapshot = past ?? structuredClone(work);
-          authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision;
-          operatorAuthorization = directMergeAuthorization(directMerge, { sha: observation.mergeSha!, at: observation.mergedAt }, snapshot.revision, new Date(cutoff).toISOString(), historical);
-        }
-      }
-      const previousObservation = work.observation;
       // When this pull request's head was first observed (GY-1460): the worker bound reads a push from it, never a poll.
       observeHead(work, observation.candidate, observation.at);
       work.candidate = observation.candidate;
@@ -2407,7 +2320,7 @@ export class Engine {
       observeBaseHold(work, observation.at);
       // A newer approval of the head a base refresh was built from replaces the carried binding
       // (GY-831), so the binding names a review the pull request still holds.
-      const refreshed = observation.merged ? null : refreshedCarriedApproval(work);
+      const refreshed = refreshedCarriedApproval(work);
       const carrying = refreshed ? currentCarry(work) : null;
       if (refreshed && carrying) {
         const replaced = carrying.approval as CarriedApproval;
@@ -2416,26 +2329,6 @@ export class Engine {
           JSON.stringify({ details: { reviewer: refreshed.reviewer, reviewId: refreshed.reviewId, sha: refreshed.originalSha, replaced: { reviewId: replaced.reviewId ?? null, sha: replaced.originalSha }, candidate: work.candidate!.sha } })]);
       }
       this.evaluate(work, all, now);
-      if (observation.merged) {
-        const violation = unauthorizedMergeViolation;
-        if (authorizedSnapshot && observation.mergeSha) {
-          // An operator-authorized delivery is judged by the operator, not the gates: what the
-          // record lacked is on the delivery, and the violation it owns leaves the record the same way.
-          if (operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
-          else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
-          work.stage = 'done'; work.stageEnteredAt = now.toISOString();
-          const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}) };
-          work.delivery = operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
-          if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
-            JSON.stringify({ details: { ...operatorAuthorization, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
-          await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
-          // Delivered in this transaction: what it still owes is recomputed now and its leftover rows
-          // retired, so nothing retries against the delivery (GY-185).
-          settleDelivered(work, all, now);
-        } else {
-          if (!work.violations.includes(violation)) work.violations.push(violation);
-        }
-      }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
       return work;

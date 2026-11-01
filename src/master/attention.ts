@@ -51,7 +51,7 @@ export function installationOwner(source: typeof installationSources[number], te
 }
 /** Why a work item raises attention. */
 export const workAttentionCauses = ['human-request', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
-  'stalled-step', 'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const;
+  'stalled-step', 'base-conflict', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const;
 export type WorkAttentionCause = typeof workAttentionCauses[number];
 /**
  * The owner of a work item's attention, from the same facts that raised it. Everything an agent
@@ -75,9 +75,6 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
     const reverted = work.observation!.revertedDelivery!;
     return agentOwner('master', `graphyard master create FILE for a follow-up item that restores ${reverted.files.map(file => file.path).join(', ')} to the base branch as ${key} shipped them${reverted.removedBy ? `, naming merge ${reverted.removedBy.mergeSha?.slice(0, 12) ?? `of pull request #${reverted.removedBy.pr}`}${reverted.removedBy.key ? ` of ${reverted.removedBy.key}` : ''} as what removed them` : ''}; request no merge decision for ${key} until the base branch holds its content — a reconciliation now would record a delivery for work that is not there`);
   }
-  // The merge already happened and cannot be re-run: it stays on the record as a violation, and
-  // the work it skipped is a follow-up item.
-  if (cause === 'merged-unauthorized') return agentOwner('master', `graphyard master create FILE for a follow-up item that re-verifies what ${key}'s merge skipped; its unauthorized-merge violation stays on the record`);
   // Graphyard absorbs a moved base itself; a conflict is the one case it cannot, so the candidate
   // goes back to a worker for a fresh attempt rather than waiting for a refresh that cannot land.
   // On a system-driven item that rework is the loop's own round (GY-1389), which refuses a hand request:

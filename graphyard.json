@@ -67,10 +67,6 @@
       },
       {
         "rule": "merge path",
-        "glob": "src/direct-merge.ts"
-      },
-      {
-        "rule": "merge path",
         "glob": "src/merger-mode.ts"
       },
       {
