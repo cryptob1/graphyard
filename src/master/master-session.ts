@@ -79,7 +79,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     // Confined exactly as `master start` launches it (GY-1658): the checkout read-only at the OS
     // level, its managed .graphyard state and the shared Git areas writable. A host that cannot
     // apply the confinement refuses the launch; the master is never started unconfined.
-    ({ delivery } = await startAgentSession(name, kind, pane, plan.args, masterRequest(config, handover), run, { directory: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master' }));
+    ({ delivery } = await startAgentSession(name, kind, pane, plan.args, masterRequest(config, handover), run, { directory: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master', masterStateDirectory: dirname(config.credentialFile) }));
   } catch (error) { throw await abandon(error, 'master session launch failed'); }
   return { agentName: name, pane: pane!, runtime: kind, account: selected.account.name, session: selected.account.fleet.session, delivery: delivery! };
 }

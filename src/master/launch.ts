@@ -1,8 +1,9 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
+import { basename, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { slotsDirectoryVariable } from './verification-slots.js';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
 import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, nonInteractiveLaunch } from '../harness.js';
@@ -193,13 +194,12 @@ export async function masterSessionConfinement(kind: string, root: string, probe
   return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session in a bubblewrap namespace whose /proc shows only its own processes and whose host systemd and bus sockets are hidden; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs, nor any host process it could ask to start, can patch the checkout's tracked files` };
 }
 /** The master launch's confinement against the launcher's own checkout (or `coordinatorRoot`), derived as every other role's is: null only where nothing is confined (the test runner, a non-CLI launcher), the named refusal when the launcher's checkout cannot be derived. */
-async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe' | 'environment'>): Promise<CoordinatorConfinement | null> {
+async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe' | 'environment' | 'masterStateDirectory'>): Promise<CoordinatorConfinement | null> {
   const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
   if (root) {
-    const token = options.environment?.GRAPHYARD_TOKEN_FILE;
     return masterSessionConfinement(kind, root, options.confinementProbe, [
       ...runtimeLoginHomes(options.environment),
-      ...(token && isAbsolute(token) ? [dirname(token)] : []),
+      ...(options.masterStateDirectory ? [options.masterStateDirectory] : []),
     ]);
   }
   const undetermined = launcherRootUndetermined();
@@ -207,7 +207,7 @@ async function masterLaunchConfinement(kind: string, options: Pick<SessionStart,
   return null;
 }
 /** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. The sandbox-claim check models the runtime's workspace root as its working directory (`cwd` when the pane starts elsewhere, GY-888); the read-only mount re-exposes the allocated `directory` separately, so a terminal reviewer or producer that starts from the coordinator root still gets its own checkout writable while the root stays read-only (GY-888, review finding). The `credentialMask` hides the install's credential locations from the session (GY-1856). */
-export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string; ownGitHubCredential?: boolean; secretsBus?: null; credentialMask?: CredentialMask }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
+export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string; environment?: Record<string, string>; writable?: readonly string[]; ownGitHubCredential?: boolean; secretsBus?: null; credentialMask?: CredentialMask }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
   const root = coordinatorRoot !== undefined ? coordinatorRoot : launcherCoordinatorRoot();
   if (!root) {
     const undetermined = launcherRootUndetermined();
@@ -215,7 +215,7 @@ export async function sessionConfinement(kind: string, args: readonly string[], 
     return null;
   }
   const workspaceRoot = resolve(options.cwd ?? options.directory), allocated = resolve(options.directory);
-  const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: workspaceRoot, ...(allocated === workspaceRoot ? {} : { allocatedDirectory: allocated }), ...(options.ownGitHubCredential ? { ownGitHubCredential: true } : {}), ...(options.secretsBus === null ? { secretsBus: null } : {}), ...(options.credentialMask ? { credentialMask: options.credentialMask } : {}) };
+  const input: ConfinementInput = { kind, args, coordinatorRoot: root, writable: [...(options.writable ?? []), ...(options.environment?.[slotsDirectoryVariable] ? [options.environment[slotsDirectoryVariable]] : [])], sessionDirectory: workspaceRoot, ...(allocated === workspaceRoot ? {} : { allocatedDirectory: allocated }), ...(options.ownGitHubCredential ? { ownGitHubCredential: true } : {}), ...(options.secretsBus === null ? { secretsBus: null } : {}), ...(options.credentialMask ? { credentialMask: options.credentialMask } : {}) };
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   prepareConfinedGitPaths(root);
@@ -524,6 +524,8 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   /** `'master'`: the master session's own confinement (masterSessionConfinement, GY-1658), judged with `confinementProbe`. `false` is a test seam for launches whose runner is faked: no production launch passes it (GY-1658). */
   confinement?: false | 'master';
   confinementProbe?: MasterConfinementProbe;
+  /** The master's private coordinator state beside its credential, granted explicitly by its launcher. */
+  masterStateDirectory?: string;
   /** The coordinator checkout to confine against, when the launcher's own cannot be derived from its entry — a launcher embedded outside the CLI passes it, so its sessions are confined too (GY-888). */
   coordinatorRoot?: string;
   /** The session carries a GitHub credential of its own (a reviewer's) or must never read the operator's (every worker, minted credential or not), so the confinement gives it no route to the operator's keyring (GY-1039). */

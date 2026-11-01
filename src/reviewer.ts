@@ -625,7 +625,7 @@ export async function verifySessionSandbox(role: 'reviewer' | 'producer', launch
   const run = probe === undefined ? (underTestRunner() ? null : 'host') : probe;
   const sandbox = launch.kind ? runtimeSandboxes[launch.kind] : undefined;
   if (!run || !sandbox || sandbox.mode(launch.args) === null) return null;
-  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, ownGitHubCredential, credentialMask });
+  const confinement = await sessionConfinement(launch.kind!, launch.args, { directory, cwd: directory, writable: writable.filter(path => path.endsWith('/.verification-slots')), ownGitHubCredential, credentialMask });
   return verifyWorkerSandbox({ ...launch, role, ...(confinement?.wrapper.length ? { confinement: confinement.wrapper } : {}) }, directory, writable, run === 'host' ? undefined : run);
 }
 

@@ -2,6 +2,8 @@
 import { existsSync, mkdirSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
+import { slotsDirectoryVariable } from './verification-slots.js';
+import { herdrTarget } from './herdr.js';
 import { configHome } from '../install/secrets.js';
 import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
 
@@ -30,6 +32,8 @@ export interface ConfinementInput {
   allocatedDirectory?: string;
   /** Defaults to this host's platform. */
   platform?: string;
+  /** Launcher-assigned runtime state, such as the host verification slot directory. */
+  writable?: readonly string[];
   /** The bubblewrap executable; null when it is known absent, the PATH lookup when unset. */
   bwrap?: string | null;
   /** Overrides the availability probe (tests); when absent, the probe runs once and is cached. */
@@ -200,7 +204,11 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
   const runtimeDirectories = [...new Set([uid === undefined ? null : `/run/user/${uid}`, env.XDG_RUNTIME_DIR || null]
     .filter((path): path is string => !!path && isAbsolute(path)).map(path => { try { return realpathSync(path); } catch { return path; } }))];
   const directories = [...runtimeDirectories.flatMap(directory => [directory, join(directory, 'systemd')]), '/run/dbus', '/var/run/dbus',
-    ...[env.HOME && join(env.HOME, '.docker', 'run'), env.HOME && join(env.HOME, '.docker', 'desktop'), env.HOME && join(env.HOME, '.local', 'share', 'docker')].filter((path): path is string => !!path)];
+    ...[env.HOME && join(env.HOME, '.config', 'herdr', 'sessions'),
+      env.XDG_CONFIG_HOME && join(env.XDG_CONFIG_HOME, 'herdr', 'sessions'),
+      env.GRAPHYARD_HERDR_CONFIG_HOME && join(env.GRAPHYARD_HERDR_CONFIG_HOME, 'herdr', 'sessions'),
+      herdrTarget()?.configHome && join(herdrTarget()!.configHome, 'herdr', 'sessions'),
+      env.HOME && join(env.HOME, '.docker', 'run'), env.HOME && join(env.HOME, '.docker', 'desktop'), env.HOME && join(env.HOME, '.local', 'share', 'docker')].filter((path): path is string => !!path)];
   return { directories, busSockets: [...runtimeDirectories.map(directory => join(directory, 'bus')),
     ...[env.DOCKER_HOST, env.CONTAINER_HOST, env.BUILDKIT_HOST].flatMap(value => value?.startsWith('unix://') ? [value.slice(7)] : []),
     ...[env.SSH_AUTH_SOCK, env.HERDR_SOCKET_PATH].filter((path): path is string => !!path)], secretsBus: secretsBusPath(uid, env) };
@@ -247,6 +255,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const fetchHead = join(checkoutWorktreeAdminDirectory(root) ?? gitDir, 'FETCH_HEAD');
   const shared = [...sharedDirectories, ...(existsSync(fetchHead) && !isDirectoryPath(fetchHead) ? [fetchHead] : [])];
   const own = directory !== root ? [directory] : [];
+  const writable = [...(input.writable ?? []), ...(process.env[slotsDirectoryVariable] ? [process.env[slotsDirectoryVariable]!] : [])].filter(isDirectoryPath);
   const scratch = join(directory, '.graphyard', 'scratch');
   mkdirSync(scratch, { recursive: true, mode: 0o700 });
   const bwrap = input.bwrap ?? 'bwrap';
@@ -257,7 +266,8 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   // GY-2995: the install's own CLI checkout is re-exposed read-only after the masks, so a
   // confined session runs the launcher its prompt names but can change none of its code.
   const cli = (input.credentialMask?.cli ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath);
-  const masks = [...processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]), ...credentialMaskWords(input.credentialMask, [root, directory])];
+  const masks = credentialMaskWords(input.credentialMask, [root, directory]);
+  const channels = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
   // GY-2967: every ref transaction a session runs — commit, merge, reset, branch -f, update-ref, a
   // cherry-pick's cleanup — takes the common git directory's packed-refs lock once anything has
   // packed a ref (git gc, git pack-refs), and rewrites packed-refs under that lock, so keeping the
@@ -275,15 +285,18 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   // itself a linked worktree its own admin (HEAD, index) lies there, so it is bound read-only again
   // after that re-exposure — only its FETCH_HEAD, bound after it, stays writable (GY-957, review finding).
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
+  // Apply external state grants before protecting the coordinator, so an ancestor grant cannot unprotect it.
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
-  return [bwrap, ...hostFilesystemWords(scratch), ...masks, '--ro-bind', root, root,
+  return [bwrap, ...hostFilesystemWords(scratch), ...masks,
+    ...writable.filter(path => !withinCheckout(path, root)).flatMap(path => ['--bind', path, path]),
+    '--ro-bind', root, root,
     ...commonGitDir.flatMap(path => ['--bind', path, path]),
     ...ownGitState.flatMap(path => ['--ro-bind', path, path]),
-    ...[...sharedDirectories, ...own, ...(input.writable ?? []).filter(isDirectoryPath)].flatMap(path => ['--bind', path, path]),
+    ...[...sharedDirectories, ...own, ...writable.filter(path => withinCheckout(path, root))].flatMap(path => ['--bind', path, path]),
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
     ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]),
     ...kept.flatMap(path => isDirectoryPath(path) ? ['--bind', path, path] : ['--ro-bind', path, path]),
-    ...cli.flatMap(path => ['--ro-bind', path, path]), '--'];
+    ...cli.flatMap(path => ['--ro-bind', path, path]), ...channels, '--'];
 }
 
 /** The one refusal text for a launch whose coordinator confinement cannot be applied (GY-888): the head names the runtime and the checkout, `problem` says what is missing. */
@@ -336,7 +349,7 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, writable: input.writable, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,
     detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };

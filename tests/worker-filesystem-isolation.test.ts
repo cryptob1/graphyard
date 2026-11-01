@@ -6,17 +6,19 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { coordinatorConfinement, readOnlyMountWrapper } from '../src/master/confinement.js';
 import { headlessConfinementWrapper, masterSessionConfinement, prepareConfinedGitPaths } from '../src/master/launch.js';
-import { trialConfinement } from '../src/merge-writer/trial.js';
+import { runTrialAttempt, trialConfinement } from '../src/merge-writer/trial.js';
+import { herdrSocketPath, herdrTarget, targetHerdr } from '../src/master/herdr.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
-async function fixture() {
+async function fixture(maskedCoordinator = false) {
   // Outside /tmp: these protected files remain visible through the read-only host mount.
   // Every destructive probe below names only this disposable fixture, never the real HOME.
   const base = await temporaryDirectory('fs', process.cwd());
-  const root = join(base, 'repo'), home = join(base, 'home'), unrelated = join(base, 'other');
   const config = join(base, 'config'), runtime = join(config, 'own');
-  for (const path of [root, home, unrelated, runtime]) mkdirSync(path, { recursive: true });
+  const root = maskedCoordinator ? join(config, 'deploy') : join(base, 'repo');
+  const home = join(base, 'home'), unrelated = join(base, 'other'), slots = join(base, '.verification-slots');
+  for (const path of [root, home, unrelated, runtime, slots]) mkdirSync(path, { recursive: true });
   for (const directory of [home, unrelated]) writeFileSync(join(directory, 'sentinel'), 'protected\n');
   writeFileSync(join(config, 'operator.token'), 'operator-secret');
   writeFileSync(join(runtime, 'login'), 'own-login');
@@ -33,8 +35,8 @@ async function fixture() {
   git(root, 'worktree', 'add', '-qb', 'graphyard/gy-3045-1', worktree);
   prepareConfinedGitPaths(root);
   const mask = { configHome: config, extraPaths: [], own: [join(config, 'worker.token'), runtime], cli: [] };
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: worktree, credentialMask: mask, secretsBus: null });
-  return { base, root, worktree, home, unrelated, config, runtime, mask, wrapper };
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: worktree, credentialMask: mask, secretsBus: null, writable: [slots] });
+  return { base, root, worktree, home, unrelated, config, runtime, slots, mask, wrapper };
 }
 function run(wrapper: readonly string[], cwd: string, program: string, args: string[] = [], env: NodeJS.ProcessEnv = {}) {
   const result = spawnSync(wrapper[0], [...wrapper.slice(1), program, ...args], {
@@ -97,13 +99,14 @@ HOME=$(mktemp -d) /bin/bash -lc 'true'; rm -rf "$HOME" 2>/dev/null; true
     test ! -r "$1/operator.token"
     test "$(cat "$2/login")" = own-login
     echo state > "$2/state"
+    mkdir "$4/slot-0"; echo lease > "$4/slot-0/owner"; rm "$4/slot-0/owner"; rmdir "$4/slot-0"
     echo edit > edit; git add edit; git commit -qm edit
     /usr/bin/npm run build; /usr/bin/npm test
     test "$HOME" != "$3"
     mkdir -p "$HOME/.cache"; echo cache > "$HOME/.cache/runtime"
     scratch=$(mktemp -d); echo scratch > "$scratch/owned"; rm -rf "$scratch"; test ! -e "$scratch"
     test ! -e /dev/disk; test ! -e /dev/mem
-  `, 'allowed', f.config, f.runtime, process.env.HOME ?? '']);
+  `, 'allowed', f.config, f.runtime, process.env.HOME ?? '', f.slots]);
   assert.notEqual(git(f.worktree, 'rev-parse', 'HEAD'), before);
   assert.equal(readFileSync(join(f.worktree, 'built'), 'utf8'), 'built');
   assert.equal(readFileSync(join(f.runtime, 'state'), 'utf8'), 'state\n');
@@ -114,23 +117,30 @@ test('integration:worker-control-socket-isolation — host Docker, systemd and c
   const sockets = await temporaryDirectory('s', f.base);
   const socket = join(f.base, 'docker.sock');
   const runtimeSocket = join(sockets, 'launch.sock');
+  const herdrHome = await temporaryDirectory('h');
+  const herdr = { configHome: herdrHome, session: 'x' }, oldHerdr = herdrTarget();
+  const herdrSocket = herdrSocketPath(herdr);
+  mkdirSync(join(herdrHome, 'herdr', 'sessions', 'x'), { recursive: true });
   let reached = 0;
   const server = createServer(connection => { reached++; connection.end('host command executor'); });
   await new Promise<void>(resolve => server.listen(socket, resolve));
   const runtimeServer = createServer(connection => { reached++; connection.end('host runtime executor'); });
   await new Promise<void>(resolve => runtimeServer.listen(runtimeSocket, resolve));
+  const herdrServer = createServer(connection => { reached++; connection.end('host pane executor'); });
+  await new Promise<void>(resolve => herdrServer.listen(herdrSocket, resolve));
   const oldRuntime = process.env.XDG_RUNTIME_DIR, oldDocker = process.env.DOCKER_HOST;
   try {
     process.env.XDG_RUNTIME_DIR = sockets;
+    targetHerdr(herdr);
     process.env.DOCKER_HOST = `unix://${socket}`;
     // Construct wrappers after publishing a nonstandard host command endpoint.
     const wrappers = [readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.worktree, secretsBus: null }),
-      headlessConfinementWrapper(f.root, f.worktree), (await masterSessionConfinement('claude', f.root)).wrapper,
+      headlessConfinementWrapper(f.root, f.worktree), (await masterSessionConfinement('claude', f.root, {}, [herdrHome])).wrapper,
       trialConfinement([f.config], [f.worktree])];
     for (const wrapper of wrappers) {
       run(wrapper, f.worktree, process.execPath, ['-e', `
         const net = require('node:net'), fs = require('node:fs'), assert = require('node:assert/strict');
-        const endpoints = [${JSON.stringify(socket)}, ${JSON.stringify(runtimeSocket)}, '/run/docker.sock', '/var/run/docker.sock', '/run/dbus/system_bus_socket',
+        const endpoints = [${JSON.stringify(socket)}, ${JSON.stringify(runtimeSocket)}, ${JSON.stringify(herdrSocket)}, '/run/docker.sock', '/var/run/docker.sock', '/run/dbus/system_bus_socket',
           ${JSON.stringify(join(sockets, 'bus'))}, ${JSON.stringify(join(sockets, 'systemd', 'private'))}];
         Promise.all(endpoints.map(path => new Promise((resolve, reject) => {
           const socket = net.connect(path); socket.on('connect', () => { socket.destroy(); reject(new Error('host socket reached: ' + path)); });
@@ -146,5 +156,40 @@ test('integration:worker-control-socket-isolation — host Docker, systemd and c
     if (oldDocker === undefined) delete process.env.DOCKER_HOST; else process.env.DOCKER_HOST = oldDocker;
     await new Promise<void>(resolve => server.close(() => resolve()));
     await new Promise<void>(resolve => runtimeServer.close(() => resolve()));
+    await new Promise<void>(resolve => herdrServer.close(() => resolve()));
+    targetHerdr(oldHerdr);
   }
+});
+
+
+test('integration:worker-host-filesystem-isolation — runTrialAttempt restores a masked coordinator and shared dependencies read-only while only its allocated directories are writable', async () => {
+  const f = await fixture(true);
+  const dependency = join(f.root, 'node_modules', 'fixture-dependency');
+  mkdirSync(dependency, { recursive: true });
+  writeFileSync(join(dependency, 'index.js'), 'module.exports = "shared dependency";');
+  writeFileSync(join(f.root, 'package-lock.json'), '{}');
+  writeFileSync(join(f.root, 'package.json'), JSON.stringify({ scripts: {
+    build: '/usr/bin/node build.cjs', test: '/usr/bin/node test.cjs',
+  } }));
+  writeFileSync(join(f.root, 'build.cjs'), `const assert = require('node:assert/strict'), fs = require('node:fs');
+    assert.equal(require('fixture-dependency'), 'shared dependency');
+    fs.writeFileSync('built', 'built');`);
+  writeFileSync(join(f.root, 'test.cjs'), `
+    const assert = require('node:assert/strict'), fs = require('node:fs');
+    assert.equal(fs.readFileSync('built', 'utf8'), 'built');
+    assert.throws(() => fs.readFileSync(${JSON.stringify(join(f.config, 'operator.token'))}), { code: 'ENOENT' });
+    { ${deniedOperations.replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
+  `);
+  git(f.root, 'add', 'package.json', 'package-lock.json', 'build.cjs', 'test.cjs');
+  git(f.root, 'commit', '-qm', 'trial checks');
+  const base = await temporaryDirectory('trial', f.base);
+  const temporary = await temporaryDirectory('tmp', f.base);
+  const verdict = await runTrialAttempt({ root: f.root, base, mergeSha: git(f.root, 'rev-parse', 'HEAD'),
+    changedFiles: [], hidden: [f.config], temporaryRoots: [temporary], checkoutRoots: [],
+    environment: { ...process.env, PATH: '/usr/bin:/bin' }, timeoutMs: 60_000, secretScan: false });
+  assert.equal(verdict.build, 'pass', verdict.logTail);
+  assert.deepEqual(verdict.tests.failed, [], verdict.logTail);
+  assert.equal(verdict.tests.passed, 1, verdict.logTail);
+  assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
+  assert.equal(readFileSync(join(f.unrelated, 'sentinel'), 'utf8'), 'protected\n');
 });
