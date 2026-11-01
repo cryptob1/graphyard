@@ -1,0 +1,15 @@
+{
+  "id": "master-limit-failover",
+  "title": "A moved master stopped on a limit fails over",
+  "description": "Exercises stale recorded panes with live Herdr handles for weekly limits, session limits and exhausted usage credits; checks account holds, pane closure, replacement in one cycle and live-pane status with unreadable screens.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "master limit failover and status regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-session-limit.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
