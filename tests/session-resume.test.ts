@@ -23,12 +23,12 @@ const finding = 'BLOCKING: parking.ts compacts the vehicle array, so stored inde
 
 /** A Herdr world: every pane gets its own id, and a `--resume` launch exits at once when `resumeExits` is set. */
 function world(resumeExits = false) {
-  const typed = new Map<string, string>(), commands: string[] = [], tabs: string[][] = [];
+  const typed = new Map<string, string>(), commands: ReturnType<typeof expandTypedCommand>[] = [], tabs: string[][] = [];
   let now = Date.now(), panes = 0;
   const json = (result: unknown) => JSON.stringify({ result });
   return { commands, tabs, bounds: (log: string[]) => ({ clock: () => now, wait: (ms: number) => { now += ms; }, log: (line: string) => log.push(line) }), run: (_command: string, args: string[]): string => {
     if (args[0] === 'tab' && args[1] === 'create') { panes++; tabs.push(args); return json({ root_pane: { pane_id: `w1V:p${panes}`, tab_id: `w1V:t${panes}` } }); }
-    if (args[0] === 'pane' && args[1] === 'run') { typed.set(args[2], args[3]); commands.push(args[3]); return ''; }
+    if (args[0] === 'pane' && args[1] === 'run') { typed.set(args[2], args[3]); commands.push(expandTypedCommand(args[3])); return ''; }
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     const pane = args[1] === 'process-info' ? args[3] : args[2], command = typed.get(pane);
     if (!command) return json({});
@@ -84,7 +84,8 @@ async function fixture() {
     const prepare = async () => { claims++; return { epoch, path, base: 'c'.repeat(40) }; };
     const dispatched = await dispatchWork(root, { ...work, epoch: epoch - 1 }, profile, [], herdr.run, [work], prepare, async (_root, _key, claimed) => { released.push(claimed); }, 5_000, at,
       { start: herdr.bounds(log), probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
-    const launches = herdr.commands.map(command => expandTypedCommand(command));
+    // Snapshot shell expansion at launch: a fallback can overwrite the same stem’s .launch file.
+    const launches = herdr.commands;
     return { dispatched, launches, tabs: herdr.tabs, log, released, claims, path, record: await readAttemptLaunch(root, work.key) };
   };
   return { root, limited, dispatch };
@@ -200,7 +201,7 @@ test('unit:rework-resumes-with-findings-and-falls-back — a CHANGES_REQUESTED r
     const exitAtOnce = async (earlyExitKeepsLeaseMs?: number) => {
       const surrendered: string[] = [];
       await supervise(process.execPath, ['-e', 'process.exit(1)'], 2, async () => ({ updatedAt: new Date().toISOString(), lease: { epoch: 2, expiresAt: new Date(Date.now() + 120_000).toISOString() } }) as never,
-        { detached: true, intervalMs: 20, graceMs: 25, session: { visible: () => null, surrender: async cause => { surrendered.push(cause); } }, ...(earlyExitKeepsLeaseMs ? { earlyExitKeepsLeaseMs } : {}) });
+        { intervalMs: 20, graceMs: 25, session: { visible: () => null, surrender: async cause => { surrendered.push(cause); } }, ...(earlyExitKeepsLeaseMs ? { earlyExitKeepsLeaseMs } : {}) });
       return surrendered;
     };
     assert.deepEqual(await exitAtOnce(resumeExitWindowMs), [], 'a resume that exits at once keeps the lease');

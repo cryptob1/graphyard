@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
 import { credentialTrialVariable, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, durableTemporaryRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
@@ -275,18 +275,22 @@ test('unit:trial-base-run-registry-files-pass — with a stray .git in each shar
   assert.equal(durableTemporaryRoot('/home/me'), '/home/me/.gy/tmp');
   assert.deepEqual(trialTemporaryRoots('/var/tmp', '/home/me'), ['/tmp', '/var/tmp', '/home/me/.gy/tmp']);
   // Both shared roots poisoned by an empty .git each, exactly the host's state: the durable root is chosen, the session directory never.
-  const sharedTmp = await temporaryDirectory('trial-base-run-shared', tmpdir()), sharedVar = await temporaryDirectory('trial-base-run-var', tmpdir());
-  mkdirSync(join(sharedTmp, '.git')); mkdirSync(join(sharedVar, '.git'));
-  const durable = durableTemporaryRoot(homedir());
+  const sharedTmp = '/trial-shared/tmp', sharedVar = '/trial-shared/var';
+  const home = await temporaryDirectory('h', '/tmp');
+  const durable = durableTemporaryRoot(home);
   mkdirSync(durable, { recursive: true });
-  assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable]), durable, 'a poisoned shared pair falls through to the durable root');
-  assert.equal(trialTemporaryRoot(durable, [sharedTmp, sharedVar, durable]), durable, 'never the session directory while the durable root is clean');
-  // The socket fixture uses the runner's chosen TMPDIR, as keyring-probe-backoff.test.ts does,
-  // even when this test's HOME is the outer trial's isolated home.
-  const endpoint = join(await temporaryDirectory('keyring-probe-backoff'), 'graphyard-secrets-bus');
+  const entries = new Set([sharedTmp, sharedVar, durable, join(sharedTmp, '.git'), join(sharedVar, '.git')]);
+  const exists = (path: string) => entries.has(path);
+  assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable], exists), durable, 'a poisoned shared pair falls through to the durable root');
+  assert.equal(trialTemporaryRoot(durable, [sharedTmp, sharedVar, durable], exists), durable, 'never the session directory while the durable root is clean');
+  entries.add(join(home, '.git'));
+  assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable], exists), '/session', 'an isolated HOME below a checkout is not a clean fallback');
+  // Check the production short-root shape separately from the caller's arbitrary HOME length.
+  const endpoint = join(durable, 'graphyard-keyring-probe-backoff-abcdefghij', 'graphyard-secrets-bus');
   assert.ok(endpoint.length <= 107, `the socket path stays inside the kernel's 108-byte sun_path (${endpoint.length} bytes)`);
+  mkdirSync(dirname(endpoint), { recursive: true });
   const server = createServer();
-  await new Promise<void>(done => server.listen(endpoint, done));
+  await new Promise<void>((done, reject) => { server.once('error', reject); server.listen(endpoint, done); });
   await new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done()));
 });
 
@@ -572,14 +576,17 @@ test('unit:trial-checkout-outside-temp — with /tmp a tmpfs and the process tmp
   assert.deepEqual(trialExcludedRoots('/tmp', '/home/me'), ['/tmp', '/var/tmp', '/home/me/.gy/tmp']);
   const memoryTmp: FilesystemProbe = async path => ({ probed: path, volatile: path === '/tmp' || path.startsWith('/tmp/') ? 'tmpfs' : null, freeBytes: 1e12 });
   assert.equal(await trialCheckoutRoot(trialTemporaryRoots('/var/tmp', '/home/me'), 2e9, memoryTmp, excluded), null, 'the durable /var/tmp and the durable suite root are passed over: no trial checkout lands in a temporary root');
-  const home = await temporaryDirectory('gy-trial-home', homedir());
+  const home = await temporaryDirectory('gy-trial-home', tmpdir());
   const [trials] = trialCheckoutRoots(home);
   assert.equal(trials, join(home, '.gy', 'trials'));
   assert.equal(existsSync(trials!), false);
-  const chosen = await trialCheckoutRoot([...trialTemporaryRoots('/var/tmp', '/home/me'), trials!], 2e9, memoryTmp, [...excluded, tmpdir()]);
-  const outside = (path: string) => [...excluded, tmpdir()].every(root => path !== root && !path.startsWith(`${root}/`));
-  // An isolated trial home may itself live under TMPDIR; that must not turn it into a checkout root.
-  assert.equal(chosen, lookupPoisoned(home) || !outside(trials!) ? null : trials, 'only a lookup-clean home outside temporary roots supplies the trials folder');
+  // Model this host's temporary roots inside the owned home instead of writing into the caller's HOME.
+  const fixtureExcluded = [join(home, 'tmp'), join(home, 'var-tmp'), durableTemporaryRoot(home)];
+  const fixtureDisk: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 1e12 });
+  const chosen = await trialCheckoutRoot([...fixtureExcluded, trials!], 2e9, fixtureDisk, fixtureExcluded);
+  const outside = (path: string) => fixtureExcluded.every(root => path !== root && !path.startsWith(`${root}/`));
+  // A home with a stray package.json, .git or node_modules above it falls back to the session directory instead.
+  assert.equal(chosen, lookupPoisoned(home) ? null : trials, 'the home\'s own trials folder is chosen');
   if (chosen) { assert.ok(outside(chosen), `${chosen} is under no temporary root`); assert.ok(existsSync(chosen), 'it is made on demand'); }
   const onlyMemory: FilesystemProbe = async path => ({ probed: path, volatile: 'tmpfs', freeBytes: null });
   assert.equal(await trialCheckoutRoot([trials!], 2e9, onlyMemory, excluded), null, 'a memory-backed home: the managed session directory');
@@ -594,7 +601,7 @@ test('unit:trial-checkout-outside-temp — with /tmp a tmpfs and the process tmp
 });
 
 test('unit:trial-checkout-reclaim-durable — a crashed checkout that left the trials folder short of space is taken back before the root is given up on, while a removal that fails keeps its owner marker and is taken back by a later pass (GY-2020, GY-2963)', async () => {
-  const home = await temporaryDirectory('gy-trial-home', homedir());
+  const home = await temporaryDirectory('gy-trial-home', tmpdir());
   const [trials] = trialCheckoutRoots(home);
   mkdirSync(trials!, { recursive: true });
   // Low space while the crashed checkout stands, room once it is gone: the space is measured first,
@@ -609,8 +616,9 @@ test('unit:trial-checkout-reclaim-durable — a crashed checkout that left the t
   const roomy: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 1e12 });
   const gated = trialCheckoutRoot([trials!], 2e9, roomy, [], reclaim);
   const answered = await Promise.race([gated.then(value => `chosen ${value}`), new Promise(resolve => setTimeout(() => resolve('still waiting'), 100))]);
-  assert.equal(answered, `chosen ${lookupPoisoned(trials!) ? null : trials}`, 'the root is chosen while the stale checkout is still being taken back');
+  assert.equal(answered, lookupPoisoned(trials!) ? 'still waiting' : `chosen ${trials}`, 'a clean root is chosen immediately; a poisoned root retries after reclamation');
   releaseReclaim();
+  assert.equal(await gated, lookupPoisoned(trials!) ? null : trials, 'reclamation never makes an ancestor-poisoned root usable');
   await reclaimTrialCheckouts(trials!);
   assert.deepEqual([existsSync(crashed), existsSync(tempOwnerMarker(crashed))], [false, false], 'the stale checkout is taken back beside the choice');
   // Short of space, the taking-back is awaited and the root is measured again: the stale checkout never keeps its space (GY-2020).
@@ -714,8 +722,11 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
   for (const left of reclaimed) assert.equal(existsSync(tempOwnerMarker(left)), false, `${left}'s marker went with it`);
   assert.equal(dyingGoneBy, trialsRun / 2, 'the dying owner\'s checkout went with the first trial after its owner died');
   assert.ok(existsSync(kept) && existsSync(tempOwnerMarker(kept)), 'the live owner\'s checkout stands at the end of the day');
-  // Every checkout was in the on-disk trials folder, under none of /tmp, /var/tmp or the tmpdir by the folder's own choice of root.
-  for (const made of checkouts) assert.ok(made.startsWith(`${trials}/${trialCheckoutPrefix}`) && made.endsWith('/checkout'), `${made} is in the trials folder`);
+  // A poisoned ancestor forces the managed session fallback; a clean trials root gets the short checkout.
+  for (const made of checkouts) {
+    const expected = lookupPoisoned(trials!) ? `${sessions}/graphyard-trial-` : `${trials}/${trialCheckoutPrefix}`;
+    assert.ok(made.startsWith(expected) && made.endsWith('/checkout'), `${made} uses ${expected}`);
+  }
   assert.deepEqual(trialExcludedRoots('/var/tmp', '/home/me'), ['/tmp', '/var/tmp', '/home/me/.gy/tmp'], 'every temporary root keeps the checkout out');
   assert.ok(most <= 2, `the folder never held more than ${most} entries after a trial`);
 });
