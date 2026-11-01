@@ -9,6 +9,7 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 - `tests/five-step-cycle.test.ts`: the cycle is snapshot, close, dispatch, merge writer, persist.
 - `tests/trial-merge.test.ts`: a failed trial grounds candidate rework through the merge writer, with no base-break refresh wait.
 - `tests/deploy-unit.test.ts`: graphyard-deploy.service (`upgrade --watch`) and the loop's restart onto the tip it serves.
+- `tests/worker-credit-handoff.test.ts`: provider-limit stops preserve local attempt work and name its commit to the next account; `e2e:worker-credit-handoff`.
 
 ## Drive
 
