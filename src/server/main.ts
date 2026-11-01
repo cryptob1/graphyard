@@ -13,7 +13,6 @@ import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, observationLine, productionProvider, resolvedWatchEnvironment, startProductionWatch } from '../production-watch.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
-import { startDirectMerge } from '../direct-merge.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
 import { processControlPlaneJob } from './control-plane-observation.js';
@@ -79,7 +78,6 @@ export async function main(options: MainOptions = {}) {
         if (!prepared) {
           mark('production.load'); await production.load().catch(error => { if (!closing) console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'); });
           if (closing) return;
-          mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
           prepared = true;
         }
         if (closing) return;

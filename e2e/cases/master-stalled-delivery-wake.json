@@ -1,0 +1,15 @@
+{
+  "id": "master-stalled-delivery-wake",
+  "title": "A stalled shared base wakes the master automatically",
+  "description": "Exercises visible and absent masters, repeated cycles, restart, failed delivery, changed diagnosis/base, recovery, worker blockers, launch failures, failed reviews, abandoned proofs, deployment failures, bounded idle/stale-working heartbeats and the master status reason and next agent action.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "stalled delivery wake and status regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/master-stalled-delivery-wake.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}

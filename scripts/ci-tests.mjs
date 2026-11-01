@@ -3,9 +3,7 @@
 // cannot map run every file, while a change limited to documentation runs none.
 //
 //   node scripts/ci-tests.mjs affected FILE...            the selection for changed FILEs: `mode: reason`, then
-//                                                         the files it runs, one per line (every one when full),
-//                                                         never the advisory budget tests (`advisoryTests`)
-//   node scripts/ci-tests.mjs advisory                     the advisory budget tests, in the `affected` shape
+//                                                         the files it runs, one per line (every one when full)
 //
 // The dependency map is built from the source itself: every relative import, and every path a file
 // names in text (`'../docs/x.md'`, `join(root, 'src')`, `${root}/src/cli.ts`), is an edge; a
@@ -23,15 +21,6 @@ export const repositoryRoot = resolve(dirname(fileURLToPath(import.meta.url)), '
 export function listTestFiles(root = repositoryRoot) {
   return readdirSync(join(root, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
 }
-
-/**
- * The budget tests that are advisory under the control-plane merger (GY-1528): a module outgrowing
- * its budget is a chore, never a reason to refuse or revert a merge. The merge writer's trial
- * (`affected`) leaves them out, and the loop runs them once after each merge. GitHub's CI selection
- * (`select`) still runs them.
- */
-export const advisoryTests = [];
-export const isAdvisoryTest = file => advisoryTests.includes(file);
 
 // ---- Shards ------------------------------------------------------------------------------------
 
@@ -159,17 +148,11 @@ export function selectAffected(changed, map, tests) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   const [command, ...args] = process.argv.slice(2);
-  const tests = listTestFiles();
   if (command === 'affected') {
-    // The merge writer's trial selection never runs the advisory budget tests (GY-1528).
-    const selection = selectAffected(args, dependencyMap(), listTestFiles().filter(file => !isAdvisoryTest(file)));
+    const selection = selectAffected(args, dependencyMap(), listTestFiles());
     // The files follow in both modes, so the merge writer's trial runs exactly this selection; an empty one runs nothing.
     console.log(`${selection.mode}: ${selection.reason}`); if (selection.files.length) console.log(selection.files.join('\n'));
-  } else if (command === 'advisory') {
-    // The advisory budget tests the loop runs once after each control-plane merge (GY-1528), in the `affected` output's shape.
-    const files = advisoryTests.filter(file => tests.includes(file));
-    console.log(`advisory: ${files.length} advisory budget test file(s)`); if (files.length) console.log(files.join('\n'));
   } else {
-    throw new Error('Usage: ci-tests affected FILE... | advisory');
+    throw new Error('Usage: ci-tests affected FILE...');
   }
 }

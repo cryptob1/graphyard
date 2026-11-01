@@ -10,6 +10,7 @@ import { dispatchSort, inFlight } from '../coordination.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 import type { CoordinationRounds } from '../server/work-view.js';
+import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, touchStanding } from './state.js';
@@ -590,7 +591,7 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
   }
 }
 
-/** The loop's own master session: launched when Herdr shows none, adopted when it does; the cycle never prompts it.
+/** The loop's master: launched when absent, adopted when visible, woken once per changed shared-base cause.
  *  A pane that has stopped on its provider's usage or session limit is not a working master (GY-2949): the
  *  loop judges the pane's recent output with the same limit-notice reader workers use, holds the account
  *  until the notice's reset, closes the pane, and launches the role's next account in the same cycle — so a
@@ -599,14 +600,37 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   const { config, state, effects, herdr } = cycle;
   const sessions = effects.masterSession;
   if (!sessions || !herdr.available) return;
+  const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
+  const current = new Set(causes.map(cause => cause.key));
+  // A retrial temporarily replaces its refusal with an intent. Keep the same base's wake
+  // while it runs, otherwise an unchanged failure would wake again after every retrial.
+  for (const item of open) if (item.mergeLedger?.state === 'intent' && item.mergeLedger.head === item.candidate?.sha && item.mergeLedger.baseTip)
+    current.add(`base:${item.mergeLedger.baseTip}`);
+  for (const key of Object.keys(state.master.subjects)) if (!current.has(key)) delete state.master.subjects[key];
   const master = state.master;
   const handle = herdr.agents.find(agent => agent.name === (master.agentName ?? config.masterAgentName));
   if (!handle) {
     submitMasterLaunch(cycle, open);
     return;
   }
-  if (!master.agentName) state.master = { ...emptyMasterSession(), agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: cycle.snapshot.now, adopted: true };
-  await masterPaneFailover(cycle, handle, open);
+  if (!master.agentName) state.master = { ...master, agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: cycle.snapshot.now, adopted: true };
+  if (!state.master.startedAt) state.master.startedAt = cycle.snapshot.now;
+  if (await masterPaneFailover(cycle, handle, open)) return;
+  const changed = causes.filter(cause => state.master.subjects[cause.key] !== cause.digest);
+  const target = handle.pane_id ?? state.master.pane ?? handle.name;
+  const since = Date.parse(state.master.lastWake?.at ?? state.master.startedAt ?? cycle.snapshot.now);
+  const heartbeat = !changed.length && open.length > 0 && cycle.now() - since >= (config.run.masterHeartbeatMinutes ?? 30) * 60_000;
+  if ((!changed.length && !heartbeat) || !target || !sessions.wake) return;
+  const prompt = changed.length ? masterCausePrompt(changed) : `Graphyard coordinator heartbeat: open in-scope work remains. Continue from node ${config.cliPath} master status, diagnose stalled work and advance typed agent actions with every gate intact. Act without asking for routine human approval.`;
+  const key = config.forPerson ? `master:wake:${config.forPerson}` : 'master:wake';
+  cycle.launcher.submit(key, [], async sink => {
+    try {
+      await sessions.wake!(target, prompt);
+      for (const cause of changed) state.master.subjects[cause.key] = cause.digest;
+      state.master.lastWake = { at: new Date(cycle.now()).toISOString(), causes: changed.map(cause => cause.key).slice(0, 20), heartbeat };
+      sink.push(await record(state, key, { kind: 'wake', work: null, principal: null, state: 'done', detail: prompt, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
+    } catch (error) { sink.push(await record(state, key, { kind: 'wake', work: null, principal: null, state: 'failed', detail: `Could not wake the master: ${message(error)}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist)); }
+  });
 }
 
 /** The launch the absent or failed-over master session owes, handed to the launcher so a slow pane creation never stalls the cycle. The registry session the previous pane ran under is ended first, so the role's one slot frees for this launch. */
@@ -618,8 +642,12 @@ function submitMasterLaunch(cycle: Cycle, open: Work[]) {
   launcher.submit(launchKey, [], async sink => {
     try {
       if (state.master.session && sessions.end) await sessions.end(state.master.session, 'the master session it recorded is gone from Herdr; the loop launches its replacement').catch(() => undefined);
-      const launched = await sessions.launch(masterHandover({ work: open, cliPath: config.cliPath }));
-      state.master = { ...emptyMasterSession(), ...launched, startedAt: new Date(cycle.now()).toISOString() };
+      const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
+      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(causes.length ? [masterCausePrompt(causes)] : [])].join('\n'));
+      const at = new Date(cycle.now()).toISOString();
+      state.master = { ...emptyMasterSession(), ...launched, startedAt: at,
+        subjects: Object.fromEntries(causes.map(cause => [cause.key, cause.digest])),
+        lastWake: causes.length ? { at, causes: causes.map(cause => cause.key).slice(0, 20), heartbeat: false } : null };
       sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
     } catch (error) {
       sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'failed', detail: `The master session could not be launched; the next cycle tries again: ${message(error)}`, attempts: (state.actions[launchKey]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist));
@@ -657,6 +685,7 @@ async function masterPaneFailover(cycle: Cycle, handle: HerdrAgent, open: Work[]
       lastEnd: { cause: notice ? 'exhausted' : 'exited', at: new Date(clock).toISOString(), detail: reason.slice(0, 500) },
       limitedUntil: notice?.resetsAt ?? null };
     await note(cycle, key, 'failover', null, 'done', `The master session ${master.agentName} is treated as absent (${reason}); the account it spent is held until its reset, and the master launches on the role's next account`);
-  } catch (error) { await note(cycle, key, 'failover', null, 'failed', `Could not fail the master session over: ${message(error)}`); return; }
+  } catch (error) { await note(cycle, key, 'failover', null, 'failed', `Could not fail the master session over: ${message(error)}`); return true; }
   submitMasterLaunch(cycle, open);
+  return true;
 }

@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
-import { advisoryIdle, advisoryStep, emptyMergeWriterState } from '../src/daemon/cycle-merge-writer.js';
+import { emptyMergeWriterState, type MergeWriterState } from '../src/daemon/cycle-merge-writer.js';
 import { daemonStatePath, readDaemonState } from '../src/daemon/state.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
@@ -13,8 +13,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 
 // GY-2186: the loop files no work item on its own. A cycle that sees a flaky test past its rerun
-// or a failing advisory test after a merge makes no work-item request, and the loop's effects
-// expose no filing route at all.
+// makes no work-item request, and the loop's effects expose no filing route at all.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const clock = Date.parse('2030-01-01T12:00:00Z');
@@ -40,7 +39,7 @@ function item(key: string, overrides: Partial<Work> = {}): Work {
 const delivered = () => item('GY-87', { title: "GY-87's throughput claim", delivery: { mergedAt: iso(-2 * hour), mergeSha: sha('m'), authorizationRevision: 1,
   deployment: { sha: serving, mergeSha: sha('m'), source: 'endpoint', observedAt: iso(-hour), covers: 'exact', at: iso(-hour), observer: 'coordinator-1' } } } as Partial<Work>);
 
-test('unit:loop-files-no-items — a cycle with a flaked rerun, a failing advisory test, saturated docs headroom files nothing and raises no escalation', async t => {
+test('unit:loop-files-no-items — a cycle with a flaked rerun and saturated docs headroom files nothing and raises no escalation', async t => {
   const root = await temporaryDirectory('loop-files-no-items');
   t.after(() => rm(root, { recursive: true, force: true }));
   const master = config(), state = emptyDaemonState(master);
@@ -72,25 +71,9 @@ test('unit:loop-files-no-items — a cycle with a flaked rerun, a failing adviso
   }
   assert.deepEqual(escalations, [], `no owner escalation is raised: ${JSON.stringify(escalations)}`);
   assert.deepEqual(Object.keys(state.actions).filter(key => key.includes('throughput:owner')), [], 'no throughput owner record');
-
-  // 4. A failing advisory test after a merge: one log line, no work item, no refusal.
-  const logs: string[] = [], errors = console.error;
-  console.error = line => logs.push(String(line));
-  try {
-    state.mergeWriter = emptyMergeWriterState();
-    const mergeSha = sha('merged'), reads = { ...effects, mergeWriter: { advisory: async () => ({ build: 'fail', failed: ['tests/module-budgets.test.ts'] }) } };
-    const step = advisoryStep as (cycle: unknown, delivered: { key: string; mergeSha: string } | null) => Promise<boolean>;
-    await step({ state, effects: reads, now: () => clock, performed: [] }, { key: 'GY-87', mergeSha });
-    await advisoryIdle(state);
-    // The run settles beside the step: the next step folds its outcome, which is the one log line.
-    await step({ state, effects: reads, now: () => clock, performed: [] }, null);
-  } finally { console.error = errors; }
-  assert.equal(logs.length, 1, JSON.stringify(logs));
-  assert.match(logs[0]!, /The advisory budget tests failed on .*they are advisory, so nothing is refused, reverted or filed/);
-  assert.deepEqual(Object.values(state.actions).filter(action => /advisory/i.test(action.detail) && action.work), [], 'the advisory failure files nothing');
 });
 
-test('unit:no-flake-or-advisory-items — a test that fails then passes on rerun, and an advisory test that fails after a merge, file no work item and are at most one line each', async t => {
+test('unit:no-flake-items — a test that fails then passes on rerun files no work item, and the refusal that grounds it is at most one line', async t => {
   // The flake: GY-101's merge ledger holds the trial's flake (failed once, passed on its rerun, none
   // of them the item's proofs). The writer holds the head on the ledger; the loop files nothing for
   // it, and the trial record is at most the one attention line the writer's own refusal names.
@@ -111,22 +94,6 @@ test('unit:no-flake-or-advisory-items — a test that fails then passes on rerun
   const filings = Object.values(state.actions).filter(action => action.kind === 'fault' && /^Filed |flake/i.test(action.detail));
   assert.deepEqual(filings, [], `a flake files no work item: ${JSON.stringify(filings.map(entry => entry.detail))}`);
   assert.deepEqual(Object.keys(state.actions).filter(key => key.startsWith('fault:')), [], 'no fault-class action row at all');
-
-  // The advisory failure after a merge: one log line, no work item, no refusal, no revert.
-  const logs: string[] = [], errors = console.error;
-  console.error = line => logs.push(String(line));
-  try {
-    state.mergeWriter = emptyMergeWriterState();
-    const reads = { ...effects, mergeWriter: { advisory: async () => ({ build: 'fail', failed: ['tests/module-budgets.test.ts'] }) } };
-    const step = advisoryStep as (cycle: unknown, delivered: { key: string; mergeSha: string } | null) => Promise<boolean>;
-    await step({ state, effects: reads, now: () => clock, performed: [] }, { key: 'GY-87', mergeSha: sha('merged') });
-    await advisoryIdle(state);
-    await step({ state, effects: reads, now: () => clock, performed: [] }, null);
-  } finally { console.error = errors; }
-  assert.equal(logs.length, 1, JSON.stringify(logs));
-  assert.match(logs[0]!, /The advisory budget tests failed on .*they are advisory, so nothing is refused, reverted or filed/);
-  const advisoryActions = Object.values(state.actions).filter(action => /advisory/i.test(action.detail));
-  assert.deepEqual(advisoryActions.filter(action => action.work), [], 'an advisory failure files no work item');
 });
 
 test('unit:loop-files-no-items — the loop exposes no filing effect at all', async t => {
@@ -161,15 +128,15 @@ test('unit:diagnostician-removed-cursor-loads — a cursor still carrying diagno
     // The diagnostician's records, per recurring item and invariant instance.
     diagnoses: { 'GY-1682': { subject: 'GY-1682', kind: 'recurring', faultClass: 'scope', work: 'GY-1682', state: 'answered', startedAt: iso(-hour), updatedAt: iso(-minute),
       runs: [{ runtime: 'pi', model: 'zai/glm-5.3-flash', startedAt: iso(-hour), endedAt: iso(-minute), result: 'diagnosed', detail: 'Diagnosed' }], diagnosis: null, fix: 'GY-1683', decision: null, answeredBy: 'GY-1683', refusedAt: null, retryAt: null, detail: 'answered' } },
-    // The advisory run ledger and a base-failure record naming the item an older loop filed for it.
-    mergeWriter: { ...emptyMergeWriterState(), advisory: { since: iso(-2 * hour), due: [], ran: [{ key: 'GY-87', mergeSha: sha('merged'), deliveredAt: iso(-hour) }] } },
+    // The advisory run ledger an older loop kept (GY-3002 retires it) and a base-failure record naming the item an older loop filed for it.
+    mergeWriter: { ...emptyMergeWriterState(), advisory: { since: iso(-2 * hour), due: [], ran: [{ key: 'GY-87', mergeSha: sha('merged'), deliveredAt: iso(-hour) }] } } as MergeWriterState,
     baseFailures: { 'trial:work-100:abc': { test: 'tests/flaky.test.ts', check: 'trial', baseSha: tip40(), jobId: null, url: null, raisedAt: iso(-hour), blocks: [{ key: 'GY-100', id: 'work-100', sha: sha('candidate'), jobId: null, url: null }], item: 'GY-999', cleared: null } },
   };
   await writeFile(file, JSON.stringify(carried));
   const loaded = await readDaemonState(root, master);
   // Everything the loop still reads survived; the retired keys did not.
   assert.equal((loaded as unknown as Record<string, unknown>).diagnoses, undefined, 'the diagnoses record is dropped on read');
-  assert.equal(loaded.mergeWriter.advisory?.ran.length, 1, 'the advisory run ledger loads');
+  assert.equal((loaded.mergeWriter as unknown as Record<string, unknown>).advisory, undefined, 'the advisory run ledger drops on read (GY-3002)');
   // And it round-trips: the next read loads the written-back cursor without the retired keys.
   await writeFile(file, JSON.stringify({ ...loaded }));
   const again = JSON.parse(await readFile(file, 'utf8'));
