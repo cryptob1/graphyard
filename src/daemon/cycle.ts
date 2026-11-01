@@ -7,6 +7,7 @@ import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight } from '../coordination.js';
+import { capacityRefusal } from '../fleet.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 import type { CoordinationRounds } from '../server/work-view.js';
@@ -586,6 +587,11 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
     clearProfileFailure(state, profile);
     sink.push(await entry('done', `Dispatched ${item.key} to ${profile.name}; the worker launcher claimed under ${profile.principal}`));
   } catch (error) {
+    const full = capacityRefusal(error);
+    if (full) {
+      sink.push(await entry('waiting', `Dispatch of ${item.key} waits for a worker slot, retried on the first cycle one frees: ${full}`));
+      return;
+    }
     recordProfileFailure(state, profile, message(error), now());
     sink.push(await entry('failed', `Dispatch of ${item.key} to ${profile.name} failed: ${message(error)}; it is retried next cycle`));
   }
