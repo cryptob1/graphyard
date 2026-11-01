@@ -9,6 +9,10 @@ import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1557: two `actorless` submissions (GY-1522, GY-1526) were counted while the product's own remedy
 // was in motion, because the base-conflict bound was anchored to a moment before the hold existed.
 // The bound now runs from the hold's first sighting; each instance is replayed from the ledger
@@ -90,7 +94,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 test('integration:base-hold-observed — the observation write records when the current head was first read withheld behind the base, keeps it across a base move, and clears it when GitHub reports the head mergeable', async () => {
   await holds();
   const head = 'a'.repeat(40), base = 'b'.repeat(40), moved = 'c'.repeat(40);
-  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Base hold', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:base-hold-fixture'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Base hold', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:base-hold-fixture', 'e2e:fixture'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/base-hold/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}` }, randomUUID());

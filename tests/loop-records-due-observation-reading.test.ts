@@ -8,6 +8,10 @@ import { isClosed, type Principal, type Work } from '../src/model.js';
 import * as model from '../src/model.js';
 import type { Services } from '../src/server/routes.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1694/GY-1799: the 2026-10-13 instants are the fixture's own clock, judged against the explicit `now` below: the daemon cycle is handed that `now`, and the delivered-observation close reads its clock from the fixture-clocked store the test hands it (src/server/close.ts judges the worker lease against the transaction's `now`), so nothing judges the fixture against the wall clock and the file holds no wall-clock reading to allow.
 
 const hour = 3_600_000, now = Date.parse('2026-10-13T12:00:00.000Z');
@@ -50,7 +54,7 @@ after(async () => { await store?.close(); await database?.stop(); });
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 /** An item created through the engine, then written as the control plane would have left it: the fixture for what the reading binds to. */
 async function plant(shape: Work): Promise<Work> {
-  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: shape.title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:readings'] }] }, randomUUID()) as Work;
+  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: shape.title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:readings', 'e2e:fixture'] }] }, randomUUID()) as Work;
   const { id, key, ...rest } = shape;
   await store.pool.query('UPDATE work_items SET document=$2 WHERE id=$1', [created.id, JSON.stringify({ ...created, ...rest, id: created.id, key: created.key })]);
   return reload(created.id);

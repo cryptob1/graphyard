@@ -10,6 +10,10 @@ import { server } from '../src/server.js';
 import { directMergeFromEnv, directMergeStatus } from '../src/direct-merge.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): every absolute instant (the 2024-2026 `since` windows and mergedAt values) is past and compared only with the others; the new Date() merge follows off closing the window.
 
 /**
@@ -54,7 +58,7 @@ const events = async (id: string, kind: string) => (await store.pool.query('SELE
 /** A submitted item whose pull request GitHub then reports merged at `mergedAt`, with no merge execution. */
 async function mergedWithoutExecution(mergedAt: string, observer = engine) {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Direct merge ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Direct merge ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/direct-merge-${n}`, branch: `graphyard/direct-${n}` }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 700 + n }, randomUUID());

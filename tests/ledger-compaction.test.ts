@@ -12,6 +12,10 @@ import { readEventHistory, parseEventHistoryQuery } from '../src/events-history.
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * Control-plane storage stays bounded (GY-979): a routine save stores only what changed, never a
  * whole work document, and routine rows past the retention window are compacted in bounded,
@@ -116,7 +120,7 @@ test('unit:routine-events-store-no-snapshot — a routine save stores only what 
   try { assert.deepEqual(await documentBefore(client, work.id, new Date(Date.now() + 60_000), () => true), written.at(-1)); } finally { client.release(); }
 
   // Through the engine: a worker's renewals past snapshotEvery are never whole.
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Renewals', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Renewals', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   for (let beat = 0; beat < snapshotEvery + 5; beat++) w = await engine.execute(worker, 'heartbeat', w.id, { epoch: 1 }, randomUUID());
   const beats = (await raw(w.id)).filter(row => row.kind === 'heartbeat');

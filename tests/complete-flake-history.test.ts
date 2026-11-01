@@ -7,6 +7,10 @@ import { Engine } from '../src/engine.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-2968: what complete's automatic rerun sets aside travels with the submission and lands on the
 // item's history in the submission's own transaction — the flaked cases and the base failures,
 // each named where the run located it, with the timing the runner gave.
@@ -28,7 +32,7 @@ const flaked = [{ case: 'unit:outside-proof — case A', file: 'tests/flaky.test
 const baseFailures = [{ case: 'unit:outside-proof — case B', file: 'tests/broken-elsewhere.test.ts', line: 7, durationMs: null }];
 
 async function assigned(title: string, n: number) {
-  let w = await engine.execute(operator, 'create', null, { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:outside-proof'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:outside-proof', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   return await engine.execute(worker, 'workspace', w.id, { epoch: w.epoch, host: 'test', path: `/tmp/complete-flake-history-${n}`, branch: `graphyard/complete-flake-history-${n}` }, randomUUID());

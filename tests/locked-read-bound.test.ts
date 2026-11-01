@@ -9,6 +9,10 @@ import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-1787: the locked-read full-pass bound is relative — a fixed multiple of the host's trivial-lock
  * baseline plus the batches' budget (tests/locked-read.test.ts, unit:locked-read-relative-bound) —
@@ -89,7 +93,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 
 let template: Work;
 async function ensureTemplate() {
-  template ??= await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Template', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  template ??= await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Template', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench', 'e2e:fixture'] }] }, randomUUID());
 }
 function open(n: number): Work {
   return { ...structuredClone(template), id: randomUUID(), key: `OPEN-${n}`, title: `Open change ${n}`, description: `What open change ${n} must do. `.repeat(8), ready: n % 2 === 0, stage: 'backlog' } as Work;

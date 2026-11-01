@@ -10,7 +10,7 @@ import { setupAddress, setupChecklist, type SetupItem, type SetupItemId } from '
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { sshOrigin } from './merger-mode.js';
-import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
+import { fileOnboardingWork, onboardingChecks, onboardingFirstCase } from './onboarding.js';
 import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './evidence-replay.js';
@@ -899,12 +899,22 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // GY-1480: only the workflows the apply reports writing are claimed, and the publish refuses
       // when any of them is not on disk, so a change never says it carries a workflow it lacks.
       const workflows: string[] = Array.isArray(applied?.delivery?.workflows) ? applied.delivery.workflows.filter((path: unknown) => typeof path === 'string') : [];
+      // GY-3037: the first case the apply wrote for the e2e rule is onboarding output like the rest,
+      // published in the same commit; and the serve declaration it writes when no application serves
+      // a head is the deployed control plane's policy, which an install reads from graphyard.json —
+      // so the install runs again once, this run, before the item that carries it is filed.
+      const firstCase: string[] = typeof applied?.delivery?.firstCase === 'string' ? [applied.delivery.firstCase] : [];
+      if (applied?.delivery?.serve === true) {
+        const result = await deps.cli(installArgs('--apply'));
+        claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
+        if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
+      }
       // The files are written to this checkout only; the base branch needs them before any work is
       // delivered, so they are published as one commit on `graphyard/onboarding` (the base is
       // protected, never pushed to) and the commit is submitted as a work item by head sha, exactly
       // as a worker's `complete --head` submits (GY-2938): no pull request is opened.
-      const published = await deps.publishOnboarding(workflows).catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
-      const carried = workflows.length ? `onboarding files with ${workflows.join(', ')}` : 'onboarding files (no delivery workflow was written)';
+      const published = await deps.publishOnboarding([...workflows, ...firstCase]).catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
+      const carried = [...workflows, ...firstCase].length ? `onboarding files with ${[...workflows, ...firstCase].join(', ')}` : 'onboarding files (no delivery workflow was written)';
       if (!published) return `${carried}: the base branch already holds them`;
       // GY-1478: the commit is filed as a work item the loop owns, so its reviewer reviews it,
       // the checks run and it merges under the normal gates; nothing waits on a person.
@@ -1702,7 +1712,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       let token = '';
       try { token = operatorTokenFile ? (await readFile(operatorTokenFile, 'utf8')).trim() : ''; } catch { /* no credential on this machine */ }
       if (!server || token.length < 32) return null;
-      return fileOnboardingWork({ server, token, commit, checks: await onboardingChecks(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
+      return fileOnboardingWork({ server, token, commit, checks: await onboardingChecks(root), caseId: await onboardingFirstCase(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
     },
     work: async () => {
       const url = await serverUrl(), token = await masterToken();

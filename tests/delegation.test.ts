@@ -18,6 +18,10 @@ import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { mergeIntent } from './helpers/merge-ledger.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // The merge writer merges (GY-1524, GY-2010): what it may push is a head its trial passed with every
 // other gate passing on the item as it stands, the merge gate waiting only on the push, in the merge
 // order the delegation computes. These stand in for the writer's selection.
@@ -58,7 +62,7 @@ let http: ReturnType<typeof server>, url: string;
 const credentials = roster.map(principal => ({ ...principal, token: `delegation-${principal.id}-${'x'.repeat(32)}` }));
 let pr = 500;
 const id = () => randomUUID();
-const input = (title: string, slice?: SliceId) => ({ type: 'chore', title, ...(slice ? { slice } : {}), criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+const input = (title: string, slice?: SliceId) => ({ type: 'chore', title, ...(slice ? { slice } : {}), criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] });
 const proof = (overrides: Record<string, unknown> = {}) => ({ proof: 'unit:works', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, ...overrides });
 function observation(work: Work, sha = head): Observation {
   return { clockOffset: { min: 0, max: 0 }, candidate: { sha, baseSha: base, pr: work.submission!.pr, branch: work.workspaces.at(-1)!.branch, author: 'implementer' },
@@ -176,7 +180,7 @@ test('integration:lead-enforcement — violating lead actions are refused server
   let item = await engine.execute(admin, 'create', null, input('lead-enforcement', 'product'), id());
   item = await engine.execute(admin, 'ready', item.id, {}, id());
   for (const [command, body] of [['claim', {}], ['evidence', proof()], ['ready', {}], ['submit', { epoch: 1, pr: 1 }],
-    ['requirements', { expectedPolicyRevision: 1, reason: 'lead rewrite', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], dependencies: [], exclusiveResources: [] }]] as const)
+    ['requirements', { expectedPolicyRevision: 1, reason: 'lead rewrite', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], dependencies: [], exclusiveResources: [] }]] as const)
     await assert.rejects(engine.execute(lead, command as never, item.id, body, id()), /Slice leads cannot perform lifecycle mutations/, command);
   // A lead identity that also holds producer credentials cannot self-prove its slice.
   const leadProducer: Principal = { ...lead, role: 'producer', proofs: ['unit:works'] };

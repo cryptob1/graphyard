@@ -14,6 +14,10 @@ import type { Principal, Work } from '../src/model.js';
 import { eventHistoryLimits, routineEventKinds } from '../src/events-history.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 const operator: Principal = { id: 'operator', role: 'admin' };
 const worker: Principal = { id: 'worker-a', role: 'worker' };
 const tokens = { operator: 'o'.repeat(32), worker: 'w'.repeat(32) };
@@ -57,7 +61,7 @@ async function noise(work: Work, rows = NOISE) {
 async function lifecycle() {
   let work = await engine.execute(operator, 'create', null, { type: 'chore', 
     title: 'An item whose history outlives one page', 
-    criteria: [{ id: 'AC-1', text: 'History is readable at any age', proofs: ['integration:events-pagination'] }],
+    criteria: [{ id: 'AC-1', text: 'History is readable at any age', proofs: ['integration:events-pagination', 'e2e:fixture'] }],
   }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   await noise(work);

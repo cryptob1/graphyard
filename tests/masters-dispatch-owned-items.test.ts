@@ -10,6 +10,10 @@ import type { Principal, Work } from '../src/model.js';
 import { relandItemFor } from '../src/merge-writer/serve-revert.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 const alice: Principal = { id: 'alice', role: 'admin', sessionKind: 'human' };
 const bob: Principal = { id: 'bob', role: 'admin', sessionKind: 'human' };
 let pg: EmbeddedPostgres, store: Store, engine: Engine;
@@ -21,7 +25,7 @@ before(async () => {
   engine = new Engine(store, 120, 'owner/project'); engine.principals = [alice, bob];
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
-const criteria = [{ id: 'AC-1', text: 'Ownership routes work', proofs: ['unit:masters-dispatch-owned-items'] }];
+const criteria = [{ id: 'AC-1', text: 'Ownership routes work', proofs: ['unit:masters-dispatch-owned-items', 'e2e:fixture'] }];
 const create = (owner?: string | null) => engine.execute(alice, 'create', null, { title: `Item ${owner ?? 'install'}`, type: 'chore', criteria, owner }, randomUUID());
 
 test('unit:masters-dispatch-owned-items two personal masters and the install share one control plane and one loop', async () => {

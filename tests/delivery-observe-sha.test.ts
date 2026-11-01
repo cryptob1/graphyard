@@ -14,6 +14,10 @@ import type { Principal, Work, Observation } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-1861: a producer records a deployment observation by the commit production serves, and
  * every delivered item whose merge that commit contains moves from awaiting deployment to deployed.
@@ -56,7 +60,7 @@ const smoked = (w: Work): Work => ({ ...w, policy: { ...w.policy, deploySmoke: t
 
 /** Delivered work the way production reaches it: an authorized, verified, independently observed merge. */
 async function delivered(mergeSha: string) {
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety', 'e2e:fixture'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/observe-sha-${serial}`, branch: `graphyard/observe-sha-${serial}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: serial }, id());

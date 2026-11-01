@@ -25,6 +25,10 @@ import { completionBody } from '../src/cli/complete.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1524: the control-plane merge executor — one serial queue, intent before push, the trial on the
 // exact merged tree, the deploy-key push leased on the tested tip, and the reconcile of what a crash left open.
 
@@ -532,7 +536,7 @@ async function request(credential: string, path: string, body?: unknown, key: st
 }
 /** An item the worker claimed, registered on its branch and submitted with `complete --head`, as GY-1523 submits it. */
 async function submittedItem(n: number) {
-  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
+  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(admin, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;

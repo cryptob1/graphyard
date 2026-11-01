@@ -6,6 +6,10 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2026-10-07 clock is the explicit now handed to unsubmittedAttempt over fixtures derived from it; the DB tests build stamps relative to Date.now().
 
 // GY-1462: the 60-minute worker no-submission bound, enforced. An attempt that holds its lease past
@@ -101,7 +105,7 @@ async function overwrite(work: Work, mutate: (document: Work) => void) {
   return document;
 }
 async function claimed(title: string) {
-  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, id());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   work = await engine.execute(worker, 'claim', work.id, {}, id());
   return engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'machine-a', path: `/srv/worktrees/${work.key}-${work.epoch}`, branch: `graphyard/${work.key.toLowerCase()}-${work.epoch}` }, id());

@@ -46,16 +46,16 @@ const review = (verdict: ProductReview['verdict'], head = H, findings = 'The wor
 
 const reviewGate = (work: Work) => evaluate(work, [work], new Date()).gates.find(gate => gate.name === 'review')!;
 
-test('unit:product-review-gates-features — who owes one: a feature carrying an e2e: proof does, bugs, chores and "No user-facing change" items do not', () => {
+test('unit:product-review-gates-features — who owes one: a feature carrying an e2e: proof does, bugs and chores do not, and the old opt-out sentence excuses nothing', () => {
   assert.equal(needsProductReview(feature('GY-1')), true);
   const bug = { ...feature('GY-2'), type: 'bug' } as Work;
   assert.equal(needsProductReview(bug), false);
   const chore = { ...feature('GY-3'), type: 'chore' } as Work;
   assert.equal(needsProductReview(chore), false);
   const opted = { ...feature('GY-4'), description: 'No user-facing change: the scheduler internals moved.' } as Work;
-  assert.equal(needsProductReview(opted), false);
+  assert.equal(needsProductReview(opted), true, 'a feature owes its review whatever its description says (GY-3037)');
   const unitOnly = { ...feature('GY-5'), criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] } as Work;
-  assert.equal(needsProductReview(unitOnly), false);
+  assert.equal(needsProductReview(unitOnly), false, 'an item written before the e2e rule still owes no review until it carries the proof');
   // The review is launched and posted through the control plane, so a GitHub-observed head owes none here.
   const github = feature('GY-6');
   github.observation = { ...github.observation!, source: undefined } as never;

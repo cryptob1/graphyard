@@ -15,6 +15,10 @@ import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatc
 import { nextAction } from '../src/model/next-action.js';
 import { neededRework } from '../src/daemon/rework.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-135: a proof that passes against an unchanged tree proves nothing. A pass is trusted only
 // beside the producer's run of the same proof failing against a tree with its criterion's
 // behaviour removed; anything else is recorded as not exercising its criterion.
@@ -44,7 +48,7 @@ before(async () => {
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (database) await database.stop(); });
 
 const create = () => engine.execute(operator, 'create', null, { type: 'chore',  title: 'Exercise fixture', criteria: [
-  { id: 'AC-1', text: 'An expired lease cannot claim', proofs: [PROOF] },
+  { id: 'AC-1', text: 'An expired lease cannot claim', proofs: [PROOF, 'e2e:fixture'] },
   { id: 'AC-2', text: 'Something else holds', proofs: [OTHER] },
 ] }, id()) as Promise<Work>;
 // Submitted over the producer's own HTTP route, exactly as `graphyard evidence KEY FILE` does.

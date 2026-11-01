@@ -14,6 +14,10 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-2934: since GY-2876 a coordinator's roster entry may carry --proof patterns (the install's master
  * carries manual:*), and the loop refused every such credential, so it never started. The loop now runs
@@ -62,7 +66,7 @@ test('unit:loop-accepts-coordinator-proof-patterns — master run --once runs a 
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
   }
 
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Proven by hand', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:checked'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Proven by hand', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:checked', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   await assert.rejects(engine.execute(coordinator, 'evidence', w.id, { proof: 'manual:checked', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: w.policyRevision, result: 'pass', executed: 1, skipped: 0 }, randomUUID()),
     /Evidence submission is not permitted/, 'a coordinator never submits evidence, whatever its patterns');

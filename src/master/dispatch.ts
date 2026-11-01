@@ -122,9 +122,9 @@ export function assertDispatchable(work: Work, allWork: Work[], observedAt: stri
   // GY-2992: a released feature item is not dispatched until its spec check reports — a ready
   // verdict dispatches, a first gaps verdict holds the item at ready with its report until master
   // requirements revises it (one re-check runs; a second gaps verdict dispatches, with the report
-  // attached), and a bug, chore or "No user-facing change" item owes none. Judged beside the
-  // lease and submission holds: an attempt's own carry keeps its original refusals, and an item
-  // that would dispatch is held until its check (or its one re-check) reports.
+  // attached), and a bug or chore owes none. Judged beside the lease and submission holds: an
+  // attempt's own carry keeps its original refusals, and an item that would dispatch is held until
+  // its check (or its one re-check) reports.
   const spec = specCheckRefusal(work);
   if (spec) throw new Error(spec);
   const conflicts = resourceConflicts(work, allWork, now);

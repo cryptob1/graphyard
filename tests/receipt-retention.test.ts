@@ -10,6 +10,10 @@ import { pruneReceipts, receiptPruneIntervalMs, receiptReplayWindowMs } from '..
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * Receipts grew without bound: no timestamp, no pruning, and every lease renewal stored a whole
  * work document under a fresh key. A renewal's receipt is now compact, and receipts past the
@@ -34,7 +38,7 @@ const age = (actor: string, key: string, ms: number) => store.pool.query("UPDATE
 
 async function claimed() {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { type: 'chore', title: `Receipts ${n}`, description: 'x'.repeat(4000), criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore', title: `Receipts ${n}`, description: 'x'.repeat(4000), criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   return engine.execute(worker, 'claim', w.id, {}, randomUUID());
 }

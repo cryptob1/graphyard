@@ -9,6 +9,10 @@ import type { Principal, Work } from '../src/model.js';
 import { appliedReworkBrief } from '../src/master/rework-brief.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-2874: the master applies intent with its own identity at once, and a lapsed lease ends the attempt.
 const operator: Principal = { id: 'operator', role: 'admin' };
 const master: Principal = { id: 'graphyard-master-project-operator', role: 'operator-agent', scope: { repositories: ['owner/project'], workItems: ['*'] } };
@@ -38,7 +42,7 @@ test('unit:master-intent-applies-directly — the master rewrites requirements w
   const before = (await events(work)).length;
   // A rewrite that retires AC-2 and rewords AC-1: once an approver's decision, now the master's own intent.
   const revised = await engine.execute(master, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, reason: 'The second behaviour moved to another item',
-    criteria: [{ id: 'AC-1', text: 'The first behaviour holds, reworded', proofs: ['unit:first'] }], dependencies: [], exclusiveResources: [], producerProofs: [] }, id());
+    criteria: [{ id: 'AC-1', text: 'The first behaviour holds, reworded', proofs: ['unit:first', 'e2e:fixture'] }], dependencies: [], exclusiveResources: [], producerProofs: [] }, id());
   assert.equal(revised.policyRevision, work.policyRevision + 1, 'the revision is applied in the same request');
   assert.deepEqual(revised.criteria.map(criterion => [criterion.id, criterion.text]), [['AC-1', 'The first behaviour holds, reworded']]);
   assert.deepEqual(revised.retiredCriterionIds, ['AC-2']);

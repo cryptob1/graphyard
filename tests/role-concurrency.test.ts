@@ -15,6 +15,10 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveRev
 import { launchProducer, reconcileProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2026-09-21 `at` stamps the requested() fixtures; the tests stamp items, verdicts and mint expiry from the real clock alone.
 
 // GY-107: one review and one proof run at a time fleet-wide, because each role had a single fixed
@@ -174,7 +178,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 test('integration:concurrent-producers — the control plane refuses evidence for an item from the principal that held an assignment on it, and trusts the same principal on an item it never touched', async () => {
   const H = sha40('c1');
   const submitted = async (title: string, claimant: Principal, pr: number) => {
-    let item = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:concurrency'] }] }, randomUUID());
+    let item = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:concurrency', 'e2e:fixture'] }] }, randomUUID());
     item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
     item = await engine.execute(claimant, 'claim', item.id, {}, randomUUID());
     item = await engine.execute(claimant, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/concurrency/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());

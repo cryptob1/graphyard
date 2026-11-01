@@ -14,6 +14,10 @@ import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-1027: coordination writes read only what their decision needs while they hold the coordination
  * lock. On 2026-10-01 ~20 write paths read every work item's whole document under the lock (~1000
@@ -97,7 +101,7 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   const dependency = delivered(template, 9000), sharing = open(template, 9002, ['probe-db']);
   const unrelated = Array.from({ length: 5 }, (_, n) => open(template, 9003 + n));
   await insert([dependency, sharing, ...unrelated]);
-  const focus = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Scope probe', exclusiveResources: ['probe-db'], dependencies: [dependency.id], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  const focus = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Scope probe', exclusiveResources: ['probe-db'], dependencies: [dependency.id], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench', 'e2e:fixture'] }] }, randomUUID());
   timeTransactions();
   const { reads } = await held('scope', () => engine.execute(operator, 'ready', focus.id, {}, randomUUID()));
   const seen = new Set(reads.flatMap(entry => entry.keys));
@@ -219,7 +223,7 @@ async function insert(documents: Work[]) {
 
 let template: Work, opened = 0, closed = 0, prs = 0;
 async function ensureTemplate() {
-  template ??= await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Template', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  template ??= await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Template', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench', 'e2e:fixture'] }] }, randomUUID());
 }
 async function seed(open_: number, closed_: number) {
   await insert([...Array.from({ length: open_ }, () => open(template, opened++)), ...Array.from({ length: closed_ }, () => delivered(template, closed++))]);
@@ -227,7 +231,7 @@ async function seed(open_: number, closed_: number) {
 
 /** One claim, renew, submit and registry select, each its own coordination transaction; their lock hold in ms. */
 async function lifecycle(round: string) {
-  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Bench ${round}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Bench ${round}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:bench', 'e2e:fixture'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   const claim = await held('claim', () => engine.execute(worker, 'claim', work.id, {}, randomUUID()));
   work = claim.result;

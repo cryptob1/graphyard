@@ -16,6 +16,10 @@ import { isConfirmedCoordinationRefusal } from '../src/cli/context.js';
 import { renewalGraceMs, supervise } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-558: lease renewals timed out waiting for a connection behind slow report and observation
 // queries, and live workers lost their leases. Each test is named for the proof it produces.
 const operator: Principal = { id: 'lease-pool-operator', role: 'admin', sessionKind: 'human' };
@@ -40,7 +44,7 @@ function engineOn(store: Store, leaseSeconds = 120) {
   engine.submissionObserver = null;
   return engine;
 }
-async function ready(engine: Engine, title: string, criteria = [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }]) {
+async function ready(engine: Engine, title: string, criteria = [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }]) {
   const work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria }, randomUUID());
   return engine.execute(operator, 'ready', work.id, {}, randomUUID());
 }
