@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -355,8 +355,10 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     assert.ok(!child.cwd.startsWith(`${shared}/`), `the ${outcome} trial's checkout is never made in the poisoned tmp`);
     const near = probe === durable && usable ? `${clean}/${trialCheckoutPrefix}` : `${base}/`;
     assert.ok(child.cwd.startsWith(near) && child.cwd.endsWith('/checkout'), `its checkout is made in ${near}: ${child.cwd}`);
-    // The namespace prepares private HOME/runtime directories; npm may add its compile cache.
-    assert.deepEqual(child.tmpEntries.filter(entry => !['node-compile-cache', 'home', 'runtime'].includes(entry)), [], 'only namespace scratch exists when the suite starts: no node_modules, no .git');
+    // When the host allocations live under /tmp, bubblewrap also creates their
+    // mount points in its private /tmp. None is an upward-lookup poison entry.
+    const namespaceEntries = ['node-compile-cache', 'home', 'runtime', basename(repo.root), basename(base)];
+    assert.deepEqual(child.tmpEntries.filter(entry => !namespaceEntries.includes(entry)), [], 'only namespace scratch and allocated mount points exist when the suite starts: no node_modules, no .git');
     assert.equal(existsSync(child.tmpdir), false, `it is removed with the checkout after a ${outcome}`);
     assert.equal(existsSync(tempOwnerMarker(child.tmpdir)), false, `its owner marker goes with it after a ${outcome}`);
     assert.equal(existsSync(child.cwd), false, `the checkout goes with it after a ${outcome}`);
