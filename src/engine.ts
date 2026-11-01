@@ -1840,7 +1840,7 @@ export class Engine {
    * again, under the lock as their compact stand-ins from the in-process cache (`lockedRows`,
    * GY-1027: an open item's coordination projection, a settled delivery's work-index summary), so
    * the lock hold grows with neither the history nor the open items' histories. The first pass of
-   * a process reads every live document once. The opening also sweeps direct merges.
+   * a process reads every live document once.
    *
    * The pass then evaluates the items whose own row moved, plus those whose inputs elsewhere
    * did: a fleet face any writer moved (anything beyond a lease renewal: stage, queue,

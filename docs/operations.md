@@ -88,4 +88,4 @@ The server outlives a dropped Postgres connection (one log line; the next reques
 
 ## Withdrawal and credentials
 
-Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. A delivered item with a failed smoke proof stays Done.
+Nothing is queued or armed on the remote: the [merge writer](delivery-redesign.md#merge-writer) pushes the base itself. Only its reconciled ledger record marks an item Done; an observation alone does not record delivery. A delivered item with a failed smoke proof stays Done.

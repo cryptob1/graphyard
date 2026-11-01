@@ -60,6 +60,12 @@ test('unit:merge-ledger — the merge writer\'s record is the one delivery: reco
   let work = await engine.observe(created.id, created.revision, observation(created));
   assert.equal(work.candidate?.sha, head, 'the observed candidate is the head the record names');
 
+  // Even a historical observer reporting a merge cannot deliver outside the writer's ledger.
+  work = await engine.observe(work.id, work.revision, { ...observation(work), merged: true, mergeSha: fixtureMergeSha(work), mergedAt: new Date().toISOString() });
+  assert.notEqual(work.stage, 'done', 'an observation alone does not deliver');
+  assert.equal(work.delivery, undefined);
+  assert.deepEqual(work.violations, [], 'observations no longer judge merge authorization');
+
   // The writer's intent opens the ledger; the item is not delivered by it.
   work = await mergeIntent(engine, work);
   assert.equal(work.mergeLedger?.state, 'intent');
