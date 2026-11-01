@@ -4,6 +4,7 @@ import { SERVER_CONTAINER_UID, shellQuote, type Transport } from './transport.js
 import { SERVER_PORT, type EnvValue, type PlanAction, type PreflightItem, type Provider } from './types.js';
 import { checkoutRelease } from '../release.js';
 import { localAdapter } from './local.js';
+import { buildTrialImage, trialImagePlan } from './trial-image.js';
 
 export interface AdapterContext {
   provider: Provider;
@@ -303,11 +304,13 @@ export const composeAdapter: ProviderAdapter = {
   },
   plan(ctx, observation) {
     return [
+      trialImagePlan(ctx),
       { id: 'provider.image', target: 'provider', title: `Build the Graphyard image ${ctx.image} from ${ctx.sourceRoot}`, state: 'update', command: ['docker build', ...imageBuildArgs(ctx.sourceRoot).map(arg => /\s/.test(arg) ? shellQuote(arg) : arg), '--tag', ctx.image, ctx.sourceRoot].join(' ') },
       ...composeActions(ctx, observation),
     ];
   },
   async provision(ctx) {
+    await buildTrialImage(ctx);
     await ctx.transport.exec('docker', ['build', ...imageBuildArgs(ctx.sourceRoot), '--tag', ctx.image, ctx.sourceRoot], { timeout: 1_800_000 });
   },
   async setEnv(ctx, values) {

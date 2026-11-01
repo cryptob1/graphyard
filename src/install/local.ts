@@ -17,6 +17,7 @@ import { emptyObservation, httpHealth, variableMarker, type AdapterContext, type
 import { clusterExists, localDatabaseUrl, localPaths, postgresBinaries, postgresPackage, readLocalEnvironment, type LocalPaths } from './local-runtime.js';
 import { loopUnitDirectory, supervisorSupport, testSuiteHomeGuard } from '../supervisor.js';
 import type { EnvValue, PreflightItem } from './types.js';
+import { buildTrialImage, trialImagePlan } from './trial-image.js';
 
 /** How the runtime is kept alive on this machine. A test supervisor runs it in-process. */
 export interface LocalSupervisor {
@@ -209,6 +210,7 @@ export const localAdapter: ProviderAdapter = {
   plan(ctx, observation) {
     const local = settings(ctx);
     return [
+      trialImagePlan(ctx),
       { id: 'provider.provision.database', target: 'provider', state: observation.database ? 'satisfied' : 'create',
         title: `Create the embedded Postgres cluster under ${local.paths.postgres} (directory 0700, password file 0600) on 127.0.0.1:${local.postgresPort}; no Docker`,
         command: `initdb --pgdata=${local.paths.data} --auth=scram-sha-256 --username=graphyard --pwfile=${local.paths.passwordFile}` },
@@ -222,6 +224,7 @@ export const localAdapter: ProviderAdapter = {
     ];
   },
   async provision(ctx) {
+    await buildTrialImage(ctx);
     const { paths } = settings(ctx);
     await mkdir(paths.postgres, { recursive: true, mode: 0o700 });
     await chmod(paths.postgres, 0o700);

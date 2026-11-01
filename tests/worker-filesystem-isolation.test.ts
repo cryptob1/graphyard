@@ -95,7 +95,10 @@ test('integration:worker-home-deletion-regression — the real regression remain
   // The merge writer runs this file under its own socket policy. A direct host
   // run must exercise that composition too, rather than report a false pass
   // while the bound E2E case cannot establish its inner sandbox in production.
-  const outer = trialConfinement([f.config], [f.base]);
+  // The bound E2E runner supplies the real outer container. Within that private
+  // root, this extra mount namespace must still permit the session's mounts.
+  // Socket Landlock belongs to the inner session, after its mounts.
+  const outer = ['bwrap', '--unshare-user', '--ro-bind', '/', '/', '--bind', f.base, f.base, '--'];
   run(outer, f.worktree, f.wrapper[0], [...f.wrapper.slice(1), process.execPath,
     '-e', deniedOperations, f.home, f.unrelated, f.root, f.worktree]);
   run(outer, f.worktree, f.wrapper[0], [...f.wrapper.slice(1), '/bin/sh', '-ec',

@@ -16,6 +16,14 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
+# Private-root merge trials. Nested bwrap uses unprivileged user namespaces;
+# no capabilities or host control sockets are supplied to this image.
+FROM node:24-bookworm-slim AS trial
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap python3 git ca-certificates openssh-client && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/local/bin/node /usr/bin/node && ln -s /usr/local/bin/npm /usr/bin/npm \
+    && touch /etc/graphyard-trial
+USER node
+
 FROM node:24-bookworm-slim
 ARG GRAPHYARD_VERSION
 ARG GRAPHYARD_BUILD_REVISION

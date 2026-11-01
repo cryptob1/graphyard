@@ -16,6 +16,7 @@ import { parseFailedTests } from '../model/base-failure.js';
 import { bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';
 import { socketConfinementWords } from '../master/socket-confinement.js';
 import { configHome } from '../install/secrets.js';
+import { containerTrialE2e, trialContainerDependencies, trialContainerWords } from './trial-container.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -790,7 +791,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     await mkdir(home);
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
     env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home) };
-    wrapper = trialConfinement(input.hidden ?? [], [checkout.directory, place, temporary], undefined, [input.root], { ...process.env, ...input.environment, ...env });
+    wrapper = trialContainerWords([checkout.directory, place, temporary], trialContainerDependencies(input.root));
   }
   catch (error) {
     for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
@@ -947,9 +948,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
       if (input.e2eProofs?.length) {
         enter('tests');
-        const ran = await runTrialE2eCases({
+        const ran = await containerTrialE2e({
           worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
-          scratch: temporary ?? checkout.directory, budgetMs: remaining(), holds, log: line => log.push(line),
+          scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
         });
         // Bounded so the trial record the merge writer posts stays within its schema.
         e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
