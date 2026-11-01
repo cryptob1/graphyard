@@ -46,8 +46,8 @@ test('integration:master-session-checkout-readonly — the master session cannot
   assert.deepEqual(words.slice(1, 4), ['--setenv', masterConfinementVariable, 'master'], 'the wrapper marks the session confined, so its master restart asks the loop');
   if (process.platform !== 'linux') return;
   assert.ok(await sessionMountNamespaceWorks(), 'mount namespaces work on this Linux host');
-  const live = await masterSessionConfinement('claude', root);
   const outside = join(base, 'config'); mkdirSync(outside);
+  const live = await masterSessionConfinement('claude', root, {}, [outside]);
   const inside = (script: string) => spawnSync(live.wrapper[0], [...live.wrapper.slice(1), 'bash', '-c', script], { cwd: root, encoding: 'utf8' });
   // The scripted hotfix of a tracked path fails at the OS level, by every route.
   for (const script of ['echo hotfix >> src/loop.ts', 'sed -i s/1/2/ src/loop.ts', 'cp Dockerfile src/loop.ts', `git -C ${root} commit -q --allow-empty -m hotfix`, `git -C ${root} stash push -q`, 'rm src/gone.ts',

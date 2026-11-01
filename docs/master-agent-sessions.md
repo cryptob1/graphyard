@@ -9,13 +9,21 @@
 
 ## The coordinator checkout is confined at the OS level
 
-Non-master launches get own checkouts, the coordinator's unwritable (Codex sandbox, others bubblewrap); unconfinable refused.
+Every launched role (worker, reviewer, producer, approver, spec checker and master), including Codex and registered runtimes, carries an outer bubblewrap namespace. The host root is read-only; an unavailable namespace refuses the launch. Merge-trial install, build, test, serve and E2E commands use the same host boundary.
 
 ### Worker sandbox
 
 Codex `--add-dir` roots: the common `.git` (GY-2977: `packed-refs` lock), `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`.
 
 The read-only mount re-exposes the common `.git` directory writable (GY-2967): every ref transaction a worker runs — commit, merge, reset, `branch -f`, `update-ref`, a cherry-pick's cleanup — takes the common `packed-refs` lock once anything has packed a ref (git gc does), and rewrites that file under the lock. Each runtime's own sandbox (Codex `--add-dir`, and the equivalent for other runtimes) must grant that common directory too (GY-2977): GY-2967 fixed only the bubblewrap layer, and a nested Codex sandbox that omitted it still refused `packed-refs.lock` with EROFS. Inside the mount, the checkout's own state is re-bound read-only — `index`, `HEAD`, `config`, `hooks`, the refs outside `refs/heads/graphyard`, and the shared `worktrees` area for a session with its own worktree admin — where the read-only bind still lets git take its `.lock` (the directory stays writable) but refuses the write and the rename that commits it, so the coordinator's index, HEAD, config and the base branch keep the protection they had.
+
+### Host writes and scratch cleanup (GY-3045)
+
+Writable host paths are the allocated worktree or session checkout, its required Git state described above, its own runtime login/binding directories and private scratch. The master also keeps its managed `.graphyard` state and explicitly supplied coordinator state directory writable. Merge trials grant only their allocated checkout/session and temporary directories, never the coordinator root. Other host-home and unrelated-project files stay read-only, including rename and unlink. The OS denies these writes without an approval prompt; routine work and existing delivery gates stay unattended.
+
+Each agent's `.graphyard/scratch` is mounted at `/tmp` and `/var/tmp` inside its namespace; trials use their allocated temporary directory. These short paths stay on the allocated disk so checks can create Git fixtures and Unix sockets. `TMPDIR`, `TMP` and `TEMP` point there; HOME, runtime scratch and caches also live there. Explicit runtime login homes remain available. `/dev` is a fresh minimal device filesystem. Host `/run`, host temporary directories, Docker runtime directories, and configured Unix Docker/Podman/BuildKit/SSH/Herdr endpoints are hidden; systemd buses stay masked (only the existing filtered keyring proxy may be re-exposed).
+
+Create scratch with `scratch=$(mktemp -d)` in the session, keep that variable in the same shell, and clean only that directory after checking its value. Never use `HOME=$(mktemp -d) command; rm -rf "$HOME"`: the assignment affects only `command`, and the later expansion uses the parent HOME. After an incident, stop the command and inspect the exact allocated directory; never clean the operator HOME or infer a cleanup target from a missing CLI. Session checkout cleanup removes its scratch. `e2e/cases/worker-filesystem-isolation.json` runs the real namespace regression: disposable host-home sentinels, all roles, normal work, the command-scope mistake and host control sockets.
 
 ### Credentials are hidden from confined sessions (GY-1856)
 

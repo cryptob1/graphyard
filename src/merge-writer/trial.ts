@@ -13,7 +13,7 @@ import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
 import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master/host-memory.js';
 import { parseFailedTests } from '../model/base-failure.js';
-import { bwrapOnPath, credentialMaskWords } from '../master/confinement.js';
+import { bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';
 import { configHome } from '../install/secrets.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -144,18 +144,20 @@ export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = proce
 export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
   [...new Set([configHome(environment.GRAPHYARD_CONFIG_HOME), deployKeyFile, environment.XDG_RUNTIME_DIR, uid === undefined ? undefined : `/run/user/${uid}`].filter((path): path is string => !!path && isAbsolute(path)))];
 /**
- * GY-2997: the bubblewrap words a trial child runs under: the host as it is, with each hidden path's
- * directory replaced by an empty tmpfs (`credentialMaskWords`), and the trial's own directories that
- * lie under a mask bound back on top so the child still reaches its checkout. The child sees only
+ * The bubblewrap words every trial child runs under: a read-only host, private devices and
+ * scratch, host launch sockets hidden, credential masks, then only the trial's allocated
+ * directories bound writable. The child sees only
  * its own processes and dies with the runner, so a killed trial leaves nothing behind.
  */
 export function trialConfinement(hidden: readonly string[], reexposed: readonly (string | null)[], bwrap = bwrapOnPath() ?? 'bwrap'): string[] {
   const masks = credentialMaskWords({ configHome: '', extraPaths: hidden, own: [], cli: [] }, []);
-  const masked = masks.filter((_, index) => masks[index - 1] === '--tmpfs');
-  const inside = (path: string, directory: string) => { const from = relative(directory, path); return from !== '' && !from.startsWith('..') && !isAbsolute(from); };
-  const binds = [...new Set(reexposed.filter((path): path is string => !!path && existsSync(path)).map(path => realpathSync(path)))].filter(path => masked.some(directory => inside(path, directory)));
+  const binds = [...new Set(reexposed.filter((path): path is string => !!path && existsSync(path)).map(path => realpathSync(path)))];
   // Its own PID namespace and a fresh /proc, so no host process's /proc/<pid>/root leads back past the masks.
-  return [bwrap, '--die-with-parent', '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', ...binds.flatMap(path => ['--bind', path, path]), '--'];
+  const scratch = binds.at(-1);
+  if (!scratch) throw new Error('A trial sandbox requires an allocated writable directory');
+  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch),
+    ...processLaunchMaskWords({ ...hostProcessLaunchTargets(), secretsBus: null }, []),
+    ...masks, ...binds.flatMap(path => ['--bind', path, path]), '--'];
 }
 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */
@@ -788,7 +790,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   await mkdir(home);
   const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
   const env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
-  const wrapper = input.hidden?.length ? trialConfinement(input.hidden, [input.root, checkout.directory, place, temporary]) : undefined;
+  const wrapper = trialConfinement(input.hidden ?? [], [checkout.directory, place, temporary]);
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
   const e2e: TrialE2eCase[] = [];

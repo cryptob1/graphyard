@@ -1,7 +1,7 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
@@ -10,7 +10,7 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './profiles.js';
+import { bwrapOnPath, runtimeLoginHomes, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 import { deliverPrompt, herdrErrorText, nameRefusedByRuntime, readSessionScreen, sessionWords, type PromptDelivery } from './prompt-delivery.js';
@@ -179,7 +179,7 @@ export interface MasterConfinementProbe { bwrap?: string | null; platform?: stri
  * proxy stands in for the session bus), and GRAPHYARD_CONFINEMENT=master set. A host that cannot
  * build it refuses the launch with the named reason: the master is never started unconfined.
  */
-export async function masterSessionConfinement(kind: string, root: string, probe: MasterConfinementProbe = {}): Promise<CoordinatorConfinement> {
+export async function masterSessionConfinement(kind: string, root: string, probe: MasterConfinementProbe = {}, writable: readonly string[] = []): Promise<CoordinatorConfinement> {
   const refusal = await coordinatorConfinementRefusal({ kind, args: [], coordinatorRoot: root, sessionDirectory: root, ...probe });
   if (refusal) throw new Error(`${refusal} The master session is refused rather than started with the checkout writable (GY-1658).`);
   prepareConfinedGitPaths(root);
@@ -187,15 +187,21 @@ export async function masterSessionConfinement(kind: string, root: string, probe
   if (existsSync(checkoutGitDirectory(root))) mkdirSync(join(checkoutGitDirectory(root), 'worktrees'), { recursive: true });
   const managed = join(resolve(root), '.graphyard');
   mkdirSync(managed, { recursive: true, mode: 0o700 });
-  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed] });
+  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed, ...writable] });
   const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', ...words];
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session in a bubblewrap namespace whose /proc shows only its own processes and whose host systemd and bus sockets are hidden; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs, nor any host process it could ask to start, can patch the checkout's tracked files` };
 }
 /** The master launch's confinement against the launcher's own checkout (or `coordinatorRoot`), derived as every other role's is: null only where nothing is confined (the test runner, a non-CLI launcher), the named refusal when the launcher's checkout cannot be derived. */
-async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe'>): Promise<CoordinatorConfinement | null> {
+async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe' | 'environment'>): Promise<CoordinatorConfinement | null> {
   const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
-  if (root) return masterSessionConfinement(kind, root, options.confinementProbe);
+  if (root) {
+    const token = options.environment?.GRAPHYARD_TOKEN_FILE;
+    return masterSessionConfinement(kind, root, options.confinementProbe, [
+      ...runtimeLoginHomes(options.environment),
+      ...(token && isAbsolute(token) ? [dirname(token)] : []),
+    ]);
+  }
   const undetermined = launcherRootUndetermined();
   if (undetermined) throw new Error(confinementRefusalText(kind, options.directory, { undetermined }));
   return null;

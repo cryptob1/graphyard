@@ -206,7 +206,7 @@ test('integration:sandbox-probe-inside-confinement-fails-launch — the sandbox 
     // The probe ran behind the coordinator confinement: bubblewrap, the checkout read-only, then the codex sandbox.
     const [command, ...args] = probes[0];
     assert.equal(command, 'bwrap', 'the wrapper words the session itself is launched behind');
-    const ro = args.indexOf('--ro-bind', args.indexOf('/proc'));
+    const ro = args.findIndex((word, index) => word === '--ro-bind' && args[index + 1] === fixture.main);
     assert.deepEqual(args.slice(ro, ro + 3), ['--ro-bind', fixture.main, fixture.main]);
     assert.ok(args.includes(fixture.gitDir) && args.includes(join(fixture.commonDir, 'objects')), 'the worker\'s own Git paths are re-exposed writable');
     assert.deepEqual(args.slice(args.indexOf('--') + 1, args.indexOf('--') + 3), ['codex', 'sandbox']);
