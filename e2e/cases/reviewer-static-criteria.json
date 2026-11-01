@@ -1,0 +1,16 @@
+{
+  "id": "reviewer-static-criteria",
+  "title": "Generated reviewer requests judge code and coverage without forbidden execution",
+  "description": "Regression coverage generates GitHub, control-plane and post-merge review requests with E2E proof bindings, real seed and fixture inputs, and multiple seeds. Every criterion can receive a static verdict; exact-head execution stays with the automated merge trial gate.",
+  "tags": ["review", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "check proof-binding classification and generated review requests",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/reviewer-static-criteria.test.ts",
+      "timeoutSeconds": 180
+    }
+  ]
+}

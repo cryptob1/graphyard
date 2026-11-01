@@ -694,14 +694,14 @@ export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
     + 'it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. ';
 }
 /**
- * GY-2975: what a review brief says about a criterion whose proof pins one case: run the head on one
- * other case the item's own commands accept, and request changes when only the pinned case works.
+ * Review a criterion pinned to one input for generality through code and coverage, within the
+ * reviewer's read-only role. Execution belongs to the automated merge trial.
  * Empty when no criterion pins one, so every other review request stays byte-identical.
  */
 export function singleCaseReviewSection(criteria?: readonly ReviewCriterion[]) {
   const flagged = (criteria ?? []).filter(criterion => pinnedCases(criterion.text).length === 1).map(criterion => criterion.id);
   if (!flagged.length) return '';
-  return `${flagged.join(', ')} ${flagged.length === 1 ? 'checks' : 'check'} one case: a head can pass by tuning to that case. For each, run the head once on one other case its own commands accept — another seed or input — quote both results, and request changes when the head works only on the pinned case. `;
+  return `${flagged.join(', ')} ${flagged.length === 1 ? 'checks' : 'check'} one case: a head can pass by tuning to that case. For each, inspect the implementation and test coverage for other seeds or inputs, and request changes if the code only handles the pinned case or the coverage does not establish the required generality. `;
 }
 /**
  * The criteria rule (GY-166). GY-164 took 19 attempts: its reviewer confirmed both
@@ -716,7 +716,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
   // dropped, and collapsed whitespace changes an indented fragment or exact output it quotes.
   const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
-    + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `;
+    + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. Assess the code and test coverage without running builds, tests, or servers; exact-head test and E2E execution belongs to the automated merge trial gate. Post APPROVE or REQUEST_CHANGES on that assessment; absence of a reviewer-run test is not a blocker and requires no human step. `;
 }
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
   memory ??= projectMemory;
