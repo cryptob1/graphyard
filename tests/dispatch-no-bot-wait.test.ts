@@ -6,13 +6,13 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { Evidence, Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { evaluate } from '../src/model/gates.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { dispatchCursorPath, emptyDispatchCursor, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance: the fixed `at`/clock is handed to reconcileAutoDispatch; the new Date() readings only stamp the stub's snapshot and review records.
 
-// GY-3007: the GitHub bot-review wait is deleted from dispatch. Each test is named for the proof it
-// produces: unit:dispatch-no-bot-wait.
+// GY-3007: exercise immediate dispatch and compatibility with settings and cursors from older loops.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
@@ -21,7 +21,7 @@ const at = '2026-09-25T10:00:00.000Z', clock = Date.parse(at);
 
 function work(): Work {
   const candidate = { sha: H, baseSha: B, pr: 64, branch: 'graphyard/gy-64-1', author: 'implementer' };
-  const observation: Observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at, prState: 'open', draft: false,
+  const observation: Observation = { source: 'control-plane', candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/store/pools.ts'], scopeFiles: [], at, prState: 'open', draft: false,
     baseTip: B, baseTree: sha40('7b'), baseTipContained: true } as Observation;
   return { id: 'work-64', key: 'GY-64', title: 'No bot wait', description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:a'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1,
@@ -41,6 +41,7 @@ function reviewRequested(): Work {
 function masterConfig(credentialFile: string): MasterConfig {
   // No reviewer App: the control-plane reviewer profile answers the head without one (GY-1525).
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
+    run: { awaitReviewers: ['chatgpt-codex-connector[bot]'], awaitReviewersMinutes: 60 },
     reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' }], producers: [] });
 }
 function effects(item: Work, log: string[]): DispatchEffects {
@@ -67,10 +68,23 @@ test('unit:dispatch-no-bot-wait — a head approved by the control-plane reviewe
     // The review request launches its control-plane reviewer on the very tick that first observes
     // it, and the tick records no wait: no automatic bot reviewer is awaited any more.
     const item = reviewRequested(), log: string[] = [];
-    const tick = await runDispatchTick(config, emptyDispatchCursor(config), effects(item, log), () => Date.parse(item.autoDispatch!.review!.requestedAt) + 60_000);
+    const cursor = emptyDispatchCursor(config), dispatch = effects(item, log);
+    // A lingering adapter from an older caller must never be consulted for bot activity.
+    Object.assign(dispatch, { headReviewers: async () => { throw new Error('retired bot-review read'); } });
+    const tick = await runDispatchTick(config, cursor, dispatch, () => clock);
     assert.deepEqual(log, [`review:GY-64:${item.autoDispatch!.review!.sha.slice(0, 4)}`], 'the reviewer session launches on the request\'s first tick');
     assert.deepEqual(tick.launched.map(launch => [launch.kind, launch.work, launch.profile]), [['review', 'GY-64', 'claude-reviewer']]);
     assert.deepEqual(tick.waiting, [], 'no bot-review wait holds the head');
+    assert.equal(evaluate(item, [item], new Date(clock)).stage, 'review', 'the sensitive head requires approval before proceeding');
+    item.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'APPROVED', id: 1, submittedAt: at, source: 'control-plane' });
+    reconcileAutoDispatch(item, [item], new Date(clock));
+    const approved = evaluate(item, [item], new Date(clock));
+    assert.equal(approved.gates.find(gate => gate.name === 'review')!.passed, true);
+    assert.equal(approved.stage, 'test', 'approval advances the head immediately to the merge writer trial');
+    assert.equal(item.autoDispatch!.review, null, 'the approved request is satisfied');
+    const next = await runDispatchTick(config, cursor, dispatch, () => clock);
+    assert.deepEqual(next.waiting, [], 'the same tick has no bot wait after approval');
+    assert.equal(log.length, 1, 'approval launches no further reviewer');
     // A cursor an older loop wrote still loads: its bot-reviewer state is dropped on read.
     const retired = { ...emptyDispatchCursor(config), botReviewers: [{ login: 'chatgpt-codex-connector[bot]', state: 'exhausted', since: at, checkedAt: at }] };
     await writeFile(dispatchCursorPath(config), JSON.stringify(retired), { mode: 0o600 });

@@ -36,3 +36,5 @@ Each dispatch reconciles reviewer and producer sessions; a handle closes at the 
 ## Automatic dispatch at submit
 
 Past the build gate: a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then a review once passed (`run.reviewerProfile`, producer profiles, 4 sessions each; **concurrency is per role**, 1–20, default 1). Unanswered sessions relaunch, then `dispatch.abandoned`.
+
+Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. An exact-head control-plane approval lets the head proceed to the merge writer's trial immediately. Old settings files still load with `run.awaitReviewers` and `run.awaitReviewersMinutes` ignored; old dispatch cursors load with `botReviewers` discarded.
