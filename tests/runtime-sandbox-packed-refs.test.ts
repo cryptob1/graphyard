@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { accessSync, constants, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, delimiter, dirname, join } from 'node:path';
 import { coordinatorConfinement, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { prepareConfinedGitPaths } from '../src/master/launch.js';
@@ -50,11 +50,26 @@ function fixture(base: string) {
 }
 
 /** Runtimes whose launch arguments carry a write-restricting sandbox that this host can probe. */
-function probeableRuntimes(): string[] {
+function probeableRuntimes(codex: string, env: NodeJS.ProcessEnv): string[] {
+  const version = spawnSync(codex, ['--version'], { encoding: 'utf8', env });
+  assert.equal(version.status, 0, `native Codex runs under the isolated home: ${version.stderr || version.error}`);
   return Object.entries(runtimeSandboxes)
     .filter(([, sandbox]) => sandbox.mode(['--sandbox', 'workspace-write']) === 'workspace-write')
-    .map(([kind]) => kind)
-    .filter(kind => kind !== 'codex' || spawnSync('codex', ['--version'], { stdio: 'ignore' }).status === 0);
+    .map(([kind]) => kind);
+}
+
+function installedCodex(): string {
+  // HOME is already isolated in complete's mandatory recheck. Inspect PATH without
+  // executing mise or consulting its operator configuration to resolve a shim.
+  for (const directory of (process.env.PATH ?? '').split(delimiter)) {
+    try {
+      const candidate = realpathSync(join(directory, 'codex'));
+      if (basename(candidate) === 'mise') continue;
+      accessSync(candidate, constants.X_OK);
+      return candidate;
+    } catch { /* This PATH entry has no installed Codex. */ }
+  }
+  throw new Error('No installed Codex executable beyond tool-manager shims on PATH');
 }
 
 const refUpdateScript = [
@@ -71,13 +86,9 @@ const refUpdateScript = [
 ].join('\n');
 
 test('unit:runtime-sandbox-ref-updates-on-packed-refs — Codex uses the outer filesystem and socket boundary: packed-ref commit, merge, branch and deletion work while coordinator main and index stay refused; a standalone native sandbox still needs the common-dir grant', async () => {
-  // Resolve a host tool-manager shim before HOME is replaced. This probe needs
-  // the installed CLI, without asking mise to configure an empty account home.
-  const command = execFileSync('/bin/sh', ['-c', 'command -v codex'], { encoding: 'utf8' }).trim();
-  const executable = basename(realpathSync(command)) === 'mise'
-    ? execFileSync(realpathSync(command), ['which', 'codex'], { encoding: 'utf8' }).trim() : command;
+  const executable = installedCodex();
   const runtimeEnvironment = { ...process.env, PATH: [dirname(executable), dirname(process.execPath), process.env.PATH].join(delimiter) };
-  const kinds = probeableRuntimes();
+  const kinds = probeableRuntimes(executable, runtimeEnvironment);
   assert.ok(kinds.includes('codex'), 'Codex is on PATH so its sandbox can be probed');
   if (process.platform !== 'linux') return;
   assert.ok(await sessionMountNamespaceWorks(), 'mount namespaces work on this Linux host');
@@ -96,7 +107,7 @@ test('unit:runtime-sandbox-ref-updates-on-packed-refs — Codex uses the outer f
         // Its private /tmp also avoids reaching any real app-server socket on the host.
         const mounts = oldConf!.wrapper.slice(0, oldConf!.wrapper.indexOf('--') + 1);
         const oldInner = runtimeSandboxes[kind].probe(oldArgs, worktree, ['/bin/sh', '-c', refUpdateScript, 'sh', worktree, root, otherTip]);
-        const oldRun = spawnSync(mounts[0], [...mounts.slice(1), oldInner.command, ...oldInner.args],
+        const oldRun = spawnSync(mounts[0], [...mounts.slice(1), executable, ...oldInner.args],
           { encoding: 'utf8', timeout: 240_000, killSignal: 'SIGKILL', cwd: worktree, env: { ...runtimeEnvironment, TMPDIR: oldBase } });
         const oldOutput = `${oldRun.stdout}\n${oldRun.stderr}`;
         assert.ok(oldOutput.includes('packed-refs.lock') && /Read-only file system/.test(oldOutput),
@@ -118,7 +129,7 @@ test('unit:runtime-sandbox-ref-updates-on-packed-refs — Codex uses the outer f
       assert.ok(confinement, `${kind} worker launch carries a confinement`);
       assert.equal(confinement.mechanism, 'read-only-mount', `${kind} carries the outer mount once the common Git directory is granted`);
       const inner = runtimeSandboxes[kind].probe(args, worktree, ['/bin/sh', '-c', refUpdateScript, 'sh', worktree, root, otherTip], true);
-      const run = spawnSync(confinement.wrapper[0], [...confinement.wrapper.slice(1), inner.command, ...inner.args],
+      const run = spawnSync(confinement.wrapper[0], [...confinement.wrapper.slice(1), kind === 'codex' ? executable : inner.command, ...inner.args],
         { encoding: 'utf8', timeout: 240_000, killSignal: 'SIGKILL', cwd: worktree, env: runtimeEnvironment });
       assert.equal(run.status, 0, `${kind} nested sandbox ran successfully: ${run.stderr}`);
       const output = `${run.stdout}\n${run.stderr}`;
