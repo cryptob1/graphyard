@@ -4,4 +4,4 @@
 
 ## Agent protocol
 
-1. [Work commands](protocol/work-commands.md) — work mutations.
+1. [Work commands](protocol/work-commands.md) — claim, submit and report results

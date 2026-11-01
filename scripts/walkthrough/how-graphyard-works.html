@@ -1,7 +1,4 @@
 <title>How Graphyard Works</title>
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
 <style>
 /* Layout: one reading column; the walkthrough, the journey of one item, then short sections; rail-yard signal colours on a cool steel neutral */
 :root {
@@ -61,7 +58,7 @@ footer { color: var(--muted); font-size: 0.88rem; border-top: 1px solid var(--ru
 .poster .big::after { content: ""; border-left: 20px solid var(--surface); border-top: 12px solid transparent; border-bottom: 12px solid transparent; margin-left: 6px; }
 .poster strong { font-family: var(--font-display); font-size: 1.2rem; }
 .poster span { color: var(--muted); font-size: 0.9rem; }
-.caption { min-height: 3.4em; padding: 10px 16px; border-top: 1px solid var(--rule); font-size: 0.98rem; display: flex; align-items: center; }
+.caption { height: 6.4em; padding: 10px 16px; border-top: 1px solid var(--rule); font-size: 0.98rem; display: flex; align-items: center; }
 .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 16px 14px; }
 .controls button { font: inherit; font-size: 0.85rem; border: 1px solid var(--rule); background: var(--bg); color: var(--fg); border-radius: 8px; padding: 6px 12px; cursor: pointer; }
 .controls button:focus-visible, .chapters button:focus-visible, .poster:focus-visible, .mode button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
@@ -146,7 +143,7 @@ td.today { color: var(--muted); }
   <header>
     <span class="eyebrow">Graphyard · how it works</span>
     <h1>One loop, from a goal to production</h1>
-    <p class="lede">You state what you want. One master loop breaks it into small work items, has AI agents build and review each one, tests it on this machine, merges it and ships it. People decide the goals. Every gate is Graphyard's own, and nothing depends on GitHub.</p>
+    <p class="lede">The master is an AI coordinator: it reasons and decides. The loop is a repeating program: it observes state and carries out routine actions. Workers implement. Graphyard owns leases, history and gates; Herdr runs sessions. A separate deploy supervisor serves main.</p>
   </header>
 
   <section aria-labelledby="watch">
@@ -176,10 +173,10 @@ td.today { color: var(--muted); }
 
     <ol class="journey">
       <li class="hop"><div class="hop-body">
-        <div class="hop-head"><span class="state">Todo</span><h3>Filed and released</h3><span class="who">master or planner</span></div>
+        <div class="hop-head"><span class="state">Todo</span><h3>Filed and released</h3><span class="who">master AI</span></div>
         <div class="facts">
           <div class="fact"><span class="k">Where</span><span><span class="chip place">control plane</span></span></div>
-          <div class="fact"><span class="k">Gate</span><span>none, the loop only checks dependencies are done</span></div>
+          <div class="fact"><span class="k">Gate</span><span>released, unblocked and eligible; features first receive a spec check</span></div>
         </div>
         <div class="dep none">No GitHub.</div>
       </div></li>
@@ -187,50 +184,52 @@ td.today { color: var(--muted); }
         <div class="hop-head"><span class="state">Doing</span><h3>Built</h3><span class="who">worker agent, started by the loop</span></div>
         <div class="facts">
           <div class="fact"><span class="k">Where</span><span><span class="chip place">its own worktree, this machine</span></span></div>
-          <div class="fact"><span class="k">Gate</span><span>none, the worker commits locally and submits its head</span></div>
+          <div class="fact"><span class="k">Gate</span><span>valid worker lease; submit an exact commit and end the lease</span></div>
         </div>
         <div class="dep none">No GitHub: commits go into the local git store.</div>
       </div></li>
       <li class="hop"><div class="hop-body">
-        <div class="hop-head"><span class="state">Checking</span><h3>Tested and reviewed</h3><span class="who">the loop, and an independent reviewer agent</span></div>
+        <div class="hop-head"><span class="state">Checking</span><h3>Tested and reviewed</h3><span class="who">merge writer and independent reviewer</span></div>
         <div class="facts">
           <div class="fact"><span class="k">Where</span><span><span class="chip place">this machine, on the change merged onto main</span></span></div>
-          <div class="fact"><span class="k">Gates</span><span><span class="chip ours">tests</span> build, tests and proofs pass · <span class="chip ours">review</span> another agent approves this exact head</span></div>
+          <div class="fact"><span class="k">Gates</span><span><span class="chip ours">tests</span> build, tests and proofs pass · <span class="chip ours">review</span> sensitive changes need exact-head approval before merge; others are reviewed afterward</span></div>
         </div>
         <div class="dep none">No GitHub: tests run here, the verdict goes to the control plane.</div>
       </div></li>
       <li class="hop"><div class="hop-body">
-        <div class="hop-head"><span class="state">Done</span><h3>Merged</h3><span class="who">the loop</span></div>
+        <div class="hop-head"><span class="state">Done</span><h3>Merged</h3><span class="who">merge writer</span></div>
         <div class="facts">
           <div class="fact"><span class="k">Where</span><span><span class="chip place">this machine pushes to the git remote</span></span></div>
-          <div class="fact"><span class="k">Gate</span><span>none left: both gates already passed</span></div>
+          <div class="fact"><span class="k">Gate</span><span>all required candidate gates and the merged-tree trial pass</span></div>
         </div>
         <div class="dep none">Any plain git host. No GitHub API, Actions, App or protection.</div>
       </div></li>
       <li class="hop"><div class="hop-body">
-        <div class="hop-head"><span class="state">Release</span><h3>Shipped continuously</h3><span class="who">the loop</span></div>
+        <div class="hop-head"><span class="state">Release</span><h3>Shipped continuously</h3><span class="who">deploy supervisor (graphyard-deploy.service)</span></div>
         <div class="facts">
           <div class="fact"><span class="k">Where</span><span><span class="chip place">production</span></span></div>
-          <div class="fact"><span class="k">Check</span><span>health and end-to-end checks after every deploy; a failure rolls back on its own</span></div>
+          <div class="fact"><span class="k">Check</span><span>build and health determine deploy success; required live cases report release health</span></div>
         </div>
-        <div class="dep none">A property of the release, shown as one status line. Items are already Done and leave the board.</div>
+        <div class="dep none">Done means merged. Serving and required checks show whether it is live and verified.</div>
       </div></li>
     </ol>
 
   <section aria-labelledby="who">
     <h2 id="who">Who does what</h2>
     <div class="roles">
-      <div class="role"><h3>Master loop</h3><p>The one owner of the flow: dispatches, tests, gets the review, merges, ships, rolls back and watches itself for stalls.</p></div>
+      <div class="role"><h3>Master AI</h3><p>Reasons about goals and failures, files work and applies routine decisions under its operator-agent identity.</p></div>
+      <div class="role"><h3>Loop program</h3><p>Repeats observations, launches sessions and executes eligible routine actions. Completed cycles alone do not prove delivery.</p></div>
+      <div class="role"><h3>Deploy supervisor</h3><p>A separate service builds and serves main. It checks deployment health and records the serving commit.</p></div>
       <div class="role"><h3>Workers</h3><p>Build one item each in their own worktree and submit a commit. They never touch the remote.</p></div>
       <div class="role"><h3>Reviewers</h3><p>Judge each change against its criteria. Never the agent that built it.</p></div>
-      <div class="role"><h3>Control plane</h3><p>Holds every item, decision and result with full history.</p></div>
+      <div class="role"><h3>Control plane</h3><p>Owns leases, history and gates independently of Herdr. Only its merge writer pushes main.</p></div>
     </div>
   </section>
 
   <section aria-labelledby="human">
     <h2 id="human">What people decide</h2>
     <div class="human">
-      <p>People keep exactly three decisions. Everything else is the loop's, and it never asks a person for a token, a repository or an approval.</p>
+      <p>People keep exactly three decisions. The master applies every other decision. Review, proof and routine repair proceed automatically without new human approvals.</p>
       <ul>
         <li>Goals and priorities</li>
         <li>Spending money or opening third-party accounts</li>
@@ -241,16 +240,12 @@ td.today { color: var(--muted); }
 
   <section aria-labelledby="stuck">
     <h2 id="stuck">When something goes wrong</h2>
-    <p>The loop handles it in this order, and stops at the first that works:</p>
-    <ol class="ladder">
-      <li>Retry the step.</li>
-      <li>Roll the change or the release back.</li>
-      <li>Show one line in the loop's status: what is stuck, since when, and what it tried.</li>
-    </ol>
-    <p>If nothing has moved for too long, the loop's own stall watchdog raises it. Nothing becomes a work item unless there is code to change.</p>
+    <p>A failed trial on both main and the change is a base failure. The writer holds the change; the master diagnoses the failing check and files or advances repair work. Workers implement the repair with all gates intact.</p>
+    <p>The deploy supervisor can restore a failed deployment. Required app-case failures are recorded for recovery through the merge writer. A liveness watchdog only detects incomplete loop cycles; it cannot judge delivery progress.</p>
+    <p>At this storyboard's source base, existing master panes are not prompted about failures. GY-3047 candidate ca55ddb7c2a7 adds changed-cause wakes and a bounded heartbeat; verify the loaded and serving commits before relying on it. The handoff shown here describes the master's job, not proof that the wake repair is deployed.</p>
   </section>
 
-  <footer>Graphyard · how it runs, October 2026.</footer>
+  <footer>Graphyard · roles and delivery, November 2026.</footer>
 </main>
 
 <script>
@@ -306,34 +301,35 @@ td.today { color: var(--muted); }
     return [0, 0, 0, 1];
   }
 
-  const chapters = [[0, 'Goal'], [10, 'Plan'], [22, 'One loop'], [34, 'Build'], [46, 'Check'], [60, 'Merge'], [70, 'Ship'], [82, 'Roll back'], [96, 'Watchdog'], [108, 'People']];
+  const chapters = [[0, 'Roles'], [10, 'Plan'], [22, 'Routine loop'], [34, 'Build'], [46, 'Check'], [60, 'Merge'], [70, 'Ship'], [82, 'Roll back'], [96, 'Master decides'], [108, 'People']];
   const sceneLabel = text(stage, 32, 40, 't-scene', '', 'start');
   updaters.push(t => { let i = 0; chapters.forEach(([s], j) => { if (t >= s) i = j; }); sceneLabel.textContent = String(i + 1).padStart(2, '0') + ' · ' + chapters[i][1].toUpperCase(); });
 
-  // 1 · Goal (0–10)
-  A(card(120, 54, 'You', 'the operator', 'steel')).at(0.3, 150, 270).out(9.4);
-  A(line([[220, 270], [300, 270]])).at(1.6, 0, 0).out(9.4);
-  A(card(470, 110, 'Build a browser Snake game', 'playable on phone and laptop, live on the web', 'hl', 'GOAL')).at(2, 560, 270).out(9.6);
-  A(label('one plain-language goal is all you write')).at(4.5, 560, 370).out(9.4);
+  // 1 · Roles (0–10): visible from the first encoded frame.
+  A(label('ONE GOAL: BUILD A BROWSER SNAKE GAME', 't-scene')).at(-0.5, 480, 100).out(9.4);
+  A(card(350, 100, 'Master · AI coordinator', 'reasons and decides', 'steel')).at(-0.5, 260, 230).out(9.4);
+  A(card(350, 100, 'Loop · repeating program', 'observes and acts', 'hl')).at(-0.5, 700, 230).out(9.4);
+  A(card(260, 64, 'Workers implement', 'in assigned worktrees')).at(-0.5, 480, 370).out(9.4);
+  A(label('Graphyard owns leases, history and gates · Herdr runs sessions')).at(-0.5, 480, 465).out(9.4);
 
   // 2 · Plan (10–22)
-  A(card(220, 60, 'Planner agent', 'splits the goal', 'steel')).at(10.3, 480, 110).out(21.4);
+  A(card(220, 60, 'Master AI', 'plans the work', 'steel')).at(10.3, 480, 110).out(21.4);
   const items = [['GY-1', 'Board & movement'], ['GY-2', 'Food & growth'], ['GY-3', 'Collisions'], ['GY-4', 'High score'], ['GY-5', 'Publish']];
   const itemAnims = items.map(([key, name], i) => A(card(160, 92, name, 'criteria + tests', '', key)).at(11.5 + i * 0.9, 120 + i * 180, 300));
   A(label('each item: what done means, and the tests that prove it')).at(16.5, 480, 410).out(21.4);
   itemAnims.forEach((a, i) => a.to(21, 90, 140 + i * 66, 0.62));
   A(label('TODO')).at(21.4, 90, 100).out(33.4);
 
-  // 3 · One loop (22–34)
+  // 3 · Routine loop (22–34)
   const ring = el('g', {});
   el('circle', { cx: 0, cy: 0, r: 92, class: 'v-ring' }, ring);
   const tick = el('circle', { cx: 0, cy: -92, r: 9, class: 'v-dot' }, ring);
-  text(ring, 0, -10, 't-title', 'Master loop');
-  text(ring, 0, 10, 't-sub', 'the one owner');
-  text(ring, 0, 28, 't-sub', 'of the flow');
+  text(ring, 0, -10, 't-title', 'Loop program');
+  text(ring, 0, 10, 't-sub', 'repeats routine');
+  text(ring, 0, 28, 't-sub', 'actions');
   A(ring).at(22.4, 480, 270).out(33.5);
   updaters.push(t => { const a = t * Math.PI / 2; tick.setAttribute('cx', (Math.sin(a) * 92).toFixed(1)); tick.setAttribute('cy', (-Math.cos(a) * 92).toFixed(1)); });
-  ['dispatch', 'test', 'review', 'merge', 'ship', 'roll back'].forEach((w, i) => {
+  ['observe', 'release', 'dispatch', 'request proofs', 'trial merge', 'persist'].forEach((w, i) => {
     const ang = -Math.PI / 2 + i * Math.PI / 3, r = 160;
     A(label(w.toUpperCase(), 't-key')).at(24 + i * 0.6, 480 + Math.cos(ang) * r, 275 + Math.sin(ang) * r * 0.85).out(33.5);
   });
@@ -358,8 +354,8 @@ td.today { color: var(--muted); }
   A(card(200, 70, 'Trial merge', 'on this machine')).at(48.8, 480, 250).out(59.5);
   A(line([[585, 250], [640, 250]])).at(50, 0, 0).out(59.5);
   ['Build', 'Tests and proofs'].forEach((s, i) => { const g = el('g', {}); text(g, 0, 0, 't-title ok-text', '✓ ' + s, 'start'); A(g).at(50.8 + i * 1.3, 660, 225 + i * 40).out(59.5); });
-  A(card(300, 64, 'Independent reviewer', 'approves this exact commit', 'ok')).at(53.5, 480, 410).out(59.5);
-  A(label('CHECKING · two gates, both Graphyard\'s')).at(56, 480, 480).out(59.5);
+  A(card(300, 64, 'Independent reviewer', 'sensitive: before · other: after merge', 'ok')).at(53.5, 480, 410).out(59.5);
+  A(label('Graphyard checks proofs, review and the merged tree')).at(56, 480, 480).out(59.5);
 
   // 6 · Merge (60–70)
   const main = el('g', {});
@@ -369,52 +365,51 @@ td.today { color: var(--muted); }
   A(main).at(60.4, 120, 260).out(69.5);
   const nc = el('g', {}); el('circle', { cx: 0, cy: 0, r: 14, class: 'v-commit new' }, nc); text(nc, 0, 40, 't-key', 'GY-1');
   A(nc).at(62.4, 760, 260).out(69.5);
-  A(card(440, 58, 'The loop pushes main', 'to any git remote · no GitHub API, App or protection', 'steel')).at(64, 480, 400).out(69.5);
+  A(card(440, 58, 'Only the merge writer pushes main', 'to any git remote · no GitHub API, App or protection', 'steel')).at(64, 480, 400).out(69.5);
   A(label('DONE · the item leaves the board')).at(66.5, 480, 470).out(69.5);
 
   // 7 · Ship (70–82)
-  const stops = [['Main', 'new commit'], ['Deploy', 'automatic'], ['Health check', 'and end-to-end'], ['Live', 'serving it']];
+  const stops = [['Main', 'new commit'], ['Deploy service', 'builds and serves'], ['Health check', 'and end-to-end'], ['Live', 'serving it']];
   stops.forEach(([t1, t2], i) => {
     A(card(170, 66, t1, t2, i === 3 ? 'ok' : '')).at(71 + i * 2.2, 140 + i * 225, 260).out(81.5);
     if (i < 3) A(line([[228 + i * 225, 260], [272 + i * 225, 260]])).at(72 + i * 2.2, 0, 0).out(81.5);
   });
-  A(label('every merge ships; release health is one status line, not a stage on each item')).at(78, 480, 380).out(81.5);
+  A(label('Deploy supervisor builds main · serving and checks show delivery')).at(78, 480, 380).out(81.5);
 
   // 8 · Roll back (82–96)
-  A(card(320, 62, 'A check fails after deploy', 'health or end-to-end', 'bad')).at(82.4, 480, 130).out(95.5);
+  A(card(320, 62, 'A deployment fails', 'build, restart or health', 'bad')).at(82.4, 480, 130).out(95.5);
   A(line([[480, 165], [480, 230]], 'bad')).at(84.4, 0, 0).out(95.5);
-  A(card(320, 64, 'The loop rolls back', 'the previous release serves again', 'ok')).at(85, 480, 270).out(95.5);
+  A(card(320, 64, 'Deploy service restores', 'previous release, when safe', 'ok')).at(85, 480, 270).out(95.5);
   A(line([[480, 305], [480, 365]])).at(87.4, 0, 0).out(95.5);
-  A(card(380, 64, 'The change goes back to the worker', 'with the failure attached', 'hl')).at(88, 480, 400).out(95.5);
-  A(label('no ticket, no question to a person')).at(91, 480, 480).out(95.5);
+  A(card(380, 64, 'Master diagnoses the failure', 'files or advances repair work', 'hl')).at(88, 480, 400).out(95.5);
+  A(label('routine repair needs no human approval')).at(91, 480, 480).out(95.5);
 
-  // 9 · Watchdog (96–108)
-  A(card(300, 62, 'Nothing has moved for a while', 'the loop notices its own stall', 'bad')).at(96.4, 260, 140).out(107.5);
-  ['1. Retry the step', '2. Roll back', '3. Show one line in status'].forEach((s, i) => {
-    A(card(360, 54, s, '', i === 0 ? 'ok' : '')).at(98.6 + i * 2.2, 620, 140 + i * 90).out(107.5);
-  });
-  A(label('nothing becomes a work item unless there is code to change')).at(103, 480, 450).out(107.5);
+  // 9 · Master decides (96–108): concrete failure and responsibility.
+  A(card(620, 64, 'Trial check fails on main and the change', 'merge writer holds it as a base failure', 'bad')).at(96.4, 480, 135).out(107.5);
+  A(card(620, 64, 'Master AI diagnoses and files a repair', 'worker implements · writer retries with all gates intact', 'steel')).at(98.6, 480, 270).out(107.5);
+  A(label('Running cycles alone do not prove delivery progress')).at(101.2, 480, 405).out(107.5);
+  A(label('Check item history, merged commit, serving commit and test results', 't-sub')).at(103, 480, 450).out(107.5);
 
   // 10 · People (108–120)
   A(label('PEOPLE KEEP THREE DECISIONS', 't-scene')).at(108.3, 480, 100);
   ['Goals and priorities', 'Spending money, new accounts', 'Credentials for people'].forEach((s, i) => A(card(270, 72, s, '', 'hl')).at(109.2 + i * 1.3, 190 + i * 290, 230));
-  A(card(560, 62, 'Everything else: the loop, with agents checking agents', '', 'steel')).at(114, 480, 380);
+  A(card(560, 62, 'Master decides the rest · agents check agents', '', 'steel')).at(114, 480, 380);
 
   const captions = [
-    [0, 10, 'You write one goal in plain language: what to build, for whom, and where it ships.'],
-    [10, 16, 'A planner agent splits the goal into small work items.'],
-    [16, 22, 'Each item says what done means and names the tests that prove it.'],
-    [22, 28, 'One master loop owns the whole flow. There is nothing else to coordinate.'],
-    [28, 34, 'It dispatches, tests, gets the review, merges, ships and rolls back.'],
-    [34, 40, 'A worker agent builds the item in its own worktree on this machine.'],
-    [40, 46, 'It commits locally and submits the commit. Nothing is pushed anywhere.'],
-    [46, 53, 'The loop merges the commit onto the latest main and runs the build and tests right here.'],
-    [53, 60, 'A different agent reviews the exact commit. Those are the only two gates, and both are Graphyard\'s.'],
-    [60, 70, 'The loop pushes main to the git remote. The item is Done and leaves the board.'],
-    [70, 82, 'Every merge deploys on its own, and health and end-to-end checks run on the live release.'],
-    [82, 96, 'If a check fails, the loop rolls back and hands the change back with the failure. No ticket, no person.'],
-    [96, 108, 'If nothing moves, the loop\'s watchdog retries, rolls back, or shows one line in its status.'],
-    [108, 120, 'People keep three decisions. Everything else is the loop, with agents checking agents.'],
+    [0, 10, 'Master: AI that reasons and decides. Loop: program that observes and acts. Workers implement; Graphyard owns leases, history and gates.'],
+    [10, 16, 'The master turns your goal into work items. Herdr runs the agent sessions; Graphyard owns their leases.'],
+    [16, 22, 'Each item says what done means and names the checks that prove it.'],
+    [22, 28, 'The loop repeats routine actions: read state, release eligible work and start sessions.'],
+    [28, 34, 'It requests review, runs the merge writer and saves its cursor. It does not reason like the master.'],
+    [34, 40, 'A worker implements one item in its assigned worktree under a lease.'],
+    [40, 46, 'It commits locally and submits the exact head. Submission ends its lease; workers push nothing.'],
+    [46, 53, 'The merge writer tests the change merged onto current main. The trial counts proof cases for the criteria.'],
+    [53, 60, 'Independent review runs before merge for sensitive changes and afterward for others. User-facing features also get product review.'],
+    [60, 70, 'Only the merge writer pushes main using its deploy key. Done means merged, not necessarily live.'],
+    [70, 82, 'A separate deploy supervisor builds and serves main. Deployment health and required live cases show release status.'],
+    [82, 96, 'The deploy supervisor restores a failed deployment when safe. The master diagnoses repair work; workers implement it.'],
+    [96, 108, 'Example: a check fails on both main and the change. The writer holds it; the master diagnoses a repair. Running cycles alone prove no delivery progress.'],
+    [108, 120, 'People keep exactly three decisions. The master applies the rest; review, proof and routine repairs proceed automatically.'],
   ];
   const capEl = document.getElementById('caption');
   const playBtn = document.getElementById('play'), scrub = document.getElementById('scrub');
@@ -462,6 +457,6 @@ td.today { color: var(--muted); }
     if (e.target === scrub || (e.target.closest && e.target.closest('.chapters'))) return;
     if (e.code === 'Space' && e.target.closest && e.target.closest('.player')) { e.preventDefault(); playing ? pause() : play(); }
   });
-  t = 6; render(); t = 0; scrub.value = 0; clock.textContent = '0:00 / ' + fmt(DURATION);
+  render();
 })();
 </script>

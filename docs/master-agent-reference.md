@@ -1,30 +1,30 @@
-<!-- page: Operate Graphyard | 7 | typed actions -->
+<!-- page: Operate Graphyard | 7 | commands and trial isolation -->
 # Master-agent reference
 
 ## Items and human waits
 
-Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choice LABEL]… -- REASON` ([the dashboard](onboarding.md#the-dashboard)); `answer GY-N …`; criterion-rewrite asks refused. A `blocked` reason is plain text; `master unblock GY-N REASON` clears it.
+Use `blocked GY-N EPOCH REASON` for a genuine blocker; it commits changes and ends the lease. `master unblock GY-N REASON` clears it. Use `guide park` only for the human's three decisions; `answer GY-N …` records their response. Routine requirements and repair need no human approval.
 
 ## Promotion to autonomy
 
-`graphyard master promote --admin-token-stdin` provisions the master's operator-agent identity.
+`master promote --admin-token-stdin` provisions the master's operator-agent identity. Workers never receive it.
 
 ## GitHub administration through the browser
 
-Graphyard's one remote credential is the merge writer's deploy key ([install](install.md)). `master browser app-permissions|installation-accept|capture` therefore refuse, naming the missing credential. `master harness claude|codex --apply` writes rules denying `gh pr merge`/`review`, token-minting or mutating `gh api`.
+Only the [deploy key](install.md#step-3-deploy-key) is needed. Legacy `master browser app-permissions|installation-accept|capture` commands refuse without their old credential. `master harness claude|codex --apply` denies remote merges/reviews, token minting and mutating `gh api`.
 
 ## Typed actions
 
-`nextAction`: `dispatch`/`request-review`/`request-rework`/`resync`/`reclaim`/`merge`; a gate refusal is its reason string.
+`nextAction` names dispatch, request-review, request-rework, resync, reclaim or merge. `master dispatch GY-N PROFILE` works through normal eligibility and lease checks, including on system-driven items. `master merge` reports that only the loop's writer merges; it performs no hand merge.
 
 ## Recovery
 
-A dead supervisor's lease lapses; the close step keeps what the attempt had not committed on its branch and records it for the redispatch's handoff, then reconciles the lease and the item is claimable again.
+See [operations](operations.md) and [session recovery](master-agent-sessions.md). Preserve expired attempts' work for redispatch.
 
 ### Producer-runtime faults
 
-Unacted producer requests relaunch on an untried profile.
+Unanswered requests try another profile. Never substitute worker evidence for trusted proof.
 
 ## Merge trial
 
-The merge writer's trial, the only trial: the merge commit's build and affected tests via `scripts/ci-tests.mjs`, or — without that script — the repository's `preMerge` / `npm test` / `npm run typecheck` checks (dashboard changes: `npx playwright install chromium`, then `npm run test:browser`), credential-free in its own `TMPDIR` (a fresh `HOME` under a bubblewrap mask of the deploy key and coordinator credentials — npm, the static build, `e2e.serve`, and bound E2E command/agent steps all run under it, every step invocation of a case sharing one confined session's namespace so a browser an agent step opens outlives each invocation; the push child alone still holds the key), killed after 20 minutes; its checkout is removed when it ends. A managed repository with no test check records that explicitly (`master status` / `doctor`: `trialTests`).
+See [trial checks](delivery.md#merge-trials). Trials use a separate checkout/TMPDIR, fresh HOME and bubblewrap masks hiding coordinator credentials and deploy key. Builds, previews and E2E steps share confinement; case steps share a namespace for persistent browsers. Only the push child holds the key. Trials stop after 20 minutes and remove their checkout.

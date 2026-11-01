@@ -1,37 +1,39 @@
-<!-- page: Build integrations | 2 | cases -->
+<!-- page: Build integrations | 2 | bind cases and run checks -->
 # E2E validation
 
 ## Every user-facing item carries an e2e: proof
 
-An item of type `feature` or `bug` — work a user can see — must carry at least one criterion with an `e2e:` proof: the end-to-end case the merge writer's trial runs against the served head before the item can land. `master create` and `master requirements` refuse one otherwise, naming the case format and the opt-out. A head whose bound case is missing or failing is refused by the merge trial, the same way failing tests refuse it.
+Features and bugs need an `e2e:NAME` criterion bound to `e2e/cases/NAME.json` on the head. Create/requirements enforce it; invisible changes opt out with `No user-facing change: <reason>`. Ready checks apply to open unheld work, not retroactively to claimed/submitted items. Missing/failing cases refuse the trial. New cases register after merge/sync; trusted trial runs populate Tests history.
 
-- **Binding.** An `e2e:NAME` proof binds to `e2e/cases/NAME.json` on the head. A trial of a head that carries the proof but not the case refuses it: `e2e:NAME has no case at e2e/cases/NAME.json`. A new case registers when the head adding it merges and syncs, not before create.
-- **Serve declaration.** The repository's graphyard.json declares how a head is served for end-to-end runs, `e2e.serve`: `"e2e": { "serve": { "command", "url", "readySeconds" } }` — `command` runs in the trial checkout until `url` answers, waited for at most `readySeconds` for a 2xx answer, and stopped with SIGTERM once the cases have run; teardown waits for serving descendants' cleanup before killing what remains. The cases' bearer token reaches it as `GRAPHYARD_E2E_TOKEN`. Graphyard's own declaration runs `scripts/e2e-serve.mjs`, the head's control plane on a temporary embedded database. A repository that already declares a previewable application (`delivery.applications`, a static site or Compose project) needs no `serve`: the trial runs each case against the application `delivery.cases` binds it to (or the only one declared), served the way a preview is. Create refuses an `e2e:` proof in a repository that declares neither, naming the declaration to add.
-- **Opt-out.** Work with nothing a user can see — refactors, docs, headless-only and control-plane-internal changes — opens its description with `No user-facing change:` followed by a reason, and then owes no e2e proof.
-- **Open items.** The ready gate runs this validation against every open unheld item under today's policy; refused with the same message, it dispatches once `master requirements` adds what is missing. Claimed and submitted items are not refused.
-- **Real-world checks.** A `human:NAME` proof is allowed only where the criterion names the physical thing checked (a phone call, a printed page, a card in a terminal). Once the head is ready, Needs you asks once with steps, commit and preview URL. The person's pass or fail with a note is a trusted run: pass merges, fail reworks, a new head re-asks.
+Declare `e2e.serve` in graphyard.json:
 
-The trial records each case's run against the exact merge commit as a trusted run, so the Tests page history fills from the gate. Required `uat` cases still run on every deploy, as below.
+```json
+{"e2e":{"serve":{"command":"node scripts/e2e-serve.mjs","url":"http://127.0.0.1:4391/healthz?ready","readySeconds":120}}}
+```
 
-An `e2e:` proof passes from pinned candidate/bundle/separate collector; `validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json` wraps `POST /api/validation/ACTION`. `admin` defines cases; runners (`worker`) poll/ack/heartbeat; builders/collectors (`producer`) attest/publish, never both; only trusted attempts append **Tests** runs. [Evidence](protocol/work-commands.md#evidence-and-pipeline) carries trust and grants.
+The trial starts command, waits for 2xx, supplies `GRAPHYARD_E2E_TOKEN`, runs cases and tears down descendants. Graphyard's script uses temporary Postgres. Existing `delivery.applications` previews can supply serving through `delivery.cases` or the sole app; otherwise creation refuses without e2e.serve.
+
+`human:NAME` is limited to physical checks named by the criterion. Needs you asks once per head with steps/commit/preview; pass advances, fail reworks. It is not general approval.
 
 ## Approve the bundle and run an attempt
 
-```bash
+Pinned validation uses `validation define|build|candidate|request|dispatch|ack|heartbeat|result FILE.json`. Admins define, worker runners poll/ack/heartbeat, producer builders/collectors attest/publish. Builder and collector remain separate; [grants](protocol/work-commands.md#evidence-and-pipeline) determine trust.
+
+```sh
 graphyard runner inspect [packages/web]
 graphyard runner snapshot selected-files.json > oracle-source.json
 graphyard runner bundle-digest ./oracle
 ```
 
-`validation define` pins `digest` and `runnerImageDigest`. `graphyard runner attempt runner.json` runs as a non-root `runAsUser` with a boundary-group GID; the attestor (`graphyard runner supervise`) enumerates offline, executes read-only, signs what it saw.
+Define pins digest/runnerImageDigest. `runner attempt runner.json` uses non-root runAsUser and boundary GID. `runner supervise` enumerates offline, executes read-only and signs inventory.
 
 ### The acknowledgement is retried, never repeated
 
-Each send carries request key `ATTEMPT_ID-ack`, identical body; an already-acknowledged answer is success, other 2xx refuse. A confirmed refusal is a decision, never retried; transport failures, timeouts, 408, 429, 5xx retry: At most **5 sends**, paused 1, 2, 4 and 8 seconds apart; no send starts more than **60 seconds** after the first. Until the acknowledgement is confirmed, no heartbeat is sent nor the attestor told to proceed.
+Use identical `ATTEMPT_ID-ack` requests. Already acknowledged succeeds; unexpected 2xx or confirmed refusals stop. Transport/timeouts/408/429/5xx retry up to five sends, after 1/2/4/8 seconds, within 60 seconds total. No heartbeat or attestor execution starts before acknowledgement.
 
 ### Attempt boundary
 
-```bash
+```sh
 groupadd --gid 20001 graphyard-boundary
 useradd -r --uid 10001 -g graphyard-boundary graphyard-container
 useradd -r graphyard-collector
@@ -41,36 +43,33 @@ install -d -o graphyard-attestor -g graphyard-boundary -m 2750 /srv/graphyard/at
 setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
 ```
 
-Container writes; attestor, collector read; never add the runner account. Collect with a proof-scoped `producer` credential: `graphyard runner collect collector.json` verifies signature, inventory, teardown, uploads artifacts; `observations` bracket the run within `maxGapMs`.
+Container writes; attestor/collector read. Never add the runner account. `runner collect collector.json` uses proof-scoped credentials to verify signature, inventory and teardown and upload artifacts. Observations bracket the run within maxGapMs.
 
 ## E2E case repository
 
-`e2e/cases/ID.json`, code-reviewed: `id`/`title`, optional `description`/`tags`, `target` (`uat`/`any`), `required` (default `false`), ordered `steps`: `http` (`method`, `path`, `status`, `expect` on dotted paths, `save`, GET `waitSeconds`, within its case's equal share of the run's wait budget, so no case is left 0 s; a path that reads nothing fails as `unset` with the nearest value above it); `browser` (Playwright Chromium: `open`, `fill`, `click`/`expectText`); `command`: `run` in the checkout with `TARGET_URL`, exit 0 passes, last 50 lines kept: `{"kind":"command","run":"npx playwright test"}`; `agent`: agent-browser pursues `goal` at `path` until `success` holds, ending `VERDICT: PASS|FAIL - reason`, screenshot kept: `{"kind":"agent","goal":"Win tic-tac-toe","success":["Board says You win"],"path":"/games"}`; `"compare": true` (GY-2985) runs the same goal at `BASELINE_URL` — the previously served build the serve pass keeps on the port beside the served one — and one judge call given both transcripts and screenshots answers `VERDICT: SAME|BETTER|WORSE - reason`; WORSE fails the case naming the reason, and with no baseline (the first serve) the step runs once.
+Code-reviewed cases have id/title, optional description/tags, target (`uat`/`any`), required (false), timeoutSeconds (600), secrets and ordered steps:
 
-`timeoutSeconds` (600). `secrets: ["NAME"]` from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600, uncommitted) as variables and `{{secret:NAME}}`, redacted. `e2e run CASE|--tag T|--all --url URL` prints failing steps, exits non-zero. Without a wired repository the delivery cases pend; without previews the preview cases do. Cases belong to the repository they live in: a managed repository's **Tests** page lists exactly the cases synced from its `e2e/cases/` and the runs recorded against them — never Graphyard's built-in scenarios, which register only on an install managing `cryptob1/graphyard` itself; with no cases the page says so and how to add one. A seeded or synced revision carries the time it landed, never the epoch.
+| Kind | Fields and behavior |
+| --- | --- |
+| http | method/path/status, dotted expect, save, GET waitSeconds. Cases share wait budget equally; unset reads fail with nearest value. |
+| browser | Playwright Chromium open/fill/click/expectText. |
+| command | run in checkout with TARGET_URL; exit 0 passes, last 50 lines retained. |
+| agent | goal/path/success via agent-browser; screenshot and `VERDICT: PASS\|FAIL - reason`. |
 
-**Required `uat` cases run on every deploy** (`GRAPHYARD_UAT_URL`, `GRAPHYARD_SUITE_DETAIL`; static sites loop back `GRAPHYARD_UAT_STATIC`); `e2e record REPORT` records attempts ([`e2e:record` agent](delivery.md#e2e-record-credential)).
+Agent `compare: true` also runs at BASELINE_URL (previous build, adjacent port); a judge compares transcripts/screenshots as SAME/BETTER/WORSE. WORSE fails. No baseline means one run.
+
+Secrets come from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600), as variables or `{{secret:NAME}}`, redacted from output.
+
+`e2e run CASE|--tag T|--all --url URL` prints failures and exits nonzero. Unwired cases/previews remain pending. Tests lists the repository's synced cases, with actual landing times; Graphyard scenarios register only for its own repository.
+
+Required UAT cases run every deploy via GRAPHYARD_UAT_URL/GRAPHYARD_SUITE_DETAIL; static sites use GRAPHYARD_UAT_STATIC. `e2e record REPORT` needs the [record credential](delivery.md#e2e-record-credential).
 
 ## Release verdicts
 
-One retry: **passed**; **failed**; **flaky** (retry passed at same SHA); **unrun**; **blocked**; **pending** (blocks only if a delivered outcome shares it or `e2e.pendingOutcomes: blocking`). Only failed or unaccepted flaky required cases block. `POST /api/validation/import` (`external-runs:import` producers) records an external run, idempotent per `producer`+`runId`, only at a commit the retired release cut tagged `rc/`; it gates nothing.
+Passed, failed, flaky (one retry passes at same SHA), unrun, blocked or pending. Failed/unaccepted flaky required cases block. Pending blocks for shared delivered outcomes or `e2e.pendingOutcomes: blocking`. `e2e/contract.json` binds customer outcomes to required UAT cases.
 
-`e2e/contract.json` lists required customer outcomes, each bound to required `uat`-targeted cases.
+Legacy `/api/validation/import` requires external-runs:import, is idempotent by producer/runId, accepts only rc-tagged commits and gates nothing.
 
 ## Evidence reuse and replay
 
-Under a reuse policy the newest compatible pass covers new heads:
-
-```json
-{"kind":"reuse","id":"preview-reuse","expectedRevision":0,"environment":{"id":"preview","revision":1},"enabled":true,"freshnessSeconds":86400,"artifacts":"identical","relevant":{"dependencies":["package.json","**/package.json"],"lockfiles":["package-lock.json"],"buildInputs":["Dockerfile","tsconfig.json"],"configuration":["config/**"],"migrations":["migrations/**"],"services":{"api":["src/**"]}},"ignorable":["docs/**"]}
-```
-
-`relevant.services` covers every service; changed relevant or unknown paths refuse.
-
-Per attested head, `graphyard validation reuse decision.json`; fresh settled passes on identical pins qualify:
-
-```json
-{"workId":"9a7d6b2f-4e1c-4c5a-9f3e-2b8d1c0a7e51","expectedWorkRevision":12,"proof":"e2e:confirmed-booking-sends-sms","policy":{"id":"preview-reuse","revision":1},"buildAttestationId":"5c2e9a1b-7d3f-4a8e-b6c4-0f1d2e3a4b5c"}
-```
-
-`graphyard validation replay REQUEST ATTEMPT` (authorizes nothing) keeps each attempt's time, evaluator, outcome; `evaluator-error` reruns ≤2×, `fail` never. `graphyard validation analytics`: outcomes, faults, cost.
+A reuse policy allows compatible settled passes on identical pins. `validation reuse decision.json` names workId, expectedWorkRevision, proof, policy `{id,revision}` and buildAttestationId. `validation replay REQUEST ATTEMPT` preserves evaluator/time/outcome and grants no authority; evaluator-error reruns at most twice, fail never does. `validation analytics` reports outcomes, faults and cost.

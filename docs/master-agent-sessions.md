@@ -1,89 +1,76 @@
-<!-- page: Operate Graphyard | 6 | profiles, launches. -->
+<!-- page: Operate Graphyard | 6 | launch, isolate and recover sessions -->
 # Master-agent sessions
 
-`master worker add FILE`, `master reviewer add FILE`; `master producer replace|remove` applies next tick; `master status` `sessions` lists handles.
+Add profiles with `master worker add FILE`, `master reviewer add FILE` or `master producer replace|remove`. Changes apply next cycle; `master status` lists handles.
 
 ## Approval modes
 
-[`"approvals": "auto"`](onboarding.md#agent-environments) adds per-runtime unattended flags: Claude Code `--permission-mode bypassPermissions`; Codex `--ask-for-approval never --sandbox workspace-write`; opencode `OPENCODE_PERMISSION`; others likewise; Pi none. A worker launch derives opencode's document from the checkout it serves (GY-2959): the repository tree — `<repository>/**` and `<repository>/.graphyard/**` — is granted so a second worktree beside the assigned one never prompts, and everything outside the repository is denied; a profile's own document lays over it. Never started: `"prompt"`, `refusedLaunchKinds`, runtimes without command-line requests; [registry](onboarding.md#configure-the-fleet) runtimes need `{request}`.
+`approvals: auto` selects unattended flags: Claude `--permission-mode bypassPermissions`, Codex `--ask-for-approval never --sandbox workspace-write`, OpenCode `OPENCODE_PERMISSION`; Pi needs none. Prompt mode, refused kinds and runtimes without command-line requests cannot launch. Registry commands need `{request}`. OpenCode grants the repository tree, including sibling worktrees, denies outside paths, then overlays profile permissions.
 
 ## The coordinator checkout is confined at the OS level
 
-Non-master launches get own checkouts, the coordinator's unwritable (Codex sandbox, others bubblewrap); unconfinable refused.
+Non-master sessions use separate checkouts with a read-only coordinator checkout, through Codex or bubblewrap. Unconfinable launches refuse.
 
 ### Worker sandbox
 
-Codex `--add-dir` roots: the common `.git` (GY-2977: `packed-refs` lock), `.git/worktrees/NAME`, `objects`, `refs/remotes`, `refs/heads/graphyard`, `logs/`.
-
-The read-only mount re-exposes the common `.git` directory writable (GY-2967): every ref transaction a worker runs — commit, merge, reset, `branch -f`, `update-ref`, a cherry-pick's cleanup — takes the common `packed-refs` lock once anything has packed a ref (git gc does), and rewrites that file under the lock. Each runtime's own sandbox (Codex `--add-dir`, and the equivalent for other runtimes) must grant that common directory too (GY-2977): GY-2967 fixed only the bubblewrap layer, and a nested Codex sandbox that omitted it still refused `packed-refs.lock` with EROFS. Inside the mount, the checkout's own state is re-bound read-only — `index`, `HEAD`, `config`, `hooks`, the refs outside `refs/heads/graphyard`, and the shared `worktrees` area for a session with its own worktree admin — where the read-only bind still lets git take its `.lock` (the directory stays writable) but refuses the write and the rename that commits it, so the coordinator's index, HEAD, config and the base branch keep the protection they had.
+Both confinement layers must grant writable common `.git` for `packed-refs` locking/replacement, plus assigned worktree administration, objects, remote refs, graphyard branch refs and logs. Inside the mount, coordinator index/HEAD/config/hooks, other refs and shared worktree administration remain read-only. Lock creation cannot replace protected files.
 
 ### Credentials are hidden from confined sessions (GY-1856)
 
-Read-only checkout confinement is not credential isolation, so the mount also masks the operator's credential locations with an empty tmpfs: the whole config home (`~/.config/graphyard`, or `GRAPHYARD_CONFIG_HOME`) — every install, master, worker, reviewer and producer directory under it — plus each credential path the install records beside it (the coordinator credential, `run.mergeWriter.deployKeyFile`, `upstream.credentialFile`) and the per-install `confinement.maskPaths` list in `.graphyard/master.json` for anything else (a collector's token file, say). A recorded path is masked at the nearest directory that holds it; a stale path hides nothing. Only the session's own credential survives: its token file (the one `GRAPHYARD_TOKEN_FILE` names, re-exposed read-only), a reviewer's or spec checker's binding directory (`reviewers/sessions/<id>`, its `GH_CONFIG_DIR`, re-exposed writable), and its runtime login home (the value its launch sets on the runtime's home variable, re-exposed writable), so `git status`, `git commit`, `graphyard sync` and the repository's test command keep working in its worktree. The mask applies to every session launched inside the wrapper — workers, reviewers, producers — each keeping its own credential; the master session, which acts as the coordinator identity, keeps its coordinator credential.
+The wrapper masks Graphyard's whole config home, recorded coordinator/upstream credentials, deploy key and `confinement.maskPaths`. Files are masked at their containing directory; nonexistent paths hide nothing. Each session retains only its token (read-only), runtime home and reviewer/spec-check binding directory (writable). The master keeps its coordinator credential.
 
-An install deployed under its own config home runs its CLI from there too (`<install>/deploy/build/bin/graphyard.mjs`), so the mask keeps that deploy checkout readable — read-only, code only — with the session's own paths (GY-2995): a confined reviewer or spec checker can execute the CLI its prompt names and post its verdict, while every credential beside the checkout stays unreadable. A review or spec-check launch whose sandbox still cannot reach the CLI its prompt names is refused before any session starts: `master status` names the launcher and the fix as configuration attention, and the loop waits instead of relaunching (a restored CLI launches again on its own).
+Install deploy code stays readable so sessions can run its CLI, while neighboring credentials remain hidden. Unreachable reviewer/spec-check CLIs refuse before launch and report configuration attention until repaired.
 
-Launches take the first account under `run.quotaCeilingPercent`, else fail over; limit notices hold the account (`capacity.exhausted`), among them Z.AI's 429 `Rate limit reached` envelope (`{"code":"1302",…}`), which names no reset and holds its account 15 minutes, and Claude's `You've hit your session limit · resets 1:30am (America/Los_Angeles)` and `You've reached your Fable limit. …` (GY-2962): the session limit holds until the reset it names, a session or usage limit with no readable reset holds 6 hours, and a Fable limit — which names no reset — until the next 08:00 local. Concurrent launches spread across provider plans before any plan takes a second live session, so one plan's limit cannot take the fleet down. Reviewers/producers: profile `kind` only. A rework worktree starts from the submission head in the shared object store, pushing no worker branch.
+Accounts below `run.quotaCeilingPercent` are preferred; simultaneous launches spread across provider plans. Limits hold accounts: Z.AI 1302 for 15 minutes; Claude until the stated reset, or 6 hours if unreadable; Fable until next 08:00 local. Reviewers/producers use profile kind. Rework starts at the submitted head; workers push nothing.
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …`: one session; loop and `master start` adopt live `masterAgentName`. Relaunched once gone from Herdr. `master registry propose` proposes the master role beside the others — the reviewer's accounts, concurrency 1 — so a fresh install's loop launches its own session; renaming the role's accounts replaces that proposal.
+`master registry role set master ACCOUNTS …` configures one session. Registry proposal includes it using reviewer accounts. The loop or `master start` adopts `masterAgentName` or replaces it. [Wake support](master-agent.md#master-wake-and-delivery-progress) depends on loaded code.
 
 ### A pane stopped on its provider's limit is absent (GY-2949)
 
-Each cycle reads the master pane's recent output with the same limit-notice judge workers use. A usage or session limit notice (`You've hit your session limit · resets 1:30am`) is treated as absent: the account is held until the parsed reset (the hold rides every selection, so the spent plan is not asked again), the pane closes, and the role's next account launches the master in the same cycle. A pane whose runtime reports exited is closed and relaunched the same way, with no hold. `master status` shows the session's state on its one page: `working`, `idle` (Herdr reports the pane idle), `limited until T` while the hold stands, and `absent` once the pane is closed with no hold standing.
+Each cycle replaces exited or provider-limited master panes. Limits hold the account until reset; exits impose no quota hold. Status is working, idle, limited or absent; none proves delivery.
 
 ### A closed Herdr workspace is replaced
 
-Each cycle checks `herdrWorkspace` against `herdr workspace list`, as does the next reload after any launch refused with `workspace_not_found`. A workspace Herdr no longer lists is replaced in `.graphyard/master.json` by the one `masterAgentName` runs in (else the first listed), recorded as a `config` action with its reason, and items blocked on dispatches into the closed workspace are unblocked.
+Missing `herdrWorkspace` is replaced with the master's workspace or first listed. The loop records the config change and clears dispatch blockers caused by it. `workspace_not_found` triggers the same check.
 
 ### The request is the session's first message
 
-Never pasted.
+Requests arrive on the runtime command line. Later authorized reminders come from the launcher ([authorization](onboarding.md#what-the-generated-instructions-authorize)).
 
 #### How the request reaches the runtime
 
-Written to `.graphyard/launch/NAME.request` (Claude also `NAME.role`), 0600, removed with the checkout; the typed line is bounded at **512 bytes**:
+`.graphyard/launch/NAME.request` and Claude's `NAME.role` are 0600 and removed with the checkout. The typed line stays within 512 bytes:
 
-```
+```sh
 claude … --settings …/.graphyard/harness/ROLE.json --append-system-prompt-file "$GY.role" "$(cat "$GY.request")"
 ```
 
 #### The start bound reads the pane
 
-**Ready**: Herdr active without prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line, never Herdr's own `agent_not_found`.
+Ready means active without a prompt, or a visible runtime banner while Herdr reports unknown. `run.launchStartSeconds` defaults to 60 seconds; starting gets 120 (`started.extended`). Refusals quote the pane's last nonempty line.
 
 #### First-run consent prompts
 
-**`awaiting consent`**: answers only `hooks-continue-untrusted` (**Continue without trusting**), `telemetry-decline`, never one that grants hook execution or a sandbox escape; others (**credential**, **payment**) wait for the human. Held: `.graphyard/launch/NAME.consent` (`herdr pane attach`); after **15 minutes** the supervisor stops renewing; the item dispatches.
+Only Continue without trusting (`hooks-continue-untrusted`) and telemetry decline are answered automatically. Credential/payment prompts wait for the person's decision, recorded at `.graphyard/launch/NAME.consent`; inspect with `herdr pane attach`. After 15 minutes supervision stops renewing the lease.
 
-Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted once quiet past `run.acknowledgementSeconds` (90); resultless is **`never started`**: relaunched ≤3 times (`retry.neverStarted`), [then elsewhere](master-agent-reference.md#producer-runtime-faults).
+Reviewers/producers acknowledge after 30 seconds active. Quiet sessions get one reminder at `run.acknowledgementSeconds` (90); resultless starts retry `retry.neverStarted` times (3), then another profile.
 
-**Worker stall** (`run.inactivityMinutes`, 10): a worker session Herdr reports idle with no recorded activity for the window is re-prompted once with its own work; still idle a whole window after that re-prompt, the close step ends it as **`stalled`**: the pane closes, the attempt releases with its lease (a provider limit notice on the pane holds its account — Z.AI's 429 envelope for 15 minutes), and the item dispatches again next cycle. A session that has stopped, whose pane's last lines already carry a recognised limit notice — Claude's `You've reached your Fable limit. …` or `You've hit your session limit` among them — ends at once on it, with no window waited and no re-prompt: the attempt ends as a limit, the lease releases, and the account is held for the notice's reset (GY-2962).
+Idle workers get one reminder after `run.inactivityMinutes` (10); another idle window ends as stalled and releases the lease. Stopped sessions with recognized limits end immediately and hold the account. Runtime prompts receive one reject key (external-directory Reject, destructive-command No). Still blocked after a window ends stalled with the prompt recorded; a new prompt gets a fresh answer.
 
-**Blocked on its runtime's own prompt** (GY-2959): a worker Herdr reports `blocked` is answered by the close step, not renewed under — the loop reads the prompt off the pane and sends its reject key once (OpenCode's external-directory Allow once / Always allow / Reject chooses Reject, which leaves the worker inside its worktree; a destructive command's No is declined the same way); one still blocked a whole window after the answer ends as **`stalled`** naming the prompt text, lease released, item dispatchable. One that unblocked after the key is left alone, and a new prompt gets a fresh answer. The launch instruction names the external-directory prompt beside the rm/mv one, and the worker launch pre-grants the repository tree so the prompt does not appear for a worktree beside the assigned one.
+### Resume and attempt bounds
 
-**The next attempt resumes the last one's session** (GY-2971): a Claude Code worker launches with `--session-id ID`, and the item's launch record (`.graphyard/dispatch/dispatched-KEY.json`) keeps the id with its runtime, account and worktree. The item's next attempt or rework round — on the same runtime and account — launches `claude --resume ID` in its own worktree under its own epoch, its complete brief (head, findings, rework reason) still the first request; only the conversation carries over. Another runtime, an account the selection passed over (limited, logged out), no recorded id, or a resume that fails its start bound launches fresh as before, logging `attempt N launches a fresh session: WHY`; a failed resume relaunches the same attempt under the lease it holds. `master status` reads `attempt N (resumed from M)`. Measure it by each item's `pipeline.attempts` count and `pipeline.reworkRounds`:
+Claude records session ID, runtime, account and worktree in `.graphyard/dispatch/dispatched-KEY.json`. The next attempt on that account/runtime uses `--resume ID`, with its new epoch, worktree and brief. Missing/unsupported/unavailable resumes launch fresh and log why; failed starts retry under the same lease. Status names the resumed attempt. Measure `pipeline.attempts.length` and `pipeline.reworkRounds`.
 
-| Measure | Read from |
-|---|---|
-| attempts per item | `pipeline.attempts.length` |
-| rework rounds | `pipeline.reworkRounds` |
+`run.attemptBoundMinutes` defaults to 130; commits or file changes within 20 minutes extend it while leases renew. `run.attemptCeilingMinutes` defaults to 480 and never extends. The loop records progress; stops preserve a WIP commit and successor diff. Status shows time remaining. Open human scope requests are exempt from the no-submission backstop.
 
-**Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
+### Verdicts and registry slots
 
-**Registry slot**: the launch's agent-registry session rides its ledger record; the loop's close step ends it once the verdict is recorded, the item leaves review, or the pane is gone from Herdr (the reason names the pane), so a finished review or proof stops consuming its role's concurrency. Producers likewise. A session whose launching loop restarted away has no handle the successor loop tracks; each dispatch tick also judges every registry session the control plane lists live for this host by the pane its ledger record names, and ends it on the second consecutive miss.
+`review-binding.json` (0600 in `GH_CONFIG_DIR`) binds head/base/policy, verdictToken and previousHead. No binding means no launch. `review post --event …` posts once; moved heads refuse. Workers run `review self GY-N` before complete.
 
-**The attempt bound is a progress bound** (GY-2961): an attempt whose worktree shows a new commit or changed files within the last 20 minutes, and whose lease renews, runs past the bound and is stopped only at the **ceiling** (default 8h); one with neither is stopped at the **bound** (default 130min since the claim). Each cycle the loop reads the attempt's worktree and records what changed on the session handle, so the control plane's renewal refusal counts the same progress. The stop keeps the attempt's uncommitted work as one WIP commit on its branch — a successor receives the diff — and releases the lease. The launch brief names the end instant, the rule and the ceiling (`run.attemptBoundMinutes` / `run.attemptCeilingMinutes` set both per install), and `master status` shows each live attempt's remaining time. **Unsubmitted past the bound** (lease 60min): `unsubmitted-attempt` shown; from 130min renewal refused as the backstop when no progress of either kind is on the record. Open scope asks exempt.
+Verdict, stage change or missing pane ends the ledger-linked registry slot. Orphaned slots close after two consecutive pane misses, including after loop restart.
 
 ### The launch reads short; the procedure loads on demand (GY-2972)
 
-A launched session's standing text is the short AGENTS.md block plus its role brief; each names the `guide TOPIC` topics its role needs instead of restating their procedure, and `node $GRAPHYARD_CLI guide TOPIC` (topics: claim, sync, complete, park, blocked, review, proof, master) prints it. The topics moved the older, longer text verbatim, so no rule changed. Word counts before (the item's base commit) and after, rendered with the fixed inputs tests/agents-guide.test.ts pins:
-
-| Text | Before | After |
-| --- | --- | --- |
-| AGENTS.md block | 678 | 101 |
-| Worker brief | 662 | 453 |
-| Reviewer brief | 795 | 553 |
-| Producer brief | 732 | 501 |
-| Master brief | 356 | 246 |
+Use `node $GRAPHYARD_CLI guide TOPIC` for the procedure named by the brief; standing rules remain in AGENTS.md.

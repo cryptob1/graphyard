@@ -1,47 +1,66 @@
-<!-- page: Operate Graphyard | 1 | variables -->
+<!-- page: Operate Graphyard | 1 | configure and serve -->
 # Deployment
 
 ## The one command
 
-One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider compose --repo OWNER/REPO --apply` ([install](install.md)). `/healthz?strict` alerts (503); CI runners pull Docker Hub images through the `mirror.gcr.io` mirror.
+```sh
+node "$GRAPHYARD_CLI" install --provider compose --repo OWNER/REPO --apply
+```
+
+Preview with `--plan` first ([install](install.md)). Compose runs one stateless container and Postgres. `/healthz?strict` returns 503 for alerts. CI pulls Docker Hub images through `mirror.gcr.io`.
 
 ## Variables
 
-`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH`; no remote-side credential variable (the merge writer pushes with the [deploy key](install.md#step-3-deploy-key)); `GRAPHYARD_REVIEWER_APPS`; `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/`s3`); `GRAPHYARD_SIGNIN_CLAIM`:
+| Variable | Purpose |
+| --- | --- |
+| `DATABASE_URL` | Postgres connection. |
+| `HOST`, `PORT` | Listen address, default `0.0.0.0:4310`. |
+| `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH` | Managed repository and base. |
+| `GRAPHYARD_PRINCIPALS` | Principal roster: role and sessionKind. Human admin uses `human`; AI never holds admin. |
+| `GRAPHYARD_REVIEWER_APPS` | Reviewer configuration. |
+| `GRAPHYARD_GENERATED_FILES` | Generated-file paths. |
+| `GRAPHYARD_REPOSITORY_POLICY` | Deployed repository policy. |
+| `GRAPHYARD_BUILD_SHA` | Control-plane build commit. |
+| `GRAPHYARD_ARTIFACT_BACKEND` | `postgres` or `s3`. |
+| `GRAPHYARD_SIGNIN_CLAIM` | Sign-in claim configuration. |
+| `GRAPHYARD_MAX_SLICE_LEADS` | Slice-lead limit, default 3. |
+| `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead, default 1. |
+| `GRAPHYARD_MAX_REVIEWERS` | At least producer count, default 2. |
 
-| Variable | Purpose
-| --- | ---
-| `GRAPHYARD_PRINCIPALS` | Principals JSON (`role`, `sessionKind`: operator `human`, AI `admin` `ai`)
-| `GRAPHYARD_MAX_SLICE_LEADS` | Slice leads (3)
-| `GRAPHYARD_MIN_REVIEWERS` | Reviewers with a lead (1)
-| `GRAPHYARD_MAX_REVIEWERS` | ≥ `producer` count (2)
-
-CI proofs publish via one producer principal; its posted run binding is Graphyard's record of the job, never read back from the remote.
+There is no remote-side token variable: the merge writer uses the [deploy key](install.md#step-3-deploy-key). CI posts proof runs under its producer identity; Graphyard does not read them back from GitHub.
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; the serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; `.graphyard/held-cli.json` pins the loop to a dirty checkout's snapshot.
+`master init --deployment-url …` sets the commit endpoint. Unserved merges after five minutes raise delivery.deployment-incident. `run.deploymentReuseMinutes` (15) permits reused observations. Deploy serves before loop reload; `.graphyard/held-cli.json` pins dirty CLI snapshots.
 
 ### Serving the managed repository's app
 
-A repository whose main declares `.graphyard/serve.json` gets its merged main built and served on a loopback port after every merge — no shell loop beside the install. The declaration names how to build the app and how to serve it:
+Declare build, serve command and port on main in `.graphyard/serve.json`:
 
 ```json
-{ "build": ["npm", "run", "build"], "serve": ["npx", "vite", "preview", "--host", "127.0.0.1", "--port", "4400"], "port": 4400 }
+{"build":["npm","run","build"],"serve":["npx","vite","preview","--host","127.0.0.1","--port","4400"],"port":4400}
 ```
 
-(the Open City scaffold's declaration). The install's deploy unit (`graphyard-deploy`) checks each new main out into its own serve checkout under the managed root's local `.graphyard/` — never the coordinator's or a worker's checkout, and created only once a declaration exists — runs `npm ci` and the declared build, and restarts the declared serve command only when the build passed: a failing build keeps the previous build serving and is recorded, with why, in `.graphyard/served.json`. A serve counts as served only once it answers its port and the answer is the restarted serve's own: one that cannot bind or fails to start is recorded as the failure it is, with nothing claimed served — a port another process already holds names that port as the reason, and no required case runs against the foreign holder — and the process it spawned stays tracked for the next restart to stop. When the served commit is still main but nothing answers it (a reboot, a crashed serve), the pass serves the build the checkout already holds again and records the new process's pid, so the next restart stops the process that actually holds the port. Once a new commit serves, the pass live-verifies it: the commit's own required cases from its `e2e/cases/` run against the served URL, and the verdict is recorded in `.graphyard/served.json` for that exact commit — a failing case is the release health the master acts on, never a reason to stop serving or roll back. `master status`'s serving block and the dashboard's release line name the served commit, whether it is main, the URL, the last build failure, and the verdict — verified, the failing case and step, or not yet run; `doctor` prints a FAIL line naming the URL when a declared serve does not answer. A repository that declares no `serve.json` is untouched: the pass only fetches main into the managed root's remote-tracking ref — no serve checkout, no build, no serve, nothing recorded, nothing changed in any report.
+The deploy supervisor builds main in a separate `.graphyard/` serve checkout with npm ci and the declared build. Only a passing build restarts serving; failures keep the previous build. The process must answer its own port: foreign holders fail and receive no case runs. Spawned PIDs remain tracked for restart.
+
+If main is still served but the process died, the supervisor restarts the existing build. Each new serve runs its required cases and writes commit, URL, failure and verdict to `.graphyard/served.json`. Failed cases remain visible for [recovery](delivery.md#merge-trials); the serve pass keeps the app running.
+
+Status/dashboard read that record; doctor reports unreachable declared apps. Without a declaration, only the remote-tracking ref updates: no checkout, build or serve.
 
 ### Deployment incident
 
-`/healthz` `commit` behind tip: `install --logs` shows failures; redeploy ([manual fallback](#manual-fallback)). The serving environment name comes from `production.environment`, else `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`. `/api/github/*` is not served.
+If `/healthz` reports an old commit, read `install --logs`, diagnose the failure and use the [fallback](#manual-fallback) if needed. Environment name comes from `production.environment`, then `GRAPHYARD_PRODUCTION_ENVIRONMENT`, then `production`. `/api/github/*` is not served.
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup`, `db verify`, `db fence` before move. **Upgrade:** [upgrade](install.md#upgrading-an-existing-installation); the continuous deploy follows Graphyard's main: build and restart from the install's build worktree, `/healthz?strict` reporting the deployed commit, then the watched checkout moved to the served commit and pinned — a worker CLI's checkout, when the unit watches it, never leads the server (GY-2978) — and it rolls a failed deploy or health check back leaving the checkout as it was; a lease command (`heartbeat`, `claim`, `complete`, `blocked`, `defer`) run from a checkout the server does not match yet proceeds with a one-line warning, every other command refuses by name. **Restore:** `db migrate`, `db restore`.
+Back up with `graphyard db backup`, verify with `db verify`, and fence before a move with `db fence`. Restore with `db migrate` then `db restore`.
+
+[Upgrade](install.md#upgrading-an-existing-installation) builds and restarts from the install's build worktree, checks the served SHA, then moves and pins the watched checkout. A failed deploy or health check restores the previous release when safe and leaves that checkout unchanged. Lease commands (`heartbeat`, `claim`, `complete`, `blocked`, `defer`) from a mismatched CLI commit warn and proceed; other commands refuse with the mismatch.
 
 ## Manual fallback
 
-Set the variables table, register a read-write deploy key ([step 3](install.md#step-3-deploy-key)), then `doctor`. Compose: `cp .env.example .env`, `docker compose --profile full up -d`.
-- `graphyard master setup` plans variables saved credentials derive; `--apply` sets them, audited in `.graphyard/setup-audit.jsonl`. `park` refuses host-doable asks (repository, derived variable, held credential, Confirm-access capture, coordinator checkout or unit record, agent identity); a person's sign-in, enrolment or browser profile stays human.
-- No main guard or revert approver remains; leftover `GRAPHYARD_REVERT_APPROVER_*` are unread and may be deleted.
+Set the variables, register a read-write deploy key, then run `doctor`. For Compose: `cp .env.example .env`, then `docker compose --profile full up -d`.
+
+`master setup --apply` sets derivable variables and appends `.graphyard/setup-audit.jsonl`. Agents run host-doable steps; park refuses those asks. Personal sign-in, enrolment and browser profiles remain human.
+
+Old `GRAPHYARD_REVERT_APPROVER_*` variables are unread; no main guard or revert approver remains.

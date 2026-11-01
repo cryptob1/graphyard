@@ -1,40 +1,38 @@
 # Graphyard
 
-Graphyard is a control plane that runs a team of AI coding agents on a repository. Its goal is software that ships itself: agents build, verify, review and release, while the human keeps three decisions: goals and priorities, spending money or opening accounts, and issuing credentials to people.
+Graphyard coordinates AI coding agents on a repository. The **master** is an AI coordinator: it reads failures, reasons about what to do, and decides the next action. The **loop** is a repeating program: it observes state, starts sessions, and carries out routine actions. **Workers** implement each item in its assigned worktree. Graphyard owns leases, history and gates; Herdr runs sessions and reports their state.
+
+The human keeps exactly three decisions: goals and priorities, spending money or opening accounts, and issuing credentials to people. The master applies every other decision under its operator-agent identity. Review, proof and routine repairs proceed automatically.
 
 [![How Graphyard works: a two-minute walkthrough](docs/diagrams/how-graphyard-works.gif)](docs/diagrams/how-graphyard-works.mp4)
 
 ## Start here: setup and docs
 
-[Setup checklist](docs/setup-from-zero.md):
-
 ```sh
 graphyard up --agent
 ```
 
-[Install](docs/install.md) · [How Graphyard works](docs/how-graphyard-works.md) · [Onboard a repository](docs/onboarding.md) · [Documentation](docs/README.md)
-
-**[docs/install.md](docs/install.md) is the primary install path** (`install --provider compose|local`). Contribute: [AGENTS.md](AGENTS.md), [development](docs/development.md). Licence: [Apache 2.0](LICENSE).
+Follow the [setup checklist](docs/setup-from-zero.md) or [install guide](docs/install.md) (`install --provider compose|local`). Read [How Graphyard works](docs/how-graphyard-works.md), [onboarding](docs/onboarding.md), or the [documentation index](docs/README.md). Contributors: [AGENTS.md](AGENTS.md), [development](docs/development.md). Licence: [Apache 2.0](LICENSE).
 
 ## How it works
 
-1. The master agent files work items with acceptance criteria and releases them.
-2. A worker agent takes over: the worker builds each work item on its own branch.
-3. Graphyard checks the merged tree: build, tests and the change's E2E cases against its preview, before the merge to main itself.
-4. An independent agent reviews, before the merge for sensitive changes and after the merge for everything else, by default.
-5. Graphyard merges to main, and every merge deploys on its own: health and end-to-end checks run on the live release.
-6. A failed check rolls the release back and hands the change back to a worker with the failure attached.
-7. Only Graphyard writes to main.
+1. The master files work with acceptance criteria. The loop releases eligible backlog and starts workers.
+2. A worker implements, checks and submits an exact commit under its lease. Submission ends the lease.
+3. Graphyard runs proofs in the merge trial and requests independent review. Sensitive changes wait for approval before merge; other changes receive review after merge.
+4. The merge writer tests the change merged onto main, then alone pushes main with the install's deploy key.
+5. The deploy supervisor (`graphyard-deploy.service`, with an install-specific name on new installs) builds and serves new main commits. Deployment health and required end-to-end checks report what is live.
+6. Failures trigger the appropriate retry, rework or recovery. The master handles causes that need judgment, without asking for routine human approval.
 
-graphyard.json sets sensitive paths (`risk.sensitive`), reviewed before merge: [delivery](docs/delivery.md).
+For example, if a trial check fails on both the change and main, the merge writer holds it as a base failure. The master diagnoses the failing test and files or advances a repair; a worker fixes it, and the writer retries with the gates intact. Running loop cycles alone do not prove delivery progress: check the item history, merged commit, served commit and required test results. See [current wake behavior](docs/master-agent.md#master-wake-and-delivery-progress) before relying on automatic master prompting.
 
 ```mermaid
 flowchart LR
-  B[Master] --> C[Work items] --> D[Worker builds] --> E[Graphyard checks the merged tree]
-  E --> F[Merge to main] -->|normal: after| G[Review]
-  E -.->|sensitive: before| G -.-> F
-  F --> H[Deploys] --> I[Health and end-to-end checks] --> J[Live release]
-  I -.->|failure: roll back| C
+  M[Master: reasons and decides] --> W[Work items]
+  L[Loop: observes and acts] --> A[Worker implements]
+  W --> A --> G[Graphyard gates and merge writer]
+  G --> D[Deploy supervisor] --> V[Serving commit and test results]
+  G -. failure .-> M
+  V -. failure .-> M
 ```
 
-Text equivalent: steps 1-8.
+Text equivalent: the six steps above. [Delivery](docs/delivery.md) describes trials, deploys and recovery; `graphyard.json` sets sensitive paths in `risk.sensitive`.

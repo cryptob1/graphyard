@@ -1,38 +1,46 @@
-<!-- page: Operate Graphyard | 5 | loop -->
+<!-- page: Operate Graphyard | 5 | coordinate work and diagnose stalls -->
 # Master-agent operating mode
 
-The master (`coordinator`) administers access, never implementing, reviewing or proving; it files items itself, and its loop releases backlog to keep the pipeline full ([intent](how-graphyard-works.md#from-intent-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
+The master is an AI coordinator, not the loop program. It files work, diagnoses failures and applies release, unblock, requirements, rework, close and attest decisions under its operator-agent identity. It never implements, reviews or proves its own work. People keep only goals and priorities, money and accounts, and credentials for people.
 
 ## Operate
 
-Cycle until scoped items are Done or blocked and releases healthy. `master status` prints the serving commit against main, scoped items' stage, worker and human owner, head and blocker, the merge queue, sessions and free profiles. Serving describes the managed repository's deployment, never the control plane's build; without a provider it is `unconfigured`. A repository declaring [`.graphyard/serve.json`](deployment.md#serving-the-managed-repositorys-app) reports its served commit, `atMain`, URL and last build failure. Review, rework and proof setup are not stopping conditions.
+Run `master status` and act until scoped work is Done or blocked and serving is healthy. Review/rework/proof setup are work to advance. Status reports items, queue, sessions and capacity. Serving belongs to the managed repository; no deployment reads `unconfigured`.
 
-Items carry an optional `owner`, a principal with `sessionKind: "human"`, separate from the worker lease. Set it in `master create` or change it through `master requirements`; `null` returns it to the install. Requirements still enforce revisions and active leases. In the install checkout, `master init --for PERSON --token-stdin` registers a personal master without replacing identities or installing another supervisor. The loop launches each person's master and dispatches only their items; the install master dispatches unowned items. Scopes share capacity, backlog release, reconciliation, review/proof dispatch and one merge writer. A personal master's creates default to its person. Signed-in people open Work → Now for exactly their items, stage and next step; Work remains the shared board.
+Optional item `owner` names a human, separate from the worker lease. Set with create/requirements; null returns ownership to the install. `master init --for PERSON --token-stdin` registers a personal master without another supervisor. It creates/dispatches that person's items; the install master handles unowned work. Capacity and merge writer stay shared. Work → Now shows personal work; Work shows all.
 
 ## The loop
 
-`master run` runs one cycle every `run.intervalSeconds`: five steps in order, each under one timeout; a failed step is one log line and runs again next cycle.
+`master run` repeats every `run.intervalSeconds`. Each step has a timeout; a failed step logs its cause and retries next cycle.
 
-1. **snapshot**: the work snapshot and Herdr's session list.
-2. **close**: end sessions whose item left the stage they were launched for; keep what an attempt ended by its lapsed lease had not committed and record it for the redispatch's handoff — whether the lapsed lease is still on the record or the control plane's reconciliation already cleared it (GY-2956); reconcile leases that lapsed unsubmitted; remove ended attempts' worktrees.
-3. **dispatch**: backlog released while the pipeline sits under its concurrency — the highest-priority item whose dependencies are done, oldest first on ties; a parked item never releases; claimable items to free worker profiles; unmergeable heads back to a worker; reviewer and producer requests; the master session, launched when absent.
-4. **merge writer**: trial and merge each submitted head in order ([delivery](delivery.md)).
-5. **persist**: the loop cursor.
+1. **Snapshot:** read work and Herdr sessions.
+2. **Close:** end obsolete sessions, preserve uncommitted work from expired attempts for the next worker, reconcile leases and remove ended worktrees.
+3. **Dispatch:** release eligible backlog up to capacity, highest priority first and oldest on ties. Launch workers, spec checks, reviewers, producers and an absent master session; return unmergeable heads for rework. Parked work stays held.
+4. **Merge writer:** trial and merge submitted heads in order ([delivery](delivery.md)).
+5. **Persist:** save the loop cursor.
 
-`master restart` restarts `graphyard-master.service`; from the confined master session it files a request the loop serves. The loop restarts itself when [graphyard-deploy.service](delivery.md) serves a commit it did not load.
+`master restart` restarts the install's loop unit; confined masters record a request. The loop reloads newly served code. [Unit names](delivery.md#continuous-deployment) are per install, with legacy aliases.
+
+### Master wake and delivery progress
+
+The systemd watchdog receives a ping after each completed cycle (`src/supervisor.ts`). It restarts a hung loop; it does not prove commits are merging, diagnose failed tests or decide repairs.
+
+At this worktree's base, the loop adopts or launches a master and replaces exited or provider-limited panes. It does not prompt an existing master about delivery failures. GY-3047's submitted candidate `ca55ddb7c2a7` adds prompts for changed blockers, failed operations, review/proof launches, shared-base failures and deployment failures, plus a bounded heartbeat while open work remains. That candidate is pending work, not evidence that a deployed install has it. Check the serving and loaded commits before relying on those wakes.
+
+Completed cycles and a pane marked `working` alone establish no delivery progress. Diagnose failures with all gates intact.
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, loop-owned `rework`. The master attests unproduced `manual:` proofs per head, base and policy revision.
+Items default to `systemDriven: true`. `master dispatch GY-N PROFILE` still uses normal eligibility, ownership and lease checks. Use typed actions without bypassing gates; attest required manual proofs for the exact head/base/policy.
 
 ### File user-facing items with an e2e: proof by default
 
-Every `feature` or `bug` item the master files carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — the case the merge trial runs against the served head — unless the change has nothing a user can see, and then the description opens `No user-facing change: <reason>`. `master create` and `master requirements` refuse anything else, naming the case format and the opt-out ([validation](validation.md)).
+Create and requirements enforce the [E2E rule and opt-out](validation.md#every-user-facing-item-carries-an-e2e-proof).
 
 ### Session liveness is reconciled, not trusted
 
-Each dispatch reconciles reviewer and producer sessions; a handle closes at the second consecutive miss, and so does the agent-registry session a restarted loop left standing — the ledger record names its pane, and the role's slot frees with it. `blocked` frees its slot; its [reason](protocol/work-commands.md#blocked-work) stays on the item until the master clears it.
+Missing panes free role capacity after two consecutive misses, including across loop restarts. `blocked` frees a worker slot; the reason stays until master clears it.
 
 ## Automatic dispatch at submit
 
-Past the build gate: a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then a review once passed (`run.reviewerProfile`, producer profiles, 4 sessions each; **concurrency is per role**, 1–20, default 1). Unanswered sessions relaunch, then `dispatch.abandoned`.
+Control-plane acceptance reads executed unit/integration/E2E counts from the merge trial, not producer evidence. Sensitive changes also need manual attestations. Review is automatic; unanswered sessions retry, then record `dispatch.abandoned`. Producer APIs remain for integrations, but these candidates launch no producer sessions.
