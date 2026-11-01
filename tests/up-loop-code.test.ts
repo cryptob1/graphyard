@@ -620,7 +620,7 @@ test('unit:up-validates-the-checkout-it-installs — the clean-checkout prefligh
   assert.deepEqual(await read(), { root: b, dirty: ['bin/graphyard.mjs'] }, 'dirty work in this CLI\'s own checkout is found');
 });
 
-test('up removes a stale launcher pointer even when the loop step is already complete', async () => {
+test('unit:launcher-runs-checkout — up removes a stale launcher pointer even when the loop step is already complete', async () => {
   const { runUp } = await up();
   const { removeHeldCliPin } = await repositorySetup();
   const root = await recordedRoot('up-current-stale-launcher');

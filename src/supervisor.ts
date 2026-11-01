@@ -914,8 +914,7 @@ function observeUnit(run: (command: string, args: string[]) => string, unit: str
  * WorkingDirectory that is not the configured coordinator checkout on a durable path, and an
  * installed unit that runs a different loop unless `replace` was passed explicitly.
  */
-export async function installLoopSupervisor(given: LoopUnitInput, host: LoopSupervisorHost = {}, options: LoopSupervisorInstallOptions = {}): Promise<LoopSupervisorInstallation> {
-  const input = given;
+export async function installLoopSupervisor(input: LoopUnitInput, host: LoopSupervisorHost = {}, options: LoopSupervisorInstallOptions = {}): Promise<LoopSupervisorInstallation> {
   const support = supervisorSupport(host);
   const unitDirectory = loopUnitDirectory(host);
   const home = host.home ?? ((host.env ?? process.env).HOME?.trim() || homedir());

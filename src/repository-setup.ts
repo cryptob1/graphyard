@@ -571,7 +571,7 @@ export interface LoopCodeFacts {
  * checkout (or the repository's, a unit naming no launcher, or — GY-2937 — the install's pinned
  * coordinator snapshot, which the deploy unit pins and the loop restarts onto by design) and its
  * cursor records loading exactly this CLI's commit from a clean tree. A cursor naming no commit is
- * not proof, and neither is a known-good pin or held snapshot on another commit: those are this
+ * not proof, and neither is a known-good pin on another commit: that is this
  * install's machinery, but the command asked for this CLI's code.
  */
 export function judgeLoopCode(facts: LoopCodeFacts): LoopCodeReading {
