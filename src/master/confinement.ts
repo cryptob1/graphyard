@@ -202,14 +202,15 @@ export const secretsBusPath = (uid: number | undefined = process.getuid?.(), env
  * the system bus directory. Whether a candidate may be hidden is `processLaunchMaskWords`'s call.
  */
 export const hostProcessLaunchTargets = (uid: number | undefined = process.getuid?.(), env: NodeJS.ProcessEnv = process.env): { directories: string[]; busSockets: string[]; secretsBus: string | null } => {
-  const runtimeDirectories = [...new Set([uid === undefined ? null : `/run/user/${uid}`, env.XDG_RUNTIME_DIR || null]
+  const runtimeDirectories = [...new Set([uid === undefined ? null : `/run/user/${uid}`, process.env.XDG_RUNTIME_DIR || null, env.XDG_RUNTIME_DIR || null]
     .filter((path): path is string => !!path && isAbsolute(path)).map(path => { try { return realpathSync(path); } catch { return path; } }))];
   const directories = [...runtimeDirectories.flatMap(directory => [directory, join(directory, 'systemd')]), '/run/dbus', '/var/run/dbus',
-    ...[env.HOME && join(env.HOME, '.config', 'herdr', 'sessions'),
+    ...[...new Set([process.env.HOME, env.HOME])].filter((home): home is string => !!home).flatMap(home => [
+      join(home, '.config', 'herdr', 'sessions'), join(home, '.docker', 'run'), join(home, '.docker', 'desktop'), join(home, '.local', 'share', 'docker')]),
+    ...[
       env.XDG_CONFIG_HOME && join(env.XDG_CONFIG_HOME, 'herdr', 'sessions'),
       env.GRAPHYARD_HERDR_CONFIG_HOME && join(env.GRAPHYARD_HERDR_CONFIG_HOME, 'herdr', 'sessions'),
-      herdrTarget()?.configHome && join(herdrTarget()!.configHome, 'herdr', 'sessions'),
-      env.HOME && join(env.HOME, '.docker', 'run'), env.HOME && join(env.HOME, '.docker', 'desktop'), env.HOME && join(env.HOME, '.local', 'share', 'docker')].filter((path): path is string => !!path)];
+      herdrTarget()?.configHome && join(herdrTarget()!.configHome, 'herdr', 'sessions')].filter((path): path is string => !!path)];
   return { directories, busSockets: [...runtimeDirectories.map(directory => join(directory, 'bus')),
     ...[env.DOCKER_HOST, env.CONTAINER_HOST, env.BUILDKIT_HOST].flatMap(value => value?.startsWith('unix://') ? [value.slice(7)] : []),
     ...[env.SSH_AUTH_SOCK, env.HERDR_SOCKET_PATH].filter((path): path is string => !!path)], secretsBus: secretsBusPath(uid, env) };
@@ -229,14 +230,20 @@ export function assertIsolatableHostControlEndpoints(environment: NodeJS.Process
 /** Read-only host with private devices, processes, scratch and host runtime sockets hidden.
  * Scratch is allocated under the session, and mounted at short paths so Git/test Unix sockets fit.
  */
-export function hostFilesystemWords(scratch: string, environment: NodeJS.ProcessEnv = process.env): string[] {
+export function hostFilesystemWords(scratch: string, environment: NodeJS.ProcessEnv = process.env, writable: readonly string[] = []): string[] {
   assertIsolatableHostControlEndpoints(environment);
+  // Preserve runtime login variables only when their destination is explicitly writable.
+  // The inherited operator HOME otherwise becomes a private scratch home.
+  const variable = (name: string, fallback: string) => {
+    const value = environment[name];
+    return ['--setenv', name, value && isAbsolute(value) && writable.some(path => value === path || withinCheckout(value, path)) ? value : fallback];
+  };
   return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
     '--tmpfs', '/run', '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
-    '--setenv', 'TMPDIR', '/tmp', '--setenv', 'TMP', '/tmp', '--setenv', 'TEMP', '/tmp',
-    '--dir', '/tmp/home', '--setenv', 'HOME', '/tmp/home',
-    '--dir', '/tmp/runtime', '--setenv', 'XDG_RUNTIME_DIR', '/tmp/runtime',
-    '--setenv', 'XDG_CACHE_HOME', '/tmp/cache', '--setenv', 'npm_config_cache', '/tmp/npm-cache'];
+    ...variable('TMPDIR', '/tmp'), ...variable('TMP', '/tmp'), ...variable('TEMP', '/tmp'),
+    '--dir', '/tmp/home', ...variable('HOME', '/tmp/home'),
+    '--dir', '/tmp/runtime', ...variable('XDG_RUNTIME_DIR', '/tmp/runtime'),
+    ...variable('XDG_CACHE_HOME', '/tmp/cache'), ...variable('npm_config_cache', '/tmp/npm-cache')];
 }
 
 /**
@@ -301,7 +308,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
   // Apply external state grants before protecting the coordinator, so an ancestor grant cannot unprotect it.
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
-  return [bwrap, ...hostFilesystemWords(scratch, environment), ...masks,
+  return [bwrap, ...hostFilesystemWords(scratch, environment, [...writable, ...kept.filter(isDirectoryPath)]), ...masks,
     ...writable.filter(path => !withinCheckout(path, root)).flatMap(path => ['--bind', path, path]),
     '--ro-bind', root, root,
     ...commonGitDir.flatMap(path => ['--bind', path, path]),

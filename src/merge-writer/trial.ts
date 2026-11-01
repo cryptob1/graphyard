@@ -767,6 +767,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
+  let env: Record<string, string>, wrapper: string[];
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
@@ -780,6 +781,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
     const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
+    const home = join(checkout.directory, 'home');
+    await mkdir(home);
+    const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
+    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
+    wrapper = trialConfinement(input.hidden ?? [], [checkout.directory, place, temporary], undefined, [input.root], { ...process.env, ...input.environment });
   }
   catch (error) {
     for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
@@ -787,11 +793,6 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (typeof error === 'object' && error) attemptContext.set(error, { phase, phases: enter() });
     throw error;
   }
-  const home = join(checkout.directory, 'home');
-  await mkdir(home);
-  const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
-  const env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
-  const wrapper = trialConfinement(input.hidden ?? [], [checkout.directory, place, temporary], undefined, [input.root], { ...process.env, ...input.environment });
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
   const e2e: TrialE2eCase[] = [];

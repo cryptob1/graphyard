@@ -1,13 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { coordinatorConfinement, readOnlyMountWrapper } from '../src/master/confinement.js';
 import { headlessConfinementWrapper, masterSessionConfinement, prepareConfinedGitPaths, startAgentSession } from '../src/master/launch.js';
 import { runTrialAttempt, trialConfinement } from '../src/merge-writer/trial.js';
 import { herdrSocketPath, herdrTarget, targetHerdr } from '../src/master/herdr.js';
+import { piRunner } from '../src/runner/pi.js';
+import { runConfinement } from '../src/runner/roles.js';
+import { graphyardTools } from '../src/runner/payloads.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const git = (cwd: string, ...args: string[]) => execFileSync('git', ['-C', cwd, ...args], { encoding: 'utf8' }).trim();
@@ -224,6 +227,15 @@ test('integration:worker-control-socket-isolation — declared TCP host executor
       }
       assert.throws(() => trialConfinement([f.config], [f.worktree], undefined, [], { [variable]: endpoint }),
         /host command endpoint that filesystem mounts cannot isolate/);
+      for (const extra of [{ environment: { [variable]: endpoint } }, { env: { [variable]: endpoint } }]) {
+        const result = await piRunner({ command: process.execPath, ...('environment' in extra ? extra : {}),
+          confine: runConfinement({ coordinatorRoot: f.root }),
+          spawn: (() => { launched++; throw new Error('must refuse before spawn'); }) as typeof import('node:child_process').spawn,
+        }).start('Run', { cwd: f.worktree, runs: join(f.worktree, 'runs'), tool: graphyardTools.evidence,
+          validate: value => value, timeoutMs: 1000, ...('env' in extra ? extra : {}) }).result();
+        assert.equal(result.ok, false);
+        assert.match(JSON.stringify(result), /host command endpoint that filesystem mounts cannot isolate/);
+      }
       for (const remote of [endpoint, 'ssh://host', 'https://host']) {
         await assert.rejects(startAgentSession('fixture-worker', 'registered', 'w1:p1', ['{request}'], 'Run',
           () => { launched++; return '{}'; }, { directory: f.worktree, coordinatorRoot: f.root,
@@ -237,16 +249,21 @@ test('integration:worker-control-socket-isolation — declared TCP host executor
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
 });
 
-test('integration:worker-home-deletion-regression — a registered master runtime can update its custom account home while sibling accounts stay read-only', async () => {
+for (const homeVariable of ['CUSTOM_AGENT_HOME', 'HOME', 'XDG_CACHE_HOME']) test(`integration:worker-home-deletion-regression — a registered master runtime preserves assigned ${homeVariable} while sibling accounts stay read-only`, async () => {
   const f = await fixture();
   const sibling = join(f.config, 'sibling');
   mkdirSync(sibling); writeFileSync(join(sibling, 'login'), 'other-login');
-  const environment = { CUSTOM_AGENT_HOME: f.runtime };
+  const environment = { [homeVariable]: f.runtime };
   const code = `const fs = require('node:fs'), assert = require('node:assert/strict');
-    assert.equal(fs.readFileSync(process.env.CUSTOM_AGENT_HOME + '/login', 'utf8'), 'own-login');
-    fs.writeFileSync(process.env.CUSTOM_AGENT_HOME + '/state', 'updated');
-    assert.throws(() => fs.writeFileSync(${JSON.stringify(join(sibling, 'login'))}, 'bad'), { code: 'EROFS' });
-    assert.throws(() => fs.writeFileSync(${JSON.stringify(join(f.config, 'outside'))}, 'bad'), { code: 'EROFS' });`;
+    assert.equal(fs.readFileSync(process.env[${JSON.stringify(homeVariable)}] + '/login', 'utf8'), 'own-login');
+    fs.writeFileSync(process.env[${JSON.stringify(homeVariable)}] + '/state', 'updated');
+    assert.throws(() => fs.writeFileSync(${JSON.stringify(join(sibling, 'login'))}, 'bad'), error => ['EROFS', 'ENOENT'].includes(error.code));
+    assert.throws(() => fs.writeFileSync(${JSON.stringify(join(f.home, 'sentinel'))}, 'bad'), error => ['EROFS', 'ENOENT'].includes(error.code));`;
+  const worker = await coordinatorConfinement({ kind: 'registered', args: [], coordinatorRoot: f.root,
+    sessionDirectory: f.worktree, credentialMask: f.mask, environment });
+  assert.ok(worker);
+  for (const wrapper of [worker.wrapper, headlessConfinementWrapper(f.root, f.worktree, undefined, f.mask, environment)])
+    run(wrapper, f.worktree, process.execPath, ['-e', code], environment);
   let launched = 0;
   const result = await startAgentSession('fixture-master', process.execPath, 'w1:p1', ['-e', code, '{request}'], 'Run master',
     (_program, args) => {
@@ -256,10 +273,81 @@ test('integration:worker-home-deletion-regression — a registered master runtim
       }
       return JSON.stringify({ result: { agent: { agent: process.execPath, agent_status: 'working' } } });
     }, { directory: f.root, coordinatorRoot: f.root, confinement: 'master', environment,
-      contract: { args: ['--auto', '{request}'], homeVariable: 'CUSTOM_AGENT_HOME' },
+      contract: { args: ['--auto', '{request}'], homeVariable },
       keyringWarning: async () => null, log: () => {} });
   assert.equal(result.started.state, 'started');
   assert.equal(launched, 1);
   assert.equal(readFileSync(join(f.runtime, 'state'), 'utf8'), 'updated');
   assert.equal(readFileSync(join(sibling, 'login'), 'utf8'), 'other-login');
+});
+
+
+test('integration:worker-control-socket-isolation — headless effective environments mask launch-local Unix executors', async () => {
+  const f = await fixture();
+  const socket = join(await temporaryDirectory('headless-socket', process.cwd()), 'executor.sock');
+  let reached = 0;
+  const server = createServer(connection => { reached++; connection.end(); });
+  await new Promise<void>(resolve => server.listen(socket, resolve));
+  try {
+    for (const variable of ['DOCKER_HOST', 'CONTAINER_HOST', 'BUILDKIT_HOST']) {
+      const marker = join(f.worktree, variable);
+      const code = `const net = require('node:net'), fs = require('node:fs');
+        const socket = net.connect(process.env.${variable}.slice(7));
+        socket.on('connect', () => { socket.destroy(); process.exitCode = 1; });
+        socket.on('error', () => fs.writeFileSync(${JSON.stringify(marker)}, 'denied'));`;
+      const result = await piRunner({ command: process.execPath, commandArgs: ['-e', code, '--'],
+        environment: { [variable]: `unix://${socket}` },
+        confine: runConfinement({ coordinatorRoot: f.root }), containment: 'setsid', pollMs: 10, exitGraceMs: 10,
+      }).start('Run', { cwd: f.worktree, runs: join(f.worktree, 'runs'), tool: graphyardTools.evidence,
+        validate: value => value, timeoutMs: 10_000 }).result();
+      assert.equal(readFileSync(marker, 'utf8'), 'denied', JSON.stringify(result));
+    }
+    assert.equal(reached, 0);
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('integration:worker-control-socket-isolation — trial launch refusal cleans every allocation on repeated attempts', async () => {
+  const f = await fixture();
+  const base = await temporaryDirectory('trial-refusal-sessions', process.cwd());
+  const temporary = await temporaryDirectory('trial-refusal-temp', process.cwd());
+  const places = await temporaryDirectory('trial-refusal-checkouts', process.cwd());
+  const before = git(f.root, 'worktree', 'list', '--porcelain');
+  for (let attempt = 0; attempt < 2; attempt++) {
+    await assert.rejects(runTrialAttempt({ root: f.root, base, mergeSha: git(f.root, 'rev-parse', 'HEAD'),
+      changedFiles: [], timeoutMs: 1000, temporaryRoots: [temporary], checkoutRoots: [places],
+      minFreeBytes: 0, environment: { DOCKER_HOST: 'tcp://127.0.0.1:2375' },
+    }), /host command endpoint that filesystem mounts cannot isolate/);
+    assert.deepEqual(readdirSync(temporary), []);
+    assert.deepEqual(readdirSync(places), []);
+    assert.equal(git(f.root, 'worktree', 'list', '--porcelain'), before);
+    assert.equal(existsSync(base), false, 'the empty managed session root is removed');
+  }
+});
+
+
+test('integration:worker-control-socket-isolation — assigning runtime HOME still masks the operator home launch sockets', async () => {
+  const f = await fixture();
+  const directory = join(f.home, '.docker', 'run');
+  mkdirSync(directory, { recursive: true });
+  const socket = join(directory, 'docker.sock');
+  let reached = 0;
+  const server = createServer(connection => { reached++; connection.end(); });
+  await new Promise<void>(resolve => server.listen(socket, resolve));
+  const previous = process.env.HOME;
+  try {
+    process.env.HOME = f.home;
+    const environment = { HOME: f.runtime };
+    const wrapper = headlessConfinementWrapper(f.root, f.worktree, undefined, f.mask, environment);
+    run(wrapper, f.worktree, process.execPath, ['-e', `
+      const net = require('node:net'), assert = require('node:assert/strict');
+      assert.equal(process.env.HOME, ${JSON.stringify(f.runtime)});
+      const socket = net.connect(${JSON.stringify(socket)});
+      socket.on('connect', () => { socket.destroy(); process.exitCode = 1; });
+      socket.on('error', () => {});
+    `], environment);
+    assert.equal(reached, 0);
+  } finally {
+    if (previous === undefined) delete process.env.HOME; else process.env.HOME = previous;
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
 });
