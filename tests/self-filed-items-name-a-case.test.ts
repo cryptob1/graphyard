@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { freePort } from '../src/cli/test-isolation.js';
-import { applyDelivery } from '../src/repository-setup.js';
+import { applyDelivery, onboardingServe } from '../src/repository-setup.js';
 import * as onboarding from '../src/onboarding.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -70,6 +70,12 @@ test('unit:self-filed-items-name-a-case — onboarding writes a serve declaratio
     assert.equal(applied.wroteServe, true);
     assert.equal(await onboarding.onboardingFirstCase(root), 'served-head');
     const config = JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8'));
+    assert.deepEqual(config.e2e.serve, onboardingServe, 'onboarding wrote its fallback server');
+    // Concurrent suite/proof runs must serve their own fixture, rather than share the default port.
+    const port = await freePort();
+    config.e2e.serve.command = config.e2e.serve.command.replace('43911', String(port));
+    config.e2e.serve.url = `http://127.0.0.1:${port}/`;
+    await writeFile(join(root, 'graphyard.json'), JSON.stringify(config));
     setRepositoryPolicy({ ...defaultRepositoryPolicy, ...config });
     const request = onboardingWorkRequest(sha('d'), ['test'], 'served-head');
     assert.equal(filingRefusal(request), null);
