@@ -853,7 +853,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // A child a signal ended, or one the host could not start or capture, says nothing about the merge.
   const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
   // Mise shims and a missing node/npm cannot start the host toolchain; no install/build verdict exists.
-  const toolchainStartFailed = (ended: Ended) => !ended.ok && /^(?:mise ERROR\b|.*(?:env:|sh:).*\b(?:node|npm|npx)\b.*(?:not found|No such file or directory))/m.test(ended.out.replace(ansiEscape, ''));
+  const toolchainStartFailed = (ended: Ended) => !ended.ok && /^(?:mise ERROR\b|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(ended.out.replace(ansiEscape, ''));
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {

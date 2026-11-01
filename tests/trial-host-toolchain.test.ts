@@ -74,6 +74,7 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
     'mise ERROR No version is set for tool node',
     '/usr/bin/env: ‘node’: No such file or directory',
     '/bin/sh: 1: npm: not found',
+    '/bin/bash: line 1: npx: command not found',
   ]) {
     const events: MergeRecordEvent[] = [];
     const invocations: string[][] = [];
@@ -124,8 +125,23 @@ test('unit:trial-build-failure-names-cause — a real build failure refuses with
   const refusal = events.at(-1);
   assert.equal(refusal?.kind === 'refused' && refusal.reason, reason);
   // A missing build dependency is still the merge's failure, unlike missing npm/node.
-  const missing = await fixture("console.error('sh: 1: tsc: not found'); process.exit(1)");
-  assert.equal((await runTrial(missing)).build, 'fail');
+  for (const executable of ['tsc', 'node-gyp', 'npm-run-all', 'node-sass']) {
+    const diagnostic = `sh: 1: ${executable}: not found`;
+    const missing = await fixture(`console.error(${JSON.stringify(diagnostic)}); process.exit(1)`);
+    const missingResult = await runTrial(missing);
+    assert.equal(missingResult.build, 'fail', diagnostic);
+    const missingEvents: MergeRecordEvent[] = [];
+    const missingRefusal = await mergeOne({
+      baseBranch: 'main', retrials: 0, now: Date.now, fetch: async () => missing.mergeSha,
+      merge: async () => ({ mergeSha: missing.mergeSha, files: missing.changedFiles }),
+      trial: async () => ({ ...missingResult, files: [], proofs: {} }),
+      holds: async () => false, push: async () => { throw Error('must not push'); },
+      record: async (_work, event) => { missingEvents.push(event); },
+    }, { ...work, candidate: { ...work.candidate!, sha: missing.mergeSha } });
+    assert.equal(missingRefusal.outcome, 'refused', diagnostic);
+    const event = missingEvents.at(-1);
+    assert.ok(event?.kind === 'refused' && event.reason.includes(diagnostic), diagnostic);
+  }
 });
 
 test('unit:trial-build-failure-names-cause — a genuine npm ci failure remains a merge failure', async () => {
