@@ -82,7 +82,13 @@ test('unit:production-watch-build-serving — the watch observes the serving com
       // An old installation may retain the ledger value the deleted route once wrote.
       // Status must work both without that record and with a conflicting historical value.
       await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'production.environment', JSON.stringify({ environment: 'legacy-production' })]);
+      await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['graphyard', 'release.candidate.promotion', JSON.stringify({
+        candidate: 'legacy-candidate', promotion: { environment: 'production', releaseId: 'legacy-release', sourceSha: sha(2), artifact: 'sha256:legacy', at: new Date(T0).toISOString(), by: 'graphyard' },
+      })]);
       await readStatus();
+      const delivery = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/delivery`, { headers: { Authorization: `Bearer ${credential.token}` } });
+      assert.equal(delivery.status, 200);
+      assert.deepEqual((await delivery.json()).environments, [], 'historical candidate promotions do not manufacture delivery environments or expected releases');
     } finally {
       await new Promise<void>(resolve => http.close(() => resolve()));
       await store.close(); await database.stop();

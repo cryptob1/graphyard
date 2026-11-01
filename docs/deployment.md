@@ -34,7 +34,7 @@ A repository whose main declares `.graphyard/serve.json` gets its merged main bu
 
 ### Deployment incident
 
-The retired `POST /api/production-environment` route returns 404. Configure the production environment through `GRAPHYARD_PRODUCTION_ENVIRONMENT`; historical `production.environment` ledger entries do not select the environment reported by `/api/status` or accepted by `/api/delivery/observe-sha`. Both use the process configuration, defaulting to `production`.
+The retired `POST /api/production-environment` route returns 404. Configure the production environment through `GRAPHYARD_PRODUCTION_ENVIRONMENT`; historical `production.environment` ledger entries do not select the environment reported by `/api/status` or accepted by `/api/delivery/observe-sha`. Both use the process configuration, defaulting to `production`. Historical candidate promotions no longer supply expected releases in `/api/delivery`; that view uses persisted release-backed selections.
 
 `/healthz` `commit` behind tip: `install --logs` shows failures; redeploy ([manual fallback](#manual-fallback)). The production watch observes serving from its provider's deployment list (Railway's API, `RAILWAY_API_TOKEN` or `RAILWAY_TOKEN`) or the build identity; containment is equality alone, so a merge is deployed only when production serves its exact commit. What production serves is read from the deploy record and the watch only — `/api/status` names the production environment from `GRAPHYARD_PRODUCTION_ENVIRONMENT`, else `production`, and reads no ledger value. `/api/github/*` is not served.
 
