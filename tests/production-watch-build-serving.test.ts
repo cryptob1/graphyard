@@ -85,7 +85,8 @@ test('unit:production-watch-build-serving — the watch observes the serving com
     const database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('production-watch-serving'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
     await database.initialise(); await database.start(); await database.createDatabase('production_watch_serving_test');
     const store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/production_watch_serving_test`); await store.init();
-    const { watch } = watchOf({ built: 1, deployments: [deployment('d-live', 'success', sha(4))] });
+    const deployments = [deployment('d-live', 'success', sha(4))];
+    const { watch } = watchOf({ built: 1, deployments });
     await watch.tick(true);
     const admin: Principal = { id: 'serving-admin', role: 'admin', sessionKind: 'human' };
     const credential = { ...admin, token: `serving-admin-${'s'.repeat(32)}` };
@@ -94,12 +95,12 @@ test('unit:production-watch-build-serving — the watch observes the serving com
     await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
     try {
       assert.equal((await store.pool.query("SELECT count(*)::int AS count FROM events WHERE kind='production.environment'")).rows[0].count, 0);
-      const readStatus = async () => {
+      const readStatus = async (serving = sha(4), source = 'provider') => {
         const response = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/status`, { headers: { Authorization: `Bearer ${credential.token}` } });
         assert.equal(response.status, 200);
         const status = await response.json() as { production: { serving: string | null; servingSource: string | null; observedAt: string | null }; productionEnvironment: string };
-        assert.equal(status.production.serving, sha(4), 'the provider record of what production serves is observed in status');
-        assert.equal(status.production.servingSource, 'provider');
+        assert.equal(status.production.serving, serving, 'the watch records what production serves in status');
+        assert.equal(status.production.servingSource, source);
         assert.ok(status.production.observedAt, 'the watch reports when it last looked');
         assert.equal(status.productionEnvironment, 'production', 'status names the process configuration, not the ledger value');
         assert.notEqual(status.productionEnvironment, 'legacy-production');
@@ -121,6 +122,10 @@ test('unit:production-watch-build-serving — the watch observes the serving com
       const delivery = await fetch(`http://127.0.0.1:${(http.address() as { port: number }).port}/api/delivery`, { headers: { Authorization: `Bearer ${credential.token}` } });
       assert.equal(delivery.status, 200);
       assert.deepEqual((await delivery.json()).environments, [], 'historical candidate promotions do not manufacture delivery environments or expected releases');
+      // Losing the provider record falls back to the running build, even with conflicting history.
+      deployments.length = 0;
+      await watch.tick(true);
+      await readStatus(sha(1), 'build');
     } finally {
       await new Promise<void>(resolve => http.close(() => resolve()));
       await store.close(); await database.stop();
