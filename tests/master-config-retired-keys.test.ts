@@ -1,6 +1,10 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { masterConfigSchema } from '../src/master.js';
+import { execFileSync } from 'node:child_process';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
+import { join, resolve } from 'node:path';
+import { loadMasterConfig, masterConfigSchema } from '../src/master.js';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 /**
  * GY-1264: `mergeQueue.optimistic` and `optimisticExclude` are retired (GY-1233), and GY-1236
@@ -27,10 +31,27 @@ test('unit:retired-merge-queue-keys — unknown merge-queue keys are kept and wr
 });
 
 // A pre-control-plane master.json keeps loading while new installations omit the App ID.
-test('unit:master-config-retired-keys — old App and merge settings load and githubAppId is optional', () => {
+test('unit:master-config-retired-keys — old App and merge settings load and githubAppId is optional', async () => {
   const old = masterConfigSchema.parse({ ...base, mergeMethod: 'squash' });
   assert.equal(old.githubAppId, 1234);
   assert.equal(old.mergeMethod, 'squash');
   const { githubAppId, ...withoutApp } = base;
   assert.equal(masterConfigSchema.parse(withoutApp).githubAppId, undefined);
+  const directory = await temporaryDirectory('retired-master-config');
+  const root = join(directory, 'repo');
+  try {
+    await mkdir(join(root, '.graphyard'), { recursive: true });
+    execFileSync('git', ['init', '--quiet', root]);
+    const credentialFile = join(directory, 'master.token');
+    await writeFile(credentialFile, 'fixture-master-token-with-no-app-credentials', { mode: 0o600 });
+    const file = join(root, '.graphyard/master.json');
+    const config = { ...base, credentialFile, cliPath: resolve('bin/graphyard.mjs'), mergeMethod: 'squash' };
+    await writeFile(file, JSON.stringify(config), { mode: 0o600 });
+    const loaded = await loadMasterConfig(root);
+    assert.equal(loaded.githubAppId, 1234);
+    assert.equal(loaded.mergeMethod, 'squash');
+    const { githubAppId: _retired, ...current } = config;
+    await writeFile(file, JSON.stringify(current));
+    assert.equal((await loadMasterConfig(root)).githubAppId, undefined);
+  } finally { await rm(directory, { recursive: true, force: true }); }
 });

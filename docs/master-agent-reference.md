@@ -11,6 +11,8 @@ Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choi
 
 Reviewers launch with `master reviewer add FILE` profiles and post verdicts through the control plane with a token bound to that launch and candidate. No reviewer GitHub App, installation binding or App credential is needed; `master reviewer setup` and `bind` are removed. Older master configs with `githubAppId` and `mergeMethod` still load.
 
+Before submission, run `graphyard verify GY-N` in the assigned worktree for local criterion checks. After `complete`, the control plane requests independent review and the merge writer runs the required unit and served-head E2E proofs for the submitted head. Workers do not submit trusted evidence; results from an earlier head cannot satisfy the new head's merge gates.
+
 ## Typed actions
 
 `nextAction`: `dispatch`/`request-review`/`request-rework`/`resync`/`reclaim`/`merge`; a gate refusal is its reason string.
