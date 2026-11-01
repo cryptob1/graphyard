@@ -763,7 +763,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
   // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
-  let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
+  let home: string | null = null, temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
@@ -775,20 +775,20 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const root = trialTemporaryRoot(checkout.directory, roots);
     if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
+    // HOME stays beside the short tempdir: nested tests derive socket paths from it.
+    home = await mkdtemp(join(root, 'gy-h')); await writeTempOwner(home);
     const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
   }
   catch (error) {
-    for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
+    for (const made of [temporary, home, place]) if (made) await clear(made).catch(() => {});
     await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {});
     if (typeof error === 'object' && error) attemptContext.set(error, { phase, phases: enter() });
     throw error;
   }
-  const home = join(checkout.directory, 'home');
-  await mkdir(home);
   const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
-  const env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
-  const wrapper = input.hidden?.length ? trialConfinement(input.hidden, [input.root, checkout.directory, place, temporary]) : undefined;
+  const env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home!, input.environment) };
+  const wrapper = input.hidden?.length ? trialConfinement(input.hidden, [input.root, checkout.directory, place, temporary, home]) : undefined;
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
   const e2e: TrialE2eCase[] = [];
@@ -1061,7 +1061,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // The temporary directory goes with it: a failure to remove any is the cleanup's, naming the directory, and none stops the others.
   // The short checkout's files go first, so the session's removal prunes its registration in the repository.
   const failures: { directory: string; cause: unknown }[] = [];
-  for (const directory of [temporary, ...(place ? [place] : [])]) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
+  for (const directory of [temporary, home!, ...(place ? [place] : [])]) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
   await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(cause => { failures.push({ directory: checkout.directory, cause }); });
   const failure = failures[0];
   if (failure) {
