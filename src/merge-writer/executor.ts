@@ -191,7 +191,7 @@ export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<Mer
 export const keyReusedRefusal = (error: unknown) => /Idempotency key reused with different input/.test(error instanceof Error ? error.message : String(error));
 
 /** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3). */
-export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> & Pick<MergeTrialRun, 'notReproduced'> | null }): string | null {
+export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> & Partial<Pick<TrialRun, 'logTail'>> & Pick<MergeTrialRun, 'notReproduced'> | null }): string | null {
   if (trial.conflict?.length) return `${trialFailurePrefix}: the merge conflicts in ${trial.conflict.slice(0, 20).join(', ')}`;
   const run = trial.run;
   if (!run) return `${trialFailurePrefix}: the trial reached no verdict`;
@@ -200,7 +200,11 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
   if (missing) return `${trialFailurePrefix}: ${missing.proof} has no case at e2e/cases/${missing.case}.json`;
   const failedCase = run.e2e?.find(entry => entry.failingStep);
   if (failedCase) return `${trialFailurePrefix}: e2e case ${failedCase.case}: ${failedCase.failingStep}`;
-  if (run.build === 'fail') return `${trialFailurePrefix}: build step npm run build`;
+  if (run.build === 'fail') {
+    const reason = `${trialFailurePrefix}: build step npm run build`;
+    const tail = run.logTail?.trim();
+    return tail ? `${reason}\n${tail.slice(-(2000 - reason.length - 1))}` : reason;
+  }
   if (run.tests.failed.length) {
     // GY-2960: a repository check names its failing files; timed-out-only failures say so, else the first case rides after the files.
     const files = run.tests.failed.slice(0, 20).join(', ');

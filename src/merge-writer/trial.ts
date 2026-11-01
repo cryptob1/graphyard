@@ -134,10 +134,19 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
  * GY-2997: the trial child's home — a fresh, empty directory of the trial as HOME and every XDG base
  * directory (as `previewEnvironment` gives a preview), so nothing the merge brings in finds a
  * coordinator credential through HOME or XDG. Only the host's npm cache and Playwright browsers are
- * still found where the host keeps them.
+ * still found where the host keeps them, along with mise's toolchain directories.
  */
 export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const shared: Record<string, string> = host.HOME ? { npm_config_cache: host.npm_config_cache ?? join(host.HOME, '.npm'), PLAYWRIGHT_BROWSERS_PATH: host.PLAYWRIGHT_BROWSERS_PATH ?? join(host.HOME, '.cache', 'ms-playwright') } : {};
+  for (const [kind, base, fallback] of [
+    ['CONFIG', 'XDG_CONFIG_HOME', '.config'], ['CACHE', 'XDG_CACHE_HOME', '.cache'],
+    ['DATA', 'XDG_DATA_HOME', '.local/share'], ['STATE', 'XDG_STATE_HOME', '.local/state'],
+  ] as const) {
+    const name = `MISE_${kind}_DIR`;
+    const directory = host[base] ?? (host.HOME ? join(host.HOME, fallback) : undefined);
+    if (host[name] !== undefined) shared[name] = host[name];
+    else if (directory) shared[name] = join(directory, 'mise');
+  }
   return { ...shared, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
@@ -919,7 +928,9 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           enter('build');
           enterStep('build');
           const built = await child('build', 'npm', ['run', 'build']);
-          if (hostEnded(built)) throw runnerFailure('build', built);
+          // Mise shims and a missing node/npm cannot start the host toolchain; no build verdict exists.
+          const startFailure = /^(?:mise ERROR\b|.*(?:env:|sh:).*\b(?:node|npm|npx)\b.*(?:not found|No such file or directory))/m.test(built.out.replace(ansiEscape, ''));
+          if (hostEnded(built) || !built.ok && startFailure) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
         // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
