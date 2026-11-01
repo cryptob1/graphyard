@@ -206,7 +206,8 @@ test('unit:start-failure-fallback-visible — a worker role the agent registry d
     // The registry's worker role prefers opencode-a, then claude-b, and ignores the profile's own
     // `accounts`, which this profile does not list at all (docs/onboarding.md: `master registry role set worker …`).
     const host = master.hostId ?? 'unknown-host', context = { actor: 'operator', at };
-    let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['opencode', 'claude'].includes(runtime.name)),
+    let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', { runtimes: proposedRuntimes.filter(runtime => ['opencode', 'claude'].includes(runtime.name))
+      .map(runtime => runtime.name === 'claude' ? { ...runtime, launch: { ...runtime.launch, args: [...runtime.launch.args, '--setting-sources', 'user'] } } : runtime),
       models: [{ name: 'glm', id: 'zai-coding-plan/glm-5' }, { name: 'opus', id: 'claude-opus-5' }],
       accounts: [{ name: 'opencode-a', runtime: 'opencode', model: 'glm', credential: { host, home: null } }, { name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host, home: null } }],
       roles: [{ name: 'worker', accounts: ['opencode-a', 'claude-b'], concurrency: 4 }], reason: 'fixture' }, context).registry;

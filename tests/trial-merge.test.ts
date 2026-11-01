@@ -281,15 +281,13 @@ test('unit:trial-base-run-registry-files-pass — with a stray .git in each shar
   mkdirSync(durable, { recursive: true });
   assert.equal(trialTemporaryRoot('/session', [sharedTmp, sharedVar, durable]), durable, 'a poisoned shared pair falls through to the durable root');
   assert.equal(trialTemporaryRoot(durable, [sharedTmp, sharedVar, durable]), durable, 'never the session directory while the durable root is clean');
-  // And the confinement files' fixture shape binds under it: the secrets-bus socket of tests/keyring-probe-backoff.test.ts
-  // stays inside sun_path, which the base's session-directory tmpdir refused with `listen EINVAL: invalid argument`.
-  const endpoint = join(durable, 'graphyard-keyring-probe-backoff-abcdefghij', 'graphyard-secrets-bus');
+  // The socket fixture uses the runner's chosen TMPDIR, as keyring-probe-backoff.test.ts does,
+  // even when this test's HOME is the outer trial's isolated home.
+  const endpoint = join(await temporaryDirectory('keyring-probe-backoff'), 'graphyard-secrets-bus');
   assert.ok(endpoint.length <= 107, `the socket path stays inside the kernel's 108-byte sun_path (${endpoint.length} bytes)`);
-  mkdirSync(dirname(endpoint), { recursive: true });
   const server = createServer();
   await new Promise<void>(done => server.listen(endpoint, done));
-  server.close();
-  rmSync(dirname(endpoint), { recursive: true, force: true });
+  await new Promise<void>((done, reject) => server.close(error => error ? reject(error) : done()));
 });
 
 test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short temporary directory made for the trial in the first of /tmp and the coordinator\'s tmpdir that no stray node_modules, .git or package.json sits in or above, the filesystem root included, else the suite\'s short durable root (GY-2954), else its session directory, never the host\'s TMPDIR, so a fixture\'s upward lookup cannot resolve one; a root that gains one during the trial makes it no verdict; its checkout goes beside it only on durable storage with room; the directories are removed with the checkout, pass or fail, a removal that fails names its directory and drops its owner marker (GY-1565)', async () => {
@@ -578,10 +576,10 @@ test('unit:trial-checkout-outside-temp — with /tmp a tmpfs and the process tmp
   const [trials] = trialCheckoutRoots(home);
   assert.equal(trials, join(home, '.gy', 'trials'));
   assert.equal(existsSync(trials!), false);
-  const chosen = await trialCheckoutRoot([...trialTemporaryRoots('/var/tmp', '/home/me'), trials!], 2e9, memoryTmp, excluded);
+  const chosen = await trialCheckoutRoot([...trialTemporaryRoots('/var/tmp', '/home/me'), trials!], 2e9, memoryTmp, [...excluded, tmpdir()]);
   const outside = (path: string) => [...excluded, tmpdir()].every(root => path !== root && !path.startsWith(`${root}/`));
-  // A home with a stray package.json, .git or node_modules above it falls back to the session directory instead.
-  assert.equal(chosen, lookupPoisoned(home) ? null : trials, 'the home\'s own trials folder is chosen');
+  // An isolated trial home may itself live under TMPDIR; that must not turn it into a checkout root.
+  assert.equal(chosen, lookupPoisoned(home) || !outside(trials!) ? null : trials, 'only a lookup-clean home outside temporary roots supplies the trials folder');
   if (chosen) { assert.ok(outside(chosen), `${chosen} is under no temporary root`); assert.ok(existsSync(chosen), 'it is made on demand'); }
   const onlyMemory: FilesystemProbe = async path => ({ probed: path, volatile: 'tmpfs', freeBytes: null });
   assert.equal(await trialCheckoutRoot([trials!], 2e9, onlyMemory, excluded), null, 'a memory-backed home: the managed session directory');

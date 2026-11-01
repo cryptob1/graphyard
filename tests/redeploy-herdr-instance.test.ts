@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import os from 'node:os';
+import { syncBuiltinESMExports } from 'node:module';
 import { upgradePlan } from '../src/cli/upgrade.js';
 import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall, redeployArguments } from '../src/install/index.js';
 import { installDirectory, readInstallRecord, type InstallRecord } from '../src/install/secrets.js';
@@ -24,7 +26,12 @@ test('unit:redeploy-carries-herdr-instance — the restart step\'s redeploy pass
   assert.ok(!workerless.includes('--observe-only'));
 });
 
-test('unit:own-herdr-instance-recorded — an install applied with --herdr-instance records it, so a later redeploy from the record carries it', async () => {
+test('unit:own-herdr-instance-recorded — an install applied with --herdr-instance records it, so a later redeploy from the record carries it', async t => {
+  // The transport is scripted; its socket paths must use a fixture home too,
+  // rather than the merge trial's potentially long isolated HOME.
+  t.mock.method(os, 'homedir', () => '/fixture-home');
+  syncBuiltinESMExports();
+  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
   const fixture = await harness({ provider: 'compose', serverUrl: 'http://127.0.0.1:4310' });
   try {
     const apply = async (args: string[]) => {
