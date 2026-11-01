@@ -667,7 +667,7 @@ test('unit:superseded-intent-settles — an item resubmitted with a new head whi
   };
   /** A submission on a fresh branch, mirroring submittedItem. */
   const submitBranchHead = async (n: number, head: string) => {
-    let item = await engine.execute(admin, 'create', null, { type: 'chore', title: `Superseded fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
+    let item = await engine.execute(admin, 'create', null, { type: 'chore', title: `Superseded fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works', 'e2e:fixture'] }] }, randomUUID());
     item = await engine.execute(admin, 'ready', item.id, {}, randomUUID());
     const pulled = await engine.pullAssignment(worker, { work: item.id }, randomUUID());
     assert.ok(pulled.assigned, JSON.stringify(pulled.refused)); item = pulled.assigned!;
