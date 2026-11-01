@@ -10,7 +10,7 @@ import { serverOrigin, loadConnection, managedInstructions } from '../repository
 import { launchPlan } from '../harness.js';
 import { type LoopSupervisorHost, type LoopSupervisorInstallation, installLoopSupervisor, loopUnitOf, unsupervisedInstruction, loopSupervisionAttention } from '../supervisor.js';
 import { type FilesystemProbe, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes } from '../install/worktree-root.js';
-import { APP_PENDING, checkoutLauncherOf, type AgentEnvironment, type Supervision, type MasterBrowser, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
+import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterConfig, masterConfigSchema, type MasterRun, type ProducerProfile, producerProfileSchema, type WorkerProfile, workerProfileSchema, withRoleDefaults } from './profiles.js';
 import { withoutMasterInstructions } from './instructions.js';
 import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
@@ -168,7 +168,7 @@ async function recordAutoMerge(url: string, token: string, autoMerge: boolean, f
   return response.json() as Promise<{ autoMerge: boolean }>;
 }
 
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>; browser?: MasterBrowser;
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>;
   /** Install the loop's supervisor (GY-114). Explicit, never implied: only `master init` passes it. */
   installSupervisor?: boolean;
   /** Replace an installed unit that runs a different loop; `master init --replace-supervisor`. */
@@ -191,7 +191,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   if (!appPending && (!Number.isSafeInteger(status.githubAppId) || status.githubAppId <= 0)) throw new Error('Master setup requires the control plane to identify its GitHub App');
   assertRepository(detected.repository, status.repository);
   if (!detected.repository) throw new Error('Master setup requires a recognized GitHub origin');
-  const cliPath = checkoutLauncherOf(resolve(input.cliPath));
+  const cliPath = resolve(input.cliPath);
   try { if (!(await lstat(cliPath)).isFile()) throw new Error(); } catch { throw new Error('Master setup requires an existing Graphyard CLI launcher'); }
   let previous: MasterConfig | undefined;
   try { previous = await readMasterConfig(root); } catch (error: any) { if (error.code !== 'ENOENT' && !/ENOENT/.test(error.message)) throw error; }
@@ -217,7 +217,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   // records among them, and any field a future command adds to the schema, so rerunning setup (as
   // `up`'s master-loop step does) can no longer drop an identity another command wrote and strand
   // every goal in acceptance drafting.
-  const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath, repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run }, ...(input.browser ?? previous?.browser ? { browser: input.browser ?? previous?.browser } : {}) });
+  const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath, repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run } });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -258,28 +258,24 @@ export async function setupMaster(root: string, input: { url: string; token: str
   ).catch(error => ({ supported: false, unit: loopUnitOf(root), unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
     reason: `Installing the loop's supervisor failed: ${error instanceof Error ? error.message : String(error)}`,
     instruction: unsupervisedInstruction({ root, cliPath: config.cliPath }) })) : null;
-  // A permission the installed App lacks is announced here with its exact migration steps, not
-  // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
-  const { attention, appPermissions, delegationLimits, production } = controlPlaneAttention(status);
+  const { attention, delegationLimits, production } = controlPlaneAttention(status);
   // A loop nothing restarts is an installation fact like any other, so it is stated where the rest
   // are — in the same words `master status` will keep using — rather than left for whoever
   // eventually notices the silence. A refused install is stated with what the operator runs.
   const supervision = !supervisor ? [] : supervisor.wrote === 'refused' ? [`${supervisor.reason}: ${supervisor.instruction}`] : loopSupervisionAttention(supervisor).map(gap => `${gap.text}: ${gap.next}`);
   attention.push(...supervision, ...(unrecorded ? [unrecorded] : []));
-  // Each installation fact keeps its own remedy: a permission shortfall is a GitHub migration, a
-  // capacity variable is a deployment setting, and production lag is a deploy to confirm.
-  const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? 'Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps)'
-    : delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
+  // Capacity drift and production lag each name their own remedy.
+  const remedy = delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
     : production?.incidents.length ? `Deploy main: ${production.attention[0] ?? production.incidents[0].reason}` : null;
   const profiles = 'graphyard master environments --apply to generate worker, reviewer and producer profiles from the logged-in agent accounts';
-  const start = config.reviewer ? `run ${profiles}, then graphyard master start codex (or another supported agent kind)` : `run graphyard master reviewer setup to register the independent reviewer identity, then ${profiles}, then graphyard master start codex (or another supported agent kind)`;
+  const start = `run ${profiles}, then graphyard master start codex (or another supported agent kind)`;
   // Which agent accounts this machine has, and which are logged in; quota is read by master environments.
   const environmentDirectory = agentEnvironmentRoot();
   const environments = await Promise.all((await discoverAgentEnvironments(environmentDirectory).catch(() => [] as AgentEnvironment[])).map(async environment => {
     const health = await checkAgentEnvironment(environment, { quota: false });
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
-  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: autoMerge ? autoMerge.autoMerge !== false : true, workers: config.workers.length, run: config.run, browser: config.browser ?? null, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: autoMerge ? autoMerge.autoMerge !== false : true, workers: config.workers.length, run: config.run, config: '.graphyard/master.json', attention,
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.

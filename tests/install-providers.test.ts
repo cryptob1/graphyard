@@ -65,7 +65,7 @@ test('a changed value is reported as drift with a redacted comparison, never as 
     const core = coreEnv(session);
     const drifted = core.map(value => value.name === 'GITHUB_BASE_BRANCH' ? { ...value, value: 'trunk' }
       : value.name === 'GRAPHYARD_PRINCIPALS' ? { ...value, value: '[{"id":"stale","role":"admin","token":"stale-token-value-0123456789abcd"}]' }
-      : value).filter(value => value.name !== 'GRAPHYARD_REVIEWER_APPS');
+      : value).filter(value => value.name !== 'GITHUB_REPOSITORY');
 
     second = await harness({ provider: 'compose', installed: true, envFile: renderEnv(drifted), root: first.root, configHome: first.configHome });
     const plan = await buildPlan(await prepareInstall(second.root, inputsFor(), second.deps, 'plan'));
@@ -79,7 +79,7 @@ test('a changed value is reported as drift with a redacted comparison, never as 
     assert.match(principals.expected, /^sha:[0-9a-f]{12}$/);
     assert.match(principals.observed, /^sha:[0-9a-f]{12}$/);
     assert.notEqual(principals.expected, principals.observed);
-    assert.equal(action.drift!.find(entry => entry.field === 'GRAPHYARD_REVIEWER_APPS')!.observed, 'absent');
+    assert.equal(action.drift!.find(entry => entry.field === 'GITHUB_REPOSITORY')!.observed, 'absent');
 
     const serialized = JSON.stringify(plan);
     for (const token of session.tokens.values()) assert.ok(!serialized.includes(token));

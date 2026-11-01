@@ -4,7 +4,7 @@ import type { AddressInfo } from 'node:net';
 import { Store } from '../store.js';
 import { waitForDatabase } from '../store/pools.js';
 import { Engine } from '../engine.js';
-import { demand, parseReviewerApps } from '../model.js';
+import { demand } from '../model.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
@@ -13,7 +13,6 @@ import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, observationLine, productionProvider, startProductionWatch } from '../production-watch.js';
 import { configuredGeneratedFiles } from '../generated-files.js';
 import { generatedFilesVariable } from '../install/generated-files.js';
-import { startDirectMerge } from '../direct-merge.js';
 import { pruneReceipts, receiptPruneIntervalMs } from '../store/receipts.js';
 import { compactLedger, configuredLedgerRetentionMs, ledgerCompactionIntervalMs } from '../store/compaction.js';
 import { processControlPlaneJob } from './control-plane-observation.js';
@@ -36,7 +35,6 @@ export async function main(options: MainOptions = {}) {
   mark('store.init'); await store.init(); mark('store.init done');
   const engine = new Engine(store);
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
-  engine.reviewerApps = parseReviewerApps(process.env.GRAPHYARD_REVIEWER_APPS);
   const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
   // The configured roster is the one this installation runs with: an over-limit roster starts with a warning.
   const knownPrincipals = credentials.map(credential => credential.id);
@@ -63,7 +61,7 @@ export async function main(options: MainOptions = {}) {
   // opens first; until startup validation completes, /healthz reports `readiness: false`, every
   // mutation that could act on unvalidated state is refused with a retryable 503, and the
   // observation workers and production watch are not started. A failed attempt is logged and the
-  // reconciliation tick retries it. 
+  // reconciliation tick retries it.
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let observing: ReturnType<typeof startObservationWorkers> | null = null;
@@ -78,7 +76,6 @@ export async function main(options: MainOptions = {}) {
         if (!prepared) {
           mark('production.load'); await production.load().catch(error => { if (!closing) console.error('production incidents could not be loaded', error instanceof Error ? error.message : 'unknown'); });
           if (closing) return;
-          mark('directMerge'); await startDirectMerge(store, engine.directMergeEnvironment);
           prepared = true;
         }
         if (closing) return;

@@ -43,7 +43,6 @@ const sensitiveSamples: [string, string][] = [
   ['package.json', 'dependencies'],
   ['package-lock.json', 'dependencies'],
   ['src/merge-queue.ts', 'merge path'],
-  ['src/direct-merge.ts', 'merge path'],
   ['src/merger-mode.ts', 'merge path'],
   ['src/main-guard.ts', 'merge path'],
   ['src/regression-guard.ts', 'merge path'],

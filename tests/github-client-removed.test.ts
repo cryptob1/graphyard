@@ -149,7 +149,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, 120, repository);
-  engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine.submissionObserver = null
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = controlPlane(engine, credentials, null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -262,7 +262,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   for (const text of [...actions, summary]) assert.doesNotMatch(text, /Main guard|main guard|GitHub (request )?budget|githubBudget/, `no Main guard or GitHub budget line: ${text.slice(0, 300)}`);
   const status = await request(coordinator, 'status');
   assert.equal(status.status, 200);
-  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
+  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions', 'reviewerApps']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
   assert.equal(status.body.mergeWriter.merger, 'control-plane', 'and reports the merge writer');
   for (const path of ['src/cli/master-status.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
 });

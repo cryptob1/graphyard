@@ -1,13 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
-import { hostname, tmpdir } from 'node:os';
-import { dirname, relative, resolve } from 'node:path';
+import { hostname } from 'node:os';
+import { dirname, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { fileURLToPath } from 'node:url';
 import { setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
-import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { sshOrigin } from './merger-mode.js';
 import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
@@ -15,92 +14,61 @@ import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type O
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './evidence-replay.js';
 import { recordSupervision } from './master/config.js';
-import { unitCheckout, userUnitDirectory } from './install/units.js';
 import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { settleWorkerCredentials } from './install/worker-credentials.js';
 import { ensureDeployKey } from './install/deploy-key.js';
-import type { MergerMode } from './merger-mode.js';
 import type { GitHubCli } from './install/github.js';
-import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, liftLoopPins, type LoopCodeReading } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, liftLoopPins, removeHeldCliPin, type LoopCodeReading } from './repository-setup.js';
 import { loopCodeRoot } from './daemon/checkout-state.js';
 import { recordHerdrInstance } from './master/config.js';
 
-/** GY-2010: App-import routes are gone; quote the control-plane up path instead. */
-function appImportRoute(repository: string, upFlags = '', _org = false, _ownerType?: string) {
-  return `graphyard up --repo ${repository}${upFlags} (GitHub App registration is removed; the merge writer uses the deploy key)`;
-}
-async function githubOwnerType(_owner: string): Promise<'User' | 'Organization' | null> { return 'User'; }
-
 /**
  * `graphyard up` (GY-1419): every machine step of a first installation, in order — preflight,
- * control plane, host supervisor and Herdr, the master's agent identities (GY-1479), onboarding, agent accounts, harness, master loop — and
- * a wait on the first-run checklist (src/model/setup-checklist.ts) wherever a person must act.
+ * control plane, host supervisor and Herdr, the merge writer's deploy key, the master's agent
+ * identities (GY-1479), onboarding, agent accounts, harness, master loop — and a wait on the
+ * first-run checklist (src/model/setup-checklist.ts) wherever a person must act.
  * Each step is an existing idempotent command run as a child of this CLI, and each completed step
  * is recorded in .graphyard/up.json, so a rerun after any interruption skips what is done and never
- * registers an identity, App or variable twice. Every run sets Herdr up (GY-1511): it installs herdr
+ * registers an identity or variable twice. Every run sets Herdr up (GY-1511): it installs herdr
  * when missing and keeps its server running as a user unit. It never repoints a Herdr plugin bound
  * to another server: the install gets its own Herdr instance instead (--herdr-instance).
  *
  * Interactive, a human step prints the dashboard's Setup page address once and waits for the step
  * to turn green. That address is a one-time sign-in link minted with the operator's own credential
  * (a host install's, from its redeemed claim) and ending `&setup`, so opening it signs the person in and lands on
- * the Setup page with no token to paste. With --agent, every step has a non-interactive path (the
- * App manifest is driven through the master's browser profile and recorded under
- * .graphyard/master-actions like every master browser flow, accounts come from login homes already
- * on the host) and only a step that needs a person's own device or identity —
- * a GitHub Mobile or passkey approval, a subscription login's browser approval — is handed off, as
- * one sentence plus a link or code; the run resumes on its own once it completes. Agent mode with
- * no browser profile stops before anything runs: App creation is never handed to a person.
+ * the Setup page with no token to paste. With --agent, every step has a non-interactive path (accounts
+ * come from login homes already on the host) and only a step that needs a person's own device or identity —
+ * a subscription login's browser approval — is handed off, as one sentence plus a link; the run
+ * resumes on its own once it completes.
  *
  * `up --local` sets up supervised mode (GY-1501): no master-autonomy identities, and master.json
  * records `supervision: supervised` with the operator's GitHub login, so the operator answers each
  * decision and nothing claims autonomy; its heads are reviewed and merged as below (GY-1978).
  *
- * Every `up` (GY-1552): the control plane is the merge writer, with no GitHub Apps and no
- * browser profile; `install --no-github-app`, a deploy key from the operator's `gh` login, then the
- * same autonomy, onboarding, accounts, harness and master-loop steps. A run recorded before
- * the control plane became the only merge writer resumes with its deploy-key step still to run.
+ * Every `up` (GY-1552): the control plane is the merge writer — `install --no-github-app`, a deploy
+ * key from the operator's `gh` login, then the autonomy, onboarding, accounts, harness and
+ * master-loop steps. A run recorded before the control plane became the only merge writer resumes
+ * with its deploy-key step still to run.
  */
 
 /** `up --local` installs supervised (GY-1501): no operator-agent identity; the operator answers each decision. */
 export const upSupervised = (request: Pick<UpRequest, 'provider'>) => request.provider === 'local';
-/** GY-1552: every `up` — the control plane is the merge writer, with no GitHub Apps. */
-export const upMergerControlPlane = (request: Pick<UpRequest, 'merger'>) => request.merger === 'control-plane';
-/** Supervised step list. */
-export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'] as const;
-/** Control-plane merger step list: deploy-key between host-supervisor and master-autonomy. */
-export const upControlPlaneSteps = ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'] as const;
-export type UpStep = typeof upControlPlaneSteps[number];
-/** The resumable steps for REQUEST: control-plane merger or the supervised list. */
-export const upStepsFor = (request: Pick<UpRequest, 'merger'>) => upMergerControlPlane(request) ? upControlPlaneSteps : upSteps;
+/** The one step list: the control plane is the merge writer (GY-1552), with the deploy key between host-supervisor and master-autonomy. */
+export const upSteps = ['preflight', 'control-plane', 'host-supervisor', 'deploy-key', 'master-autonomy', 'onboarding', 'accounts', 'harness', 'master-loop'] as const;
+export type UpStep = typeof upSteps[number];
 
 export interface UpRequest {
   repository: string;
   provider: string;
   /** The non-interactive agent path (`graphyard up --agent`). */
   agent: boolean;
-  reviewer: string;
   /** The agent runtime the master and harness are set up for. */
   master: string;
-  /** The Chrome profile signed in to GitHub that drives the App manifest in agent mode; the master's recorded one when omitted. */
-  browserProfile: string | null;
-  /** GY-1552: `control-plane` for every up (upRequestFromArgs sets it); absent only on a request recorded before. */
-  merger?: MergerMode;
-  /** GY-1442: Apps already installed on the account that install reuses instead of creating (`--reuse-app SLUG`). */
-  reuseApps?: string[];
-  /**
-   * How a Confirm-access prompt is passed: the passkey or password the page offers first, or GitHub
-   * Mobile first when the operator chose it (`--github-mobile`).
-   */
-  sudo?: SudoOptions['prefer'];
-  /** GY-1457: how long each wait on a person lasts (`--wait MINUTES`), the browser's Confirm access included; upWaitMs when omitted. */
+  /** GY-1457: how long each wait on a person lasts (`--wait MINUTES`); upWaitMs when omitted. */
   waitMs?: number | null;
-  /** GY-1457: at Confirm access, exit 3 with the App-import route instead of waiting (`--no-wait`). */
-  noWait?: boolean;
   /** GY-1477: serve a local dashboard on this host's tailnet (`--share-tailnet`); otherwise the command is only printed. */
   shareTailnet?: boolean;
   /**
@@ -110,7 +78,7 @@ export interface UpRequest {
    */
   url?: string | null;
 }
-/** Agent mode's default wait on a person: 20 minutes, the time the Confirm-access handoff asks for (GY-1457). */
+/** Agent mode's default wait on a person: 20 minutes (GY-1457). */
 export const upAgentWaitMs = 1_200_000;
 /** How long each wait on a person lasts: --wait, else 20 minutes in agent mode, else no bound. */
 export const upWaitMs = (request: Pick<UpRequest, 'agent' | 'waitMs'>) => request.waitMs ?? (request.agent ? upAgentWaitMs : Infinity);
@@ -130,9 +98,6 @@ export type UpEvent =
   | { kind: 'note'; text: string };
 
 /** What a device step hands to a person, or that it completed. */
-export type DriveOutcome = { state: 'done' } | { state: 'failed'; reason: string } | { state: 'waiting'; next: string }
-  /** GY-1510: GitHub rejected the App (manifest or form), with GitHub's own error text. */
-  | { state: 'rejected'; error: string };
 export type Handoff = (sentence: string, link: { url?: string | null; code?: string | null }) => void;
 
 export interface UpDependencies {
@@ -202,13 +167,13 @@ export interface UpDependencies {
    */
   loopCode?(): Promise<LoopCodeReading | null>;
   /**
-   * GY-1859: lift the known-good pin and the held-snapshot pointer that hold the install's loop and
+   * GY-1859: lift the known-good pin that holds the install's loop and
    * slots on another commit (repository-setup's liftLoopPins), so a unit rewritten or restarted
    * next starts this CLI; answers what it lifted.
    */
   liftLoopPins?(): Promise<string[]>;
-  /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
-  driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
+  /** Remove the retired held-cli pointer even when the master-loop step is already complete. */
+  removeHeldCliPin?(): Promise<void>;
   /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
   tailnet?(): Promise<Tailnet | null>;
   /** GY-1477: runs the tailnet-only serve command tailnetShare names; ok false (with what it said) when it fails or does not finish. */
@@ -291,9 +256,6 @@ export const upExitCodes = { green: 0, failed: 1, prerequisite: 2, waiting: 3 } 
 class UpStop extends Error { constructor(message: string, readonly exitCode: number) { super(message); } }
 /** GY-1641: a step stopped by a failed child command, carrying what its step-failed event names. */
 class ChildStop extends UpStop { constructor(message: string, exitCode: number, readonly argv: string[], readonly stderr: string | null) { super(message, exitCode); } }
-/** The drive met Confirm access under --no-wait: it stops there, naming the next step (GY-1457). */
-class SudoNoWait extends Error {}
-
 interface UpState {
   version: 1; repository: string; provider: string; completed: UpStep[]; noHerdr: boolean;
   /** Where the install saved the operator's admin credential (a path, never the secret): what mints the sign-in link. */
@@ -314,7 +276,7 @@ interface UpState {
   reissue?: string[] | null;
 }
 export const upStateFile = (root: string) => resolve(root, '.graphyard/up.json');
-const knownUpSteps = upControlPlaneSteps as readonly string[];
+const knownUpSteps = upSteps as readonly string[];
 
 async function readState(root: string, request: UpRequest): Promise<UpState> {
   try {
@@ -336,8 +298,6 @@ async function writeState(root: string, state: UpState) {
 }
 
 const parseJson = (text: string) => { try { return JSON.parse(text); } catch { return null; } };
-/** The manifest page the installer announces while it waits for an App. */
-const manifestUrl = (line: string) => line.match(/\bOpen (http:\/\/127\.0\.0\.1:\d+)\S*/)?.[1] ?? null;
 /**
  * What an install's JSON output (its plan, or its summary, complete or paused) says about signing
  * in: a one-time claim link, printed once and kept only in memory, and where the operator's admin
@@ -496,8 +456,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
   const machineWaitMs = deps.machineWaitMs ?? 600_000;
   let herdrAttach: string | null = null;
   const supervised = upSupervised(request);
-  const controlPlaneMerger = upMergerControlPlane(request);
-  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null, { githubApps: !controlPlaneMerger }), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
+  let setupUrl: string | null = null, prompts = 0, last: SetupItem[] = setupChecklist(null), claim: string | null = null, operator: string | null = null, onboarding: OnboardingWait | null = null, signIn: string | null = null;
   const handoffs: UpResult['handoffs'] = [];
   const handedOff = new Set<string>();
   const handoff = (step: UpStep): Handoff => (sentence, link) => {
@@ -516,7 +475,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     return items.map(item => (item.id === 'account:worker' || item.id === 'account:reviewer') && item.done ? { ...item, done: false, action: null,
       line: 'The account is connected, but the coordinator has no agent profile for it yet; setup writes one once the account is signed in where the coordinator runs.' } : item);
   };
-  const checklist = async () => (last = await withWrittenProfiles(setupChecklist(await deps.status().catch(() => null), { githubApps: !controlPlaneMerger })));
+  const checklist = async () => (last = await withWrittenProfiles(setupChecklist(await deps.status().catch(() => null))));
   let reached = false;
   /**
    * GY-1477: the dashboard's address from the operator's other devices, worked out once a server is
@@ -675,23 +634,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       }
     }
 
-    // Agent mode creates the Apps in a browser; without a profile it would hand the whole App
-    // creation to a person, which only a device approval may be. It stops before anything runs.
-    // A reused App (GY-1442) or one saved on this machine (GY-1476) needs no browser, so agent mode
-    // starts without one only when the install's read-only plan says no App is left to create in a
-    // browser: install reuses a saved App before any App page is driven.
-    // Control-plane merger (GY-1552) registers no App, so agent mode needs no browser profile.
-    const noProfile = 'Agent mode creates the GitHub Apps in a Chrome profile signed in to GitHub, and none is given or recorded, here or by another Graphyard install on this host for the same GitHub login: pass --browser-profile PROFILE and rerun graphyard up --agent.';
-    if (request.agent && !controlPlaneMerger && !state.completed.includes('control-plane') && !deps.driveApp) {
-      const browserApps: unknown = parseJson(await run('preflight', installArgs('--plan')))?.browserApps;
-      const left = Array.isArray(browserApps) ? browserApps.map(String) : ['control-plane', 'reviewer'];
-      const apps = left.map(role => role === 'reviewer' ? `reviewer App "${request.reviewer}"` : 'control-plane App').join(' and ');
-      if (left.length) throw new UpStop(request.reuseApps?.length ? `${noProfile} --reuse-app covers no ${apps}, which would otherwise be created in that browser; reuse one for it too, or pass the profile.` : `${noProfile} No App saved on this machine covers the ${apps}.`, upExitCodes.prerequisite);
-    }
-
     await step('preflight', async () => {
-      // GY-1552: the repository must exist for deploy-key registration; create it under the operator's gh login when missing.
-      if (controlPlaneMerger) await ensureRepository();
+      // The repository must exist for deploy-key registration; create it under the operator's gh login when missing.
+      await ensureRepository();
       for (let attempt = 0; attempt < 2; attempt++) {
         const planned = await run('preflight', installArgs('--plan'));
         const plan = parseJson(planned);
@@ -723,62 +668,12 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
 
     const controlPlane = () => step('control-plane', async () => {
-      // GY-1552: control-plane merger installs with --no-github-app; no App page is served or driven.
-      if (controlPlaneMerger) {
-        const result = await deps.cli(installArgs('--apply'));
-        claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
-        if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
-        return 'control plane installed without a GitHub App';
-      }
-      // The install waits on the App pages itself, as long as this run waits on a person (900 s
-      // without a bound); it then pauses (exit 1) and a rerun resumes it. The page's clock starts
-      // before the drive reaches Confirm access, so it gets a minute more than the drive waits.
-      const deadline = deps.now() + humanWaitMs;
-      const appWait = Number.isFinite(humanWaitMs) ? { GRAPHYARD_APP_WAIT_MS: String(humanWaitMs + 60_000) } : null;
-      // GY-1466: a drive that gives up (Confirm access unanswered) leaves the page to the operator. The
-      // page stays served and up keeps waiting, to its overall wait, on the manual route; nothing drives
-      // again in this run, so the operator's browser and the agent's never both register an App.
-      const gaveUp: string[] = [];
-      const manual = (url: string) => handoff('control-plane')(`The agent's browser could not finish the App page (${gaveUp.join('; ')}). Open ${url} in your own browser${/^http:\/\/127\.0\.0\.1:/.test(url) ? ` (on SSH, forward port ${new URL(url).port} to this machine first)` : ''} and finish it there: graphyard up keeps serving it and carries on once the App is confirmed.`, { url });
-      for (;;) {
-        // A drive that stops at Confirm access under --no-wait ends the install it drives too.
-        const stopped = new AbortController();
-        const waiting: string[] = [], refused: string[] = [];
-        // One browser drive at a time, in the order the installer serves its App pages.
-        let drives: Promise<void> = Promise.resolve();
-        let running = true;
-        const watcher = (async () => {
-          while (running) {
-            const items = await checklist();
-            const pending = (['github-app', 'reviewer-app'] as SetupItemId[]).filter(id => !items.find(item => item.id === id)?.done);
-            if (pending.length && await deps.serverUrl()) await announce(pending);
-            await deps.sleep(pollMs);
-          }
-        })();
-        const result = await deps.cli(installArgs('--apply'), { ...(appWait ? { env: appWait } : {}), signal: stopped.signal, onLine: line => {
-          const url = manifestUrl(line);
-          if (!url || !request.agent || !deps.driveApp) return;
-          drives = drives.then(async () => {
-            if (stopped.signal.aborted) return;
-            if (gaveUp.length) return manual(url);
-            const outcome = await deps.driveApp!(url, handoff('control-plane'));
-            if (outcome.state === 'waiting') { waiting.push(outcome.next); stopped.abort(); }
-            // GY-1510: a rejection is no wait on a person; the install it drives stops, and up fails quoting GitHub.
-            if (outcome.state === 'rejected') { refused.push(outcome.error); stopped.abort(); }
-            if (outcome.state === 'failed') { gaveUp.push(outcome.reason); manual(url); }
-          });
-        } }).catch(error => { if (stopped.signal.aborted) return { code: 1, stdout: '' }; throw error; }).finally(() => { running = false; });
-        await watcher;
-        await drives;
-        if (refused.length) throw new UpStop(`GitHub rejected the App: "${refused[0]}". control-plane failed: GitHub refused the App page the install served, so the install was stopped; this is GitHub's answer, not a wait on a person.`, upExitCodes.failed);
-        if (waiting.length) throw new UpStop(waiting[0], upExitCodes.waiting);
-        claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
-        if (result.code === 0) return 'control plane installed with its GitHub Apps';
-        const paused = parseJson(result.stdout);
-        const drove = gaveUp.length ? `; the browser could not finish the App page (${gaveUp.join('; ')}), its record is under .graphyard/master-actions` : '';
-        if (!paused?.resume || deps.now() >= deadline) throw paused?.resume ? new UpStop(`control-plane: graphyard install exited ${result.code}${drove}; the App page is still unconfirmed, rerun graphyard up to resume`, upExitCodes.waiting) : childStop('control-plane', installArgs('--apply'), result, drove);
-        deps.emit({ kind: 'note', text: 'The App page is still waiting for a person; serving it again' });
-      }
+      // The control plane is the merge writer (GY-1552): the install registers no App, no App page
+      // is served or driven, and the merge writer's deploy key is its only GitHub access.
+      const result = await deps.cli(installArgs('--apply'));
+      claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
+      if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
+      return 'control plane installed without a GitHub App';
     });
     // GY-1851: an install whose recorded credentials the control plane refuses (401) is a fresh
     // database behind a kept install directory: a new installation. Its credentials are re-issued
@@ -851,7 +746,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       if (!token) throw new UpStop('host-supervisor: no master credential is recorded for the installed control plane', upExitCodes.failed);
       // GY-1641: master init accepts the control plane on the recorded address, never its default port.
       const server = await deps.serverUrl();
-      await run('host-supervisor', ['master', 'init', '--token-stdin', ...(server ? ['--url', server] : []), ...(request.browserProfile ? ['--browser-profile', request.browserProfile] : [])], { stdin: token });
+      await run('host-supervisor', ['master', 'init', '--token-stdin', ...(server ? ['--url', server] : [])], { stdin: token });
     });
     // Recorded on every run (idempotent), so a resumed run that skipped master init still installs supervised.
     if (supervised && deps.supervise) {
@@ -860,7 +755,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     }
 
     // GY-1552: the merge writer's deploy key under the install directory. No GitHub protection is set.
-    if (controlPlaneMerger) {
+    {
       const directory = deps.installDirectory?.() ?? installDirectory(installIdFor(request.repository));
       const gh: GitHubCli | null = deps.gh ? async (args, options) => {
         const result = await deps.gh!(args, options?.input);
@@ -869,7 +764,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       } : null;
       await step('deploy-key', async () => {
         const ensure = deps.ensureDeployKey ?? (async (installDir, repository) => {
-          if (!gh) throw new UpStop('deploy-key: control-plane merger needs gh on this machine to register the deploy key', upExitCodes.prerequisite);
+          if (!gh) throw new UpStop('deploy-key: the merge writer needs gh on this machine to register the deploy key', upExitCodes.prerequisite);
           return ensureDeployKey(installDir, repository, gh);
         });
         await ensure(directory, request.repository);
@@ -880,7 +775,6 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // GY-1479: the master's operator-agent identity (`master autonomy --apply`), provisioned
     // with the admin credential the install saved, so the new master creates, releases and unblocks work
     // with no further command. That credential is never something an agent session may read.
-    // Control-plane merger (GY-1552) still provisions them: no reviewer App, but the master decides with its own identities.
     if (supervised) deps.emit({ kind: 'step', step: 'master-autonomy', state: 'skipped', detail: 'supervised: no operator-agent identity is provisioned; the operator answers each decision' });
     else await step('master-autonomy', async () => {
       const admin = await deps.operatorToken?.(state.operatorTokenFile ?? null).catch(() => null) ?? null;
@@ -959,7 +853,8 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
     // The registry's first fold may lag the apply by a poll; only a role still empty after it is asked for:
     // handed off in agent mode, on the Setup page interactively. A profile still missing is written
     // again on each wait (each write settling the install's workers), and a wait that polled at all is
-    // followed by one more write. The handoff asks for a sign-in only while no account is logged in.
+    // followed by one more write. The handoff asks for a sign-in only while the last write found no
+    // logged-in account; a registry lag alone never asks for one the fleet already has.
     const awaitAccounts = async () => {
       for (;;) {
         let waited = false;
@@ -967,7 +862,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
           waited = true;
           let report: any = null;
           if (profileMissing()) report = await writeProfiles();
-          if (request.agent && polls > 0 && !(report?.counts?.loggedIn > 0)) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
+          if (request.agent && polls > 0 && report?.counts?.loggedIn === 0) handoff('accounts')(`Sign in to an AI coding account for ${pending.map(id => id.slice('account:'.length)).join(' and ')}: approve its browser login on your device`, { url: setupUrl });
         }, 1);
         if (!waited) return;
         await writeProfiles();
@@ -1003,6 +898,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const read = await deps.loopCode().then(answer => answer ?? 'no reading came back', (error: any) => String(error?.message ?? error).split('\n')[0].slice(0, 400) || 'the reading was rejected');
       return typeof read === 'string' ? { error: read, reading: null } : { error: read.error, reading: read };
     };
+    await deps.removeHeldCliPin?.();
     if (state.completed.includes('master-loop') && deps.loopCode) {
       const recorded = await readLoopCode();
       if (recorded?.error || recorded?.reading?.loopStale) {
@@ -1025,9 +921,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // A unit that starts another checkout is rewritten; one on this checkout whose process loaded other code is restarted.
       const rewriteLoop = !!loopStale && reading?.loopReplace !== 'restart';
       let rewrote: string | null = null;
-      // A known-good pin or held snapshot would bring a rewritten unit — and the loop's own alignment
-      // a restarted one — back onto the pinned commit, so it is lifted first and the step still waits
-      // for the exact commit below.
+      // A known-good pin would bring a rewritten unit — and the loop's own alignment a restarted
+      // one — back onto the pinned commit, so it is lifted first and the step still waits for the
+      // exact commit below.
       if (loopStale && deps.liftLoopPins) {
         const lifted = await deps.liftLoopPins().catch(error => { throw new UpStop(`master-loop: ${loopStale}, and lifting the pin that holds it there failed: ${String(error?.message ?? error).split('\n')[0]}; rerun ${rerun()}`, upExitCodes.failed); });
         if (lifted.length) deps.emit({ kind: 'note', text: `master-loop: lifted ${lifted.join(' and ')}, so the unit starts this CLI instead; graphyard master recover --to SHA pins a release again.` });
@@ -1128,18 +1024,16 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
 }
 
 /**
- * The `graphyard up` command: a code handed with --sudo-code, else a run whose omitted --repo and
- * --provider come from .graphyard/up.json, and whose children a SIGINT or SIGTERM reaches (GY-1466).
+ * The `graphyard up` command: a run whose omitted --repo and --provider come from .graphyard/up.json,
+ * and whose children a SIGINT or SIGTERM reaches (GY-1466).
  */
-export async function upCommand(root: string, cliPath: () => Promise<string>, args: string[]): Promise<UpResult | NonNullable<Awaited<ReturnType<typeof upSudoCode>>>> {
-  const handed = await upSudoCode(root, args);
-  if (handed) return handed;
+export async function upCommand(root: string, cliPath: () => Promise<string>, args: string[]): Promise<UpResult> {
   const request = upRequestFromArgs(args, recordedUp(root));
   const refusal = await upUrlRefusal(root, request.url);
   if (refusal) throw new Error(refusal);
   const emit = (event: UpEvent) => console.error(request.agent ? JSON.stringify(event) : describeUpEvent(event));
   const dependencies = upDependencies(root, await cliPath(), request, emit);
-  // Ctrl-C or SIGTERM stops the install child too, so nothing keeps serving its App page on 4311.
+  // Ctrl-C or SIGTERM stops the install child too, so nothing outlives the command on purpose.
   const release = forwardSignals(dependencies.children);
   return runUp(request, dependencies).finally(release);
 }
@@ -1162,7 +1056,6 @@ export async function upUrlRefusal(root: string, url: string | null | undefined)
 /** `graphyard up --help` (GY-1510): up's usage, one line for each option. */
 export const upUsage = [
   'Usage: graphyard up --repo OWNER/NAME [options]',
-  '       graphyard up --sudo-code CODE|email',
   '',
   'First-run setup in one command, resumable: a rerun skips what is done (.graphyard/up.json).',
   '',
@@ -1172,12 +1065,7 @@ export const upUsage = [
   '  --local                    --provider local: embedded Postgres on this machine, no Docker',
   '  --agent                    run every step non-interactively, JSON events on stderr; hand off only device approvals',
   '  --master NAME              the master agent runtime, claude or codex (default claude)',
-  "  --browser-profile PROFILE  the Chrome profile signed in to GitHub (default: the master's, else another install's for the same login); used only with --local",
-  '  --github-mobile            approve Confirm access with GitHub Mobile (the default whenever the page offers it)',
-  '  --sudo-code CODE|email     hand the waiting run a Confirm-access code (6 digits from an authenticator app, 8 from an email), or ask GitHub to email one',
-  '  --reuse-app SLUG           reuse an App already installed on the account (repeatable)',
   '  --wait MINUTES             how long each wait on a person lasts (agent default 20)',
-  '  --no-wait                  at Confirm access, exit 3 with the App-import route instead of waiting',
   "  --share-tailnet            serve the dashboard on this host's tailnet (never publicly)",
   '  --url URL                  the control plane\'s address before master init records one (HTTPS, or HTTP on loopback); every later step uses it',
   '  --json                     print the result as JSON',
@@ -1187,34 +1075,6 @@ export const upUsage = [
 ].join('\n');
 /** Whether ARGS ask for up's usage. */
 export const upHelpRequested = (args: readonly (string | undefined)[]) => args.includes('--help') || args.includes('-h');
-
-/** `graphyard up --sudo-code CODE|email` (GY-1450): hands the run waiting at Confirm access a code, never echoing it; null without the flag. */
-export async function upSudoCode(root: string, args: string[]) {
-  const at = args.findIndex(arg => arg === '--sudo-code' || arg.startsWith('--sudo-code='));
-  if (at < 0) return null;
-  const kind = await submitSudoCode(root, args[at].includes('=') ? args[at].slice('--sudo-code='.length) : args[at + 1] ?? '');
-  return { ok: true, handed: kind === 'email' ? 'a request for an emailed code' : 'a code', next: 'The waiting graphyard up types it into GitHub\'s Confirm-access page within its next check.' };
-}
-
-/** A shell word: plain when it needs no quoting, otherwise single-quoted. */
-const shellWord = (value: string) => /^[\w@%+=:,./-]+$/.test(value) ? value : `'${value.replace(/'/g, `'\\''`)}'`;
-/**
- * The operator's up command past its repository (GY-1457): the provider and --agent, then every
- * other option that shapes the setup (master, browser profile, install consent and
- * SSH inputs, Mobile preference, wait), so a printed rerun or App-import route sets up the same thing.
- * --reuse-app and --no-wait are left to the command that prints it.
- */
-export function upCommandFlags(request: UpRequest) {
-  const flags: string[] = ['--provider', request.provider, ...(request.agent ? ['--agent'] : [])];
-  const option = (name: string, value: string | null | undefined) => { if (value) flags.push(name, value); };
-  if (request.master !== 'claude') option('--master', request.master);
-  if (!upMergerControlPlane(request)) option('--browser-profile', request.browserProfile);
-  if (request.sudo === 'mobile') flags.push('--github-mobile');
-  if (request.waitMs) option('--wait', String(request.waitMs / 60_000));
-  if (request.shareTailnet) flags.push('--share-tailnet');
-  option('--url', request.url);
-  return flags.map(shellWord).map(word => ` ${word}`).join('');
-}
 
 /**
  * The repository and provider an earlier run recorded in .graphyard/up.json (GY-1466), so a
@@ -1228,9 +1088,8 @@ export function recordedUp(root: string): { repository: string; provider: string
   } catch (error: any) { if (error.code === 'ENOENT' || error instanceof SyntaxError) return null; throw error; }
 }
 
-/** The options `graphyard up` parses; upUsage gives each one line (GY-1510), and --sudo-code is read before them. */
-export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, 'browser-profile': { type: 'string' },
-  'reuse-app': { type: 'string', multiple: true }, 'github-mobile': { type: 'boolean' }, wait: { type: 'string' }, 'no-wait': { type: 'boolean' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
+/** The options `graphyard up` parses; upUsage gives each one line (GY-1510). */
+export const upOptions = { repo: { type: 'string' }, provider: { type: 'string' }, agent: { type: 'boolean' }, json: { type: 'boolean' }, master: { type: 'string' }, wait: { type: 'string' }, 'share-tailnet': { type: 'boolean' }, local: { type: 'boolean' }, url: { type: 'string' } } as const;
 
 /**
  * `graphyard up`'s flags. With a run RECORDED in this checkout, an omitted --repo or --provider is
@@ -1252,296 +1111,8 @@ export function upRequestFromArgs(args: string[], recorded: { repository: string
   let url: string | null = null;
   // The origin rule master init applies (serverOrigin): HTTPS, or HTTP only on loopback.
   if (values.url !== undefined) { try { url = serverOrigin(values.url); } catch { throw new Error('Use --url with the control plane\'s origin: HTTPS, or HTTP on loopback (such as http://127.0.0.1:4311); no credentials, query or path'); } }
-  return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, reviewer: 'claude', master: values.master ?? 'claude',
-    browserProfile: values['browser-profile'] ?? null, merger: 'control-plane' as const,
-    ...(values['reuse-app']?.length ? { reuseApps: values['reuse-app'] } : {}), ...(values['github-mobile'] ? { sudo: 'mobile' as const } : {}),
-    ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['no-wait'] ? { noWait: true } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}) };
-}
-
-/** How many fresh GitHub Mobile prompts a drive requests after one expires unapproved (GY-1510). */
-export const upMobileReprompts = 3;
-
-/**
- * GitHub's own error text on an App page (GY-1510): the validation lines a rejected manifest or App
- * form shows ("Hook url cannot be blank"), joined; null when the page shows none.
- */
-export function githubAppError(text: string): string | null {
-  const lines = text.split(/\r?\n/).map(line => line.trim()).filter(line => line && line.length <= 300 && (
-    /\b(?:can(?:no|')t be blank|is invalid|is not (?:a )?valid|has already been taken|is too (?:long|short)|is reserved|is not included in the list)\b/i.test(line)
-    || /^(?:invalid (?:github app )?(?:manifest|configuration)|there (?:was|were) (?:an )?errors?\b|error:|something went wrong)/i.test(line)));
-  return lines.length ? [...new Set(lines)].join('; ') : null;
-}
-/** The drive met GitHub's rejection of the App: its message is GitHub's own text. */
-class AppRejected extends Error {}
-
-/**
- * Agent mode's App step (AC-5): the installer's manifest page, driven in the master's browser
- * profile — register the App, then install it on the repository alone (GitHub preselects it from
- * `repository_ids[]`). A Confirm-access prompt is passed with passSudo, the page's own confirmation
- * first (GY-1442): the handoff names a sudo-protected page to confirm access on once in the
- * operator's own Chrome when the drive shares their profile (on a copy, GY-1459, the local App page
- * opened in their own browser instead), and every method the page offers; the drive re-checks
- * every 10 s and types in an authenticator or email code handed over on the manifest page or with
- * `graphyard up --sudo-code` (GY-1450), within 2 s of it being entered (GY-1459). GY-1510: GitHub Mobile is
- * triggered whenever the page offers it (a passkey or code only when it does not, or when the
- * operator chose `sudo: 'passkey-or-password'`), handed off as one sentence naming its number; a
- * prompt that expires unapproved is requested afresh up to upMobileReprompts times, each new number
- * handed off; a Mobile code unapproved for a minute is handed off again with the passkey or password link.
- * When GitHub rejects the manifest or shows an error on the App page, the drive ends `rejected`
- * quoting GitHub's own error text (githubAppError).
- * A re-check that reloads the App creation page drops the manifest, so once access is confirmed
- * the manifest is submitted again from the setup page.
- *
- * GY-1457: the Confirm-access wait is up's own wait (TIMEOUTMS, upWaitMs), not a shorter one of its
- * own. The handoff says whether the drive shares the operator's live Chrome session (PROFILE) and
- * always ends with the App-import route that needs no live moment. A pending confirmation is kept
- * (REMEMBER) so a rerun meeting the same page resumes it (PENDING, ONRESUME) instead of handing it
- * off again; NOWAIT ends the drive at the handoff with that route as the next step.
- */
-export function browserAppDriver(options: { page: BrowserPage; repository: string; sleep: (ms: number) => Promise<void>; now?: () => Date; timeoutMs?: number; record?: string; sudo?: SudoOptions['prefer']; readCode?: SudoOptions['readCode']; onClose?: (outcome: DriveOutcome) => Promise<void> | void;
-  profile?: { mode: BrowserProfileMode; name: string } | null; noWait?: boolean; upFlags?: string; reuseFlags?: string;
-  /** GY-1878: the repository owner's account type for the App-import route; defaults to githubOwnerType. */
-  ownerType?: (owner: string) => Promise<'User' | 'Organization' | null>;
-  pending?: () => Promise<SudoState | null> | SudoState | null; remember?: (state: SudoState | null) => Promise<void> | void; onResume?: (state: SudoState) => void }) {
-  const { page } = options;
-  const owner = options.repository.split('/')[0];
-  // The operator's up command past its repository (upCommandFlags), for the rerun and the App-import route; the rerun keeps its --reuse-app too.
-  const upFlags = options.upFlags ?? ' --agent';
-  const rerun = `graphyard up --repo ${options.repository}${options.reuseFlags ?? ''}${upFlags}`;
-  // GY-1878: the route names the owner's registration path, so the drive resolves the owner's account
-  // type once (an injected reading, else GitHub's public API) before the handoff that quotes it; a
-  // failed or unknown reading keeps the user path, as on the setup page itself.
-  let route: Promise<string> | null = null;
-  const importRoute = () => route ??= (options.ownerType ?? githubOwnerType)(owner)
-    .then(read => appImportRoute(options.repository, upFlags, false, read === 'Organization' ? 'Organization' : 'User'), () => appImportRoute(options.repository, upFlags));
-  let setupPage: string | null = null, resumeChecked = false, settledLocally = false;
-  const driveStarted = (options.now ?? (() => new Date()))();
-  const awaitSudo = async (handoff: Handoff) => {
-    const onCode = async (state: SudoState) => {
-      // The first confirmation a rerun meets resumes the one handed off before (within a day), when it is the same page method.
-      const before = resumeChecked ? null : await options.pending?.() ?? null;
-      resumeChecked = true;
-      const now = (options.now ?? (() => new Date()))().getTime();
-      const resumed = before && before.method && before.method !== 'mobile' && before.method === state.method && now - Date.parse(before.issuedAt) < 86_400_000 ? before : null;
-      await options.remember?.(resumed ? { ...state, issuedAt: resumed.issuedAt } : state);
-      if (resumed) options.onResume?.(resumed);
-      // GY-1510: a GitHub Mobile prompt is handed off as one plain sentence naming its number.
-      else handoff(state.method === 'mobile' ? sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }) : [sudoInstruction(state, 'your phone', { ...(options.readCode ? { page: setupPage, command: 'graphyard up --sudo-code' } : {}), profile: options.profile ?? null }), await importRoute()].join('\n'),
-        { url: state.fallback?.url ?? state.url ?? page.url(), code: state.code });
-      if (options.noWait) throw new SudoNoWait(`GitHub asks to confirm access before it creates the App, and --no-wait does not wait for it. ${await importRoute()}; or rerun ${rerun} without --no-wait to wait for the confirmation.`);
-    };
-    // passSudo's flow names the closest master browser flow; its rerun advice is this command's.
-    try {
-      // GY-1510: GitHub Mobile whenever the page offers it (named, with a control to request it), unless
-      // the operator chose otherwise; the page's own confirmation or a code only when it offers none.
-      const mobile = () => offeredSudoMethods(page.text()).mobile && !!(page.locate('button', 'Use GitHub Mobile') ?? page.locate('link', 'Use GitHub Mobile'));
-      const prefer = options.sudo ?? (mobile() ? 'mobile' : 'passkey-or-password');
-      const passed = await passSudo(page, { flow: 'installation-accept', record: options.record ?? 'graphyard up', sleep: options.sleep, now: options.now, timeoutMs: options.timeoutMs ?? upAgentWaitMs, prefer, readCode: options.readCode, settledSince: driveStarted,
-        maxAttempts: 1 + upMobileReprompts,
-        onCode, onSettled: state => options.remember?.(state.state === 'approved' ? null : state) });
-      settledLocally = !!passed.settled;
-      return passed.passed;
-    } catch (error: any) {
-      if (error instanceof SudoNoWait) throw error;
-      const reason = String(error?.message ?? error).replace(/rerun master browser installation-accept/g, `rerun ${rerun}`);
-      // A copied profile never sees a confirmation in the operator's own Chrome, so the timeout does not offer it.
-      throw new Error(options.profile?.mode === 'copy' ? reason.replace(`, or once in your own Chrome at ${sudoProtectedPage}`, '') : reason);
-    }
-  };
-  // GitHub's rejection of the manifest or App form, when the page shows one (GY-1510).
-  const rejected = () => { if (!/^https:\/\/github\.com\//.test(page.url())) return; const error = githubAppError(page.text()); if (error) throw new AppRejected(error); };
-  // The step was finished on the local App page in the operator's own browser (GY-1459): the copied page still shows
-  // Confirm access, so the setup page is loaded afresh and the step is not pressed again.
-  const settledOut = () => {
-    if (!settledLocally) return false;
-    settledLocally = false;
-    if (setupPage) page.open(setupPage);
-    return true;
-  };
-  const press = async (kind: 'button' | 'link', text: string, handoff: Handoff, after = false) => {
-    await awaitSudo(handoff);
-    if (settledOut()) return;
-    const control = page.locate(kind, text);
-    if (!control) { rejected(); throw new Error(`the page offers no "${text}" ${kind}`); }
-    page.click(control.selector); page.wait(2_000);
-    await awaitSudo(handoff);
-    if (settledOut()) return;
-    if (after) rejected();
-  };
-  return async (url: string, handoff: Handoff): Promise<DriveOutcome> => {
-    let outcome: DriveOutcome;
-    setupPage = url;
-    try {
-      for (let submissions = 0; ; submissions += 1) {
-        page.open(url);
-        const register = page.locate('button', 'Register Graphyard App →') ?? page.locate('button', 'Register reviewer App →');
-        if (!register) break;
-        page.click(register.selector); page.wait(2_000);
-        const confirmed = await awaitSudo(handoff);
-        if (settledOut()) { if (submissions === 0) continue; break; }
-        // Confirmed on a reloaded page: GitHub shows the plain new-App form, so submit the manifest again.
-        if (confirmed && submissions === 0 && !page.locate('button', `Create GitHub App for ${owner}`)) continue;
-        await press('button', `Create GitHub App for ${owner}`, handoff, true);
-        break;
-      }
-      page.open(url);
-      const install = page.locate('link', 'Install GitHub App');
-      if (install?.href) {
-        // The owner and repository ids from the repository page's own metadata: Graphyard calls no GitHub API.
-        const href = install.href;
-        page.open(`https://github.com/${options.repository}`);
-        const owner = page.meta('octolytics-dimension-user_id'), repository = page.meta('octolytics-dimension-repository_id');
-        if (!owner || !repository) throw new Error(`The page of ${options.repository} names no owner or repository id; install the App on ${options.repository} alone at ${href}`);
-        page.open(`${href}/permissions?suggested_target_id=${owner}&repository_ids[]=${repository}`);
-        await press('button', 'Install', handoff);
-      }
-      outcome = { state: 'done' };
-    } catch (error: any) {
-      outcome = error instanceof SudoNoWait ? { state: 'waiting', next: error.message } : error instanceof AppRejected ? { state: 'rejected', error: error.message } : { state: 'failed', reason: String(error?.message ?? error).split('\n')[0] };
-    }
-    try { page.close(); } catch { /* recorded on the step */ }
-    await options.onClose?.(outcome);
-    return outcome;
-  };
-}
-
-/**
- * The browser profile agent mode drives the App pages in: the one passed, else the one the master
- * recorded (`master init --browser-profile`), else (GY-1510) the one another Graphyard install on this
- * host recorded in its .graphyard/master.json, when that profile's GitHub login is LOGIN, the login
- * this host's gh is authenticated as; FROM names that install. A profile's login is the browser login
- * its install's administration ledger (.graphyard/master-actions/ledger.json) last observed signed in
- * to it; an entry that never read the browser's login (a no-op or dry run, which records only the gh
- * login) says nothing about the profile. A profile no entry observed is asked: DISCOVER opens GitHub
- * in it and reads the signed-in login. A profile with no login found, or no login here, is never
- * borrowed, and agent mode stops before it starts.
- * INSTALLS are the other installs' checkouts, hostInstallRoots by default.
- */
-export function upBrowserProfile(root: string, request: UpRequest, installs: string[] = hostInstallRoots(), login: () => string | null = hostGithubLogin,
-  discover: (browser: { profile: string; executable?: string }) => string | null = hostProfileLogin): { profile: string; executable?: string; from?: string; login?: string } | null {
-  if (request.browserProfile) return { profile: request.browserProfile };
-  const recorded = (checkout: string) => {
-    try { const config = JSON.parse(readFileSync(resolve(checkout, '.graphyard/master.json'), 'utf8')); return typeof config?.browser?.profile === 'string' && config.browser.profile ? config : null; }
-    catch { return null; }
-  };
-  const own = recorded(root);
-  if (own) return own.browser;
-  const self = canonicalPath(root);
-  let mine: string | null | undefined;
-  for (const checkout of installs) {
-    if (canonicalPath(checkout) === self) continue;
-    const config = recorded(checkout);
-    if (!config) continue;
-    if (mine === undefined) mine = login()?.toLowerCase() ?? null;
-    if (!mine) return null;
-    const { profile, executable } = config.browser;
-    const browser = { profile, ...(typeof executable === 'string' && executable ? { executable } : {}) };
-    let theirs = observedProfileLogin(checkout, profile);
-    if (!theirs) { try { theirs = discover(browser); } catch { theirs = null; } }
-    if (theirs && theirs.toLowerCase() === mine) return { ...browser, from: checkout, login: theirs };
-  }
-  return null;
-}
-/** The GitHub login CHECKOUT's administration ledger last observed signed in to PROFILE's browser; entries that never read it (actor.browser null) are skipped. */
-function observedProfileLogin(checkout: string, profile: string): string | null {
-  let entries: unknown[];
-  try { entries = JSON.parse(readFileSync(resolve(actionsDirectory(checkout), 'ledger.json'), 'utf8'))?.entries; } catch { return null; }
-  if (!Array.isArray(entries)) return null;
-  for (const entry of [...entries].reverse()) {
-    const actor = (entry as any)?.actor;
-    if (actor?.profile === profile && typeof actor.browser === 'string' && actor.browser) return actor.browser;
-  }
-  return null;
-}
-/**
- * The GitHub login signed in to BROWSER's profile, read as the master's browser flows read it: GitHub's
- * user-login meta tag on github.com, in a session of its own. Null when it is signed out or cannot be opened.
- */
-export function browserProfileLogin(browser: { profile: string; executable?: string }, page: (session: string) => BrowserPage = session => agentBrowserPage(browser, session)): string | null {
-  let opened: BrowserPage | null = null;
-  try {
-    opened = page(`graphyard-up-login-${browser.profile.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`);
-    opened.open('https://github.com/');
-    return opened.meta('user-login');
-  } catch { return null; }
-  finally { try { opened?.close(); } catch { /* the session may already be gone */ } }
-}
-const underTestRunner = () => !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
-/** browserProfileLogin, except that under the test runner no real browser is opened. */
-const hostProfileLogin = (browser: { profile: string; executable?: string }) => underTestRunner() ? null : browserProfileLogin(browser);
-/** gh's own record of the login it is signed in as, read from its configuration: no GitHub API request. */
-export const ghLoginArgs = ['config', 'get', 'user', '-h', 'github.com'];
-/** The GitHub login this host's gh is authenticated as, or null when gh is not signed in. */
-export function hostGithubLogin(): string | null {
-  try { return execFileSync('gh', ghLoginArgs, { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
-}
-const canonicalPath = (path: string) => { try { return realpathSync(path); } catch { return resolve(path); } };
-/**
- * The checkouts the Graphyard master loops installed on this host run from: each graphyard-master*.service
- * unit's WorkingDirectory. Under the test runner only a directory under the system temporary directory
- * is read, as legacyUnitFiles reads one: the operator's real installs belong to no test.
- */
-export function hostInstallRoots(unitDirectory = userUnitDirectory()): string[] {
-  if (underTestRunner() && !`${canonicalPath(unitDirectory)}/`.startsWith(`${canonicalPath(tmpdir())}/`)) return [];
-  let names: string[];
-  try { names = readdirSync(unitDirectory).filter(name => /^graphyard-master.*\.service$/.test(name)).sort(); } catch { return []; }
-  const roots = names.flatMap(name => { try { const working = unitCheckout(readFileSync(resolve(unitDirectory, name), 'utf8')).workingDirectory; return working ? [working] : []; } catch { return []; } });
-  return [...new Set(roots)];
-}
-
-/**
- * A recorded drive (AC-5): the App pages run through the master's recording page, so every step and
- * a screenshot after each mutation land in .graphyard/master-actions/<stamp>-app-create-<id>/,
- * with record.json written when the drive ends, as every master browser flow records its run.
- */
-export function recordedAppDriver(root: string, request: UpRequest, browser: { profile: string; executable?: string }, page: (session: string) => BrowserPage = session => agentBrowserPage(browser, session),
-  clock: { sleep?: (ms: number) => Promise<void>; now?: () => Date; emit?: (event: UpEvent) => void } = {}) {
-  const startedAt = new Date(), id = randomUUID();
-  const directory = resolve(actionsDirectory(root), `${startedAt.toISOString().replace(/[:.]/g, '-')}-app-create-${id.slice(0, 8)}`);
-  const steps: RecordedStep[] = [];
-  const scope = { repository: request.repository, provider: request.provider, browserProfile: browser.profile };
-  const session = `graphyard-up-${request.repository.replace(/[^a-zA-Z0-9]/g, '-').toLowerCase()}`;
-  let created = false;
-  const recorded = recordingPage(page(session), { directory, steps, now: () => new Date() });
-  const drive = browserAppDriver({
-    page: { ...recorded, open: url => { if (!created) { created = true; mkdirSync(directory, { recursive: true, mode: 0o700 }); } return recorded.open(url); } },
-    repository: request.repository, record: relative(root, directory), sleep: clock.sleep ?? (ms => new Promise(accept => setTimeout(accept, ms))), now: clock.now, sudo: request.sudo,
-    readCode: () => takeSudoCode(root),
-    // GY-1457: up's own wait, the profile's sharing said in the handoff, and the pending confirmation kept for a rerun.
-    timeoutMs: Number.isFinite(upWaitMs(request)) ? upWaitMs(request) : upAgentWaitMs, noWait: request.noWait,
-    profile: { mode: browserProfileMode(browser.profile), name: browser.profile },
-    upFlags: upCommandFlags(request), reuseFlags: (request.reuseApps ?? []).map(slug => ` --reuse-app ${shellWord(slug)}`).join(''),
-    pending: () => readPendingSudo(root, scope), remember: state => rememberPendingSudo(root, state, scope),
-    onResume: state => clock.emit?.({ kind: 'note', text: `Resuming the Confirm access handed off at ${state.issuedAt}; no new handoff: confirm it as asked then, or pass a code with graphyard up --sudo-code` }),
-    onClose: async outcome => {
-      if (!created) return;
-      await writeFile(resolve(directory, 'record.json'), `${JSON.stringify({ id, flow: 'app-create', startedAt: startedAt.toISOString(), completedAt: new Date().toISOString(), actor: { profile: browser.profile }, target: { repository: request.repository }, outcome: outcome.state === 'done' ? 'applied' : 'refused', ...(outcome.state === 'failed' ? { reason: outcome.reason } : outcome.state === 'rejected' ? { reason: outcome.error } : {}), screenshots: steps.filter(step => step.screenshot).length, steps }, null, 2)}\n`, { mode: 0o600 });
-    },
-  });
-  return { directory, drive };
-}
-
-/**
- * The Confirm access an App drive handed off and is waiting on (GY-1457), so a rerun resumes it.
- * It is kept with the repository and provider it was handed off for, as up.json is, and the browser
- * profile the drive ran in: a run for another one, or one that drives another profile (whose
- * handoff offers other routes), never resumes it, so its own handoff is issued.
- */
-const pendingSudoFile = (root: string) => resolve(actionsDirectory(root), 'up-sudo.json');
-export interface PendingSudoScope { repository: string; provider: string; browserProfile?: string }
-export async function readPendingSudo(root: string, scope?: PendingSudoScope): Promise<SudoState | null> {
-  try {
-    const { repository, provider, browserProfile, ...state } = JSON.parse(await readFile(pendingSudoFile(root), 'utf8'));
-    if (scope && (repository !== scope.repository || provider !== scope.provider || (browserProfile ?? undefined) !== scope.browserProfile)) return null;
-    return sudoStateSchema.parse(state);
-  } catch { return null; }
-}
-export async function rememberPendingSudo(root: string, state: SudoState | null, scope?: PendingSudoScope) {
-  const file = pendingSudoFile(root);
-  if (!state) { await rm(file, { force: true }); return; }
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-  await writeFile(`${file}.${process.pid}.tmp`, `${JSON.stringify({ ...state, ...scope })}\n`, { mode: 0o600 });
-  await rename(`${file}.${process.pid}.tmp`, file);
+  return { repository, provider: provider ?? recorded?.provider ?? 'compose', agent: !!values.agent, master: values.master ?? 'claude',
+    ...(minutes !== null ? { waitMs: minutes * 60_000 } : {}), ...(values['share-tailnet'] ? { shareTailnet: true } : {}), ...(url ? { url } : {}) };
 }
 
 /** A one-time dashboard sign-in address minted with the operator's admin credential, TOKEN or the one in FILE (as `graphyard login` mints it). */
@@ -1610,9 +1181,9 @@ export async function publishOnboarding(root: string, repository: string, run: (
 }
 
 /**
- * GY-1466: SIGINT or SIGTERM to `up` is passed to every child it runs (the install serving the App
- * page on 4311 above all), and `up` exits once they have, 128 + the signal's number; a child still
- * running after GRACE_MS, or at a second signal, is killed. Returns what removes the handlers.
+ * GY-1466: SIGINT or SIGTERM to `up` is passed to every child it runs (the install above all),
+ * and `up` exits once they have, 128 + the signal's number; a child still running after GRACE_MS,
+ * or at a second signal, is killed. Returns what removes the handlers.
  */
 export function forwardSignals(children: Set<ChildProcess>, options: { exit?: (code: number) => void; graceMs?: number } = {}) {
   const exit = options.exit ?? (code => process.exit(code));
@@ -1647,9 +1218,15 @@ export async function readInstallLoopCode(root: string, options: {
   return (options.local ?? ((at: string, path: string) => readLoopCode(at, { cliPath: path })))(root, cliPath);
 }
 
+/** gh's own record of the login it is signed in as, read from its configuration: no GitHub API request. */
+export const ghLoginArgs = ['config', 'get', 'user', '-h', 'github.com'];
+/** The GitHub login this host's gh is authenticated as, or null when gh is not signed in. */
+export function hostGithubLogin(): string | null {
+  try { return execFileSync('gh', ghLoginArgs, { encoding: 'utf8', timeout: 30_000, stdio: ['ignore', 'pipe', 'ignore'] }).trim() || null; } catch { return null; }
+}
+
 /** The real dependencies: this CLI's own commands as children, the master identity's status read. */
-export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void, githubLogin: () => string | null = hostGithubLogin,
-  discoverLogin: (browser: { profile: string; executable?: string }) => string | null = hostProfileLogin): UpDependencies & { children: Set<ChildProcess> } {
+export function upDependencies(root: string, cliPath: string, request: UpRequest, emit: (event: UpEvent) => void): UpDependencies & { children: Set<ChildProcess> } {
   // The children still running, for forwardSignals.
   const children = new Set<ChildProcess>();
   // GY-1641: --url, else the address master.json records, else the one this machine's install record (install.json) holds.
@@ -1660,9 +1237,7 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
   };
   // upUrlRefusal keeps --url to the server master.json records, so its credential is the one for serverUrl.
   const masterToken = async () => { const url = await serverUrl(); return url ? (await masterCredential(root, url))?.token ?? null : null; };
-  const browser = request.agent ? upBrowserProfile(root, request, hostInstallRoots(), githubLogin, discoverLogin) : null;
-  if (browser?.from) emit({ kind: 'note', text: `No --browser-profile given: the App pages are driven in Chrome profile ${browser.profile}, which the Graphyard install at ${browser.from} uses, signed in to GitHub as ${browser.login}, the login gh uses here; pass --browser-profile to use another.` });
-  // GY-1552: a control-plane merger's children run in the checkout itself: gh (repository view/create, deploy key) and git (origin set to the SSH form, GY-2940).
+  // GY-1552: the children run in the checkout itself: gh (repository view/create, deploy key) and git (origin set to the SSH form, GY-2940).
   const childIn = (command: string, args: string[], input?: string) => new Promise<{ code: number; stdout: string; stderr?: string }>(accept => {
     const child = spawn(command, args, { cwd: root, stdio: [input === undefined ? 'ignore' : 'pipe', 'pipe', 'pipe'] });
     if (input !== undefined) child.stdin!.end(input);
@@ -1672,11 +1247,11 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     child.on('error', error => accept({ code: 1, stdout, stderr: String(error.message ?? error) }));
     child.on('close', code => accept({ code: code ?? 1, stdout, stderr }));
   });
-  const controlPlaneChildren = upMergerControlPlane(request) ? {
+  const childCommands = {
     gh: (args: string[], input?: string) => childIn('gh', args, input),
     git: (args: string[]) => childIn('git', args),
     installDirectory: () => installDirectory(installIdFor(request.repository)),
-  } : {};
+  };
   // The loop runs from the checkout of the CLI master init recorded, which is this CLI until it has.
   const loopCheckout = async () => {
     let recorded: unknown = null;
@@ -1694,9 +1269,8 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop unit is judged against the CLI running up, whose launcher and checkout are this run's.
     loopCode: async () => readLoopCode(root, { cliPath }),
-    // GY-1899: the held snapshot's pointer lives under the checkout this CLI runs from, where the
-    // loop's holdCliAt wrote it — a lift that read the managed repository would remove nothing.
-    liftLoopPins: async () => liftLoopPins(root, { repository: request.repository, heldRoot: loopCodeRoot(cliPath, root) }),
+    removeHeldCliPin: async () => removeHeldCliPin(loopCodeRoot(cliPath, root)),
+    liftLoopPins: async () => liftLoopPins(root, { repository: request.repository }),
     fileOnboarding: async (commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();
       let token = '';
@@ -1764,11 +1338,8 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
       const recorded = await recordSupervision(root, 'supervised', login);
       return { operatorLogin: recorded.operatorLogin };
     },
-    // GY-1552: control-plane merger creates the repository and registers the deploy key through gh.
-    ...controlPlaneChildren,
-    // Each App page gets its own recorded drive, so each has its own record directory.
-    // Control-plane merger needs no App browser drive.
-    ...(!upMergerControlPlane(request) && browser ? { driveApp: (url: string, handoff: Handoff) => recordedAppDriver(root, request, { profile: browser.profile, ...(browser.executable ? { executable: browser.executable } : {}) }, undefined, { emit }).drive(url, handoff) } : {}),
+    // The merge writer's repository creation and deploy key run through gh, in the checkout itself.
+    ...childCommands,
   };
 }
 

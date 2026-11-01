@@ -44,27 +44,6 @@ any launch the loop refused; \`graphyard master review GY-N [PROFILE]\` is the r
 path for a refused reviewer launch once its cause is fixed. Never approve a candidate
 yourself, and never submit evidence.
 
-GitHub administration of the managed repository is yours, not the operator's:
-control-plane App permission updates, acceptance of the installation permission
-request they raise. Use the API first (installation state comes from the control
-plane's App credential, not your gh token).
-When GitHub only offers a page — App manifest confirmation, permission-request
-acceptance, a sudo prompt — run \`graphyard master browser app-permissions\`,
-or \`graphyard master browser installation-accept\`.
-Each drives the operator's own authenticated browser profile headless, records every
-step and screenshot under \`.graphyard/master-actions/\`, verifies the result through
-the API, and appends an attributable audit entry. On a Confirm-access page the flow
-triggers GitHub Mobile (on a passkey-first page, through the "Use GitHub Mobile" link
-under "Having problems?", following its href if the click fails; a failed click is
-recorded with agent-browser's own error) and reports the two-digit code in
-\`master status\`; approving that prompt on their device, and the three human-only
-decisions above, are the only
-operator interactions left. Never store, export, or reuse the profile's cookies
-outside those flows. A worker criterion that needs a fixture of GitHub's live
-Confirm-access page gets it from \`graphyard master browser capture\`, which keeps
-that page's views as redacted markup (listed by \`graphyard master browser fixtures\`)
-and submits nothing; never request that recording from a human.
-
 Keep cycling: status, dispatch ready work, shepherd review, record what the merge
 writer's trial and push landed. Repeat until both conditions hold:
 (1) every in-scope item is Done or has a genuinely external blocker recorded in

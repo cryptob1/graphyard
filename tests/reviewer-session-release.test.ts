@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
@@ -90,6 +90,31 @@ async function closeCycle(root: string, config: MasterConfig, registry: ReturnTy
   return released;
 }
 
+test('unit:reviewer-session-release — a master config with no githubAppId launches a review, reads its control-plane verdict and releases its session', async () => {
+  const host = await fleet({ name: 'review-a', agentName: 'review-a', kind: 'claude', concurrency: 4 }, 'review-a');
+  try {
+    const file = join(host.root, '.graphyard', 'master.json');
+    const { githubAppId: _retired, ...stored } = JSON.parse(await readFile(file, 'utf8'));
+    await writeFile(file, JSON.stringify(stored));
+    const config = await loadMasterConfig(host.root);
+    const registry = memoryRegistry(config.hostId, await claudeLogin('reviewer-account'));
+    const item = requested(3);
+    const requestId = item.autoDispatch!.review!.id;
+    const launched = await launchReview(host.root, item, 'review-a', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId, probe: { registry: registry.client, quota: false, cacheMs: 0 } });
+    const record = (await readReviewLedger(host.root)).reviews.find(entry => entry.requestId === requestId)!;
+    const verdict = { sha: item.candidate!.sha, state: 'APPROVED', reviewer: launched.reviewer, reviewId: 9, submittedAt: new Date().toISOString() };
+    (item as { reviewLaunch?: unknown }).reviewLaunch = { id: record.launch, head: item.candidate!.sha, verdict };
+    await reconcileReviews(host.root, config, { run: host.run, work: [item], agents: [...host.agents] });
+    assert.equal((await readReviewLedger(host.root)).reviews.find(entry => entry.requestId === requestId)!.state, 'completed');
+    item.observation!.reviews = [{ sha: item.candidate!.sha, state: 'APPROVED', reviewer: launched.reviewer, id: 9, source: 'control-plane', submittedAt: verdict.submittedAt }];
+    reconcileAutoDispatch(item, [item], new Date());
+    (item as { sessions?: unknown[] }).sessions = [handle(requestId, 'review', config.hostId, launched, item.candidate!.sha)];
+    const [released] = await closeCycle(host.root, config, registry, item, host.agents);
+    assert.equal(released.session, record.session);
+    assert.deepEqual(registry.live(), []);
+  } finally { await host.cleanup(); }
+});
+
 test('unit:reviewer-session-released-after-review — the close step releases a reviewer session the registry still counts once its verdict is recorded, and one whose pane Herdr no longer reports, with the missing pane named', async () => {
   const host = await fleet({ name: 'review-a', agentName: 'review-a', kind: 'claude', concurrency: 4 }, 'review-a');
   try {
@@ -101,7 +126,7 @@ test('unit:reviewer-session-released-after-review — the close step releases a 
     // recorded the session, and the ledger record carries the registry session it ran under.
     const item = requested(1);
     const requestId = item.autoDispatch!.review!.id;
-    const launched = await launchReview(host.root, item, 'review-a', host.agents, new Date().toISOString(), { run: host.run, mint: host.mint, requestId, probe });
+    const launched = await launchReview(host.root, item, 'review-a', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId, probe });
     const sessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === requestId)!.session!;
     assert.deepEqual(registry.live().map(session => [session.id, session.work]), [[sessionId, 'GY-501']], 'the registry counts the fresh review live');
 
@@ -127,7 +152,7 @@ test('unit:reviewer-session-released-after-review — the close step releases a 
     // (a codex session exits on its own): the close step releases it too, naming the missing pane.
     const vanished = requested(2);
     const vanishedRequestId = vanished.autoDispatch!.review!.id;
-    const gone = await launchReview(host.root, vanished, 'review-a', host.agents, new Date().toISOString(), { run: host.run, mint: host.mint, requestId: vanishedRequestId, probe });
+    const gone = await launchReview(host.root, vanished, 'review-a', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: vanishedRequestId, probe });
     const goneSessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === vanishedRequestId)!.session!;
     assert.deepEqual(registry.live().map(session => session.id), [goneSessionId], 'the standing request holds its session');
     host.agents.splice(host.agents.findIndex(agent => agent.pane_id === gone.pane), 1);

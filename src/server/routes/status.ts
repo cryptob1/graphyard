@@ -10,7 +10,6 @@ import { humanOnlySubjects } from '../waits.js';
 import { defineRoutes } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
-import { directMergeStatus } from '../../direct-merge.js';
 import { autoMergeStatus, mergeWriterStatus } from '../../merger-mode.js';
 import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
@@ -64,7 +63,7 @@ export const statusRoutes = defineRoutes('status', [
       const servingRoot = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : repositoryToplevel(process.cwd());
       const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs, deploy, serving,
+        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', heldJobs, starvedJobs, jobs, deploy, serving,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
@@ -74,8 +73,6 @@ export const statusRoutes = defineRoutes('status', [
         // quota and reset time. `?host=` (or the executor-host header) judges placement for that
         // executor. It names hosts and login homes, so implementers and producers do not read it.
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
-        // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
-        directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // The merge writer (merger-mode.ts): always the control plane.
         mergeWriter: mergeWriterStatus,
         // Automatic merging (GY-1927): off, a gate-passing candidate is held until a merge decision releases it.

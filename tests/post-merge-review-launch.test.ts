@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -62,13 +62,11 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('post-merge-launch-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('post_merge_launch_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/post_merge_launch_test`); await store.init();
-  const engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  const engine = new Engine(store, 120, repository); engine.submissionObserver = null
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  // The loop's own checkout, with one reviewer profile and the reviewer identity the production loop
-  // registers (GY-2008): the configured reviewer App's bot login. In control-plane mode the App's
-  // credential is never read, so the binding alone drives the identity.
+  // The loop's own checkout, with one reviewer profile.
   root = await temporaryDirectory('post-merge-launch-master');
   credentialDirectory = await temporaryDirectory('post-merge-launch-credentials');
   execFileSync('git', ['init', '-q', root]);
@@ -76,10 +74,6 @@ before(async () => {
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: coordinator.id, role: coordinator.role }, repository, baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
   await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', concurrency: 4 });
-  const file = join(root, '.graphyard/master.json');
-  const storedConfig = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-  storedConfig.reviewer = { appId: 4242, installationId: 99, slug: 'graphyard-reviewer', credentialFile: join(credentialDirectory, 'reviewer.json'), boundAt: at() };
-  await writeFile(file, JSON.stringify(storedConfig, null, 2));
   config = await loadMasterConfig(root);
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
@@ -130,10 +124,10 @@ test('unit:post-merge-review-without-pr-launches — a post-merge request for a 
   const tick = await runDispatchTick(config, cursor, effects, () => Date.parse(at()));
   assert.deepEqual(tick.refused, [], JSON.stringify(tick.refused));
   assert.deepEqual(tick.launched.map(launch => [launch.kind, launch.work, launch.requestId]), [['review', 'GY-9001', postMergeRequestId('GY-9001', M)]], 'the launch went out, not a 400');
-  // The plane registered the launch: post-merge, on the merge commit, as the configured reviewer App's bot identity.
+  // The plane registered the launch: post-merge, on the merge commit, as the reviewer profile's identity.
   const registered = await stored(work.id);
   assert.equal(registered.reviewLaunch!.postMerge, true);
-  assert.deepEqual([registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester], [M, B, 'graphyard-reviewer[bot]', coordinator.id]);
+  assert.deepEqual([registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester], [M, B, 'review-claude-1', coordinator.id]);
   assert.equal(registered.reviewLaunch!.verdict, null);
   // The session is on the ledger: control-plane mode, post-merge, under the request id, and the record's pr is positive —
   // `reviewRecordSchema` requires it, and the binding's `|| 1` stands in for the pull request the merge never had.

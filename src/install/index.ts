@@ -148,8 +148,8 @@ export function installRequestFromArgs(args: string[]) {
  * installation with no installer-created worker and no own Herdr instance was applied with --observe-only.
  *
  * `sourceRoot` (GY-2168) names the checkout the image builds from, instead of the running CLI's
- * own code root: a redeploy the loop or `graphyard upgrade` starts may load a held snapshot at
- * another commit, and the image it builds must hold the deployed commit's tree, stamped with that
+ * own code root: a redeploy the loop or `graphyard upgrade` starts may target another commit,
+ * and the image it builds must hold the deployed commit's tree, stamped with that
  * commit, so `/healthz?strict` reports the deployed commit after the step.
  */
 export function redeployArguments(record: InstallRecord, image: string, sourceRoot: string | null = null) {
@@ -411,7 +411,6 @@ export function coreEnv(session: InstallSession): EnvValue[] {
     { name: 'GRAPHYARD_PRINCIPALS', value: principalsVariable(session.principals, session.tokens), secret: true },
     { name: 'GITHUB_REPOSITORY', value: inputs.repository, secret: false },
     { name: 'GITHUB_BASE_BRANCH', value: inputs.baseBranch, secret: false },
-    { name: 'GRAPHYARD_REVIEWER_APPS', value: JSON.stringify((session.record?.reviewers ?? []).map(reviewer => ({ id: reviewer.name, runtime: reviewer.name.replace(/-reviewer$/, ''), appId: reviewer.appId, botUserId: reviewer.botUserId }))), secret: false },
     // The capacity limits derived from the principal set being deployed; the server derives the
     // same values when they are unset, and an explicit value keeps the install predictable
     // across upgrades. A re-run after the roster changed reports the old values as drift.

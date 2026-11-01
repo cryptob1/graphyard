@@ -116,7 +116,7 @@ test('unit:mode-parity-github-snapshot — the engine\'s own submit of the fixtu
   await pg.initialise(); await pg.start(); await pg.createDatabase('mode_parity_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/mode_parity_test`); await store.init();
   const engine = new Engine(store, 120, 'owner/project');
-  engine.directMergeEnvironment = null; engine.baseBranch = 'main';
+  engine.baseBranch = 'main';
   const assigned = async (branch: string) => {
     let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'parity fixture', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:item-works'] }] }, randomUUID());
     w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());

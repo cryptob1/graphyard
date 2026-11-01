@@ -107,10 +107,6 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
     recovery: loopCodeStale ? rerunUp : !loopCode ? rerunUp : null });
 
   const proposal = facts.proposal ?? null;
-  item({ id: 'required-checks', title: 'Required CI checks discovered', profiles: all,
-    status: proposal === null ? 'unknown' : proposal.checks.length ? 'ready' : 'missing',
-    detail: proposal === null ? 'no proposal to read' : proposal.checks.length ? `checks: ${proposal.checks.join(', ')} (${proposal.ci.system})` : 'no CI checks were discovered',
-    recovery: proposal === null ? scanFirst.proposal : proposal.checks.length ? null : 'Add a GitHub Actions workflow that runs on pull_request with the test and static-analysis jobs, or declare the check names by hand in the proposal before applying it' });
 
   const frameworks = proposal?.stack.frameworks ?? [];
   const e2e = frameworks.filter(f => f === '@playwright/test' || f === 'cypress');
@@ -132,7 +128,7 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
   item({ id: 'reviewer', title: 'Independent review provider selected', profiles: all,
     status: proposal === null ? 'unknown' : proposal.profiles.reviewer.provider ? 'ready' : 'missing',
     detail: proposal === null ? 'no proposal to read' : `review provider: ${proposal.profiles.reviewer.provider}`,
-    recovery: proposal === null ? scanFirst.proposal : proposal.profiles.reviewer.provider ? null : 'Choose a review provider with `graphyard reviewpolicy GY-N github|codex|agent POLICY_REVISION REASON`' });
+    recovery: proposal === null ? scanFirst.proposal : null });
 
   const validation = facts.validation ?? null;
   const runnerPath: [string, keyof NonNullable<ReadinessFacts['validation']>, string, string][] = [
@@ -163,7 +159,7 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
   const missing = items.filter(i => i.status === 'missing'), unknown = items.filter(i => i.status === 'unknown');
   return { profile, meaning: profileMeaning[profile], ready: !missing.length && !unknown.length, items,
     summary: { ready: items.length - missing.length - unknown.length, missing: missing.length, unknown: unknown.length },
-    next: missing[0]?.recovery ?? unknown[0]?.recovery ?? 'Every item is ready: submit a real PR and inspect each gate; configured is not proof of enforcement' };
+    next: missing[0]?.recovery ?? unknown[0]?.recovery ?? 'Every item is ready: file what you want built.' };
 }
 
 /** Count the current revision of each validation definition the server lists. */

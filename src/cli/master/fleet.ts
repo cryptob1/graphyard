@@ -4,14 +4,13 @@ import { parseArgs } from 'node:util';
 import { listHerdrAgents, masterHarness, masterSettingsFromArgs, producerCommand, registeredReview, saveMasterSettings, saveWorkerProfile, startMaster, workerProfileSchema } from '../../master.js';
 import { reviewCommand as launchReview } from '../../reviewer.js';
 import { writeHarnessPermissions } from '../../harness.js';
-import { browserFlows, listConfirmAccessFixtures, runBrowserFlow, type BrowserFlow } from '../../master-browser.js';
 import { reviewerCommand } from '../master-reviewer.js';
 import { registryCommand } from '../master-registry.js';
 import { unhandled, type MasterSession } from './session.js';
 
-/** Launch profiles, the master session, reviewer launches, and GitHub administration through the operator. */
+/** Launch profiles, the master session, reviewer launches and the master's harness rules. */
 export async function fleetCommand(session: MasterSession): Promise<unknown> {
-  const { id, args, print, root, master, masterApi, masterMutation, coordinator } = session;
+  const { id, args, print, root, master, masterApi, masterMutation } = session;
   const reviewCommand: typeof launchReview = (...a) => registeredReview(master, a[1], a[2], masterMutation, () => launchReview(...a));
   if (id === 'start') {
     const kind = workerProfileSchema.shape.kind.safeParse(args[0]); if (!kind.success) throw new Error('Use master start with a supported agent kind such as codex or claude');
@@ -28,16 +27,6 @@ export async function fleetCommand(session: MasterSession): Promise<unknown> {
   if (id === 'review') {
     const snapshot = await masterApi('work-snapshot');
     return print(await reviewCommand(root, args, snapshot, await listHerdrAgents()));
-  }
-  if (id === 'browser') {
-    const { values, positionals } = parseArgs({ args, options: { 'dry-run': { type: 'boolean' } }, allowPositionals: true });
-    // The Confirm-access captures earlier flows recorded, for fixtures (GY-1482); nothing is opened.
-    if (positionals[0] === 'fixtures' && positionals.length === 1 && !values['dry-run']) return print(await listConfirmAccessFixtures(root));
-    const flow = positionals[0] as BrowserFlow | undefined;
-    if (!flow || !browserFlows.includes(flow)) throw new Error(`Use master browser ${browserFlows.join('|')} [--dry-run], or master browser fixtures`);
-    const result = await runBrowserFlow(root, master, flow, { coordinator: coordinator.actor.id, dryRun: !!values['dry-run'] });
-    if (result.outcome === 'refused') process.exitCode = 1;
-    return print(result);
   }
   if (id === 'harness') {
     const { values, positionals } = parseArgs({ args, options: { apply: { type: 'boolean' } }, allowPositionals: true });

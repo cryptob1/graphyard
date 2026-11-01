@@ -1,17 +1,17 @@
 import { execFileSync } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, generateKeyPairSync } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../../src/model.js';
 import { reconcileAutoDispatch } from '../../src/model/dispatch.js';
 import { setupMaster, type HerdrAgent, type MasterConfig } from '../../src/master.js';
-import { bindReviewer, launchReview, reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
+import { launchReview, reconcileReviews, saveReviewerProfile } from '../../src/reviewer.js';
 import type { DispatchEffects } from '../../src/auto-dispatch.js';
 import { temporaryDirectory } from './temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2026-10-01T10:00Z at stamps createdAt, stageEnteredAt and evidence of fixture items; new Date() is the clock handed to reconcileAutoDispatch and stamps snapshots and token expiries nothing ages.
 
-// The automatic-review fleet (GY-1072): a master bound to a reviewer App over a stubbed Herdr, and
+// The automatic-review fleet (GY-1072): a master over a stubbed Herdr, and
 // review requests for it, shared by tests/automatic-review-concurrency.test.ts and the soak.
 
 const launcher = fileURLToPath(new URL('../../bin/graphyard.mjs', import.meta.url));
@@ -28,7 +28,7 @@ function observation(candidate: { sha: string; baseSha: string; pr: number; bran
 export function requested(n: number, head = 1): Work {
   const now = new Date();
   const candidate = { sha: sha40(head === 1 ? `a${n}` : `a${n}e${head}`), baseSha: B, pr: 500 + n, branch: `graphyard/gy-${500 + n}-1`, author: 'implementer' };
-  const item = { id: `work-${500 + n}`, key: `GY-${500 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [], 
+  const item = { id: `work-${500 + n}`, key: `GY-${500 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:review'] }],
     policy: { checks: ['test', 'typecheck'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: `/w/gy-${500 + n}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -42,7 +42,7 @@ export function requested(n: number, head = 1): Work {
 }
 
 /**
- * A master bound to a reviewer App with a stubbed Herdr: every typed launch becomes a visible agent,
+ * A master with a stubbed Herdr: every typed launch becomes a visible agent,
  * and `pane close` removes one unless the test makes Herdr refuse it: `refuseClose` maps a pane to
  * how many more closes Herdr refuses (Infinity: every one). `closes` lists every close asked for.
  */
@@ -50,9 +50,7 @@ export async function fleet(reviewer: Record<string, unknown>, automatic: string
   const root = await temporaryDirectory('auto-review'), credentialDirectory = await temporaryDirectory('auto-review-credentials');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
-  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
+  await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC', run: { worktreeRoot: await temporaryDirectory('review-checkouts', join(process.cwd(), '.graphyard')) } }, coordinatorStatus as typeof fetch);
   await saveReviewerProfile(root, reviewer);
   await saveReviewerProfile(root, { name: 'spare-reviewer', agentName: 'review-spare', kind: 'claude' });
   if (automatic) {
@@ -81,19 +79,18 @@ export async function fleet(reviewer: Record<string, unknown>, automatic: string
     if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
     return JSON.stringify({ result: {} });
   };
-  const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+  const registerLaunch = async () => ({ launch: 'fixture-launch' });
   const effects = (items: () => Work[], config: () => MasterConfig, observe: NonNullable<Parameters<typeof reconcileReviews>[2]>['observe'] = () => null): DispatchEffects => ({
     snapshot: async () => ({ work: items(), now: new Date().toISOString() }),
     agents: () => [...agents],
     credentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])),
     reconcileReviews: (work, herdr) => reconcileReviews(root, config(), { run, work, agents: herdr, observe }),
     reconcileProducers: async () => ({ producers: [] }),
-    launchReview: (work, request, profile, herdr, observedAt) => launchReview(root, work, profile.name, herdr, observedAt, { run, mint, requestId: request.id }),
+    launchReview: (work, request, profile, herdr, observedAt) => launchReview(root, work, profile.name, herdr, observedAt, { run, registerLaunch, requestId: request.id }),
     launchProducer: async () => { throw new Error('no producer is launched here'); },
     persist: async () => {},
   }) as DispatchEffects;
   const cleanup = async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); };
-  return { root, agents, calls, closes, run, mint, refuseClose, effects, cleanup };
+  return { root, agents, calls, closes, run, registerLaunch, refuseClose, effects, cleanup };
 }
 export const starts = (calls: string[][]) => calls.filter(call => call[0] === 'agent' && call[1] === 'rename').map(call => call[3]);
-

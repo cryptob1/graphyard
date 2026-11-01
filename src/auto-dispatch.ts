@@ -329,11 +329,10 @@ export async function writeDispatchCursor(config: MasterConfig, cursor: Dispatch
  * The reviewer profile that answers automatic requests: the configured one, else the only one.
  * The configured one runs `automaticReviewerConcurrency` sessions when it declares none (GY-1072).
  */
-export function selectReviewerProfile(input: MasterConfig, mode: 'github' | 'control-plane' = 'github'): { profile: ReviewerProfile | null; reason: string | null } {
+export function selectReviewerProfile(input: MasterConfig): { profile: ReviewerProfile | null; reason: string | null } {
   // GY-1978: a supervised install's heads have no pull request either, so its reviewer answers in control-plane mode.
   const config = withReviewerDefaults(input);
   // A control-plane review (GY-1525) posts through the API under a one-time token: it needs a profile, not a reviewer App.
-  if (!config.reviewer && mode !== 'control-plane') return { profile: null, reason: 'no reviewer identity is registered; run master reviewer setup or master reviewer bind' };
   if (config.run.reviewerProfile) {
     const profile = config.reviewers.find(item => item.name === config.run.reviewerProfile) ?? null;
     return profile ? { profile, reason: null } : { profile: null, reason: `run.reviewerProfile names ${config.run.reviewerProfile}, which is not a configured reviewer profile` };
@@ -1183,9 +1182,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
     else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
     else {
-      // A control-plane observation, or an install with no GitHub App, has its review answered by a control-plane reviewer.
-      const mode = item.observation?.source === 'control-plane' || !config.githubAppId ? 'control-plane' : 'github';
-      const { profile, reason } = selectReviewerProfile(config, mode);
+      const { profile, reason } = selectReviewerProfile(config);
       // The selected profile answers; the other reviewer profiles are its failover when none of
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.
@@ -1243,7 +1240,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     else if (!effects.launchProductReview) wait('review', item, request, 'this dispatcher launches no product reviews');
     else if (!retryable(request)) wait('review', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[request.id].nextAt}`}`);
     else {
-      const { profile, reason } = selectReviewerProfile(config, 'control-plane');
+      const { profile, reason } = selectReviewerProfile(config);
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
       const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
       const busy = () => wait('review', item, request, `product review: ${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}`);
@@ -1372,7 +1369,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         wait('review', item, request, `launch refused ${failure.attempts} time(s): ${failure.reason}; ${failure.attempts >= dispatchFailureLimit ? `probed again every ${postMergeRefusalProbeMs / 60_000} minutes (next at ${new Date(Date.parse(failure.at) + postMergeRefusalProbeMs).toISOString()}): the request launches once the refusal's cause is gone` : `next attempt at ${failure.nextAt}`}`);
         continue;
       }
-      const { profile, reason } = selectReviewerProfile(config, 'control-plane');
+      const { profile, reason } = selectReviewerProfile(config);
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
       const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
       const busy = () => wait('review', item, request, `${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);

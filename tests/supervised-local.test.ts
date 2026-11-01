@@ -33,7 +33,7 @@ const identities = {
 /** A local control plane: no App, a worker and a reviewing account; the loop starts on restart. */
 interface World { calls: { args: string[]; stdin?: string; env?: Record<string, string> }[]; installed: boolean; loop: boolean; supervised: number; deployKeys?: number }
 const status = (w: World) => w.installed ? {
-  github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] }, reviewerApps: [],
+  github: true, githubRepository: 'acme/shop',
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
   setup: { protection: 'checks', loop: w.loop },
 } : null;
@@ -85,10 +85,10 @@ test('unit:supervised-setup-skips-autonomy — supervision defaults to autonomou
   assert.equal(upSupervised(await localRequest()), true, '--local installs supervised');
   assert.equal(upSupervised({ provider: 'compose' }), false, 'every other provider keeps autonomous');
 
-  // The checklist (GY-1978): supervised and autonomous installs ask for the same steps — no App, a writing and a reviewing account.
+  // The checklist (GY-1978): supervised and autonomous installs ask for the same steps — a writing and a reviewing account, and the running coordinator.
   const bare = status({ calls: [], installed: true, loop: true, supervised: 0 });
   const supervisedIds = setupChecklist(bare).map(item => item.id);
-  assert.deepEqual(supervisedIds, ['github-app', 'reviewer-app', 'account:worker', 'account:reviewer', 'master-loop']);
+  assert.deepEqual(supervisedIds, ['account:worker', 'account:reviewer', 'master-loop']);
   assert.ok(setupChecklist(bare).every(item => item.done), 'a local install with a writing and a reviewing account is green');
   const autonomous = setupChecklist(bare);
   assert.ok(!setupChecklist({ ...bare!, fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }], accounts: bare!.fleet.accounts } }).find(item => item.id === 'account:reviewer')!.done, 'a supervised install still needs its reviewing account');
@@ -144,7 +144,7 @@ function work(reviews: Observation['reviews'], author = 'graphyard-worker[bot]')
   const at = '2026-10-08T00:00:00.000Z', candidate = { sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author };
   const observation: Observation = { candidate, checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews, merged: false, mergeSha: null, mergeable: true, protected: true,
     files: ['src/app.ts'], scopeFiles: [], at, prState: 'open', draft: false, baseTip: B, baseTree: sha('7b'), baseTipContained: true } as Observation;
-  return { id: 'work-7', key: 'GY-7', title: 'A supervised change', description: '', type: 'feature', priority: 0, dependencies: [], 
+  return { id: 'work-7', key: 'GY-7', title: 'A supervised change', description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:works'] }], policy: { checks: ['test', 'typecheck'], review: true }, stage: 'review', revision: 3, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 7 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation, blocker: null, gates: [], violations: [] } as unknown as Work;
@@ -175,7 +175,7 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   const supervised = withRoleDefaults(baseConfig({ supervision: 'supervised', ...identities, reviewers: [reviewer] }));
   assert.equal(supervised.reviewer, undefined); assert.equal(supervised.operatorAgent, undefined);
   // GY-1978: no pull request awaits the operator, so the reviewer profile answers every head in control-plane mode, which needs no App.
-  assert.equal(selectReviewerProfile(supervised, 'control-plane').profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
+  assert.equal(selectReviewerProfile(supervised).profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
   // The same identities in autonomous mode are kept.
   const autonomous = withRoleDefaults(baseConfig(identities));
   assert.ok(autonomous.reviewer && autonomous.operatorAgent);

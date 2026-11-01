@@ -11,7 +11,6 @@ import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
 export interface ControlPlaneStatus {
-  appPermissions?: { app?: string; installationUrl?: string; verifiedAt?: string | null; error?: string | null; suspended?: boolean; missing?: { permission: string; required: string; features: string[] }[]; attention?: string[] } | null;
   heldJobs?: number;
   /** Observation jobs that saved no observation three or more times in a row (GY-506); a server before it reports none. */
   starvedJobs?: { key: string; unobserved: number; error?: string | null; deferred_reason?: string | null }[];
@@ -37,20 +36,19 @@ export interface AttentionItem extends AttentionOwner { subject: string; text: s
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string): AttentionOwner => ({ role, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', human: true, humanOnly, next });
 /** The sources of installation attention. */
-export const installationSources = ['app-permissions', 'held-jobs', 'delegation-limits', 'production'] as const;
+export const installationSources = ['held-jobs', 'delegation-limits', 'production'] as const;
+/** Recovery for an older control plane still reporting its retired App integration. */
+export const retiredAppRemedy = "Run graphyard install --repo OWNER/NAME --plan, then --apply to install the merge writer's deploy key in place of the retired GitHub App integration";
 /** The owner of one installation attention line, by the source that raised it. */
 export function installationOwner(source: typeof installationSources[number], text: string): AttentionOwner {
-  // Reinstating a suspended App installation is an account decision on the operator's GitHub account.
-  if (source === 'app-permissions') return /suspended/i.test(text) ? humanOwner('spending money or opening third-party accounts', 'Reinstate the suspended GitHub App installation from the account that owns it')
-    : agentOwner('master', 'graphyard master browser app-permissions, then graphyard master browser installation-accept');
-  if (source === 'held-jobs') return agentOwner('control plane', 'Nothing to run: held jobs resume once graphyard master browser installation-accept grants the permission');
+  if (source === 'held-jobs') return agentOwner('master', retiredAppRemedy);
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
   // The failing deployment is on the base branch production deploys; the fix is its redeploy.
   return agentOwner('master', 'Fix the failing deployment of the base branch, which production tracks, with the configured provider');
 }
 /** Why a work item raises attention. */
 export const workAttentionCauses = ['human-request', 'session', 'proof-gap', 'reviewer-exhausted', 'launch-review', 'launch-producer',
-  'stalled-step', 'base-conflict', 'merged-unauthorized', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const;
+  'stalled-step', 'base-conflict', 'merged-reverted', 'hold-overdue', 'merge-base-dismissed', 'merge-refused', 'gate'] as const;
 export type WorkAttentionCause = typeof workAttentionCauses[number];
 /**
  * The owner of a work item's attention, from the same facts that raised it. Everything an agent
@@ -74,9 +72,6 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
     const reverted = work.observation!.revertedDelivery!;
     return agentOwner('master', `graphyard master create FILE for a follow-up item that restores ${reverted.files.map(file => file.path).join(', ')} to the base branch as ${key} shipped them${reverted.removedBy ? `, naming merge ${reverted.removedBy.mergeSha?.slice(0, 12) ?? `of pull request #${reverted.removedBy.pr}`}${reverted.removedBy.key ? ` of ${reverted.removedBy.key}` : ''} as what removed them` : ''}; request no merge decision for ${key} until the base branch holds its content — a reconciliation now would record a delivery for work that is not there`);
   }
-  // The merge already happened and cannot be re-run: it stays on the record as a violation, and
-  // the work it skipped is a follow-up item.
-  if (cause === 'merged-unauthorized') return agentOwner('master', `graphyard master create FILE for a follow-up item that re-verifies what ${key}'s merge skipped; its unauthorized-merge violation stays on the record`);
   // Graphyard absorbs a moved base itself; a conflict is the one case it cannot, so the candidate
   // goes back to a worker for a fresh attempt rather than waiting for a refresh that cannot land.
   // On a system-driven item that rework is the loop's own round (GY-1389), which refuses a hand request:
@@ -110,16 +105,13 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   return agentOwner('master', `graphyard diagnose ${key}`);
 }
 /**
- * Attention that belongs to the installation rather than to a work item: a declared App
- * permission the installation lacks, an unverifiable preflight, the jobs held on it, a
+ * Attention that belongs to the installation rather than to a work item: held jobs, a
  * capacity variable that no longer covers the roster, and a base branch that production has
  * not deployed.
  */
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
-  const report = status?.appPermissions;
   const items: AttentionItem[] = [];
   const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text) });
-  for (const text of report?.attention ?? []) raise('app-permissions', text);
   if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
   // A job that keeps finishing without an observation holds the merge queue behind its item (GY-506).
@@ -127,7 +119,7 @@ export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const production = status?.production ? productionSummary(status.production) : null;
   for (const text of production?.attention ?? []) raise('production', text);
   const attention = items.map(item => item.text);
-  return { attention, attentionItems: items, appPermissions: report ? { app: report.app ?? null, installationUrl: report.installationUrl ?? null, verifiedAt: report.verifiedAt ?? null, error: report.error ?? null, suspended: report.suspended ?? false, missing: (report.missing ?? []).map(shortfall => ({ permission: shortfall.permission, required: shortfall.required, features: shortfall.features })) } : null, heldJobs: status?.heldJobs ?? 0,
+  return { attention, attentionItems: items, heldJobs: status?.heldJobs ?? 0,
     delegationLimits: status?.delegationLimits ? { limits: status.delegationLimits.limits ?? null, deployed: status.delegationLimits.deployed ?? null, drift: (status.delegationLimits.drift ?? []).map(entry => ({ variable: entry.variable, deployed: entry.deployed, required: entry.required, reason: entry.reason })) } : null,
     build: status?.build ? { commit: status.build.commit ?? null, protocol: status.build.protocol ?? null } : null, production };
 }

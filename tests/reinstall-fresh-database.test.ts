@@ -36,8 +36,7 @@ const planeFetch = (plane: Plane): typeof fetch => async (input, init) => {
 
 /** The checklist all green, as /api/status reports it once everything is installed and the loop runs. */
 const green = (loop: boolean) => ({
-  github: true, githubRepository: 'acme/shop', appPermissions: { missing: [], installationUrl: 'https://github.com/settings/installations/7' },
-  reviewerApps: [{ id: 'claude', appId: 9 }], mergeWriter: { merger: 'github' },
+  github: true, githubRepository: 'acme/shop', mergeWriter: { merger: 'github' },
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
   setup: { protection: 'checks', loop },
 });
@@ -93,9 +92,11 @@ test('unit:reinstall-reissues-stale-credentials — up re-issues the coordinator
     status: async () => green(loop !== null),
     credentialAnswers: token => recordedCredentialAnswers(root, SERVER, fetcher(), token),
     stopLoop: async () => { stops++; await stopLoop(); return { unit: null }; },
-    publishOnboarding: async () => null
+    publishOnboarding: async () => null,
+    // The repository exists: the control-plane merger's preflight creates it only when missing.
+    gh: async () => ({ code: 0, stdout: '{}' }), git: async () => ({ code: 0, stdout: '', stderr: '' })
   });
-  const request: UpRequest = { repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null };
+  const request: UpRequest = { repository: 'acme/shop', provider: 'compose', agent: false, master: 'claude' };
   const count = (command: string) => { const [first, second] = command.split(' '); return calls.filter(args => args[0] === first && (first === 'install' ? args.includes(second) : args[1] === second)).length; };
   const archives = async () => { const file = await cursor(); return (await readdir(dirname(file))).filter(name => name.startsWith(basename(file).replace(/\.json$/, '.archived-'))); };
   const credential = async () => (await readFile((await loadStoredMasterConfig(root)).operatorAgent!.credentialFile, 'utf8')).trim();
