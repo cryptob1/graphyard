@@ -10,7 +10,7 @@ import { dispatchSort, inFlight } from '../coordination.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 import type { CoordinationRounds } from '../server/work-view.js';
-import { stalledDelivery, stalledDeliveryPrompt } from './master-stalled-delivery.js';
+import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, touchStanding } from './state.js';
@@ -600,7 +600,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   const { config, state, effects, herdr } = cycle;
   const sessions = effects.masterSession;
   if (!sessions || !herdr.available) return;
-  const causes = stalledDelivery(open);
+  const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
   const current = new Set(causes.map(cause => cause.key));
   // A retrial temporarily replaces its refusal with an intent. Keep the same base's wake
   // while it runs, otherwise an unchanged failure would wake again after every retrial.
@@ -614,17 +614,21 @@ async function masterSession(cycle: Cycle, open: Work[]) {
     return;
   }
   if (!master.agentName) state.master = { ...master, agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: cycle.snapshot.now, adopted: true };
+  if (!state.master.startedAt) state.master.startedAt = cycle.snapshot.now;
   if (await masterPaneFailover(cycle, handle, open)) return;
   const changed = causes.filter(cause => state.master.subjects[cause.key] !== cause.digest);
-  const target = state.master.pane ?? handle.pane_id ?? handle.name;
-  if (!changed.length || !target || !sessions.wake) return;
+  const target = handle.pane_id ?? state.master.pane ?? handle.name;
+  const since = Date.parse(state.master.lastWake?.at ?? state.master.startedAt ?? cycle.snapshot.now);
+  const heartbeat = !changed.length && open.length > 0 && cycle.now() - since >= (config.run.masterHeartbeatMinutes ?? 30) * 60_000;
+  if ((!changed.length && !heartbeat) || !target || !sessions.wake) return;
+  const prompt = changed.length ? masterCausePrompt(changed) : `Graphyard coordinator heartbeat: open in-scope work remains. Continue from node ${config.cliPath} master status, diagnose stalled work and advance typed agent actions with every gate intact. Act without asking for routine human approval.`;
   const key = config.forPerson ? `master:wake:${config.forPerson}` : 'master:wake';
   cycle.launcher.submit(key, [], async sink => {
     try {
-      await sessions.wake!(target, stalledDeliveryPrompt(changed));
+      await sessions.wake!(target, prompt);
       for (const cause of changed) state.master.subjects[cause.key] = cause.digest;
-      state.master.lastWake = { at: new Date(cycle.now()).toISOString(), causes: changed.map(cause => cause.key).slice(0, 20), heartbeat: false };
-      sink.push(await record(state, key, { kind: 'wake', work: null, principal: null, state: 'done', detail: stalledDeliveryPrompt(changed), attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
+      state.master.lastWake = { at: new Date(cycle.now()).toISOString(), causes: changed.map(cause => cause.key).slice(0, 20), heartbeat };
+      sink.push(await record(state, key, { kind: 'wake', work: null, principal: null, state: 'done', detail: prompt, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
     } catch (error) { sink.push(await record(state, key, { kind: 'wake', work: null, principal: null, state: 'failed', detail: `Could not wake the master: ${message(error)}`, attempts: (state.actions[key]?.attempts ?? 0) + 1, cycle: state.cycle }, cycle.now(), effects.persist)); }
   });
 }
@@ -638,8 +642,8 @@ function submitMasterLaunch(cycle: Cycle, open: Work[]) {
   launcher.submit(launchKey, [], async sink => {
     try {
       if (state.master.session && sessions.end) await sessions.end(state.master.session, 'the master session it recorded is gone from Herdr; the loop launches its replacement').catch(() => undefined);
-      const causes = stalledDelivery(open);
-      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(causes.length ? [stalledDeliveryPrompt(causes)] : [])].join('\n'));
+      const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
+      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(causes.length ? [masterCausePrompt(causes)] : [])].join('\n'));
       const at = new Date(cycle.now()).toISOString();
       state.master = { ...emptyMasterSession(), ...launched, startedAt: at,
         subjects: Object.fromEntries(causes.map(cause => [cause.key, cause.digest])),

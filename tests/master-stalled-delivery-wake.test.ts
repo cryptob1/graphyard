@@ -6,6 +6,7 @@ import { writeFile } from 'node:fs/promises';
 import { emptyDaemonState, runCycle, daemonStateSchema, daemonStatePath, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
+import { dispatchCauses, deploymentCauses } from '../src/daemon/master-stalled-delivery.js';
 import { baseFailureReason } from '../src/merge-writer/executor.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -26,12 +27,14 @@ async function fixture(visible = true) {
     credentialFile: join(directory, 'coordinator.token'), cliPath: '/bin/graphyard', hostId: 'test-host', baseBranch: 'main',
     githubAppId: 1234, masterAgentName: 'master', workers: [] });
   const prompts: string[] = [], launches: string[] = [];
-  let work = [held()], fail = false;
+  let work = [held()], fail = false, now = Date.parse(at);
+  let external: ReturnType<typeof dispatchCauses> = [];
   const effects: DaemonEffects = {
     snapshot: async () => ({ work, now: at }), agents: () => visible ? [{ name: 'master', pane_id: 'pM', agent_status: 'working' }] : [],
     credentials: async () => ({}), closeSession: () => {}, dispatch: async () => { assert.fail('no new implementation attempt'); },
     persist: async () => {},
     masterSession: {
+      pendingCauses: async () => external,
       wake: async (target, text) => { assert.equal(target, 'pM'); if (fail) throw new Error('delivery unavailable'); prompts.push(text); },
       launch: async text => { launches.push(text); visible = true; return { agentName: 'master', pane: 'pM', runtime: 'codex', account: 'account', session: 'registered-master' }; },
     },
@@ -40,7 +43,9 @@ async function fixture(visible = true) {
   return { directory, config, prompts, launches, effects, get state() { return state; },
     work: (next: Work[]) => { work = next; }, fail: (next: boolean) => { fail = next; },
     restart: () => { state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state))); },
-    cycle: () => runCycle(config, state, effects, () => Date.parse(at)),
+    advance: (minutes: number) => { now += minutes * 60_000; },
+    external: (causes: typeof external) => { external = causes; },
+    cycle: () => runCycle(config, state, effects, () => now),
   };
 }
 
@@ -128,4 +133,97 @@ test('integration:master-stalled-delivery-wake — master status distinguishes l
   const resumed = await report([{ ...held(), stage: 'done' }]);
   assert.notEqual(resumed.delivery.state, 'stalled');
   assert.equal(resumed.delivery.reason, null);
+});
+
+for (const status of ['idle', 'working']) test(`integration:master-stalled-delivery-wake — bounded heartbeat for ${status}, repeated cycles and restart`, async () => {
+  const f = await fixture();
+  f.effects.agents = () => [{ name: 'master', pane_id: 'pM', agent_status: status }];
+  f.config.run.masterHeartbeatMinutes = 7;
+  f.work([{ ...held('ordinary trial failure'), blocker: null }]);
+  await f.cycle();
+  f.advance(6);
+  await f.cycle();
+  assert.equal(f.prompts.length, 0);
+  f.restart();
+  f.advance(1);
+  await f.cycle();
+  assert.equal(f.prompts.length, 1);
+  assert.equal(f.state.master.lastWake?.heartbeat, true);
+  f.restart();
+  for (let i = 0; i < 4; i++) await f.cycle();
+  assert.equal(f.prompts.length, 1);
+  f.advance(7);
+  await f.cycle();
+  assert.equal(f.prompts.length, 2);
+  f.work([]);
+  f.advance(60);
+  await f.cycle();
+  assert.equal(f.prompts.length, 2, 'no heartbeat without scoped open work');
+});
+
+test('integration:master-stalled-delivery-wake — blocker, launch failure, failed review and abandoned proof reach master once and clear on resolution', async () => {
+  const f = await fixture();
+  const item: Work = { ...held('ordinary trial failure'), blocker: 'worker cannot reach test database' };
+  f.work([item]);
+  f.state.actions['dispatch:item'] = { kind: 'dispatch', work: 'GY-1', principal: null, state: 'failed', detail: 'launch failed: runtime unavailable', attempts: 1, epoch: 1, cycle: 0, at };
+  const review = { id: 'review-request', kind: 'review', state: 'requested', sha: head, baseSha: base, policyRevision: 1, pr: 1, requestedAt: at, reason: 'required' } as const;
+  const proof = { id: 'proof-request', kind: 'producer', state: 'requested', sha: head, baseSha: base, policyRevision: 1, pr: 1, requestedAt: at, reason: 'required' } as const;
+  item.autoDispatch = { review, producers: [proof], history: [] } as Work['autoDispatch'];
+  const cursor = { failures: { 'review-request': { reason: 'review failed: session exited without verdict' } }, abandoned: { 'proof-request': { reason: 'proof abandoned: all attempts ended without evidence' } } } as unknown as Parameters<typeof dispatchCauses>[1];
+  f.external(dispatchCauses([item], cursor));
+  await f.cycle();
+  for (const reason of ['worker cannot reach test database', 'runtime unavailable', 'session exited without verdict', 'all attempts ended without evidence', 'GY-1']) assert.ok(f.prompts[0].includes(reason));
+  f.restart();
+  for (let i = 0; i < 3; i++) await f.cycle();
+  assert.equal(f.prompts.length, 1);
+  assert.equal(Object.keys(f.state.master.subjects).length, 4);
+  item.blocker = null;
+  f.state.actions['dispatch:item'].state = 'done';
+  item.autoDispatch = null;
+  f.external(dispatchCauses([item], cursor));
+  await f.cycle();
+  assert.deepEqual(f.state.master.subjects, {});
+  f.work([{ ...item, blocker: 'new unresolved cause' }]);
+  await f.cycle();
+  assert.equal(f.prompts.length, 2);
+});
+
+test('integration:master-stalled-delivery-wake — deployment failure handoff and absent master include concrete causes', async () => {
+  const f = await fixture(false);
+  f.work([{ ...held('ordinary trial failure'), blocker: 'worker build blocked' }]);
+  f.external(deploymentCauses({ tip: base, reason: 'health failed: connection refused', restoring: head }));
+  await f.cycle();
+  assert.match(f.launches[0], /worker build blocked/);
+  assert.match(f.launches[0], /health failed: connection refused/);
+  f.restart();
+  await f.cycle();
+  assert.equal(f.prompts.length, 0);
+  f.external(deploymentCauses(null));
+  await f.cycle();
+  assert.ok(!('deployment' in f.state.master.subjects));
+});
+
+test('integration:master-stalled-delivery-wake — actionable wake resets heartbeat deadline and failed board operations clear after retry', async () => {
+  const f = await fixture();
+  const item = held('ordinary trial failure');
+  item.actionQueue = { actions: [{ id: 'board-review', kind: 'review', history: [{ event: 'failed', reason: 'review runner crashed', result: 'no verdict' }] }], history: [] } as unknown as Work['actionQueue'];
+  f.work([item]);
+  await f.cycle();
+  assert.match(f.prompts[0], /GY-1 review: review runner crashed; no verdict/);
+  f.advance(29);
+  item.blocker = 'worker needs dependency repair';
+  await f.cycle();
+  assert.equal(f.prompts.length, 2);
+  f.restart();
+  f.advance(1);
+  await f.cycle();
+  assert.equal(f.prompts.length, 2, 'material wake reset the deadline');
+  item.actionQueue = { actions: [], history: [] };
+  item.blocker = null;
+  await f.cycle();
+  assert.deepEqual(f.state.master.subjects, {});
+  f.advance(29);
+  await f.cycle();
+  assert.equal(f.prompts.length, 3);
+  assert.equal(f.state.master.lastWake?.heartbeat, true);
 });

@@ -1,4 +1,7 @@
 
+import { dispatchCauses, deploymentCauses, type MasterCause } from '../daemon/master-stalled-delivery.js';
+import { readDispatchCursor } from '../auto-dispatch.js';
+import { servingReport } from '../deploy-watch.js';
 import { dirname } from 'node:path';
 import { type ChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
@@ -88,6 +91,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
 export interface MasterSessionEffects {
   launch: (handover: string) => Promise<{ agentName: string; pane: string; runtime: string; account: string | null; session: string | null }>;
   /** Delivers an actionable cause even when the runtime still labels the pane working. */
+  pendingCauses?: (work: Work[]) => Promise<MasterCause[]>;
   wake?: (target: string, text: string) => Promise<unknown>;
   /** Holds the session's account until a limit notice's reset (GY-2949), the way a worker's notice holds its account. */
   exhaust?: (account: string, notice: ExhaustionSignal) => Promise<unknown>;
@@ -95,6 +99,11 @@ export interface MasterSessionEffects {
   end?: (session: string, reason: string) => Promise<unknown>;
 }
 export const masterSessionEffects = (root: string, config: () => MasterConfig, run?: ChildRun): MasterSessionEffects => ({
+  pendingCauses: async work => {
+    const current = config();
+    const [cursor, serving] = await Promise.all([readDispatchCursor(root, current), servingReport(root, current.repository, current.baseBranch)]);
+    return [...dispatchCauses(work, cursor), ...deploymentCauses(serving.failedDeploy)];
+  },
   wake: (target, text) => deliverPrompt(target, text, run),
   launch: async handover => {
     const { agentName, pane, runtime, account, session } = await launchMasterSession(root, config(), await observeHerdrAgents(run), handover, run);
