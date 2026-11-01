@@ -1,10 +1,12 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { mkdir, readFile, readlink, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { ChildProcessError, defaultChildRun } from '../src/child-runner.js';
+import { defaultChildRun } from '../src/child-runner.js';
 import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 import { trialEnvironment, trialHomeVariables } from '../src/merge-writer/trial.js';
 
@@ -19,7 +21,11 @@ test('integration:worker-host-filesystem-isolation integration:worker-control-so
   await Promise.all(servers.map((server, index) => new Promise<void>(resolve => server.listen(index ? abstract : socket, resolve))));
   await symlink(socket, join(allocation, 'executor-alias'));
   const namespaces = await Promise.all(['pid', 'net', 'mnt'].map(name => readlink('/proc/self/ns/' + name)));
-  const wrapper = trialContainerWords([allocation]);
+  // A linked dependency also names its canonical path. Repeated dependencies
+  // must not duplicate Docker targets or turn the assigned allocation read-only.
+  const alias = join(base, 'linked-allocation');
+  await symlink(allocation, alias);
+  const wrapper = trialContainerWords([allocation], [allocation, alias, alias]);
   try {
     const output = await defaultChildRun('node', ['-e', `
       const fs = require('node:fs'), assert = require('node:assert/strict'), net = require('node:net');
@@ -53,14 +59,21 @@ test('integration:worker-host-filesystem-isolation integration:worker-control-so
 test('integration:worker-home-deletion-regression — cancelling a trial stops its background writers before scratch is reclaimed', async () => {
   const allocation = await temporaryDirectory('cancel-trial', process.cwd());
   const beat = join(allocation, 'heartbeat');
-  await assert.rejects(defaultChildRun('node', ['-e', `
+  const [command, ...wrapper] = trialContainerWords([allocation]);
+  const child = spawn(command!, [...wrapper, 'node', '-e', `
     require('node:child_process').spawn(process.execPath, ['-e',
       "setInterval(() => require('node:fs').writeFileSync(process.argv[1], String(Date.now())), 50)", process.argv[1]],
       { detached: true, stdio: 'ignore' });
     setInterval(() => {}, 1000);
-  `, beat], { cwd: allocation, wrapper: trialContainerWords([allocation]),
-    env: { ...trialEnvironment(), ...trialHomeVariables(allocation), PATH: '/usr/local/bin:/usr/bin:/bin' }, timeoutMs: 1_500 }),
-  error => error instanceof ChildProcessError && error.timedOut);
+  `, beat], { cwd: allocation, stdio: 'ignore',
+    env: { ...trialEnvironment(), ...trialHomeVariables(allocation), PATH: '/usr/local/bin:/usr/bin:/bin' } });
+  const closed = new Promise<void>((resolve, reject) => { child.on('close', () => resolve()); child.on('error', reject); });
+  try {
+    // Cancel a running writer, rather than racing Docker startup against a short timeout.
+    const deadline = Date.now() + 30_000;
+    while (!existsSync(beat) && child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(existsSync(beat), 'the background writer started before cancellation');
+  } finally { child.kill('SIGTERM'); await closed; }
   const stopped = await readFile(beat, 'utf8');
   await new Promise(resolve => setTimeout(resolve, 200));
   assert.equal(await readFile(beat, 'utf8'), stopped, 'no background writer survives the cancelled boundary');

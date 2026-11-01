@@ -47,7 +47,9 @@ finally:
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage): string[] {
   const mounts: [string, string, boolean][] = [];
   const add = (path: string, readonly: boolean, target = path) => {
-    if (existsSync(path)) mounts.push([realpathSync(path), target, readonly]);
+    // Linked installs and harness dependencies can name the same target. Docker
+    // rejects duplicate destinations; keep the writable allocation added first.
+    if (existsSync(path) && !mounts.some(mount => mount[1] === target)) mounts.push([realpathSync(path), target, readonly]);
   };
   for (const directory of writable) if (directory) add(directory, false);
   for (const directory of dependencies) { add(directory, true); if (existsSync(directory) && realpathSync(directory) !== directory) add(directory, true, realpathSync(directory)); }
