@@ -56,6 +56,14 @@ test('integration:master-stalled-delivery-wake — working master receives diagn
   f.restart();
   await f.cycle();
   assert.equal(f.prompts.length, 1, 'same pending diagnosis survives restart without another prompt');
+  const retry = held();
+  retry.mergeLedger = { ...retry.mergeLedger!, state: 'intent', refusal: null };
+  f.work([retry]);
+  await f.cycle();
+  f.restart();
+  f.work([held()]);
+  await f.cycle();
+  assert.equal(f.prompts.length, 1, 'an unchanged base retrial does not re-prompt');
   f.work([held(failure(base, 'different assertion'))]);
   await f.cycle();
   assert.equal(f.prompts.length, 2);

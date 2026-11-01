@@ -602,6 +602,10 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   if (!sessions || !herdr.available) return;
   const causes = stalledDelivery(open);
   const current = new Set(causes.map(cause => cause.key));
+  // A retrial temporarily replaces its refusal with an intent. Keep the same base's wake
+  // while it runs, otherwise an unchanged failure would wake again after every retrial.
+  for (const item of open) if (item.mergeLedger?.state === 'intent' && item.mergeLedger.head === item.candidate?.sha && item.mergeLedger.baseTip)
+    current.add(`base:${item.mergeLedger.baseTip}`);
   for (const key of Object.keys(state.master.subjects)) if (!current.has(key)) delete state.master.subjects[key];
   const master = state.master;
   const handle = herdr.agents.find(agent => agent.name === (master.agentName ?? config.masterAgentName));
