@@ -324,7 +324,7 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
     };
     const real = daemonEffects(host.root, config, { snapshot, run, mutate: async () => ({}) });
     const state = emptyDaemonState(config);
-    state.cycle = postMerge ? 2170 : 2185;
+    state.cycle = postMerge ? 2175 : 2183;
     const cycle = async () => {
       let tick: Awaited<ReturnType<typeof runDispatchTick>> | undefined;
       const failures: string[] = [];
@@ -337,7 +337,7 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
     };
     const grace = await cycle();
     assert.deepEqual(grace.registryClosed, []); assert.equal(registry.live()[0].id, incident.session);
-    clock = Math.max(Date.parse(incident.manual), Date.parse(incident.start) + 6 * 60_000);
+    clock = Math.max(Date.parse(incident.manual) + 11_000, Date.parse(incident.start) + 5 * 60_000 + 1_000);
     readable = false;
     assert.equal((await cycle()).registryClosed, undefined, 'unreadable inventory is a gap');
     assert.equal(registry.live()[0].id, incident.session);
@@ -348,6 +348,8 @@ for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-
     assert.deepEqual((await cycle()).registryClosed, []);
     assert.equal(registry.live()[0].id, incident.session);
     host.agents.length = 0;
+    assert.equal(state.cycle, postMerge ? 2178 : 2186);
+    assert.equal(registry.live()[0].id, incident.session, 'the incident slot is still live with its pane absent before reconciliation');
     const released = await cycle();
     assert.deepEqual(released.closeFailures, []);
     assert.deepEqual(released.registryClosed, [{ work: done.key, id: incident.session, role: 'reviewer', pane: incident.pane }]);

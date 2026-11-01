@@ -387,7 +387,7 @@ export interface DispatchEffects {
    * The control plane's agent registry document, or null when it cannot be read (GY-2945); and the
    * end of one of its live sessions — a reviewer or producer session of this host no Herdr pane
    * backs, which the ledgers name and this loop may never have launched, is ended on the second
-   * consecutive miss (the first for a completed post-merge ledger record) so it stops consuming
+   * consecutive miss (the first for a completed review ledger record) so it stops consuming
    * its role's concurrency. A dispatcher wired without
    * either leaves the registry's slots to the control plane's own settlement rules.
    */
