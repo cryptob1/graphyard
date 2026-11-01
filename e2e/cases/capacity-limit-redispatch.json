@@ -1,10 +1,10 @@
 {
   "id": "capacity-limit-redispatch",
   "title": "Mid-attempt provider limit exhaustion redispatches without losing work",
-  "description": "Asserts the shipped capacity-limit-redispatch scenario revision is listed and runs the mid-attempt redispatch proofs (hold, failover, preserved work, truthful role bounds) without creating backlog items.",
+  "description": "Asserts the shipped capacity-limit-redispatch scenario revision is listed and runs the mid-attempt redispatch proofs (hold, failover on silent exhaustion, truthful role bounds) without creating backlog items.",
   "tags": ["capacity"],
   "target": "any",
-  "required": false,
+  "required": true,
   "steps": [
     {
       "kind": "http",
@@ -27,7 +27,7 @@
     {
       "kind": "command",
       "name": "mid-attempt capacity redispatch proofs",
-      "run": "node --import tsx tests/helpers/run-tests.ts tests/capacity-redispatch-preserves-attempt.test.ts tests/capacity-hold-respects-machine-bounds.test.ts",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/capacity-hold-respects-machine-bounds.test.ts tests/capacity-silent-exhaustion.test.ts",
       "timeoutSeconds": 600
     }
   ]
