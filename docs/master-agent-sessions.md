@@ -25,7 +25,7 @@ Accounts below `run.quotaCeilingPercent` are preferred; simultaneous launches sp
 
 ## The loop's own master session
 
-`master registry role set master ACCOUNTS …` configures one session. Registry proposal includes it using reviewer accounts. The loop or `master start` adopts `masterAgentName` or replaces it. [Wake support](master-agent.md#master-wake-and-delivery-progress) depends on loaded code.
+`master registry role set master ACCOUNTS …` configures one session. Registry proposal includes it using reviewer accounts. The loop or `master start` adopts `masterAgentName` or replaces it. See [master wakes and delivery progress](master-agent.md#master-wake-and-delivery-progress).
 
 ### A pane stopped on its provider's limit is absent (GY-2949)
 
@@ -69,7 +69,7 @@ Claude records session ID, runtime, account and worktree in `.graphyard/dispatch
 
 `review-binding.json` (0600 in `GH_CONFIG_DIR`) binds head/base/policy, verdictToken and previousHead. No binding means no launch. `review post --event …` posts once; moved heads refuse. Workers run `review self GY-N` before complete.
 
-Verdict, stage change or missing pane ends the ledger-linked registry slot. Orphaned slots close after two consecutive pane misses, including after loop restart.
+Verdict, stage change or missing pane ends the ledger-linked registry slot. Completed reviews release on the first eligible pane miss after launch grace; other orphaned slots close after two consecutive misses, including after loop restart. See [session liveness](master-agent.md#session-liveness-is-reconciled-not-trusted).
 
 ### The launch reads short; the procedure loads on demand (GY-2972)
 
