@@ -51,7 +51,7 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
     const databases = readdirSync(scratch).filter(name => name.startsWith('graphyard-e2e-serve-'));
     assert.equal(databases.length, 1, 'the database lives in one temporary directory under TMPDIR');
 
-    const ids = ['capacity-limit-redispatch', 'create-work-item', 'board', 'work-item-detail'];
+    const ids = ['capacity-limit-redispatch', 'create-work-item', 'every-item-owes-e2e', 'board', 'work-item-detail', 'single-case-criterion-warned'];
     const cases = ids.map(id => {
       const file = `e2e/cases/${id}.json`;
       return { file, definition: parseCase(file, readFileSync(join(checkout, file), 'utf8')) };

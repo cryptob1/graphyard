@@ -12,7 +12,7 @@
         "title": "E2E case {{case}} run {{run}}",
         "description": "Created by the board E2E case.",
         "type": "chore", "priority": 3,
-        "criteria": [{ "id": "AC-1", "text": "The board lists work created by an E2E case", "proofs": ["manual:e2e-case-created"] }],
+        "criteria": [{ "id": "AC-1", "text": "The board lists work created by an E2E case", "proofs": ["manual:e2e-case-created", "e2e:create-work-item"] }],
         "policy": { "checks": ["test"], "review": true }
       },
       "status": 200,
