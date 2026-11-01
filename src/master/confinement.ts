@@ -24,6 +24,7 @@ export interface CoordinatorConfinement {
 
 export interface ConfinementInput {
   kind: string;
+  environment?: NodeJS.ProcessEnv;
   args: readonly string[];
   coordinatorRoot: string;
   /** The directory the runtime starts in — also the workspace root its own sandbox would grant (GY-888). */
@@ -214,10 +215,22 @@ export const hostProcessLaunchTargets = (uid: number | undefined = process.getui
     ...[env.SSH_AUTH_SOCK, env.HERDR_SOCKET_PATH].filter((path): path is string => !!path)], secretsBus: secretsBusPath(uid, env) };
 };
 
+/** Mount masks isolate Unix sockets only. Refuse declared remote host executors before starting
+ * any command: retaining the host network would otherwise let them write outside this boundary.
+ */
+export function assertIsolatableHostControlEndpoints(environment: NodeJS.ProcessEnv = process.env): void {
+  for (const variable of ['DOCKER_HOST', 'CONTAINER_HOST', 'BUILDKIT_HOST']) {
+    const endpoint = environment[variable];
+    if (endpoint && !endpoint.startsWith('unix:///'))
+      throw new Error(`Graphyard refuses the sandbox launch: ${variable} declares a host command endpoint that filesystem mounts cannot isolate. Use a local unix:/// socket, which the sandbox masks. No command was started.`);
+  }
+}
+
 /** Read-only host with private devices, processes, scratch and host runtime sockets hidden.
  * Scratch is allocated under the session, and mounted at short paths so Git/test Unix sockets fit.
  */
-export function hostFilesystemWords(scratch: string): string[] {
+export function hostFilesystemWords(scratch: string, environment: NodeJS.ProcessEnv = process.env): string[] {
+  assertIsolatableHostControlEndpoints(environment);
   return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
     '--tmpfs', '/run', '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
     '--setenv', 'TMPDIR', '/tmp', '--setenv', 'TMP', '/tmp', '--setenv', 'TEMP', '/tmp',
@@ -244,7 +257,7 @@ export function hostFilesystemWords(scratch: string): string[] {
  * namespace; a session keeps the network and its own process tree. The wrapper ends with `--`, so
  * the runtime command follows it.
  */
-export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask }): readonly string[] {
+export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDirectory: string; bwrap?: string | null; ownGitHubCredential?: boolean; secretsBus?: null; writable?: readonly string[]; credentialMask?: CredentialMask; environment?: NodeJS.ProcessEnv }): readonly string[] {
   const root = resolve(input.coordinatorRoot), directory = resolve(input.sessionDirectory);
   const gitDir = checkoutGitDirectory(root);
   const adminDirectory = sessionGitAdminDirectory(directory, root);
@@ -267,7 +280,8 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   // confined session runs the launcher its prompt names but can change none of its code.
   const cli = (input.credentialMask?.cli ?? []).filter(path => isAbsolute(path) && existsSync(path)).map(canonicalPath);
   const masks = credentialMaskWords(input.credentialMask, [root, directory]);
-  const channels = processLaunchMaskWords({ ...hostProcessLaunchTargets(), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
+  const environment = { ...process.env, ...input.environment };
+  const channels = processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), ...(input.ownGitHubCredential || input.secretsBus === null ? { secretsBus: null } : {}) }, [root, directory]);
   // GY-2967: every ref transaction a session runs — commit, merge, reset, branch -f, update-ref, a
   // cherry-pick's cleanup — takes the common git directory's packed-refs lock once anything has
   // packed a ref (git gc, git pack-refs), and rewrites packed-refs under that lock, so keeping the
@@ -287,7 +301,7 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
   const coordinatorAdmin = checkoutWorktreeAdminDirectory(root);
   // Apply external state grants before protecting the coordinator, so an ancestor grant cannot unprotect it.
   const protectAdmin = !adminDirectory && coordinatorAdmin && sharedDirectories.some(path => withinCheckout(coordinatorAdmin, path)) ? [coordinatorAdmin] : [];
-  return [bwrap, ...hostFilesystemWords(scratch), ...masks,
+  return [bwrap, ...hostFilesystemWords(scratch, environment), ...masks,
     ...writable.filter(path => !withinCheckout(path, root)).flatMap(path => ['--bind', path, path]),
     '--ro-bind', root, root,
     ...commonGitDir.flatMap(path => ['--bind', path, path]),
@@ -349,7 +363,7 @@ export async function coordinatorConfinement(input: ConfinementInput): Promise<C
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   const root = resolve(input.coordinatorRoot), directory = resolve(input.allocatedDirectory ?? input.sessionDirectory);
-  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, writable: input.writable, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: directory, writable: input.writable, environment: input.environment, bwrap: input.bwrap ?? undefined, ownGitHubCredential: input.ownGitHubCredential, ...(input.secretsBus === null ? { secretsBus: null } : {}), ...(input.credentialMask ? { credentialMask: input.credentialMask } : {}) });
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper,
     detail: `the coordinator checkout at ${root} is bind-mounted read-only for the session in a bubblewrap namespace whose /proc shows only the session's own processes; only ${reexposed.join(', ') || 'nothing'} are re-exposed writable, so no shell command can write, commit in or switch the checkout` };

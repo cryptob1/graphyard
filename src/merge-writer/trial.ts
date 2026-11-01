@@ -149,16 +149,16 @@ export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.Proc
  * directories bound writable. The child sees only
  * its own processes and dies with the runner, so a killed trial leaves nothing behind.
  */
-export function trialConfinement(hidden: readonly string[], reexposed: readonly (string | null)[], bwrap = bwrapOnPath() ?? 'bwrap', readable: readonly string[] = []): string[] {
+export function trialConfinement(hidden: readonly string[], reexposed: readonly (string | null)[], bwrap = bwrapOnPath() ?? 'bwrap', readable: readonly string[] = [], environment: NodeJS.ProcessEnv = process.env): string[] {
   const masks = credentialMaskWords({ configHome: '', extraPaths: hidden, own: [], cli: [] }, []);
   const binds = [...new Set(reexposed.filter((path): path is string => !!path && existsSync(path)).map(path => realpathSync(path)))];
   // Its own PID namespace and a fresh /proc, so no host process's /proc/<pid>/root leads back past the masks.
   const scratch = binds.at(-1);
   if (!scratch) throw new Error('A trial sandbox requires an allocated writable directory');
-  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch),
+  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch, environment),
     ...masks, ...readable.filter(existsSync).map(path => realpathSync(path)).flatMap(path => ['--ro-bind', path, path]),
     ...binds.flatMap(path => ['--bind', path, path]),
-    ...processLaunchMaskWords({ ...hostProcessLaunchTargets(), secretsBus: null }, []), '--'];
+    ...processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), secretsBus: null }, []), '--'];
 }
 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */
@@ -791,7 +791,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   await mkdir(home);
   const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
   const env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
-  const wrapper = trialConfinement(input.hidden ?? [], [checkout.directory, place, temporary], undefined, [input.root]);
+  const wrapper = trialConfinement(input.hidden ?? [], [checkout.directory, place, temporary], undefined, [input.root], { ...process.env, ...input.environment });
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
   const e2e: TrialE2eCase[] = [];

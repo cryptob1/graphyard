@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { coordinatorConfinement, readOnlyMountWrapper } from '../src/master/confinement.js';
-import { headlessConfinementWrapper, masterSessionConfinement, prepareConfinedGitPaths } from '../src/master/launch.js';
+import { headlessConfinementWrapper, masterSessionConfinement, prepareConfinedGitPaths, startAgentSession } from '../src/master/launch.js';
 import { runTrialAttempt, trialConfinement } from '../src/merge-writer/trial.js';
 import { herdrSocketPath, herdrTarget, targetHerdr } from '../src/master/herdr.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -137,6 +137,12 @@ test('integration:worker-control-socket-isolation — host Docker, systemd and c
     const wrappers = [readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.worktree, secretsBus: null }),
       headlessConfinementWrapper(f.root, f.worktree), (await masterSessionConfinement('claude', f.root, {}, [herdrHome])).wrapper,
       trialConfinement([f.config], [f.worktree])];
+    // A tab-specific endpoint must be masked even when the launcher did not inherit it.
+    delete process.env.DOCKER_HOST;
+    const tab = await coordinatorConfinement({ kind: 'registered', args: [], coordinatorRoot: f.root,
+      sessionDirectory: f.worktree, environment: { DOCKER_HOST: `unix://${socket}` }, secretsBus: null });
+    assert.ok(tab);
+    wrappers.push([...tab.wrapper]);
     for (const wrapper of wrappers) {
       run(wrapper, f.worktree, process.execPath, ['-e', `
         const net = require('node:net'), fs = require('node:fs'), assert = require('node:assert/strict');
@@ -192,4 +198,68 @@ test('integration:worker-host-filesystem-isolation — runTrialAttempt restores 
   assert.equal(verdict.tests.passed, 1, verdict.logTail);
   assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
   assert.equal(readFileSync(join(f.unrelated, 'sentinel'), 'utf8'), 'protected\n');
+});
+
+
+test('integration:worker-control-socket-isolation — declared TCP host executors refuse every sandbox launch before a command can connect', async () => {
+  const f = await fixture();
+  let reached = 0, launched = 0;
+  const server = createServer(connection => { reached++; connection.end('host executor'); });
+  await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address && typeof address !== 'string');
+  const endpoint = `tcp://127.0.0.1:${address.port}`;
+  try {
+    for (const variable of ['DOCKER_HOST', 'CONTAINER_HOST', 'BUILDKIT_HOST']) {
+      const previous = process.env[variable];
+      try {
+        process.env[variable] = endpoint;
+        const refusal = /host command endpoint that filesystem mounts cannot isolate/;
+        assert.throws(() => readOnlyMountWrapper({ coordinatorRoot: f.root, sessionDirectory: f.worktree }), refusal);
+        assert.throws(() => headlessConfinementWrapper(f.root, f.worktree), refusal);
+        assert.throws(() => trialConfinement([f.config], [f.worktree]), refusal);
+        await assert.rejects(masterSessionConfinement('registered', f.root), refusal);
+      } finally {
+        if (previous === undefined) delete process.env[variable]; else process.env[variable] = previous;
+      }
+      assert.throws(() => trialConfinement([f.config], [f.worktree], undefined, [], { [variable]: endpoint }),
+        /host command endpoint that filesystem mounts cannot isolate/);
+      for (const remote of [endpoint, 'ssh://host', 'https://host']) {
+        await assert.rejects(startAgentSession('fixture-worker', 'registered', 'w1:p1', ['{request}'], 'Run',
+          () => { launched++; return '{}'; }, { directory: f.worktree, coordinatorRoot: f.root,
+            environment: { [variable]: remote }, contract: { args: ['--auto', '{request}'] } }),
+          /host command endpoint that filesystem mounts cannot isolate/);
+      }
+    }
+    assert.equal(launched, 0, 'no command reached a pane');
+    assert.equal(reached, 0, 'the disposable TCP host executor received no connection');
+    assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
+  } finally { await new Promise<void>(resolve => server.close(() => resolve())); }
+});
+
+test('integration:worker-home-deletion-regression — a registered master runtime can update its custom account home while sibling accounts stay read-only', async () => {
+  const f = await fixture();
+  const sibling = join(f.config, 'sibling');
+  mkdirSync(sibling); writeFileSync(join(sibling, 'login'), 'other-login');
+  const environment = { CUSTOM_AGENT_HOME: f.runtime };
+  const code = `const fs = require('node:fs'), assert = require('node:assert/strict');
+    assert.equal(fs.readFileSync(process.env.CUSTOM_AGENT_HOME + '/login', 'utf8'), 'own-login');
+    fs.writeFileSync(process.env.CUSTOM_AGENT_HOME + '/state', 'updated');
+    assert.throws(() => fs.writeFileSync(${JSON.stringify(join(sibling, 'login'))}, 'bad'), { code: 'EROFS' });
+    assert.throws(() => fs.writeFileSync(${JSON.stringify(join(f.config, 'outside'))}, 'bad'), { code: 'EROFS' });`;
+  let launched = 0;
+  const result = await startAgentSession('fixture-master', process.execPath, 'w1:p1', ['-e', code, '{request}'], 'Run master',
+    (_program, args) => {
+      if (args[0] === 'pane' && args[1] === 'run') {
+        launched++;
+        execFileSync('/bin/bash', ['-ec', args[3]], { cwd: f.root, env: { ...process.env, ...environment }, timeout: 60_000 });
+      }
+      return JSON.stringify({ result: { agent: { agent: process.execPath, agent_status: 'working' } } });
+    }, { directory: f.root, coordinatorRoot: f.root, confinement: 'master', environment,
+      contract: { args: ['--auto', '{request}'], homeVariable: 'CUSTOM_AGENT_HOME' },
+      keyringWarning: async () => null, log: () => {} });
+  assert.equal(result.started.state, 'started');
+  assert.equal(launched, 1);
+  assert.equal(readFileSync(join(f.runtime, 'state'), 'utf8'), 'updated');
+  assert.equal(readFileSync(join(sibling, 'login'), 'utf8'), 'other-login');
 });
