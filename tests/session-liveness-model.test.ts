@@ -14,6 +14,10 @@ import { dispatchEffects, emptyDispatchCursor, herdrSessionListing, runDispatchT
 import { runtimeEndedStates } from '../src/harness.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2026-09-24 and 2026-10-08 fixture instants are past and handed explicitly as now to observeSessions/sessionView; Date.now()/new Date() only feed the DB-backed tests' own observations.
 
 /**
@@ -64,7 +68,7 @@ function dispatcher(items: () => Promise<Work[]>, runtime: () => RuntimeSession[
 }
 
 test('unit:session-liveness-model — the loop reports every session it sees on each dispatch tick and the control plane stores it with the observation time: a working session, an agent exited to a shell (ended), a vanished pane (lost after two consecutive reports) and a report gap', async () => {
-  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Session state', criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Session state', criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed', 'e2e:fixture'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   // Four sessions a launcher registered on this host, each with the pane it holds and its name.
   const register = (id: string, pane: string) => engine.execute(coordinator, 'session', item.id, { id, kind: 'coordination', role: 'approver', runtime: 'claude', host: 'host-1', workspace: 'wF',
@@ -200,7 +204,7 @@ test('unit:session-liveness-model — a missed report keeps the last sighting, a
 });
 
 test('unit:session-liveness-model — only the observer writes the observation, a delivered item keeps it fresh, and a reopened record carries none of the previous runtime session', async () => {
-  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Observation writes', criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Observation writes', criteria: [{ id: 'AC-1', text: 'Observed', proofs: ['unit:observed', 'e2e:fixture'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   const handle = { id: 'owned', kind: 'coordination', role: 'approver', runtime: 'claude', host: 'host-1', principal: producer.id, agentName: 'agent-owned', pane: 'wF:p7',
     attach: 'herdr pane attach wF:p7 --workspace wF', transcript: '/logs/owned-1.jsonl', subject: `${item.key}: owned`, state: 'running' } as const;
@@ -383,7 +387,7 @@ test('unit:session-liveness-model — GY-1532: a launch registered over a held r
 
   // Through the control plane: the held record, observed working and missed twice under another
   // launch's token, is closed and reopened; the new session carries none of that observation.
-  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Relaunch over a held record', criteria: [{ id: 'AC-1', text: 'Fresh', proofs: ['unit:fresh'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Relaunch over a held record', criteria: [{ id: 'AC-1', text: 'Fresh', proofs: ['unit:fresh', 'e2e:fixture'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   const earlier = { id: 'req-1', kind: 'review', role: 'review', runtime: 'claude', host: 'host-1', pane: 'wF:p8', agentName: 'review-claude', subject: `${item.key}: review`, state: 'running', launch: 'a'.repeat(32) } as const;
   await engine.execute(coordinator, 'session', item.id, earlier, randomUUID());

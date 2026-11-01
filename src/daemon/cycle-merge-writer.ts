@@ -250,7 +250,15 @@ function countTrialTimeout(writer: MergeWriterState, flight: { key: string; id: 
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
 /** A failed write's HTTP status: the error's own, or the `Graphyard refused PATH (NNN)` its message names; null for a transport failure or a kill. */
-const statusOf = (error: unknown) => { const status = (error as { status?: unknown } | null)?.status; return typeof status === 'number' ? status : Number(/\brefused \S+ \((\d{3})\)/.exec(errorText(error))?.[1]) || null; };
+const statusOf = (error: unknown) => {
+  const status = (error as { status?: unknown } | null)?.status;
+  if (typeof status === 'number') return status;
+  // GY-3039: the loop's mutation path throws a bare Error carrying only `confirmedRefusal` for a 4xx
+  // the control plane judged (cli/master/session.ts), so the numeric status never arrives here. A
+  // merge-record refusal is a 409 — the server's answer, adopted at once, never replayed.
+  if ((error as { confirmedRefusal?: unknown } | null)?.confirmedRefusal === true) return 409;
+  return Number(/\brefused \S+ \((\d{3})\)/.exec(errorText(error))?.[1]) || null;
+};
 /** Whether a failed write's reply is unknown, so the server may hold it: no status, a 5xx, 408 or 429. Any other answer is the server's decision on that input. */
 const replyUnknown = (error: unknown) => { const status = statusOf(error); return status === null || status >= 500 || status === 408 || status === 429; };
 
@@ -701,7 +709,7 @@ export async function mergeWriterStep(cycle: Cycle) {
         if (entry.outcome === 'reconciled') writer.lastMergeAt = at();
         performed.push(storeAction(state, `merge-writer-reconcile:${entry.key}:${entry.mergeSha}`, { kind: 'merge', work: entry.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
           detail: entry.outcome === 'reconciled' ? `Reconciled an open intent of ${entry.key}: ${reads.baseBranch} holds ${entry.mergeSha}, so it is recorded pushed and reconciled and the item delivered without a second push`
-            : `An open intent of ${entry.key} was never pushed: ${reads.baseBranch} does not hold ${entry.mergeSha}, so it is refused and the head queued again` }));
+            : `Settled an open intent of ${entry.key} for ${entry.mergeSha}: it is refused and the current head queued again` }));
         changed = true;
       }
       // GY-2079: with the cycle's open intents settled, a head whose timeout record reached the bound is refused: the refusal is the ledger's last word for the head, so the queue drops it, and the rework it grounds is requested next cycle. A write whose reply was lost is replayed (GY-1852); the record keeps its reason and is asked for again.

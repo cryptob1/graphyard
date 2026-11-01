@@ -115,7 +115,16 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     // Every record is about the item's own submitted head (AC-4): an intent, a trial or a refusal
     // names it; a push or a reconciliation names the merge commit the item's open intent of that
     // head intends. Main holding some commit never delivers an item whose ledger did not intend it.
-    if ('head' in data) demand(data.head === candidate, otherHeadRefusal(work!.key, data.head, candidate), 409);
+    // GY-3039: an open intent on a superseded head still settles. The reconcile records the old
+    // head refused so the ledger leaves its blocking state and the current candidate queues; only
+    // a refusal naming the ledger's own open head is accepted, anything else is still another head.
+    if ('head' in data) {
+      if (data.head !== candidate) {
+        demand(data.kind === 'refused', otherHeadRefusal(work!.key, data.head, candidate), 409);
+        const ledger = await foldItemLedger(db, work!, data);
+        demand(ledger !== null && (ledger.state === 'intent' || ledger.state === 'pushed') && ledger.head?.toLowerCase() === data.head, otherHeadRefusal(work!.key, data.head, candidate), 409);
+      }
+    }
     else {
       // The merge already delivered under this very commit: a record whose receipt was lost, answered as it stands.
       if (work!.stage === 'done' && work!.delivery?.mergeSha.toLowerCase() === data.mergeSha) return receipt(answer());

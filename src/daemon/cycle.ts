@@ -614,6 +614,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
     return;
   }
   if (!master.agentName) state.master = { ...master, agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: cycle.snapshot.now, adopted: true };
+  if (handle.pane_id) state.master.pane = handle.pane_id;
   if (!state.master.startedAt) state.master.startedAt = cycle.snapshot.now;
   if (await masterPaneFailover(cycle, handle, open)) return;
   const changed = causes.filter(cause => state.master.subjects[cause.key] !== cause.digest);
@@ -668,14 +669,12 @@ async function masterPaneFailover(cycle: Cycle, handle: HerdrAgent, open: Work[]
   if (cycle.launcher.busy(cycle.config.forPerson ? `${masterLaunchKey}:${cycle.config.forPerson}` : masterLaunchKey)) return;
   const exited = endedRuntimeStates.includes(handle.agent_status ?? '');
   let notice: ExhaustionSignal | null = null;
-  if (!exited) {
-    const pane = master.pane ?? handle.pane_id ?? null;
-    if (!pane) return;
+  const pane = handle.pane_id ?? master.pane ?? null;
+  if (pane) {
     const screen = await Promise.resolve(effects.sessionScreen?.({ pane, agentName: master.agentName })).catch(() => null) ?? null;
-    if (screen === null) return;
-    notice = detectRuntimeExhaustion(screen, master.runtime, clock);
-    if (!notice) return;
+    if (screen !== null) notice = detectRuntimeExhaustion(screen, master.runtime, clock);
   }
+  if (!notice && !exited) return;
   const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
   const key = cycle.config.forPerson ? `master:failover:${cycle.config.forPerson}` : 'master:failover';
   try {

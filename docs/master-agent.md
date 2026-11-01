@@ -19,6 +19,8 @@ Items carry an optional `owner`, a principal with `sessionKind: "human"`, separa
 4. **merge writer**: trial and merge each submitted head in order ([delivery](delivery.md)).
 5. **persist**: the loop cursor.
 
+The loop follows the master's live Herdr pane after a move. A weekly limit, session limit or exhausted usage credits holds its account, closes that pane and launches the next account in the same cycle. `master status` names the live pane and reports `screen unreadable` when it cannot read it; missing runtime status reads `unknown`.
+
 `master restart` restarts `graphyard-master.service`; from the confined master session it files a request the loop serves. The loop restarts itself when [graphyard-deploy.service](delivery.md) serves a commit it did not load.
 
 When merge validation refuses a queued head for a shared base failure, the loop sends the diagnosis (including assertion or crash detail) and next repair action to the registered master, even if Herdr still labels it working. An absent master receives the unresolved cause in its launch handover. The cursor records `lastWake` and subject digests: repeated cycles and restarts do not prompt again for unchanged causes; changed details or base wake again, and resumed delivery clears the subject. Failed delivery stays pending for retry. `master status` separates the coordinator's session state from `delivery`, naming a shared-base stall, its reason and next agent action. The master files or advances the repair without human approval; every test and merge requirement remains in force.
@@ -29,9 +31,9 @@ The same handoff includes unresolved worker blockers, failed launch/review/proof
 
 Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, loop-owned `rework`. The master attests unproduced `manual:` proofs per head, base and policy revision.
 
-### File user-facing items with an e2e: proof by default
+### File every item with an e2e: proof
 
-Every `feature` or `bug` item the master files carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — the case the merge trial runs against the served head — unless the change has nothing a user can see, and then the description opens `No user-facing change: <reason>`. `master create` and `master requirements` refuse anything else, naming the case format and the opt-out ([validation](validation.md)).
+Every item carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — new or existing, run by the merge trial against the served head. There is no chore exemption and no opt-out sentence: `master create` and `master requirements` refuse anything else, naming the case format ([validation](validation.md)). Loop repairs name `e2e:create-work-item`; follow-ups reuse delivered cases (legacy items: `create-work-item`); onboarding names the repository's first case.
 
 ### Session liveness is reconciled, not trusted
 

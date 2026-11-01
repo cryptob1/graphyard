@@ -12,7 +12,7 @@
         "title": "E2E case {{case}} run {{run}} single seed",
         "description": "Created by the single-case-criterion-warned E2E case.",
         "type": "chore", "priority": 3,
-        "criteria": [{ "id": "AC-1", "text": "The campaign completes every mission on seed 42", "proofs": ["manual:e2e-case-single-seed"] }],
+        "criteria": [{ "id": "AC-1", "text": "The campaign completes every mission on seed 42", "proofs": ["manual:e2e-case-single-seed", "e2e:create-work-item"] }],
         "policy": { "checks": ["test"], "review": true }
       },
       "status": 200,
@@ -29,7 +29,7 @@
         "title": "E2E case {{case}} run {{run}} three seeds",
         "description": "Created by the single-case-criterion-warned E2E case.",
         "type": "chore", "priority": 3,
-        "criteria": [{ "id": "AC-1", "text": "The campaign completes every mission on seeds 42, 7 and 1", "proofs": ["manual:e2e-case-three-seeds"] }],
+        "criteria": [{ "id": "AC-1", "text": "The campaign completes every mission on seeds 42, 7 and 1", "proofs": ["manual:e2e-case-three-seeds", "e2e:create-work-item"] }],
         "policy": { "checks": ["test"], "review": true }
       },
       "status": 200,

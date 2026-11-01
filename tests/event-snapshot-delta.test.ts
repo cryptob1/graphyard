@@ -8,6 +8,10 @@ import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * The event ledger grew by a full work document for every reconciliation pass and every lease
  * renewal. Such a row is now a delta on the item's last full snapshot, and every reader
@@ -37,7 +41,7 @@ const observation = (work: Work, extra: Partial<Observation> = {}): Observation 
 
 async function submitted() {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delta ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delta ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:x', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); w = await engine.execute(worker, 'claim', w.id, {}, randomUUID());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/delta-${n}`, branch: `graphyard/delta-${n}` }, randomUUID());
   return w;

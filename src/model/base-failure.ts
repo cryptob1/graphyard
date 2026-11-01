@@ -39,7 +39,9 @@ export const runOf = (failure: Pick<BaseFailure, 'jobId' | 'url'>) => failure.ur
 /**
  * The P0 item a base failure files, as the master's operator-agent identity: the test, the base
  * commit, the CI run and the candidates it blocks. Repairing the base is the one change that frees
- * them, so it goes to the front of the queue.
+ * them, so it goes to the front of the queue. Its proof names `e2e:create-work-item` (GY-3037):
+ * every item owes an end-to-end proof, and the case — an existing one — runs against the served
+ * head, so a repair that lands keeps the control plane's own API working.
  */
 export function baseFailureItem(failure: BaseFailure, baseBranch: string) {
   const blocked = failure.blocks.map(block => `${block.key} (${short(block.sha)})`);
@@ -47,11 +49,11 @@ export function baseFailureItem(failure: BaseFailure, baseBranch: string) {
     title: `Base branch ${baseBranch} fails ${failure.check} test: ${failure.test}`.slice(0, 200),
     type: 'bug' as const, priority: 0,
     description: [
-      `No user-facing change: the master loop filed this control-plane repair itself (GY-528); the required ${failure.check} check fails the test "${failure.test}" on the head of ${baseBranch}, commit ${failure.baseSha}, in CI run ${runOf(failure)}.`,
+      `The master loop filed this control-plane repair itself (GY-528); the required ${failure.check} check fails the test "${failure.test}" on the head of ${baseBranch}, commit ${failure.baseSha}, in CI run ${runOf(failure)}.`,
       `The same test fails on every candidate listed below, so it is no candidate's to fix and the loop requests no rework for it: each stays held until ${baseBranch} passes again. Blocked candidates: ${blocked.join(', ') || 'none yet'}.`,
       `Once the ${failure.check} check passes on ${baseBranch} again the loop clears the attention, reruns each blocked candidate's failed job and refreshes each onto the repaired base.`,
     ].join('\n\n').slice(0, 20000),
-    criteria: [{ id: 'AC-1', text: `The test "${failure.test}" passes on ${baseBranch} again, fixed at its cause rather than skipped or weakened, and a test the change adds reproduces the failure against ${short(failure.baseSha)}`.slice(0, 2000), proofs: ['manual:base-failure-repaired'] }],
+    criteria: [{ id: 'AC-1', text: `The test "${failure.test}" passes on ${baseBranch} again, fixed at its cause rather than skipped or weakened, and a test the change adds reproduces the failure against ${short(failure.baseSha)}`.slice(0, 2000), proofs: ['manual:base-failure-repaired', 'e2e:create-work-item'] }],
     reason: `The ${failure.check} check fails "${failure.test}" on ${baseBranch} head ${short(failure.baseSha)} and on ${failure.blocks.length} candidate(s) it blocks`.slice(0, 2000),
   };
 }
