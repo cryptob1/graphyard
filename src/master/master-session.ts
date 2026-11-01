@@ -18,7 +18,7 @@ import type { Work } from '../model.js';
 import { simplicityParagraph } from '../reviewer.js';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
-import { adoptConversation, assertConversationRuntime, awaitConversation, captureConversation, conversationArgs, conversationHandover, graphyardInput, masterInputs, masterRecords, type Continuity } from './conversation.js';
+import { adoptConversation, assertConversationRuntime, awaitConversation, captureConversation, continuationContext, conversationArgs, graphyardInput, masterInputs, masterRecords, type Continuity } from './conversation.js';
 import { readFile } from 'node:fs/promises';
 import type { MasterSessionState } from '../daemon/state.js';
 
@@ -83,8 +83,8 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     return failure;
   };
   try {
-    const context = current ? await conversationHandover(current) : 'Previous master conversation: none. Last unanswered person message: none.';
-    const request = await graphyardInput(origins, 'launch', masterRequest(config, `${handover}\n${context}`));
+    const context = current ? await continuationContext(current) : { handover: 'Previous master conversation: none. Last unanswered person message: none.', input: null };
+    const request = await graphyardInput(origins, 'launch', masterRequest(config, `${handover}\n${context.handover}`));
     // The same harness the human launch writes (master start): the master's own commands, and the
     // deny rules that keep it from borrowing another identity — never a worker or producer credential.
     await writeHarnessPermissions(root, masterHarness(root, config, kind), true);
@@ -96,10 +96,11 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     // level, its managed .graphyard state and the shared Git areas writable. A host that cannot
     // apply the confinement refuses the launch; the master is never started unconfined.
     ({ delivery } = await startAgentSession(name, kind, pane, [...plan.args, ...conversationArgs(kind, nativeId, resume)], request, run, { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master' }));
-    const discovered = await awaitConversation(kind, plan.environment, root, since, nativeId, launchStartMs(config));
+    const discovered = await awaitConversation(kind, plan.environment, root, since, nativeId, launchStartMs(config), request);
     const conversation = { launch, runtime: kind, account: selected.account.name, ...discovered,
       record: resume ? current!.record : join(masterRecords(root), `${launch}.jsonl`), origins,
-      predecessor: resume ? current!.predecessor : current?.launch ?? null, supersededBy: null };
+      predecessor: resume ? current!.predecessor : current?.launch ?? null, supersededBy: null,
+      inherited: context.input ? { ...context.input, delivery: request.split('\n')[0] } : null };
     await captureConversation(conversation);
     continuity = { current: conversation, predecessor: resume ? previous!.predecessor : current ? { ...current, supersededBy: launch } : null };
   } catch (error) { throw await abandon(error, 'master session launch failed'); }
@@ -127,13 +128,13 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
     const registry = await httpFleetClient(current).document();
     const login = registry.accounts.find(entry => entry.name === account);
     const runtime = registry.runtimes.find(entry => entry.name === login?.runtime);
-    const kind = runtime?.launch.kind ?? master.runtime ?? handle?.agent ?? selected?.kind;
+    const kind = master.runtime ?? handle?.agent ?? selected?.kind ?? runtime?.launch.kind;
     if (!kind) throw new Error('Cannot identify the existing master runtime; retaining its state instead of starting cold');
     assertConversationRuntime(kind);
     const variable = runtime?.launch.homeVariable ?? (kind === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME');
     const environment = { ...runtime?.launch.environment, ...(login?.credential.home ? { [variable]: login.credential.home } : {}) };
     const request = await readFile(join(root, '.graphyard/launch', `${master.agentName ?? current.masterAgentName}.request`), 'utf8').catch(() => null);
-    return adoptConversation(root, { runtime: kind, account, environment, since: master.startedAt ? Date.parse(master.startedAt) - 1000 : 0,
+    return adoptConversation(root, { runtime: kind, account, environment,
       prompts: [...(request ? [{ origin: 'launch' as const, text: request }] : []), ...prompts.map(text => ({ origin: 'wake' as const, text }))] });
   },
   pendingCauses: async work => {

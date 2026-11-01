@@ -86,20 +86,25 @@ async function fixture() {
     if (args[0] === 'agent' && args[1] === 'read') return 'fixture runtime ready';
     if (args[0] === 'pane' && args[1] === 'read') return json({ text: 'fixture runtime ready' });
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
+    if (args[0] === 'pane' && args[1] === 'close') { await stop(args[2]); return json({}); }
     throw new Error(`Unexpected fixture Herdr command ${args.join(' ')}`);
   };
   const stop = async (pane: string) => {
     const child = panes.get(pane)?.child;
     if (child && child.exitCode === null) { child.stdin.end(); const [code] = await once(child, 'exit'); assert.equal(code, 0, panes.get(pane)!.error); }
   };
-  let state = emptyDaemonState(config), launchFailure = false;
+  let state = emptyDaemonState(config);
   const effects: DaemonEffects = {
     snapshot: async () => ({ work: [], now: new Date().toISOString() }), agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}), closeSession: stop,
     dispatch: async () => { throw new Error('No workers in the continuity fixture'); }, persist: state => writeDaemonState(config, state),
     masterSession: { ...masterSessionEffects(root, () => config, run), initialize: undefined, pendingCauses: async () => [], end: client.end,
-      launch: async (handover, previous) => { if (launchFailure) throw new Error('resume start refused'); return launchMasterSession(root, config, { agents: [], available: true }, handover, run, { registry: client, quota: false, smoke: async () => ({ ok: true, error: null }) }, previous); } },
+      launch: async (handover, previous) => {
+        const { delivery: _, ...launched } = await launchMasterSession(root, config, { agents: [], available: true }, handover, run, { registry: client, quota: false, smoke: async () => ({ ok: true, error: null }) }, previous);
+        return launched;
+      } },
   };
-  return { root, config, accounts, ended, get state() { return state; }, select: (index: number) => { accountIndex = index; }, fail: (value: boolean) => { launchFailure = value; },
+  return { root, config, accounts, ended, get state() { return state; }, select: (index: number) => { accountIndex = index; },
+    fail: (value: boolean) => { for (const runtime of registry.runtimes) runtime.launch.environment.GY_FAIL_RESUME = value ? '1' : '0'; },
     launch: async () => { await runCycle(config, state, effects); assert.equal(state.actions['master:launch']?.state, 'done', state.actions['master:launch']?.detail); return state.master; },
     failedLaunch: () => runCycle(config, state, effects),
     result: async () => JSON.parse(await readFile(resultFile(state.master.pane!), 'utf8')),
@@ -116,13 +121,16 @@ test('e2e:master-session-resumes — actual master end/relaunch reopens the auth
     for (const index of [0, 2]) {
       f.select(index); await f.launch();
       const first = await f.result(), allocation = f.state.master.session;
-      await f.emit({ input: `Durable context on ${f.accounts[index].runtime}`, final: true });
+      await f.emit({ input: `Durable context on ${f.accounts[index].runtime}`, partial: true });
       await f.stop(); await f.reload(); await f.launch();
       const next = await f.result();
       assert.equal(next.id, first.id, 'the second process really reopened the native conversation');
       assert.match(next.prior, /Durable context/);
+      assert.match(next.request, /Last unanswered person message: "Durable context/);
       assert.notEqual(f.state.master.session, allocation, 'the registry allocation is independent');
       assert.equal(next.recordWritable, false);
+      await f.emit({ final: true });
+      assert.equal(await captureConversation(f.state.master.continuity!.current), null, 'the resumed response completes the carried input batch');
       await f.stop();
     }
   } finally { await f.dispose(); }
@@ -164,6 +172,28 @@ test('e2e:master-continues-after-failover — cross-account/runtime, A-to-B-to-A
     const before = structuredClone(f.state.master.continuity);
     await f.stop(); f.fail(true); await f.failedLaunch(); await f.reload();
     assert.equal(f.state.actions['master:launch'].state, 'failed');
+    assert.match(f.state.actions['master:launch'].detail, /Fixture refuses native resume/);
     assert.deepEqual(f.state.master.continuity, before, 'failure must not supersede the authoritative predecessor');
+    assert.equal(f.ended.at(-1), 'allocation-6', 'the refused resume returns its registry allocation');
+    f.fail(false); await f.launch();
+    assert.equal((await f.result()).id, before!.current.nativeId, 'retry resumes the retained conversation');
+  } finally { await f.dispose(); }
+});
+
+test('e2e:master-continues-after-failover — another failover before the inherited question is answered preserves its original input', async () => {
+  const f = await fixture();
+  try {
+    await f.launch();
+    await f.emit({ input: 'This original question still needs an answer', partial: true });
+    const original = f.state.master.continuity!.current;
+    await f.stop(); f.select(1); await f.launch();
+    await f.emit({ partial: true });
+    await f.stop(); await f.reload(); f.select(2); await f.launch();
+    const inherited = await f.result();
+    assert.match(inherited.request, /Last unanswered person message: "This original question still needs an answer"/);
+    assert.equal(f.state.master.continuity!.current.inherited!.record, original.record, 'only the original native input reference is carried, without a summary');
+    await f.emit({ final: true });
+    await f.stop(); await f.reload(); f.select(0); await f.launch();
+    assert.match((await f.result()).request, /Last unanswered person message: none$/);
   } finally { await f.dispose(); }
 });

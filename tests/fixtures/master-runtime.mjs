@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline';
 const kind = process.env.GY_RUNTIME, args = process.argv.slice(2), root = process.cwd();
 const resumeAt = args.indexOf(kind === 'claude' ? '--resume' : 'resume');
 const resume = resumeAt >= 0;
+if (resume && process.env.GY_FAIL_RESUME === '1') throw new Error('Fixture refuses native resume');
 const id = resume ? args[resumeAt + 1] : kind === 'claude' ? args[args.indexOf('--session-id') + 1] : randomUUID();
 if (!id || id.startsWith('-')) throw new Error('Missing native session id');
 const home = kind === 'claude' ? process.env.CLAUDE_CONFIG_DIR : process.env.CODEX_HOME;
@@ -15,12 +16,24 @@ const transcript = kind === 'claude' ? join(home, 'projects', root.replace(/[^A-
 if (resume && !existsSync(transcript)) throw new Error('Native resume record is absent');
 const prior = existsSync(transcript) ? readFileSync(transcript, 'utf8') : '';
 mkdirSync(dirname(transcript), { recursive: true });
-const row = value => appendFileSync(transcript, JSON.stringify(value) + '\n');
+let parent = null, turn = randomUUID();
+const row = value => {
+  if (value.uuid) { value.parentUuid = parent; parent = value.uuid; }
+  appendFileSync(transcript, JSON.stringify(value) + '\n');
+};
 if (!resume && kind === 'codex') row({ type: 'session_meta', timestamp: new Date().toISOString(), payload: { id, cwd: root, timestamp: new Date().toISOString() } });
-const input = text => row(kind === 'claude' ? { type: 'user', uuid: randomUUID(), message: { role: 'user', content: text } }
-  : { type: 'event_msg', payload: { type: 'item_completed', item: { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text }] } } });
+if (!resume && kind === 'codex') writeFileSync(join(dirname(transcript), 'rollout-zz-decoy.jsonl'), [
+  { type: 'session_meta', timestamp: new Date().toISOString(), payload: { id: 'decoy', cwd: root, timestamp: new Date().toISOString() } },
+  { type: 'event_msg', payload: { type: 'user_message', message: 'A different conversation in the same checkout and account' } },
+].map(row => JSON.stringify(row)).join('\n'));
+const input = text => {
+  turn = randomUUID();
+  if (kind === 'codex') row({ type: 'event_msg', payload: { type: 'task_started', turn_id: turn } });
+  row(kind === 'claude' ? { type: 'user', uuid: randomUUID(), message: { role: 'user', content: text } }
+    : { type: 'event_msg', payload: { type: 'item_completed', turn_id: turn, item: { type: 'UserMessage', id: randomUUID(), content: [{ type: 'text', text }] } } });
+};
 const final = () => row(kind === 'claude' ? { type: 'assistant', uuid: randomUUID(), message: { content: [{ type: 'text', text: 'Completed response' }], stop_reason: 'end_turn' } }
-  : { type: 'event_msg', payload: { type: 'task_complete' } });
+  : { type: 'event_msg', payload: { type: 'task_complete', turn_id: turn } });
 const request = args.at(-1);
 input(request);
 // Read the predecessor inside the actual master's namespace. Other account homes are masked by

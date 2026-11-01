@@ -76,9 +76,8 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted
 
 ### One continuing master conversation
 
-Claude and Codex masters resume their current native conversation on the same account/runtime. Another account/runtime starts a successor: its request names the predecessor's runtime, account, native id, full read-only transcript and last unanswered person input (explicitly `none` when answered). A successful successor supersedes its predecessor: A→B→A continues B, never stale A. Failed launches retain the current conversation for retry; failed native resumes never fall back fresh. Unsupported master runtimes refuse explicitly.
+Claude and Codex masters resume their current native conversation on the same account/runtime. Another account/runtime starts a successor: its request names the predecessor's runtime, account, native id, full read-only transcript and last unanswered person input (explicitly `none` when answered). A→B→A continues B: successors supersede predecessors. Failed launches retain the conversation; native resumes never fall back fresh. Unsupported master runtimes refuse explicitly. Across repeated failovers, an unanswered input keeps its native-event reference.
 
 `master.continuity` persists current/predecessor identities independently of registry allocations. `.graphyard/master-records/` holds full native transcripts, mounted read-only without granting another account home or credentials. `.graphyard/launch/LAUNCH.inputs.jsonl` records launch/wake/retry origins before submission, joined to native input events by unique markers. Tools and partial output never answer a person; a completed assistant final after the input batch does. Pre-upgrade/adopted sessions recover native records from their recorded account and import known delivery origins; failed recovery retains state.
 
 `master-session-resumes` and `master-continues-after-failover` run credential-free runtime fixtures under bubblewrap, inspecting reopened records and confined transcript reads.
-

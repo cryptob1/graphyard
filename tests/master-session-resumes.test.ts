@@ -36,12 +36,29 @@ test('unit:master-session-resumes — native event metadata distinguishes person
   await appendFile(conversation.transcript, JSON.stringify({ type: 'assistant', message: { stop_reason: 'end_turn' } }) + '\n');
   assert.equal(await captureConversation(conversation), null);
   assert.match(await conversationHandover(conversation), /Last unanswered person message: none$/);
+  // Quoting a previous launch is a new person input, rather than a second automatic delivery.
+  await appendFile(conversation.transcript, JSON.stringify(user('quoted', `Why did you send this? ${automated}`)) + '\n');
+  assert.equal(await captureConversation(conversation), `Why did you send this? ${automated}`);
+  // A final belongs to its response branch, not a newer user input on another branch.
+  await appendFile(conversation.transcript, JSON.stringify({ type: 'assistant', uuid: 'old-final', parentUuid: 'person-1', message: { stop_reason: 'end_turn' } }) + '\n');
+  assert.equal(await captureConversation(conversation), `Why did you send this? ${automated}`);
   assert.deepEqual(conversationEvents('codex', [
     { type: 'event_msg', payload: { type: 'user_message', message: 'Question' } },
     { type: 'response_item', payload: { type: 'function_call_output', output: 'Tool output' } },
     { type: 'event_msg', payload: { type: 'agent_message', message: 'Partial' } },
     { type: 'event_msg', payload: { type: 'task_complete' } },
   ].map(row => JSON.stringify(row)).join('\n')).map(event => event.type), ['input', 'final']);
+  const codex = { ...conversation, runtime: 'codex', transcript: join(root, 'codex.jsonl') };
+  await writeFile(codex.transcript, [
+    { type: 'event_msg', payload: { type: 'item_completed', turn_id: 'turn-b', item: { type: 'UserMessage', id: 'person-b', content: [{ type: 'text', text: 'New turn question' }] } } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-a' } },
+  ].map(row => JSON.stringify(row)).join('\n'));
+  assert.equal(await captureConversation(codex), 'New turn question');
+  await appendFile(codex.transcript, '\n' + [
+    { type: 'event_msg', payload: { type: 'user_message', turn_id: 'turn-c', message: 'A newer question, subsequently answered' } },
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-c' } },
+  ].map(row => JSON.stringify(row)).join('\n'));
+  assert.equal(await captureConversation(codex), 'New turn question', 'answering a newer turn does not erase an older interrupted input batch');
 });
 
 test('unit:master-session-resumes — current and superseded identities survive state replacement and daemon reload separately from allocations', async () => {
@@ -70,7 +87,7 @@ test('unit:master-session-resumes — an adopted pre-upgrade Claude record impor
     { type: 'user', uuid: 'person', message: { content: 'A person still needs an answer' } },
     { type: 'user', uuid: 'wake', message: { content: 'Legacy wake' } },
   ].map(row => JSON.stringify(row)).join('\n'));
-  const adopted = await adoptConversation(root, { runtime: 'claude', account: 'legacy', environment: { CLAUDE_CONFIG_DIR: home }, since: 0,
+  const adopted = await adoptConversation(root, { runtime: 'claude', account: 'legacy', environment: { CLAUDE_CONFIG_DIR: home },
     prompts: [{ origin: 'launch', text: 'Legacy launcher request' }, { origin: 'wake', text: 'Legacy wake' }] });
   assert.equal(adopted.current.nativeId, 'legacy-native');
   assert.equal(await captureConversation(adopted.current), 'A person still needs an answer');
