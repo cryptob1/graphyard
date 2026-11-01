@@ -7,6 +7,10 @@ import { Engine } from '../src/engine.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1124 AC-2: a reconciliation pass rereads only the documents whose row changed since the
 // previous pass and re-evaluates the items whose own or fleet inputs changed. The documents are
 // counted at the database connection, whatever query read them. AC-3: a full pass over 100 items
@@ -55,7 +59,7 @@ after(async () => {
 });
 
 let created = 0;
-const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { type: 'chore',  title: `Incremental ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:incremental-reconcile'] }], ...extra }, randomUUID());
+const create = (extra: Record<string, unknown> = {}) => engine.execute(operator, 'create', null, { type: 'chore',  title: `Incremental ${++created}`, criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:incremental-reconcile', 'e2e:fixture'] }], ...extra }, randomUUID());
 async function pass() {
   documentsRead = 0; projected = 0;
   await engine.reconcile();

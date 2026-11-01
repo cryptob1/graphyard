@@ -14,6 +14,10 @@ import { registeredLaunch } from '../src/model/session-state.js';
 import { masterConfigSchema, registeredReview, type MasterConfig } from '../src/master.js';
 import { dispatchEffects, emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2026-09-01 boundAt is reviewer-binding fixture data nothing ages; the ticks run on a clock seeded from Date.now() and new Date() stamps snapshots and requests on that clock.
 
 /**
@@ -58,7 +62,7 @@ async function host() {
 test('integration:every-launch-registered — the loop\'s reviewer launches and master review register before the runtime starts, and a launch that fails ends its registration with the reason', async () => {
   const { root, master, cleanup } = await host();
   try {
-    let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Launch paths', criteria: [{ id: 'AC-1', text: 'Registered', proofs: ['unit:registered'] }] }, randomUUID());
+    let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Launch paths', criteria: [{ id: 'AC-1', text: 'Registered', proofs: ['unit:registered', 'e2e:fixture'] }] }, randomUUID());
     item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
     const sha = 'a'.repeat(40);
     const request = { id: randomUUID(), kind: 'review', provider: 'github', sha, baseSha: 'b'.repeat(40), policyRevision: 1, pr: 7, state: 'requested', requestedAt: new Date().toISOString(), reason: 'the head needs a review' };

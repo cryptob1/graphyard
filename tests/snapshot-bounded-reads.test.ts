@@ -14,6 +14,10 @@ import { Store } from '../src/store.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-864: CLI reads use a bounded snapshot: the worker commands
  * in src/cli/workspace.ts read the trimmed coordination snapshot or a single item by key, never
@@ -135,7 +139,7 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   for (let index = 0; index < 30; index++) {
     const item = await engine.execute(operator, 'create', null, { type: 'chore', 
       title: `Paged item ${index + 1}`, 
-      criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }],
+      criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test', 'e2e:fixture'] }],
     }, randomUUID()) as Work;
     if (index % 3 === 0) await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   }
@@ -197,7 +201,7 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   await get('work-snapshot?view=full');
   const before = { full: await documentsReadFor('work-snapshot?view=full&pageSize=7&cursor=3'), bounded: await documentsReadFor('work-snapshot?pageSize=7&cursor=3') };
   for (let index = 0; index < 30; index++) {
-    await engine.execute(operator, 'create', null, { type: 'chore',  title: `Growth item ${index + 1}`, criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test'] }] }, randomUUID());
+    await engine.execute(operator, 'create', null, { type: 'chore',  title: `Growth item ${index + 1}`, criteria: [{ id: 'AC-1', text: 'test', proofs: ['unit:test', 'e2e:fixture'] }] }, randomUUID());
   }
   await get('work-snapshot?view=full');
   const grown = { full: await documentsReadFor('work-snapshot?view=full&pageSize=7&cursor=3'), bounded: await documentsReadFor('work-snapshot?pageSize=7&cursor=3') };

@@ -16,6 +16,10 @@ import { redispatchPreservesAttempt } from '../src/model/capacity.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-2953: a supervisor's time bound or a worker's silence ends an attempt by its lapsed lease with
 // nothing submitted, and the loop used to reconcile the lease and remove the worktree without ever
 // putting the attempt's work on the record — the redispatch then started from the shared base and
@@ -76,7 +80,7 @@ test('integration:expired-worker-partial-work-handoff — a worker attempt ended
   const filed = await ok(operator, 'POST', 'work', {
     title: 'Preserve a timed-out attempt\'s partial work',
     type: 'chore',
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-partial-work-handoff'] }],
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:expired-worker-partial-work-handoff', 'e2e:fixture'] }],
   }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});
 

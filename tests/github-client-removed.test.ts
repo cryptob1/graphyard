@@ -23,6 +23,10 @@ import { masterConfigSchema } from '../src/master.js';
 import { reconcileReviews, saveReviewLedger } from '../src/reviewer.js';
 import { neededRework } from '../src/daemon/rework.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2030-05-01 instant is the loop's injected clock and the explicit
 // `now` of evaluate(); new Date() only stamps documents the Postgres half writes and reads back.
 
@@ -171,7 +175,7 @@ const baseEffects = (work: () => Promise<Work[]>, at: () => number) => ({
 
 test('unit:pr-era-history-loads — a work item whose history carries pull-request observations, PR numbers and GitHub check results loads and evaluates; it progresses through the merge writer\'s trial and merge with no GitHub request; master status shows no Main guard or GitHub budget line', { timeout: 300_000 }, async () => {
   // Submitted as today's workers submit, then rewritten as a release that still observed GitHub left it.
-  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'PR-era history before GY-2010', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'PR-era history before GY-2010', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a', 'e2e:fixture'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'worker-host', path: join(checkout, '.graphyard', 'worktrees', 'GY-1-1'), branch }, randomUUID());

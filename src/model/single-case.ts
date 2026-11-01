@@ -3,8 +3,8 @@ import type { Criterion } from './policy.js';
 /**
  * GY-2975: a criterion whose proof pins exactly one case — one seed, one fixture path, one sample
  * input — is flagged when the item is created and when its requirements are revised, and the
- * reviewer's brief is told to try one other case, so a head cannot pass by tuning to the single
- * case the proof checks. A warning and a review instruction: no new gate, no refusal.
+ * reviewer's brief assesses code and coverage for other cases, so a head cannot pass by tuning
+ * to the single case the proof checks. A warning and a review instruction: no new gate, no refusal.
  */
 
 /** The seed numbers a text pins: `seed 42`, `seeds 42, 7 and 1`, `seed=42`, `?seed=42`, `seed: 42`. */
@@ -16,7 +16,10 @@ const fixturePath = /\b[\w-]+(?:\/[\w.-]+)+\.(?:json|ya?ml|toml|csv|tsv|xml|txt|
 export function pinnedCases(text: string): string[] {
   const cases = new Set<string>();
   for (const [, list] of text.matchAll(seedList)) for (const seed of list.match(/\d+/g) ?? []) cases.add(seed);
-  for (const path of text.match(fixturePath) ?? []) cases.add(path);
+  for (const path of text.match(fixturePath) ?? []) {
+    // E2E case files bind executable proofs; they are not fixture inputs.
+    if (!path.startsWith('e2e/cases/')) cases.add(path);
+  }
   return [...cases];
 }
 

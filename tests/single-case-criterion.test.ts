@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+
+// Every filed fixture owes an E2E proof and the serve declaration its trial needs.
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -17,8 +21,8 @@ import type { Principal } from '../src/model.js';
  * reviewer's brief — no new gate, no refusal.
  */
 const warningOf = (id: string) => `${id} checks one case; a head can pass it by tuning to that case — name at least three, or say why one is enough.`;
-const multi = { id: 'AC-2', text: 'The campaign completes every mission on seeds 42, 7 and 1', proofs: ['unit:campaign-everywhere'] };
-const single = { id: 'AC-1', text: 'The campaign completes every mission on seed 42', proofs: ['unit:campaign-seed-42'] };
+const multi = { id: 'AC-2', text: 'The campaign completes every mission on seeds 42, 7 and 1', proofs: ['unit:campaign-everywhere', 'e2e:fixture'] };
+const single = { id: 'AC-1', text: 'The campaign completes every mission on seed 42', proofs: ['unit:campaign-seed-42', 'e2e:fixture'] };
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 let pg: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, token: string;
@@ -73,10 +77,11 @@ test('unit:single-case-criterion-warned-at-create — a pinned fixture path or ?
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 
-test('unit:reviewer-brief-checks-another-case — the brief tells the reviewer to run one other case and request changes when only the pinned case works; without one the instruction is absent', () => {
+test('unit:reviewer-brief-checks-another-case — the brief tells the reviewer to inspect code and coverage for other cases and request changes for missing generality; without one the instruction is absent', () => {
   const standard = reviewStandard({ key: 'GY-1', head, base }, [single, multi]);
   assert.match(standard, /AC-1 checks one case: a head can pass by tuning to that case\. /);
-  assert.match(standard, /run the head once on one other case its own commands accept — another seed or input — quote both results, and request changes when the head works only on the pinned case\. /);
+  assert.match(standard, /inspect the implementation and test coverage for other seeds or inputs/);
+  assert.doesNotMatch(standard, /run the head once|quote both results/);
   assert.ok(!standard.includes('AC-2 checks one case'), 'the criterion naming three seeds is not flagged');
   const plain = reviewStandard({ key: 'GY-1', head, base }, [{ id: 'AC-1', text: 'The change works at its head', proofs: ['unit:works'] }]);
   assert.ok(!plain.includes('one case'), 'no single-case instruction without a single-case criterion');

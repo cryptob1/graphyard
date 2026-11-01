@@ -10,6 +10,10 @@ import { boundLockedCache, isStandIn, lockedRows, lockedWork, rememberSaved, sav
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-1042: the follow-ups from the approved reviews of GY-1027 (PR #533). The first case records how
  * each listed finding was answered; the others prove the ones answered in code.
@@ -80,7 +84,7 @@ before(async () => {
 });
 after(async () => { boundLockedCache(); if (store) await store.close(); if (database) await database.stop(); });
 
-const create = (title: string, plannedFiles: string[]) => engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }] }, randomUUID());
+const create = (title: string, plannedFiles: string[]) => engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x', 'e2e:fixture'] }] }, randomUUID());
 /** `db` with every query's text recorded. */
 const recorded = (db: Queryable, texts: string[]): Queryable => ({ query: (text, values) => { texts.push(text); return db.query(text, values); } });
 const projects = (texts: string[]) => texts.filter(text => /CROSS JOIN LATERAL/.test(text)).length;

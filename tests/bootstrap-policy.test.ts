@@ -13,6 +13,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 // Time-bomb allowance (GY-1694): the 2026-09-18 declaredAt is a past fixture field of an operator declaration that evaluate and diagnose carry through unchanged; new Date()/Date.now() are the explicit now they are handed.
@@ -48,6 +49,9 @@ function observation(work: Work, overrides: Partial<Observation> = {}): Observat
 
 /** An item taken through claim, workspace, submission and an observed, reviewed, green candidate. */
 async function submitted(input: Record<string, unknown>, observe: Partial<Observation> = {}) {
+  const criteria = input.criteria as Work['criteria'];
+  if (!criteria.some(ac => ac.proofs.some(proof => proof.startsWith('e2e:'))))
+    input = { ...input, criteria: [...criteria, { id: 'AC-99', text: 'The served head works', proofs: ['e2e:fixture'] }] };
   const n = ++serial;
   let work = await engine.execute(operator, 'create', null, input, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
@@ -57,7 +61,7 @@ async function submitted(input: Record<string, unknown>, observe: Partial<Observ
   return engine.observe(work.id, work.revision, observation(work, observe));
 }
 async function prove(work: Work, proof: string, overrides: Record<string, unknown> = {}) {
-  const producer: Principal = { id: `producer-${proof}`, role: 'producer', proofs: [proof] };
+  const producer: Principal = { id: `producer-${proof}`, role: 'producer', proofs: [proof, 'e2e:fixture'] };
   return engine.execute(producer, 'evidence', work.id, { proof, sha: head, baseSha: base, policyRevision: work.policyRevision, result: 'pass', executed: 4, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, ...overrides }, id());
 }
 
@@ -180,7 +184,7 @@ test('integration:bootstrap-policy-gate lands a bootstrap candidate on review an
   assert.ok(Date.parse(stamped.declaredAt) > 0, 'the declaration carries a server-stamped time');
   assert.deepEqual(stamped.contractPaths, [contract]);
 
-  assert.deepEqual(requiredProofs(work, await all()), ['unit:supervisor-stop'], 'the deferred proof is not demanded of this candidate; the remaining criterion still is');
+  assert.deepEqual(requiredProofs(work, await all()), ['unit:supervisor-stop', 'e2e:fixture'], 'the deferred proof is not demanded of this candidate; the remaining criterion still is');
   // GY-2010: review passes, and only the merge writer's own trial and push stand: nothing else is asked of a bootstrap candidate.
   assert.deepEqual(work.gates.filter(gate => !gate.passed).flatMap(gate => gate.reasons.map(reason => `${gate.name}: ${reason.replace(/ [0-9a-f]{12}/g, '')}`)),
     ['test: merge writer has not trialled on', 'merge: merge writer has not pushed'], 'review and the merge writer are enough for a bootstrap candidate');
@@ -202,7 +206,7 @@ test('integration:bootstrap-policy-gate still refuses a bootstrap candidate with
   const work = await submitted({ type: 'chore',  title: 'Bootstrap without review',
     criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:noreview-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/noreview/engine.ts'] } }] },
   { reviews: [], checks: [{ name: 'test', result: 'failure', appId: 15368 }] });
-  assert.deepEqual(requiredProofs(work, await all()), [], 'the only criterion is deferred');
+  assert.deepEqual(requiredProofs(work, await all()), ['e2e:fixture'], 'the harness criterion is deferred; the E2E case still runs');
   assert.equal(work.gates.find(gate => gate.name === 'review')!.passed, false);
   assert.equal(work.gates.find(gate => gate.name === 'test')!.passed, false);
   assert.equal(work.stage, 'review', 'a deferred proof never advances a candidate past review and CI');
@@ -216,9 +220,9 @@ test('integration:bootstrap-policy-gate refuses to defer an E2E proof whose scen
 
 test('integration:bootstrap-policy-gate lets an operator declare and withdraw the deferral through a requirement revision', async () => {
   let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Deferral declared by revision',
-    criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:revised-harness'] }] }, id());
+    criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:revised-harness', 'e2e:fixture'] }] }, id());
   const revision = { expectedPolicyRevision: work.policyRevision, reason: 'The harness ships with this change', dependencies: [], exclusiveResources: [],
-    criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:revised-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/revised/engine.ts'] } }] };
+    criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:revised-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/revised/engine.ts'] } }, { id: 'AC-99', text: 'The served head works', proofs: ['e2e:fixture'] }] };
   work = await engine.execute(operator, 'requirements', work.id, revision, id());
   assert.equal(work.criteria[0].bootstrap!.declaredBy, 'operator');
   assert.equal(work.criteria[0].bootstrap!.policyRevision, 2);
@@ -229,7 +233,7 @@ test('integration:bootstrap-policy-gate lets an operator declare and withdraw th
   assert.equal(work.criteria[0].bootstrap!.policyRevision, 2);
 
   work = await engine.execute(operator, 'requirements', work.id, { ...revision, expectedPolicyRevision: work.policyRevision, reason: 'The harness exists on main now',
-    criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:revised-harness'] }] }, id());
+    criteria: [{ id: 'AC-1', text: 'Recovery is proven', proofs: ['integration:revised-harness', 'e2e:fixture'] }] }, id());
   assert.equal(work.criteria[0].bootstrap, undefined, 'withdrawing the deferral restores the ordinary proof requirement');
   assert.deepEqual(bootstrapObligations(await all()).filter(obligation => obligation.workId === work.id), []);
 });
@@ -241,11 +245,11 @@ test('integration:bootstrap-policy-gate lets an operator declare and withdraw th
 test('integration:bootstrap-policy-inheritance requires the deferred proof of the next change on that contract', async () => {
   const origin = await submitted({ type: 'chore',  title: 'Introduce the inherited harness',
     criteria: [{ id: 'AC-1', text: 'Inheritance is proven', proofs: ['integration:inherit-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/inherit/engine.ts'] } }] });
-  assert.deepEqual(requiredProofs(origin, await all()), []);
+  assert.deepEqual(requiredProofs(origin, await all()), ['e2e:fixture']);
 
   const heir = await submitted({ type: 'chore',  title: 'Change the same contract',
     criteria: [{ id: 'AC-1', text: 'The change behaves', proofs: ['unit:heir'] }] }, { files: ['src/inherit/engine.ts'] });
-  assert.deepEqual(requiredProofs(heir, await all()).slice().sort(), ['integration:inherit-harness', 'unit:heir'], 'the deferred proof is inherited as a required criterion');
+  assert.deepEqual(requiredProofs(heir, await all()).slice().sort(), ['e2e:fixture', 'integration:inherit-harness', 'unit:heir'], 'the deferred proof is inherited as a required criterion');
   assert.deepEqual(inheritedObligations(heir, await all()).map(obligation => obligation.proof), ['integration:inherit-harness']);
   assert.ok(diagnose(heir, await all(), Date.now()).some(entry => entry.kind === 'bootstrap-obligation'));
   assert.equal(proofPreview(heir, await all()).some(row => row.proof === 'integration:inherit-harness'), true, 'the inherited proof is previewed beside the item’s own');
@@ -259,13 +263,13 @@ test('integration:bootstrap-policy-inheritance refuses a second deferral of an i
   await submitted({ type: 'chore',  title: 'Introduce the renewable harness',
     criteria: [{ id: 'AC-1', text: 'Renewal is proven', proofs: ['integration:renew-harness'], bootstrap: { reason: 'Introduces the harness', contractPaths: ['src/renew/engine.ts'] } }] });
   await assert.rejects(engine.execute(operator, 'create', null, { type: 'chore',  title: 'Defer the inherited proof again',
-    criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness'], bootstrap: { reason: 'Still inconvenient', contractPaths: ['src/renew/engine.ts'] } }] }, id()),
+    criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness'], bootstrap: { reason: 'Still inconvenient', contractPaths: ['src/renew/engine.ts'] } }, { id: 'AC-99', text: 'The served head works', proofs: ['e2e:fixture'] }] }, id()),
   /is already a bootstrap obligation inherited from/, 'a deferral cannot be renewed by the change that inherits it');
 
   let heir = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Inherit the renewable harness',
-    criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness'] }] }, id());
+    criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness', 'e2e:fixture'] }] }, id());
   await assert.rejects(engine.execute(operator, 'requirements', heir.id, { expectedPolicyRevision: heir.policyRevision, reason: 'Defer it once more', dependencies: [], exclusiveResources: [],
-    criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness'], bootstrap: { reason: 'Still inconvenient', contractPaths: ['src/renew/engine.ts'] } }] }, id()),
+    criteria: [{ id: 'AC-1', text: 'Renewal is proven later', proofs: ['integration:renew-harness'], bootstrap: { reason: 'Still inconvenient', contractPaths: ['src/renew/engine.ts'] } }, { id: 'AC-99', text: 'The served head works', proofs: ['e2e:fixture'] }] }, id()),
   /is already a bootstrap obligation inherited from/, 'a requirement revision cannot renew an inherited deferral either');
   heir = await current(heir.id);
   assert.equal(heir.criteria[0].bootstrap, undefined, 'the refused revision left the requirements unchanged');
@@ -322,7 +326,7 @@ test('integration:bootstrap-policy-gate delivers a bootstrap candidate whose def
 // ---------------------------------------------------------------------------
 
 const bootstrapCriteria = (slug: string, reason = 'Introduces the harness') =>
-  [{ id: 'AC-1', text: 'Authority is proven', proofs: [`integration:${slug}-harness`], bootstrap: { reason, contractPaths: [`src/${slug}/engine.ts`] } }];
+  [{ id: 'AC-1', text: 'Authority is proven', proofs: [`integration:${slug}-harness`], bootstrap: { reason, contractPaths: [`src/${slug}/engine.ts`] } }, { id: 'AC-99', text: 'The served head works', proofs: ['e2e:fixture'] }];
 const agent = (capabilities: string[]): Principal => ({ id: 'planner', role: 'operator-agent', capabilities: capabilities as Principal['capabilities'], scope: { repositories: ['owner/project'], workItems: ['*'] } });
 
 test('integration:bootstrap-policy-authority keeps bootstrap mode away from workers', async () => {
@@ -330,11 +334,11 @@ test('integration:bootstrap-policy-authority keeps bootstrap mode away from work
   await assert.rejects(engine.execute(worker, 'create', null, input, id()), /Operator permission required/, 'a worker cannot create work in bootstrap mode');
 
   const work = await submitted({ type: 'chore',  title: 'Worker revises into bootstrap',
-    criteria: [{ id: 'AC-1', text: 'Authority is proven', proofs: ['integration:worker-authority-harness'] }] });
+    criteria: [{ id: 'AC-1', text: 'Authority is proven', proofs: ['integration:worker-authority-harness', 'e2e:fixture'] }] });
   await assert.rejects(engine.execute(worker, 'requirements', work.id, { expectedPolicyRevision: work.policyRevision, reason: 'Defer my own proof', dependencies: [], exclusiveResources: [], criteria: bootstrapCriteria('worker-authority') }, id()),
     /Operator permission required/, 'a worker cannot revise its own criteria into bootstrap mode');
   assert.equal((await current(work.id)).criteria[0].bootstrap, undefined);
-  assert.deepEqual(requiredProofs(await current(work.id), await all()), ['integration:worker-authority-harness'], 'the worker’s own proof requirement stands');
+  assert.deepEqual(requiredProofs(await current(work.id), await all()), ['integration:worker-authority-harness', 'e2e:fixture'], 'the worker’s own proof requirement stands');
 });
 
 test('integration:bootstrap-policy-authority requires the explicit policy:bootstrap capability of an operator agent', async () => {
@@ -354,7 +358,7 @@ test('integration:bootstrap-policy-authority requires the explicit policy:bootst
   work = await engine.execute(agent(['policy:requirements']), 'requirements', work.id, { ...revision, criteria: bootstrapCriteria('revised-authority') }, id());
   assert.equal(work.criteria[0].bootstrap!.declaredBy, 'operator', 'carrying an unchanged declaration forward preserves its original author');
   work = await engine.execute(agent(['policy:requirements']), 'requirements', work.id, { ...revision, expectedPolicyRevision: work.policyRevision,
-    criteria: [{ id: 'AC-1', text: 'Authority is proven', proofs: ['integration:revised-authority-harness'] }] }, id());
+    criteria: [{ id: 'AC-1', text: 'Authority is proven', proofs: ['integration:revised-authority-harness', 'e2e:fixture'] }] }, id());
   assert.equal(work.criteria[0].bootstrap, undefined, 'withdrawing a deferral strengthens the gate and needs no extra capability');
 });
 

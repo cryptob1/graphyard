@@ -13,7 +13,7 @@ import { checkoutRepositoryPolicy, defaultRepositoryPolicy, setRepositoryPolicy 
 import { defineScenario } from '../src/scenarios.js';
 import { parseCase } from '../src/e2e/case.js';
 import { projectCaseSuite } from '../src/release-project.js';
-import type { E2eReport } from '../src/e2e/runner.js';
+import { runCases, type E2eReport } from '../src/e2e/runner.js';
 import { trialEnvironment } from '../src/merge-writer/trial.js';
 
 // GY-2969: Graphyard's own graphyard.json declares e2e.serve, so its user-facing items can carry
@@ -24,7 +24,7 @@ import { trialEnvironment } from '../src/merge-writer/trial.js';
 const checkout = process.cwd();
 const policy = checkoutRepositoryPolicy(checkout);
 
-test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command answers, create-work-item passes against it, and stopping it removes its database directory', { timeout: 240_000 }, async () => {
+test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command passes core product and delivery cases, and stopping it removes its database directory', { timeout: 240_000 }, async t => {
   const serve = policy.e2e.serve;
   assert.ok(serve, 'graphyard.json declares e2e.serve');
   const scratch = await temporaryDirectory('e2e-serve');
@@ -51,13 +51,44 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
     const databases = readdirSync(scratch).filter(name => name.startsWith('graphyard-e2e-serve-'));
     assert.equal(databases.length, 1, 'the database lives in one temporary directory under TMPDIR');
 
-    const file = 'e2e/cases/create-work-item.json';
+    const ids = ['capacity-limit-redispatch', 'create-work-item', 'every-item-owes-e2e', 'board', 'work-item-detail', 'single-case-criterion-warned'];
+    const cases = ids.map(id => {
+      const file = `e2e/cases/${id}.json`;
+      return { file, definition: parseCase(file, readFileSync(join(checkout, file), 'utf8')) };
+    });
     let report: E2eReport | null = null;
-    await projectCaseSuite(checkout, token, { cases: [{ file, definition: parseCase(file, readFileSync(join(checkout, file), 'utf8')) }], select: () => true,
-      withholdSecrets: true, artifactsDirectory: join(scratch, 'artifacts'), signal: AbortSignal.timeout(60_000), report: value => { report = value; } })
+    await projectCaseSuite(checkout, token, { cases, select: () => true,
+      withholdSecrets: true, artifactsDirectory: join(scratch, 'artifacts'), signal: AbortSignal.timeout(180_000), report: value => { report = value; } })
       .run(new URL(serve.url).origin, null);
-    const outcome = (report as E2eReport | null)?.cases.find(entry => entry.id === 'create-work-item');
-    assert.equal(outcome?.verdict, 'passed', JSON.stringify(outcome?.failingStep ?? outcome));
+    for (const id of ids) {
+      const outcome: E2eReport['cases'][number] | undefined = (report as E2eReport | null)?.cases.find(entry => entry.id === id);
+      assert.equal(outcome?.verdict, 'passed', `${id}: ${JSON.stringify(outcome?.failingStep ?? outcome)}`);
+    }
+
+    // GY-3038: the same served head must actually deliver to its scratch bare origin. A push
+    // failure after a passing build/test trial must fail this case, never manufacture delivery.
+    await t.test('unit:delivery-pipeline — the case delivers a reviewed exact head and fails after a passing trial when the bare origin is unwritable', async () => {
+      const deliveryFile = 'e2e/cases/delivery-pipeline.json';
+      const definition = parseCase(deliveryFile, readFileSync(join(checkout, deliveryFile), 'utf8'));
+      const deliveryOptions = { url: new URL(serve.url).origin, token, environment: 'uat', root: checkout,
+        retries: 0, withholdSecrets: true, signal: AbortSignal.timeout(180_000), artifactsDirectory: join(scratch, 'delivery-artifacts') };
+      const passed = await runCases([{ file: deliveryFile, definition }], deliveryOptions);
+      assert.equal(passed.cases[0]?.verdict, 'passed', JSON.stringify(passed.cases[0]?.failingStep));
+      const broken = structuredClone(definition);
+      assert.equal(broken.steps[0].kind, 'command');
+      if (broken.steps[0].kind === 'command') broken.steps[0].run += ' --unwritable';
+      const failed = await runCases([{ file: deliveryFile, definition: broken }], deliveryOptions);
+      assert.equal(failed.cases[0]?.verdict, 'failed', 'the same case fails with an unwritable origin');
+      assert.match(failed.cases[0]?.failingStep?.reason ?? '', /permission denied|unpacker error|unable to create/i);
+      const items = await fetch(`${deliveryOptions.url}/api/work`, { headers: { Authorization: `Bearer ${token}` } }).then(response => response.json()) as any[];
+      const refused = items.find(item => item.title.startsWith('Scratch delivery') && item.stage !== 'done');
+      assert.ok(refused, 'the failed push leaves the item undelivered');
+      assert.equal(refused.delivery, undefined);
+      assert.equal(refused.mergeLedger.state, 'intent');
+      assert.equal(refused.mergeLedger.trial.build, 'pass', 'the fault reaches the real push after a passing build');
+      assert.deepEqual(refused.mergeLedger.trial.proofs['unit:scratch-delivery'], { executed: 1, failed: 0 });
+      assert.deepEqual(refused.mergeLedger.trial.proofs['e2e:scratch-delivery'], { executed: 1, failed: 0 }, 'the served scratch head passes its E2E check before the push fails');
+    });
 
     process.kill(-child.pid!, 'SIGTERM');
     // Wait for the serving process to finish cleanup (not the shell's exit), then observe removal.

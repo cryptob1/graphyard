@@ -194,6 +194,7 @@ test('integration:local-runtime-restart — the supervised process starts the cl
   const port = await freePort();
   const { fixture, deps, inputs } = await localFixture(systemd.supervisor, port);
   let child: ChildProcess | null = null;
+  let runtime: LocalRuntime | null = null;
   try {
     const session = await prepareInstall(fixture.root, inputs, deps, 'apply');
     await applyProvider(session);
@@ -205,18 +206,19 @@ test('integration:local-runtime-restart — the supervised process starts the cl
 
     // In process: the server closes (awaiting store.close()) before the cluster is stopped.
     const order: string[] = [];
-    const runtime = await startLocalRuntime(directory, { serve: async env => { const served = await serveControlPlane(env); order.push('served'); return { close: async () => { await served.close(); order.push('store closed'); } }; } });
+    runtime = await startLocalRuntime(directory, { serve: async env => { const served = await serveControlPlane(env); order.push('served'); return { close: async () => { await served.close(); order.push('store closed'); } }; } });
     runtime.cluster.process.once('exit', () => order.push('cluster stopped'));
     // Mutations wait for startup validation (a retryable 503 until then).
     let created!: Response;
     for (let attempt = 0; attempt < 120; attempt++) {
-      created = await fetch(`${url}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${admin.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'gy-1500-restart' }, body: JSON.stringify({ type: 'chore', title: 'Survives a restart', criteria: [{ id: 'AC-1', text: 'Kept', proofs: ['unit:kept'] }] }) });
+      created = await fetch(`${url}/api/work`, { method: 'POST', headers: { Authorization: `Bearer ${admin.token}`, 'Content-Type': 'application/json', 'Idempotency-Key': 'gy-1500-restart' }, body: JSON.stringify({ type: 'chore', title: 'Survives a restart', criteria: [{ id: 'AC-1', text: 'Kept', proofs: ['unit:kept', 'e2e:create-work-item'] }] }) });
       if (created.status !== 503) break;
       await new Promise(accept => setTimeout(accept, 250));
     }
     assert.equal(created.status, 200, await created.clone().text());
     const item = await created.json() as any;
     await runtime.stop();
+    runtime = null;
     assert.deepEqual(order, ['served', 'store closed', 'cluster stopped']);
 
     // systemd signals only the runtime, never the cluster it spawned, so the store closes before the cluster stops.
@@ -246,7 +248,7 @@ test('integration:local-runtime-restart — the supervised process starts the cl
       child = null;
       assert.equal(existsSync(join(paths.data, 'postmaster.pid')), false, 'the cluster stopped with it');
     }
-  } finally { child?.kill('SIGKILL'); await systemd.stop(); await fixture.cleanup(); }
+  } finally { child?.kill('SIGKILL'); await runtime?.stop(); await systemd.stop(); await fixture.cleanup(); }
 });
 
 test('unit:local-provider-credentials-outside-repo — the local provider writes every credential under the install directory, none inside the repository, and embedded-postgres is a runtime dependency', async () => {
