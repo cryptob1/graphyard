@@ -33,9 +33,15 @@ test('integration:worker-host-filesystem-isolation integration:worker-control-so
       for (const path of ${JSON.stringify([home, other])}) {
         assert.equal(fs.existsSync(path + '/sentinel'), false);
         for (const operation of [() => fs.writeFileSync(path + '/created', 'bad'), () => fs.writeFileSync(path + '/sentinel', 'bad'),
+          () => fs.renameSync(path + '/sentinel', path + '/moved'),
           () => fs.renameSync(path + '/sentinel', 'stolen'), () => fs.unlinkSync(path + '/sentinel')]) {
-          assert.throws(operation, error => ['EROFS', 'ENOENT', 'EACCES'].includes(error.code));
+          assert.throws(operation, error => ['EROFS', 'ENOENT', 'EACCES', 'EXDEV'].includes(error.code));
         }
+        fs.writeFileSync('source', 'own');
+        assert.throws(() => fs.renameSync('source', path + '/sentinel'),
+          error => ['EROFS', 'ENOENT', 'EACCES', 'EXDEV'].includes(error.code));
+        assert.equal(fs.readFileSync('source', 'utf8'), 'own');
+        fs.unlinkSync('source');
       }
       assert.throws(() => fs.writeFileSync('/outside', 'bad'), { code: 'EROFS' });
       assert.equal(fs.existsSync('/var/run/docker.sock'), false);
