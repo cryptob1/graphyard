@@ -1,9 +1,9 @@
 import { test } from 'node:test';
+import { temporaryDirectory } from './helpers/temp-dirs.js';
 import assert from 'node:assert/strict';
 import { upgradePlan } from '../src/cli/upgrade.js';
 import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall, redeployArguments } from '../src/install/index.js';
 import { installDirectory, readInstallRecord, type InstallRecord } from '../src/install/secrets.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { harness } from './install-harness.js';
 
 // GY-2941: an installation running its own Herdr instance redeploys with --herdr-instance, or preflight refuses the self-deploy and its rollback.
@@ -27,9 +27,11 @@ test('unit:redeploy-carries-herdr-instance — the restart step\'s redeploy pass
 
 test('unit:own-herdr-instance-recorded — an install applied with --herdr-instance records it, so a later redeploy from the record carries it', async () => {
   const previousHome = process.env.HOME;
-  process.env.HOME = await temporaryDirectory('h', '/var/tmp');
+  // This test exercises the persisted choice, not the caller's available Unix socket path bytes.
+  const home = await temporaryDirectory('h', '/tmp');
   const fixture = await harness({ provider: 'compose', serverUrl: 'http://127.0.0.1:4310' });
   try {
+    process.env.HOME = home;
     const apply = async (args: string[]) => {
       const session = await prepareInstall(fixture.root, installRequestFromArgs(args).request, fixture.deps, 'apply');
       await applyInstall(session, await buildPlan(session));
@@ -41,5 +43,8 @@ test('unit:own-herdr-instance-recorded — an install applied with --herdr-insta
     assert.equal((await apply(redeployArguments(created, 'img'))).herdrInstance, true, 'the redeploy keeps the choice');
     assert.equal((await apply(['--provider', 'compose', '--repo', 'owner/project', '--apply'])).herdrInstance, true, 'a rerun naming no Herdr choice keeps it');
     assert.equal((await apply(['--provider', 'compose', '--repo', 'owner/project', '--no-herdr', '--apply'])).herdrInstance, true, '--no-herdr leaves the own instance, so keeps it');
-  } finally { process.env.HOME = previousHome; await fixture.cleanup(); }
+  } finally {
+    await fixture.cleanup();
+    if (previousHome === undefined) delete process.env.HOME; else process.env.HOME = previousHome;
+  }
 });
