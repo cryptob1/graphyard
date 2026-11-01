@@ -4,7 +4,7 @@ import { mkdir, readFile, readlink, symlink, writeFile } from 'node:fs/promises'
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { defaultChildRun } from '../src/child-runner.js';
+import { ChildProcessError, defaultChildRun } from '../src/child-runner.js';
 import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 import { trialEnvironment, trialHomeVariables } from '../src/merge-writer/trial.js';
 
@@ -49,3 +49,20 @@ test('integration:worker-host-filesystem-isolation integration:worker-control-so
     assert.equal(reached, 0);
   } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
 });
+
+test('integration:worker-home-deletion-regression — cancelling a trial stops its background writers before scratch is reclaimed', async () => {
+  const allocation = await temporaryDirectory('cancel-trial', process.cwd());
+  const beat = join(allocation, 'heartbeat');
+  await assert.rejects(defaultChildRun('node', ['-e', `
+    require('node:child_process').spawn(process.execPath, ['-e',
+      "setInterval(() => require('node:fs').writeFileSync(process.argv[1], String(Date.now())), 50)", process.argv[1]],
+      { detached: true, stdio: 'ignore' });
+    setInterval(() => {}, 1000);
+  `, beat], { cwd: allocation, wrapper: trialContainerWords([allocation]),
+    env: { ...trialEnvironment(), ...trialHomeVariables(allocation), PATH: '/usr/local/bin:/usr/bin:/bin' }, timeoutMs: 1_500 }),
+  error => error instanceof ChildProcessError && error.timedOut);
+  const stopped = await readFile(beat, 'utf8');
+  await new Promise(resolve => setTimeout(resolve, 200));
+  assert.equal(await readFile(beat, 'utf8'), stopped, 'no background writer survives the cancelled boundary');
+});
+

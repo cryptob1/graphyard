@@ -116,7 +116,7 @@ export async function trialMerge(git: TrialGit, input: { head: string; baseTip: 
  * temporary-directory overrides (GY-1549: the loop's systemd unit inherits TMPDIR=/var/tmp from
  * environment.d). runTrial sets its own in their place (`trialTemporaryRoot`).
  */
-export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'TMPDIR', 'TMP', 'TEMP'] as const;
+export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'TMPDIR', 'TMP', 'TEMP'] as const;
 /**
  * Whether a variable name is credential-bearing and must not reach the trial child (GY-1548): the
  * named helpers above, plus any name carrying a token, secret, password, private key, API key,

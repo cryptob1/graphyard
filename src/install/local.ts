@@ -13,7 +13,7 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emptyObservation, httpHealth, variableMarker, type AdapterContext, type ProviderAdapter } from './adapters.js';
+import { emptyObservation, httpHealth, tool, variableMarker, type AdapterContext, type ProviderAdapter } from './adapters.js';
 import { clusterExists, localDatabaseUrl, localPaths, postgresBinaries, postgresPackage, readLocalEnvironment, type LocalPaths } from './local-runtime.js';
 import { loopUnitDirectory, supervisorSupport, testSuiteHomeGuard } from '../supervisor.js';
 import type { EnvValue, PreflightItem } from './types.js';
@@ -172,6 +172,7 @@ export const localAdapter: ProviderAdapter = {
     const major = Number(process.versions.node.split('.')[0]);
     const items: PreflightItem[] = [
       { name: 'Node.js', ok: major >= MINIMUM_NODE_MAJOR, detail: `Node ${process.versions.node}`, fix: `Install Node ${MINIMUM_NODE_MAJOR} or newer (nodejs.org, or nvm install ${MINIMUM_NODE_MAJOR}), then rerun the installer with it` },
+      await tool(ctx, ctx.transport, 'docker', ['version', '--format', '{{.Server.Version}}'], 'Docker Engine for merge trials', 'Start Docker Engine for private-root merge trials, then rerun the installer'),
     ];
     try {
       const binaries = await postgresBinaries();

@@ -77,7 +77,7 @@ export async function httpHealth(ctx: AdapterContext, url: string) {
   } catch { return false; }
 }
 
-async function tool(ctx: AdapterContext, transport: Transport, program: string, args: string[], name: string, fix: string): Promise<PreflightItem> {
+export async function tool(ctx: AdapterContext, transport: Transport, program: string, args: string[], name: string, fix: string): Promise<PreflightItem> {
   const result = await transport.exec(program, args, { allowFailure: true, timeout: 60_000 });
   return result.code === 0
     ? { name, ok: true, detail: ctx.vault.scrub(result.stdout.trim().split('\n')[0] ?? 'available') }
