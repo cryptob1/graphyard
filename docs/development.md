@@ -23,6 +23,8 @@ Worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates sh
 
 A merge trial whose failing tests fail on the base tip too: no rework, no filed item; the writer holds the head (`base failure`) on one attention entry naming the test; retried on the then tip after 30 min.
 
+Runtime launch tests must also work with an isolated `HOME`/XDG home and durable scratch nested under another home. Its symlinked `.claude/settings.json` is then an ancestor project source, not the session account home. The role harness checks ancestors just as folder trust does and uses `--setting-sources user` with its role file; it never trusts that ancestor. Reproduce with credential-free fixtures in owned scratch (`tests/isolated-trial-runtime-config.test.ts`), not the operator’s real configuration. Project settings still require exclusion or existing trust.
+
 ### Golden eval
 
 `eval/golden/` holds ten fixed items, each a small scaffold repository snapshot (`scaffold.tar`, under 1 MB) beside its `item.json` (criteria and proofs). They cover the fault classes the benchmark runs hit: a plain feature, a bug whose proof fails on the base, two items that touch the same file (merge conflict), a proof that fails on the item's first head (rework), an item longer than one attempt bound, a docs budget, a review that should request changes, a requirements gap a worker must report blocked, a flaky test outside the item, and a user-facing item with an e2e case.

@@ -26,7 +26,9 @@ const launch = async (kind: string, cwd: string) => {
   const directory = await temporaryDirectory(`${kind}-launch`), home = await temporaryDirectory(`${kind}-home`);
   const run = (_command: string, args: string[]) => startedAtOnce(args) ?? JSON.stringify({ result: {} });
   const environment = { HOME: home, CODEX_HOME: home, CLAUDE_CONFIG_DIR: home, AGY_CONFIG_DIR: home };
-  return startAgentSession(`review-${kind}-1-2e26881a`, kind, `pane-${kind}`, launchPlan(kind).args, 'Review GY-1717', run, { directory, cwd, environment, confinement: false });
+  // This fixture tests directory creation, independently of ancestor project settings.
+  const args = [...launchPlan(kind).args, ...(kind === 'claude' ? ['--setting-sources', 'user'] : [])];
+  return startAgentSession(`review-${kind}-1-2e26881a`, kind, `pane-${kind}`, args, 'Review GY-1717', run, { directory, cwd, environment, confinement: false });
 };
 
 test('unit:codex-protected-paths-created — a codex launch creates the missing .agents and .codex in its working directory and leaves ones already present untouched', async () => {
