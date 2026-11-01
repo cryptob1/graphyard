@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
@@ -11,7 +11,18 @@ import { loadMasterConfig, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from '../src/master/registry-slot.js';
-import { fleet, requested } from './helpers/review-fleet.js';
+import { fleet as launchFleet, requested } from './helpers/review-fleet.js';
+
+// Keep managed checkouts in the fixture too when verify runs this file directly, without the
+// suite runner's temporary GRAPHYARD_DATA_HOME.
+async function fleet(...args: Parameters<typeof launchFleet>) {
+  const host = await launchFleet(...args);
+  const file = join(host.root, '.graphyard/master.json');
+  const config = JSON.parse(await readFile(file, 'utf8'));
+  config.run.worktreeRoot = await temporaryDirectory('post-merge-managed-checkouts', '/var/tmp');
+  await writeFile(file, JSON.stringify(config), { mode: 0o600 });
+  return host;
+}
 
 // GY-2945: a loop restart leaves the agent-registry sessions of its reviewer and producer launches
 // without an owner — the successor loop never marks them ended, because nothing it tracks names
