@@ -134,12 +134,11 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
 /**
  * GY-2997: the trial child's home — a fresh, empty directory of the trial as HOME and every XDG base
  * directory (as `previewEnvironment` gives a preview), so nothing the merge brings in finds a
- * coordinator credential through HOME or XDG. Only the host's npm cache and Playwright browsers are
- * still found where the host keeps them.
+ * coordinator credential through HOME or XDG. npm and Playwright caches belong to this allocation
+ * too, so cold-cache installs never need writes to the read-only host home.
  */
-export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const shared: Record<string, string> = host.HOME ? { npm_config_cache: host.npm_config_cache ?? join(host.HOME, '.npm'), PLAYWRIGHT_BROWSERS_PATH: host.PLAYWRIGHT_BROWSERS_PATH ?? join(host.HOME, '.cache', 'ms-playwright') } : {};
-  return { ...shared, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
+export function trialHomeVariables(home: string): Record<string, string> {
+  return { npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
 export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
@@ -156,7 +155,8 @@ export function trialConfinement(hidden: readonly string[], reexposed: readonly 
   // Its own PID namespace and a fresh /proc, so no host process's /proc/<pid>/root leads back past the masks.
   const scratch = binds.at(-1);
   if (!scratch) throw new Error('A trial sandbox requires an allocated writable directory');
-  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch, environment),
+  // Keep short scratch paths for test Unix sockets while preserving the allocated home/caches.
+  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch, { ...environment, ...trialTemporaryVariables('/tmp') }, binds),
     ...masks, ...readable.filter(existsSync).map(path => realpathSync(path)).flatMap(path => ['--ro-bind', path, path]),
     ...binds.flatMap(path => ['--bind', path, path]),
     ...processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), secretsBus: null }, []), '--',
@@ -786,8 +786,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const home = join(checkout.directory, 'home');
     await mkdir(home);
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
-    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
-    wrapper = trialConfinement(input.hidden ?? [], [checkout.directory, place, temporary], undefined, [input.root], { ...process.env, ...input.environment });
+    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home) };
+    wrapper = trialConfinement(input.hidden ?? [], [checkout.directory, place, temporary], undefined, [input.root], { ...process.env, ...input.environment, ...env });
   }
   catch (error) {
     for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
@@ -928,8 +928,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (hostEnded(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
-        // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
-        // Chromium installs into the host's shared Playwright cache (a no-op once present); an install that fails is the host's, retried, never the merge's.
+        // GY-2092: a change to the dashboard installs Chromium in the allocated trial home and runs the Playwright suite; a failing browser test refuses the merge like any failing test.
+        // An install that fails is the host's, retried, never the merge's.
         if (hasBrowserTestCheck(packageScripts) && touchesDashboard(input.changedFiles)) {
           enter('tests');
           enterStep('tests: test:browser');

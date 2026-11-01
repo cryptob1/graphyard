@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { coordinatorConfinement, readOnlyMountWrapper } from '../src/master/confinement.js';
@@ -226,6 +226,60 @@ test('integration:worker-host-filesystem-isolation — runTrialAttempt restores 
   assert.equal(verdict.tests.passed, 1, verdict.logTail);
   assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
   assert.equal(readFileSync(join(f.unrelated, 'sentinel'), 'utf8'), 'protected\n');
+});
+
+test('integration:worker-home-deletion-regression — cold-cache dashboard trials install and run browser checks inside allocated state', async () => {
+  const f = await fixture(true);
+  // Exercise the real npm/npx commands and namespace without a network download. The fixture
+  // installer performs the cache writes required by Playwright, and the browser check uses them.
+  const modules = join(f.root, 'node_modules');
+  mkdirSync(join(modules, '.bin'), { recursive: true });
+  mkdirSync(join(modules, 'playwright'));
+  writeFileSync(join(modules, 'playwright', 'package.json'), JSON.stringify({ name: 'playwright', version: '1.0.0', bin: { playwright: 'cli.cjs' } }));
+  writeFileSync(join(modules, 'playwright', 'cli.cjs'), `#!/usr/bin/node
+    const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
+    assert.deepEqual(process.argv.slice(2), ['install', 'chromium']);
+    assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, path.join(process.env.HOME, '.cache', 'ms-playwright'));
+    assert.equal(process.env.npm_config_cache, path.join(process.env.HOME, '.npm'));
+    assert.equal(fs.existsSync(process.env.PLAYWRIGHT_BROWSERS_PATH), false, 'cold browser cache');
+    fs.mkdirSync(process.env.PLAYWRIGHT_BROWSERS_PATH, { recursive: true });
+    fs.writeFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'installed');
+    fs.mkdirSync(process.env.npm_config_cache, { recursive: true });
+    fs.writeFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'cached');
+  `);
+  chmodSync(join(modules, 'playwright', 'cli.cjs'), 0o755);
+  symlinkSync('../playwright/cli.cjs', join(modules, '.bin', 'playwright'));
+  writeFileSync(join(f.root, 'package-lock.json'), '{}');
+  writeFileSync(join(f.root, 'package.json'), JSON.stringify({ scripts: {
+    build: 'node -e "require(\'fs\').writeFileSync(\'built\', \'built\')"',
+    'test:browser': 'node browser.cjs',
+  } }));
+  writeFileSync(join(f.root, 'browser.cjs'), `
+    const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
+    assert.equal(fs.readFileSync('built', 'utf8'), 'built');
+    assert.equal(fs.readFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'utf8'), 'installed');
+    assert.equal(fs.readFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'utf8'), 'cached');
+    { ${deniedOperations.replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
+    console.log('browser cache consumed');
+  `);
+  git(f.root, 'add', 'package.json', 'package-lock.json', 'browser.cjs');
+  git(f.root, 'commit', '-qm', 'cold-cache browser checks');
+  const base = await temporaryDirectory('browser-trial', f.base);
+  const temporary = await temporaryDirectory('browser-tmp', f.base);
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const verdict = await runTrialAttempt({ root: f.root, base, mergeSha: git(f.root, 'rev-parse', 'HEAD'),
+      changedFiles: ['web/app.tsx'], hidden: [f.config], temporaryRoots: [temporary], checkoutRoots: [],
+      environment: { ...process.env, PATH: '/usr/bin:/bin', HOME: f.home,
+        PLAYWRIGHT_BROWSERS_PATH: join(f.home, 'browser-cache'), npm_config_cache: join(f.home, 'npm-cache') },
+      timeoutMs: 60_000, secretScan: false });
+    assert.equal(verdict.build, 'pass', verdict.logTail);
+    assert.deepEqual(verdict.tests.failed, [], verdict.logTail);
+    assert.match(verdict.logTail, /browser cache consumed/);
+    assert.equal(existsSync(join(f.home, 'browser-cache')), false);
+    assert.equal(existsSync(join(f.home, 'npm-cache')), false);
+    assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
+    assert.deepEqual(readdirSync(temporary), [], 'trial scratch is cleaned after browser checks');
+  }
 });
 
 
