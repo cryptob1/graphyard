@@ -14,11 +14,11 @@ Only Graphyard writes to main.
 
 ## Merge writer
 
-Four oldest heads share one trial and push, each delivered at its commit; a failed batch merges singly: `merge.intent`, merge-commit trial (affected and proof tests, one retry), `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone, `merge.pushed`, `merge.reconciled` delivers. A moved tip re-trials; a conflict or failed trial reworks. Lost replies replay; reused-key refusals adopt the ledger. `master status`: `mergeWriter.queue`.
+Four oldest heads share one trial and push, each delivered at its commit; a failed batch merges singly: `merge.intent`, merge-commit trial (affected and proof tests, one retry), `git push --force-with-lease` with `run.mergeWriter.deployKeyFile` alone, `merge.pushed`, `merge.reconciled` delivers. A moved tip re-trials; a conflict or failed trial reworks. Lost replies replay; reused-key refusals adopt the ledger; a superseded intent is refused and the current head queued again. `master status`: `mergeWriter.queue`.
 
 ## The merger
 
-The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` name no remote-side setup beyond the merge writer's deploy key. Candidates: object store, `Hotfix:`/base-repair first, then oldest item. `POST /api/work/:id/merge-record` records each step; `pushed`/`reconciled` name the open intent's merge commit, else 409.
+The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` name no remote-side setup beyond the merge writer's deploy key. Candidates: object store, `Hotfix:`/base-repair first, then oldest item. `POST /api/work/:id/merge-record` records each step; `pushed`/`reconciled` name the open intent's merge commit, else 409. A `refused` names the submitted head, or the open intent its resubmission superseded.
 
 ## Rollout
 
