@@ -8,7 +8,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { applyDelivery } from '../src/repository-setup.js';
-import { onboardingFirstCase } from '../src/onboarding.js';
+import * as onboarding from '../src/onboarding.js';
 import { runTrialE2eCases } from '../src/merge-writer/e2e-trial.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { baseFailureItem, type BaseFailure } from '../src/model/base-failure.js';
@@ -67,7 +67,7 @@ test('unit:self-filed-items-name-a-case — onboarding writes a serve declaratio
     const applied = await applyDelivery(root, policy, 'node');
     assert.equal(applied.firstCase, 'e2e/cases/served-head.json');
     assert.equal(applied.wroteServe, true);
-    assert.equal(await onboardingFirstCase(root), 'served-head');
+    assert.equal(await onboarding.onboardingFirstCase(root), 'served-head');
     const config = JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8'));
     setRepositoryPolicy({ ...defaultRepositoryPolicy, ...config });
     const request = onboardingWorkRequest(sha('d'), ['test'], 'served-head');
@@ -92,7 +92,7 @@ test('unit:self-filed-items-name-a-case — onboarding preserves a repository\'s
   const applied = await applyDelivery(root, policy, 'node');
   assert.equal(applied.wroteServe, false);
   assert.equal(applied.firstCase, null);
-  assert.equal(await onboardingFirstCase(root), 'existing');
+  assert.equal(await onboarding.onboardingFirstCase(root), 'existing');
   assert.deepEqual(JSON.parse(await readFile(join(root, 'graphyard.json'), 'utf8')).e2e.serve, servePolicy.e2e.serve);
 });
 
