@@ -156,12 +156,6 @@ export const dispatchCursorSchema = z.object({
    * never persisted in the cursor itself.
    */
   accounts: z.object({ environments: z.record(z.string(), z.any()), skipped: z.array(z.any()) }).optional(),
-  /**
-   * Each awaited bot reviewer as the last read of its repository activity found it (GY-349): one
-   * whose latest word since its last review is a usage-limit notice is exhausted, and no reviewer
-   * launch waits for it. Kept across ticks, so a failed read leaves the last judgment standing.
-   */
-  botReviewers: z.array(z.object({ login: z.string().max(100), state: z.enum(['available', 'exhausted']), since: z.string().nullable(), checkedAt: z.string() }).strict()).max(10).default([]),
 }).strict();
 export type DispatchCursor = z.infer<typeof dispatchCursorSchema>;
 
@@ -312,7 +306,10 @@ export async function readDispatchCursor(root: string, config: MasterConfig, onR
   };
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return withAccounts(emptyDispatchCursor(config)); throw error; }
-  const cursor = repairDispatchCursor(JSON.parse(raw), onRepair);
+  const stored = JSON.parse(raw) as { botReviewers?: unknown };
+  // The bot-review wait is retired (GY-3007): a cursor an older loop wrote still loads, its state dropped on read.
+  delete stored?.botReviewers;
+  const cursor = repairDispatchCursor(stored, onRepair);
   if (cursor.url !== config.url || cursor.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master dispatch cursor belongs to another Graphyard server or repository; remove it before running the loop');
   return withAccounts(cursor);
 }
@@ -329,11 +326,9 @@ export async function writeDispatchCursor(config: MasterConfig, cursor: Dispatch
  * The reviewer profile that answers automatic requests: the configured one, else the only one.
  * The configured one runs `automaticReviewerConcurrency` sessions when it declares none (GY-1072).
  */
-export function selectReviewerProfile(input: MasterConfig, mode: 'github' | 'control-plane' = 'github'): { profile: ReviewerProfile | null; reason: string | null } {
-  // GY-1978: a supervised install's heads have no pull request either, so its reviewer answers in control-plane mode.
+export function selectReviewerProfile(input: MasterConfig): { profile: ReviewerProfile | null; reason: string | null } {
+  // Every review posts through the API under a one-time token (GY-1525): it needs a profile, not a reviewer App.
   const config = withReviewerDefaults(input);
-  // A control-plane review (GY-1525) posts through the API under a one-time token: it needs a profile, not a reviewer App.
-  if (!config.reviewer && mode !== 'control-plane') return { profile: null, reason: 'no reviewer identity is registered; run master reviewer setup or master reviewer bind' };
   if (config.run.reviewerProfile) {
     const profile = config.reviewers.find(item => item.name === config.run.reviewerProfile) ?? null;
     return profile ? { profile, reason: null } : { profile: null, reason: `run.reviewerProfile names ${config.run.reviewerProfile}, which is not a configured reviewer profile` };
@@ -341,40 +336,6 @@ export function selectReviewerProfile(input: MasterConfig, mode: 'github' | 'con
   if (config.reviewers.length === 1) return { profile: config.reviewers[0], reason: null };
   return { profile: null, reason: config.reviewers.length ? 'more than one reviewer profile is configured; set run.reviewerProfile in .graphyard/master.json to the one automatic dispatch launches' : 'no reviewer profile is configured; add one with master reviewer add' };
 }
-
-/** The automatic bot reviewers a reviewer launch waits for when `run.awaitReviewers` is unset, and for how long. */
-export const defaultAwaitReviewers = { logins: ['chatgpt-codex-connector[bot]'], minutes: 8 };
-/**
- * A bot reviewer's notice that its provider's quota is spent (GY-349), as the Codex connector words
- * it on each new head ('You have reached your Codex usage limits for code reviews').
- */
-export const botLimitNotice = /reached your [\w .-]{0,40}usage limits?|usage limits? (?:has|have) been reached/i;
-/** One review or issue comment an awaited bot reviewer posted on the repository. */
-export interface BotActivity { login: string; kind: 'review' | 'comment'; at: string; body?: string }
-export interface BotReviewerState { login: string; state: 'available' | 'exhausted'; since: string | null }
-/**
- * Whether each awaited bot reviewer can answer (GY-349). A bot whose latest activity is a
- * usage-limit notice is exhausted since the first notice after its last review, and stays so until
- * it next posts a review on any head: only a review shows its quota is back. `held` is the last
- * judgment: an exhausted bot whose notice has aged out of the read stays exhausted since it.
- */
-export function botReviewerStates(awaited: readonly string[], activity: readonly BotActivity[], held: readonly BotReviewerState[] = []): BotReviewerState[] {
-  return awaited.map(login => {
-    const mine = activity.filter(entry => entry.login.toLowerCase() === login.toLowerCase() && Number.isFinite(Date.parse(entry.at)));
-    const reviewed = Math.max(-Infinity, ...mine.filter(entry => entry.kind === 'review').map(entry => Date.parse(entry.at)));
-    const kept = held.filter(bot => bot.login.toLowerCase() === login.toLowerCase() && bot.state === 'exhausted' && bot.since).map(bot => Date.parse(bot.since!));
-    const notices = [...mine.filter(entry => entry.kind === 'comment' && botLimitNotice.test(entry.body ?? '')).map(entry => Date.parse(entry.at)), ...kept].filter(time => Number.isFinite(time) && time > reviewed);
-    return notices.length ? { login, state: 'exhausted' as const, since: new Date(Math.min(...notices)).toISOString() } : { login, state: 'available' as const, since: null };
-  });
-}
-/** How many of the most recently updated pull requests one bot-activity read looks in for a review since a limit notice. */
-export const botReviewPullLimit = 30;
-/**
- * How long one tick waits on the bot-review reads, all started together, before treating the
- * unanswered ones as failed reads (which launch). Well inside the 30-second launch bound, so a slow
- * or hung GitHub read never holds producers, or any other item's review, past it.
- */
-export const botReviewReadTimeoutMs = 5_000;
 
 export interface DispatchEffects {
   /** The work snapshot, read within `timeoutMs`: the tick's own read bound, which grows while ticks fail (GY-1373). */
@@ -389,18 +350,6 @@ export interface DispatchEffects {
   /** GY-2989: the product review of a user-facing feature, launched like a review on the same reviewer lanes. A dispatcher wired without it waits the request instead. */
   launchProductReview?: (work: Work, request: DispatchRequest, profile: ReviewerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
   launchProducer: (work: Work, request: DispatchRequest, profile: ProducerProfile, agents: HerdrAgent[], observedAt: string) => Promise<unknown>;
-  /**
-   * The GitHub logins that have reviewed the request's head, read with the loop's own access outside
-   * every coordination transaction. Used to hold a reviewer launch until the configured automatic
-   * bot reviewers have spoken (`run.awaitReviewers`); a dispatcher wired without it never waits.
-   */
-  headReviewers?: (work: Work, request: DispatchRequest) => Promise<string[]>;
-  /**
-   * The awaited bot reviewers' recent reviews and issue comments on the repository (GY-349), read
-   * once per tick while a launch would wait on them; a bot whose latest word is a usage-limit
-   * notice is not waited for. A dispatcher wired without it waits on every awaited bot.
-   */
-  botActivity?: (logins: string[], requests: DispatchRequest[], held: BotReviewerState[]) => Promise<BotActivity[]>;
   /**
    * Records a launched reviewer or producer session's durable handle on the item. Without it a
    * launched session is visible only in this host's own ledger, which is the relaying the handle
@@ -438,7 +387,8 @@ export interface DispatchEffects {
    * The control plane's agent registry document, or null when it cannot be read (GY-2945); and the
    * end of one of its live sessions — a reviewer or producer session of this host no Herdr pane
    * backs, which the ledgers name and this loop may never have launched, is ended on the second
-   * consecutive miss so it stops consuming its role's concurrency. A dispatcher wired without
+   * consecutive miss (the first for a completed review ledger record) so it stops consuming
+   * its role's concurrency. A dispatcher wired without
    * either leaves the registry's slots to the control plane's own settlement rules.
    */
   registry?: () => Promise<AgentRegistry | null>;
@@ -814,11 +764,11 @@ async function launchWithFailover<P extends { name: string }>(profiles: P[], lau
  * every open request that has none. Each launch is recorded by the launcher's own ledger before
  * the tick moves on, so a kill between two launches leaves nothing to repeat.
  */
-export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs, botReadTimeoutMs = botReviewReadTimeoutMs, launchBound = launchBoundMs(config)): Promise<DispatchTick> {
-  return dispatchTick(config, cursor, effects, now, readTimeoutMs, botReadTimeoutMs, launchBound);
+export async function runDispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number = Date.now, readTimeoutMs = dispatchReadTimeoutMs, launchBound = launchBoundMs(config)): Promise<DispatchTick> {
+  return dispatchTick(config, cursor, effects, now, readTimeoutMs, launchBound);
 }
 
-async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, botReadTimeoutMs: number, launchBound: number): Promise<DispatchTick> {
+async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effects: DispatchEffects, now: () => number, readTimeoutMs: number, launchBound: number): Promise<DispatchTick> {
   const snapshot = await boundedRead(() => effects.snapshot(readTimeoutMs), readTimeoutMs);
   const observedAt = snapshot.now;
   const clock = Number.isFinite(Date.parse(observedAt)) ? Date.parse(observedAt) : now();
@@ -868,7 +818,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // control plane's own settlement keeps such a session live while its request stands, so the
   // finished review it belongs to pins its role at the concurrency limit. Judged here, where the
   // slot is spent: the first tick records the miss, the second ends the session with the missing
-  // pane named, and the request the slot held back launches in this tick or the next. An unread
+  // pane named, and the request the slot held back launches in this tick or the next. A completed
+  // review ledger record needs only the first miss after launch grace. An unread
   // registry or an unread Herdr is a gap: nothing is judged and the misses stand as they were.
   if (effects.registry && effects.endRegistrySession && herdr) {
     const document = await effects.registry();
@@ -881,8 +832,11 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         misses[orphan.id] = new Date(firstMissedAt).toISOString();
         // The second consecutive miss is the end; an entry survives a failed end, so the next
         // tick retries it rather than starting the grace again.
-        if (!Number.isFinite(first)) continue;
-        const reason = `the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
+        // A completed verdict already settled the ledger. Its item may be
+        // absent from this snapshot, so the handle-based close step cannot release its slot.
+        // Once its pane is gone it needs no second miss, including after a loop restart.
+        if (!orphan.completedReview && !Number.isFinite(first)) continue;
+        const reason = `${orphan.completedReview ? 'the review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
         try { await effects.endRegistrySession(orphan, reason); tick.registryClosed.push({ work: orphan.work, id: orphan.id, role: orphan.role, pane: orphan.pane }); }
         catch (error) { tick.closeFailures.push({ work: orphan.work ?? '', id: orphan.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
       }
@@ -984,7 +938,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     for (const entry of tick.waiting) { const reason = bounded(`${entry.kind} for ${entry.work} ${entry.sha.slice(0, 12)}: ${entry.reason}`, cursorTextLimit); if (!reasons.has(reason)) reasons.set(reason, entry); }
     return [...reasons.entries()].slice(0, 20);
   };
-  // One write at a time: a deferred reviewer launches beside the producer pass, and two writes of
+  // One write at a time: producer launches run beside each other and persist as each ends, and two writes of
   // the cursor racing each other could land the older state last.
   let persisting: Promise<unknown> = Promise.resolve();
   const persist = () => {
@@ -1077,68 +1031,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     wait(kind, item, request, `${last}; attempt ${retry.attempts + 1} of ${retry.limit} at ${retry.nextAt}`);
     return false;
   };
-  // A reviewer launched before the repository's automatic bot reviewers have spoken approves a head
-  // whose bot findings arrive minutes later as unresolved threads, and each costs a rework round.
-  // The launch waits for them, up to `awaitReviewersMinutes` from the request, then goes ahead: a
-  // bot with nothing to say posts no review at all. A failed read does not hold the launch: the
-  // review goes ahead as it did before the wait existed, rather than stalling on GitHub.
-  // The reads start together, before any launch, and share one deadline: however many items wait
-  // and however slowly GitHub answers, the tick is held at most `botReadTimeoutMs` in all, and an
-  // unanswered read is a failed one.
-  const awaited = config.run.awaitReviewers ?? defaultAwaitReviewers.logins, minutes = config.run.awaitReviewersMinutes ?? defaultAwaitReviewers.minutes;
-  const waitUntil = (review: DispatchRequest) => Date.parse(review.requestedAt) + minutes * 60_000;
-  const botReads = new Map<string, Promise<string[] | null>>();
-  // A bot that has announced its quota is spent posts no review until it returns (GY-349): its
-  // activity is read once, beside the head reads and under the same deadline, and a launch does
-  // not wait for an exhausted bot. A failed read keeps the last judgment the cursor holds.
-  let botStates: Promise<BotReviewerState[]> = Promise.resolve(cursor.botReviewers);
-  // The launch reasons of reviews that skipped an exhausted bot's wait, by request id.
-  const skippedWaits = new Map<string, string>();
-  if (awaited.length && minutes > 0 && effects.headReviewers) {
-    let timer: NodeJS.Timeout | undefined;
-    const deadline = new Promise<null>(resolve => { timer = setTimeout(() => resolve(null), botReadTimeoutMs); timer.unref?.(); });
-    const waiting: DispatchRequest[] = [];
-    for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
-      const review = item.autoDispatch!.review;
-      if (review?.state !== 'requested' || review.provider !== 'github' || !(now() < waitUntil(review))) continue;
-      const read = effects.headReviewers(item, review).then(logins => logins.map(login => login.toLowerCase()), () => null);
-      botReads.set(review.id, Promise.race([read, deadline]));
-      waiting.push(review);
-    }
-    if (waiting.length && effects.botActivity) {
-      const held = cursor.botReviewers.map(({ login, state, since }) => ({ login, state, since }));
-      const activity = Promise.race([effects.botActivity([...awaited], waiting, held).catch(() => null), deadline]);
-      botStates = activity.then(entries => {
-        if (entries) cursor.botReviewers = botReviewerStates(awaited, entries, held).slice(0, 10).map(bot => ({ ...bot, checkedAt: new Date(now()).toISOString() }));
-        return cursor.botReviewers;
-      });
-    }
-    const reads = [...botReads.values(), botStates];
-    if (botReads.size) void Promise.allSettled(reads).then(() => clearTimeout(timer)); else clearTimeout(timer);
-  }
-  const awaitingBotReview = async (item: Work, review: DispatchRequest) => {
-    const read = botReads.get(review.id);
-    if (!read) return false;
-    const until = waitUntil(review);
-    if (now() >= until) return false;
-    const seen = await read;
-    if (!seen) return false;
-    const exhausted = new Map((await botStates).filter(bot => bot.state === 'exhausted').map(bot => [bot.login.toLowerCase(), bot]));
-    const missing = awaited.filter(login => !seen.includes(login.toLowerCase()));
-    const skipped = missing.filter(login => exhausted.has(login.toLowerCase())).map(login => `skipped: ${login} exhausted since ${exhausted.get(login.toLowerCase())!.since}`).join('; ');
-    const waitingOn = missing.filter(login => !exhausted.has(login.toLowerCase()));
-    if (!waitingOn.length) { if (skipped) skippedWaits.set(review.id, `awaited-reviewer wait ${skipped}`); return false; }
-    wait('review', item, review, `review of ${item.key} at ${review.sha.slice(0, 12)} waits up to ${minutes} min (until ${new Date(until).toISOString()}) for ${waitingOn.join(', ')}'s review of the head, so its findings are judged in the same round${skipped ? `; ${skipped}` : ''}`);
-    return true;
-  };
-  // A reviewer with a bot read is decided the moment that read settles, beside the producer pass
-  // rather than in it: the wait on that read is the reviewer's alone, so no producer request, on
-  // its item or a later one, is held behind it, and a read that settles at once launches its
-  // reviewer without waiting behind the producer starts ahead of it in the pass. Reviewer launches
-  // take turns with each other, so two of them never both count the same free reviewer slot, and
-  // with a producer launch only over an agent name both profiles use.
-  let reviewTurn: Promise<unknown> = Promise.resolve();
-  // A reviewer launching beside the producer pass must still never take a Herdr name a producer
+  // A reviewer launch must never take a Herdr name a producer
   // launch is taking: both read the tick's inventory, and a name joins it only once its launch
   // returns. A launch holds the agent name of the one profile it is launching on until that name is
   // in the inventory, and takes a failover profile's name only when failover reaches it, so a launch
@@ -1167,11 +1060,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       throw error;
     }
   };
-  const inReviewTurn = (item: Work, review: DispatchRequest) => {
-    const turn = reviewTurn.then(() => dispatchReview(item, review));
-    reviewTurn = turn.catch(() => { /* the caller of this turn sees the failure */ });
-    return turn;
-  };
   const dispatchReview = async (item: Work, review: DispatchRequest) => {
     // A product review (GY-2989) launches like a review on the same reviewer lanes — one session per
     // head, reviewer concurrency and capacity.
@@ -1183,9 +1071,8 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     else if (spent('review')) wait('review', item, review, capacityWait('review'));
     else if (!retryable(review)) wait('review', item, review, `launch refused ${cursor.failures[review.id].attempts} time(s): ${cursor.failures[review.id].reason}; ${cursor.failures[review.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[review.id].nextAt}`}`);
     else {
-      // A control-plane observation, or an install with no GitHub App, has its review answered by a control-plane reviewer.
-      const mode = item.observation?.source === 'control-plane' || !config.githubAppId ? 'control-plane' : 'github';
-      const { profile, reason } = selectReviewerProfile(config, mode);
+      // Every review is a control-plane review (GY-1525): it posts through the API under a one-time token, so a profile answers it with no reviewer App.
+      const { profile, reason } = selectReviewerProfile(config);
       // The selected profile answers; the other reviewer profiles are its failover when none of
       // its accounts can launch. A profile with no slot left is passed over for one with room,
       // and a request no profile has room for waits on the limit it names.
@@ -1194,7 +1081,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       const busy = () => wait('review', item, review, `${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
       if (!profile) wait('review', item, review, reason!);
       else if (!withRoom().length) busy();
-      else if (await awaitingBotReview(item, review)) { /* waiting on an automatic bot reviewer, bounded */ }
       else {
         try {
           // The session is registered before its runtime starts and its coordinates written once it
@@ -1207,7 +1093,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           if (!launched) busy();
           else {
             delete cursor.failures[review.id]; delete cursor.capacity.review;
-            tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}), ...(skippedWaits.has(review.id) ? { reason: skippedWaits.get(review.id) } : {}) });
+            tick.launched.push({ kind: 'review', work: item.key, requestId: review.id, sha: review.sha, profile: launched.profile.name, ...(launched.failover.length ? { failover: launched.failover } : {}), ...(launched.relaunched ? { relaunched: true } : {}) });
           }
         } catch (error) {
           // A request a settled session already answered waits on the control plane reading that
@@ -1243,7 +1129,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     else if (!effects.launchProductReview) wait('review', item, request, 'this dispatcher launches no product reviews');
     else if (!retryable(request)) wait('review', item, request, `launch refused ${cursor.failures[request.id].attempts} time(s): ${cursor.failures[request.id].reason}; ${cursor.failures[request.id].attempts >= dispatchFailureLimit ? 'no further automatic attempt, launch it with master review once the cause is fixed' : `next attempt at ${cursor.failures[request.id].nextAt}`}`);
     else {
-      const { profile, reason } = selectReviewerProfile(config, 'control-plane');
+      const { profile, reason } = selectReviewerProfile(config);
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
       const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
       const busy = () => wait('review', item, request, `product review: ${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}`);
@@ -1278,10 +1164,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
       }
     }
   };
-  // Settled into a value, so a failure is rethrown once the pass ends and never left unhandled; a
-  // pass that fails still waits for these reviewers, so none is left launching into the next tick.
-  const deferred = snapshot.work.filter(work => work.stage !== 'done' && botReads.has(work.autoDispatch?.review?.id ?? ''))
-    .map(item => botReads.get(item.autoDispatch!.review!.id)!.then(() => inReviewTurn(item, item.autoDispatch!.review!)).then(() => null, (error: unknown) => ({ error })));
   // Producer launches that could not take the same profile run at once (GY-377), so the pass is
   // bounded by the profiles' capacity and not by the sum of every launch's duration. Requests that
   // could take the same profile keep the pass's order: each waits for the earlier ones on any agent
@@ -1299,9 +1181,9 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
     try {
       for (const item of snapshot.work.filter(work => work.stage !== 'done' && work.autoDispatch)) {
         const review = item.autoDispatch!.review;
-        if (review?.state === 'requested' && review.provider === 'github' && !botReads.has(review.id)) await inReviewTurn(item, review);
+        if (review?.state === 'requested' && review.provider === 'github') await dispatchReview(item, review);
         const product = item.autoDispatch!.product;
-        if (product?.state === 'requested' && product.kind === 'product') await inReviewTurn(item, product);
+        if (product?.state === 'requested' && product.kind === 'product') await dispatchReview(item, product);
         for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
           // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
           // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
@@ -1347,7 +1229,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
           }).then(() => null, (error: unknown) => ({ error })));
         }
       }
-    } finally { outcomes = await Promise.all([...deferred, ...producerLaunches]); }
+    } finally { outcomes = await Promise.all(producerLaunches); }
   })();
   for (const outcome of outcomes) if (outcome) throw outcome.error;
   // Review by risk (GY-1525 AC-4): a normal-risk delta the merge writer delivered owes one review of
@@ -1372,7 +1254,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         wait('review', item, request, `launch refused ${failure.attempts} time(s): ${failure.reason}; ${failure.attempts >= dispatchFailureLimit ? `probed again every ${postMergeRefusalProbeMs / 60_000} minutes (next at ${new Date(Date.parse(failure.at) + postMergeRefusalProbeMs).toISOString()}): the request launches once the refusal's cause is gone` : `next attempt at ${failure.nextAt}`}`);
         continue;
       }
-      const { profile, reason } = selectReviewerProfile(config, 'control-plane');
+      const { profile, reason } = selectReviewerProfile(config);
       const candidates = profile ? [profile, ...withReviewerDefaults(config).reviewers.filter(other => other.name !== profile.name)] : [];
       const withRoom = () => preferFreshProfiles(candidates.filter(candidate => room(candidate, reviews).free > 0), reviews, request.id);
       const busy = () => wait('review', item, request, `${launchWaitWording.busy}: ${candidates.map(candidate => atLimit(candidate, reviews)).join('; ')}; raise concurrency in .graphyard/master.json or add a reviewer profile`);
@@ -1419,7 +1301,6 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   cursor.ticks += 1; cursor.lastTickAt = cursor.lastSuccessAt = new Date(now()).toISOString(); cursor.consecutiveFailures = 0;
   cursor.lastTick = { at: tick.at, launched: tick.launched.length, refused: tick.refused.length, waiting: tick.waiting.length, settled: tick.skipped,
     closed: tick.closed.length, closeFailures: closeFailureReasons(tick.closeFailures),
-    // A launch that skipped an exhausted bot's wait says so beside the waits (GY-349).
     reasons: [...composed().map(([reason]) => reason), ...tick.launched.filter(launch => launch.reason).map(launch => bounded(`${launch.kind} for ${launch.work} ${launch.sha.slice(0, 12)}: launched; ${launch.reason}`, cursorTextLimit))].slice(0, 20),
     waits: tickWaits(tick.waiting) };
   await persist();

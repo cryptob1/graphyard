@@ -31,7 +31,7 @@ There is no remote-side token variable: the merge writer uses the [deploy key](i
 
 ### Production deployment observation
 
-`master init --deployment-url …` sets the commit endpoint. Unserved merges after five minutes raise delivery.deployment-incident. `run.deploymentReuseMinutes` (15) permits reused observations. Deploy serves before loop reload; `.graphyard/held-cli.json` pins dirty CLI snapshots.
+`master init --deployment-url …` sets the commit endpoint. Unserved merges after five minutes raise `delivery.deployment-incident`. `run.deploymentReuseMinutes` (15) permits reused observations. Self-upgrades [deploy](delivery.md) the tip before loop reload. The launcher runs the checkout's own code; every `up` removes stale `.graphyard/held-cli.json`, even when the loop is current.
 
 ### Serving the managed repository's app
 

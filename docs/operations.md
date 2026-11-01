@@ -85,8 +85,4 @@ Dropped connections reconnect on the next request. After two minutes unreachable
 
 ## Withdrawal and credentials
 
-No remote merge is armed. Outside-gate merges are violations; failed smoke proofs leave delivered items Done with failure visible.
-
-## Merge bypass
-
-Admin `operator direct-merges on --since ISO REASON` records a window; it gives workers no bypass or push credential.
+The [merge writer](delivery-redesign.md#merge-writer) pushes main itself. Only its reconciled ledger record marks an item Done; an observation alone does not record delivery. Failed smoke proofs leave delivered items Done with failure visible.

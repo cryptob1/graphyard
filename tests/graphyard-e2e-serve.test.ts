@@ -24,7 +24,7 @@ import { trialEnvironment } from '../src/merge-writer/trial.js';
 const checkout = process.cwd();
 const policy = checkoutRepositoryPolicy(checkout);
 
-test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command answers, create-work-item passes against it, and stopping it removes its database directory', { timeout: 240_000 }, async () => {
+test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command passes capacity-limit-redispatch and core product cases, and stopping it removes its database directory', { timeout: 240_000 }, async () => {
   const serve = policy.e2e.serve;
   assert.ok(serve, 'graphyard.json declares e2e.serve');
   const scratch = await temporaryDirectory('e2e-serve');
@@ -51,13 +51,19 @@ test('unit:graphyard-repo-serves-its-head-for-e2e — the declared serve command
     const databases = readdirSync(scratch).filter(name => name.startsWith('graphyard-e2e-serve-'));
     assert.equal(databases.length, 1, 'the database lives in one temporary directory under TMPDIR');
 
-    const file = 'e2e/cases/create-work-item.json';
+    const ids = ['capacity-limit-redispatch', 'create-work-item', 'board', 'work-item-detail'];
+    const cases = ids.map(id => {
+      const file = `e2e/cases/${id}.json`;
+      return { file, definition: parseCase(file, readFileSync(join(checkout, file), 'utf8')) };
+    });
     let report: E2eReport | null = null;
-    await projectCaseSuite(checkout, token, { cases: [{ file, definition: parseCase(file, readFileSync(join(checkout, file), 'utf8')) }], select: () => true,
-      withholdSecrets: true, artifactsDirectory: join(scratch, 'artifacts'), signal: AbortSignal.timeout(60_000), report: value => { report = value; } })
+    await projectCaseSuite(checkout, token, { cases, select: () => true,
+      withholdSecrets: true, artifactsDirectory: join(scratch, 'artifacts'), signal: AbortSignal.timeout(180_000), report: value => { report = value; } })
       .run(new URL(serve.url).origin, null);
-    const outcome = (report as E2eReport | null)?.cases.find(entry => entry.id === 'create-work-item');
-    assert.equal(outcome?.verdict, 'passed', JSON.stringify(outcome?.failingStep ?? outcome));
+    for (const id of ids) {
+      const outcome: E2eReport['cases'][number] | undefined = (report as E2eReport | null)?.cases.find(entry => entry.id === id);
+      assert.equal(outcome?.verdict, 'passed', `${id}: ${JSON.stringify(outcome?.failingStep ?? outcome)}`);
+    }
 
     process.kill(-child.pid!, 'SIGTERM');
     // Wait for the serving process to finish cleanup (not the shell's exit), then observe removal.

@@ -64,6 +64,8 @@ Secrets come from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600), a
 
 Required UAT cases run every deploy via GRAPHYARD_UAT_URL/GRAPHYARD_SUITE_DETAIL; static sites use GRAPHYARD_UAT_STATIC. `e2e record REPORT` needs the [record credential](delivery.md#e2e-record-credential).
 
+Graphyard's trial server (`scripts/e2e-serve.mjs`) manages `cryptob1/graphyard`, so its fresh database lists the shipped scenarios, including the required capacity-limit-redispatch case. That case runs the capacity hold and silent-exhaustion tests through the port-reserving test runner.
+
 ## Release verdicts
 
 Passed, failed, flaky (one retry passes at same SHA), unrun, blocked or pending. Failed/unaccepted flaky required cases block. Pending blocks for shared delivered outcomes or `e2e.pendingOutcomes: blocking`. `e2e/contract.json` binds customer outcomes to required UAT cases.

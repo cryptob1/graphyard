@@ -459,7 +459,7 @@ test('unit:e2e-command-and-agent-steps — a case accepts command and agent step
   assert.match(refusal(file, { ...http200('general'), steps: [{ kind: 'shell', run: 'true' }] })!, /steps\.0\.kind: /);
   assert.match(refusal(file, { ...http200('general'), steps: [{ kind: 'browser', action: 'click', role: 'button' }, { kind: 'http', method: 'GET', path: '/', status: 200 }] })!, /steps\.0\.text: a browser click step needs text/);
   const shipped = await loadCases(root);
-  // Contract UI cases stay http|browser-only; GY-1708's optional capacity-limit-redispatch may use command.
+  // Contract UI cases stay http|browser-only; GY-1708's capacity-limit-redispatch may use command.
   const contractIds = new Set(['sign-in', 'create-work-item', 'board', 'work-item-detail', 'tests-page']);
   assert.ok(shipped.filter(entry => contractIds.has(entry.definition.id)).every(entry =>
     entry.definition.secrets.length === 0 && entry.definition.steps.every(step => step.kind === 'http' || step.kind === 'browser')),

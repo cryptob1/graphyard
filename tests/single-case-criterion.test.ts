@@ -73,10 +73,11 @@ test('unit:single-case-criterion-warned-at-create — a pinned fixture path or ?
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 
-test('unit:reviewer-brief-checks-another-case — the brief tells the reviewer to run one other case and request changes when only the pinned case works; without one the instruction is absent', () => {
+test('unit:reviewer-brief-checks-another-case — the brief tells the reviewer to inspect code and coverage for other cases and request changes for missing generality; without one the instruction is absent', () => {
   const standard = reviewStandard({ key: 'GY-1', head, base }, [single, multi]);
   assert.match(standard, /AC-1 checks one case: a head can pass by tuning to that case\. /);
-  assert.match(standard, /run the head once on one other case its own commands accept — another seed or input — quote both results, and request changes when the head works only on the pinned case\. /);
+  assert.match(standard, /inspect the implementation and test coverage for other seeds or inputs/);
+  assert.doesNotMatch(standard, /run the head once|quote both results/);
   assert.ok(!standard.includes('AC-2 checks one case'), 'the criterion naming three seeds is not flagged');
   const plain = reviewStandard({ key: 'GY-1', head, base }, [{ id: 'AC-1', text: 'The change works at its head', proofs: ['unit:works'] }]);
   assert.ok(!plain.includes('one case'), 'no single-case instruction without a single-case criterion');

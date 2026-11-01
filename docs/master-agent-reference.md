@@ -27,4 +27,6 @@ Unanswered requests try another profile. Never substitute worker evidence for tr
 
 ## Merge trial
 
-See [trial checks](delivery.md#merge-trials). Trials use a separate checkout/TMPDIR, fresh HOME and bubblewrap masks hiding coordinator credentials and deploy key. Builds, previews and E2E steps share confinement; case steps share a namespace for persistent browsers. Only the push child holds the key. Trials stop after 20 minutes and remove their checkout.
+A failed candidate trial grounds rework through the merge writer; next-action does not hold it for a base-break refresh.
+
+See [trial checks](delivery.md#merge-trials). Trials use a separate checkout/TMPDIR, fresh HOME and bubblewrap masks hiding coordinator credentials and deploy key. Builds, previews and E2E steps share confinement; case steps share a namespace for persistent browsers. Only the push child holds the key. Trials stop after 20 minutes and remove their checkout. Missing test checks are explicit in `master status` and `doctor` (`trialTests`).

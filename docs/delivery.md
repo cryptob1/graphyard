@@ -13,7 +13,7 @@ The deploy unit runs `graphyard upgrade --watch --checkout <install>/deploy/src`
 
 ## Merge trials
 
-Trials run [without credentials](master-agent-reference.md#merge-trial). `mergeWriter.inFlight` names the step/start; 30 minutes without advancement or exit without verdict reports a stall. Logs include durations; abandoned checkouts are reclaimed.
+Trials run [without credentials](master-agent-reference.md#merge-trial). Commands prefer the running Node installation over host version-manager shims, so the fresh HOME needs no host mise trust setup. A successful merge trials before pushing and schedules no advisory trial afterwards; older cursors discard that retired ledger. `mergeWriter.inFlight` names the step/start; 30 minutes without advancement or exit without verdict reports a stall. Logs include durations; abandoned checkouts are reclaimed.
 
 `scripts/ci-tests.mjs` selects affected/proof tests. Otherwise use `delivery.mergeGate.preMerge`, falling back to npm test/typecheck. Missing checks are explicit in trial/status/doctor. Timeouts requeue. Head failures request rework; failures reproduced on base hold the head as `base failure` so repairs go first. Bug proofs must fail on base or the head refuses as `not reproduced`.
 

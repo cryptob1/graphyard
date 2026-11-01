@@ -5,7 +5,9 @@
 
 Use `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. Unit/integration proofs name exact-head runnable checks; E2E proofs bind [repository cases](validation.md). Control-plane acceptance requires trial cases executed with none failing. Sensitive changes also need required manual attestations; producer evidence cannot replace trial counts.
 
-Post-ship outcomes use `manual:post-deploy/NAME` or per-clause observations, not impossible pre-merge requirements. `master requirements` invalidates old evidence/review/authorization. Never weaken requirements to pass implementation. Single-fixture proofs warn: cover three cases or explain why one suffices; reviewers try another case.
+Post-ship outcomes use `manual:post-deploy/NAME` or per-clause observations, not pre-merge requirements. `master requirements` invalidates old evidence/review/authorization. Never weaken requirements to pass implementation.
+
+Single-fixture proofs warn: cover three cases or explain why one suffices. Reviewers inspect code and coverage for other inputs; `e2e/cases/` paths bind proofs rather than sample inputs. They assess every criterion and post APPROVE or REQUEST_CHANGES without running builds, tests or servers. Exact-head execution belongs to the automated merge trial, with no human step.
 
 ## Dispatch optimistically
 
@@ -13,7 +15,7 @@ Only exclusiveResources lock dispatch. Sync and merge trials integrate path over
 
 ## Review gate: verdicts, not threads
 
-Graphyard reads exact-head verdicts, not remote review threads. Sensitive changes need approval before merge. Normal changes receive post-merge review; blocking findings become follow-up bugs. Pre-merge `BLOCKING:` findings cause rework once per submission, without a round cap.
+Graphyard reads exact-head verdicts, not remote review threads. Pre-merge review judges implementation and bound E2E coverage: missing later trusted results do not block approval; missing or inadequate tests can. The writer must pass every required exact-head E2E proof before updating main; workers never submit trusted evidence. Sensitive changes need approval before merge. Normal changes receive post-merge review; blocking findings become follow-up bugs. Pre-merge `BLOCKING:` findings cause rework once per submission, without a round cap.
 
 Use `Nit: PATH:LINE — FINDING` for advisory feedback. Graphyard keeps nits in project memory for later workers; no bot fixes them in control-plane mode. Put required fixes on `BLOCKING:` lines. Use `guide review` for the procedure. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions and budget-test blockers.
 

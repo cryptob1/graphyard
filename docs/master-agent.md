@@ -41,8 +41,10 @@ Create and requirements enforce the [E2E rule and opt-out](validation.md#every-u
 
 ### Session liveness is reconciled, not trusted
 
-Missing panes free role capacity after two consecutive misses, including across loop restarts. `blocked` frees a worker slot; the reason stays until master clears it.
+Missing panes free role capacity after two consecutive misses, including across loop restarts. Completed reviews (including COMMENTED and post-merge) release their registry slot on the first readable inventory showing the pane gone after launch grace, even for delivered items absent from open work. Verdicts and review requirements stay unchanged; COMMENTED is not approval. `blocked` frees a worker slot; its [reason](protocol/work-commands.md#blocked-work) stays until master clears it.
 
 ## Automatic dispatch at submit
 
 Control-plane acceptance reads executed unit/integration/E2E counts from the merge trial, not producer evidence. Sensitive changes also need manual attestations. Review is automatic; unanswered sessions retry, then record `dispatch.abandoned`. Producer APIs remain for integrations, but these candidates launch no producer sessions.
+
+Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. Exact-head control-plane approval lets the head proceed immediately to the merge trial. Settings ignore old `run.awaitReviewers` and `run.awaitReviewersMinutes`; dispatch cursors discard old `botReviewers`.
