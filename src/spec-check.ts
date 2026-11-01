@@ -80,7 +80,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
   const config = await loadMasterConfig(root);
   const { profile, reason } = profileName
     ? (selected => selected ? { profile: selected, reason: null } : { profile: null, reason: `no configured reviewer profile is named ${profileName}` })(config.reviewers.find(item => item.name === profileName))
-    : selectReviewerProfile(config, 'control-plane');
+    : selectReviewerProfile(config);
   if (!profile) throw new Error(`No reviewer profile to launch ${work.key}'s spec checker from: ${reason}. Write one with graphyard master environments --apply`);
   // A spec checker takes one of the reviewer profile's sessions: its pending reviews and live panes hold the rest.
   const sessions = profileSessions(profile, agents, (await readReviewLedger(root)).reviews);
