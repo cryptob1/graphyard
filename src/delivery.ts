@@ -6,7 +6,7 @@ import { admin, demand, type Principal, type ReleaseDelivery, type Work } from '
 import { save } from './store.js';
 import { deliveryPolicy, type Environment, type Registration, type RollbackFencing, type Validation } from './validation.js';
 import { digestHash } from './attribution.js';
-import { resolvedProductionEnvironment } from './production-environment.js';
+import { productionEnvironmentFromEnv } from './production-environment.js';
 
 const name = z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._/-]*$/).max(150);
 const digest = z.string().regex(/^sha256:[a-f0-9]{64}$/);
@@ -680,8 +680,7 @@ export class Delivery {
    * an item's production deployment record.
    */
   private async shaEnvironment(db: pg.PoolClient, data: z.infer<typeof shaObservationSchema>) {
-    // Read through this transaction's client, so a selection published meanwhile is the one checked.
-    const production = await resolvedProductionEnvironment(db as unknown as pg.Pool);
+    const production = productionEnvironmentFromEnv();
     const environment = await this.environment(db, data.environment);
     demand(environment.id === production, `Only the production environment ('${production}') records a deployment by commit; '${environment.id}' is not it`, 400);
     const unknown = data.services.filter(service => !environment.services.includes(service));

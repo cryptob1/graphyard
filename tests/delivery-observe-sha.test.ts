@@ -170,7 +170,7 @@ test('unit:delivery-observe-sha — a sha observation names the serving release 
   assert.equal(deliveryOutcome(smoked(await reload(untouched))), deliveryLabel.delivered, 'an item the sha does not contain names no release');
 });
 
-test('unit:delivery-observe-sha — a request does bounded provider work and continues by cursor, replays its receipt after production changes, and re-reads the production selection', async () => {
+test('unit:delivery-observe-sha — a request does bounded provider work and continues by cursor, replays its receipt after production changes, and ignores historical production selections', async () => {
   // Bounded: more distinct merges than one request compares are reached by continuing from `next`, and a failed comparison stops the batch before it.
   const template = await delivered(sha('c')), served = sha('d');
   const merges = Array.from({ length: 60 }, () => randomBytes(20).toString('hex')), mergedAt = Date.parse(template.delivery!.mergedAt);
@@ -203,13 +203,16 @@ test('unit:delivery-observe-sha — a request does bounded provider work and con
   assert.deepEqual(await delivery.observeSha(observer, input, key), first);
   await assert.rejects(delivery.observeSha(observer, observation(sha('f')), id()));
 
-  // The production selection is re-read inside the transaction: one published during the provider scan refuses the stale environment.
-  const raced = await delivered(sha('0'));
-  const select = (environment: string) => store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [operator.id, 'production.environment', JSON.stringify({ environment })]);
-  let switched = false;
-  await assert.rejects(delivery.observeSha(observer, observation(served, { environment: { ...production, revision: 2 } }), id(), async () => { if (!switched) { switched = true; await select('uat'); } return true; }),
-    /Only the production environment \('uat'\) records a deployment by commit; 'production' is not it/);
-  assert.ok(switched);
-  assert.equal((await reload(raced)).delivery!.deployment, undefined, 'nothing is recorded against the stale selection');
-  await select('production');
+  // An installation upgraded from the retired publication route can have a conflicting historical
+  // selection. Status and observe-sha both use configuration, so that history cannot strand delivery.
+  const upgraded = await delivered(sha('0'));
+  await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [operator.id, 'production.environment', JSON.stringify({ environment: 'legacy-production' })]);
+  const status = await fetch(`${url}/api/status`, { headers: { authorization: `Bearer ${token(reader)}` } });
+  assert.equal(status.status, 200);
+  assert.equal((await status.json()).productionEnvironment, production.id);
+  const response = await post(observer, '/api/delivery/observe-sha', observation(upgraded.delivery!.mergeSha, { environment: { ...production, revision: 2 } }));
+  assert.equal(response.status, 200, await response.clone().text());
+  assert.deepEqual((await response.json()).deployed, [upgraded.key]);
+  assert.equal((await reload(upgraded)).delivery!.deployment!.sha, upgraded.delivery!.mergeSha);
+  await assert.rejects(delivery.observeSha(observer, observation(sha('f'), { environment: uat }), id()), /Only the production environment \('production'\) records a deployment by commit; 'uat' is not it/);
 });
