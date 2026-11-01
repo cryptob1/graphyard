@@ -192,8 +192,8 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
  * suite builds under it has a length bound. A root clean when chosen is checked again once the
  * trial ends (`TrialEnvironmentError`): no point-in-time check keeps a shared folder clean.
  */
-export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots()) =>
-  roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
+export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots(), exists: (path: string) => boolean = existsSync) =>
+  roots.find(root => exists(root) && !lookupPoisoned(root, exists)) ?? sessionDirectory;
 /**
  * Where a trial's short checkout may go (GY-2020): a short folder on disk in the coordinator's home,
  * made on demand. Never /tmp, /var/tmp or the tmpdir: the suite treats a checkout under any of them
