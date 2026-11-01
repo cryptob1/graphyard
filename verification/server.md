@@ -3,7 +3,7 @@ Paths: src/server/**, src/server.ts
 ## Tests
 
 - `tests/board-api.test.ts`: the board's HTTP routes and their principals.
-- `tests/production-watch-build-serving.test.ts`: `/api/status` reports the watch's serving commit with no production-environment ledger entry, ignores retained environment and candidate-promotion entries, and the retired environment route returns 404 without writing an event.
+- `tests/production-watch-build-serving.test.ts`: status ignores historical environment/promotion events; the retired route returns 404.
 - `tests/delivery-observe-sha.test.ts`: serving-commit observations retain authorization, idempotency, bounded continuation and configured-environment checks.
 - `tests/server-startup-readiness.test.ts`, `tests/healthz-bounded.test.ts`: startup and health.
 - `tests/master-intent-applies-directly.test.ts`: the master's intent applied at once, and a lapsed lease ending the attempt.
@@ -13,7 +13,7 @@ Paths: src/server/**, src/server.ts
 
 `npm run dev` serves `src/server.ts` against `DATABASE_URL`; tests start the server in-process over an embedded Postgres. Read a route with `node bin/graphyard.mjs status GY-N` from a configured checkout rather than hand-written requests.
 
-For GY-3006, commit before running `graphyard verify GY-3006 --preserves unit:delivery-observe-sha`: the verification record is bound to HEAD, and observe-sha preserves existing behavior. Build that head with `npm run build`. The core cases are `e2e:create-work-item`, `e2e:board` and `e2e:work-item-detail`; the head's `graphyard.json` declares the isolated server used by the merge trial. Local runs check the implementation; the control plane records the independent trial and trusted evidence after `complete`. Earlier-head results do not verify a new head.
+For GY-3006, commit, build, then run `graphyard verify GY-3006 --preserves unit:delivery-observe-sha`. Verification binds HEAD. The merge trial serves `graphyard.json`’s isolated server for `e2e:create-work-item`, `e2e:board` and `e2e:work-item-detail`; trusted evidence follows `complete`.
 
 ## Invariants
 
