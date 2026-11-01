@@ -24,12 +24,22 @@ const executor: Principal = { id: 'executor-a', role: 'coordinator' };
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 
 let database: EmbeddedPostgres, store: Store, engine: Engine;
+const queries: string[] = [];
 before(async () => {
   // An offset no other file takes: two files sharing a port fail whichever starts second.
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3005;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-ledger-delivery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
-  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
+  store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
+  store.pool.on('connect', client => {
+    const target = client as { query: (...args: any[]) => any };
+    const query = target.query.bind(client);
+    target.query = (...args: any[]) => {
+      if (typeof args[0] === 'string') queries.push(args[0]);
+      return query(...args);
+    };
+  });
+  await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, worker, executor];
 });
@@ -91,4 +101,13 @@ test('unit:merge-ledger — the merge writer\'s record is the one delivery: reco
   walk(srcRoot);
   const mentions = sources.filter(file => readFileSync(file, 'utf8').includes('direct-merge'));
   assert.deepEqual(mentions, [], 'no direct-merge route, command or module is wired anywhere under src/');
+});
+
+test('unit:five-step-cycle — reconciliation never reads retired merge windows on cold or repeated passes', async () => {
+  const fresh = new Engine(store, 120, 'owner/project');
+  queries.length = 0;
+  await fresh.reconcile();
+  await fresh.reconcile();
+  assert.ok(queries.length > 0, 'the passes reached the database');
+  assert.deepEqual(queries.filter(sql => sql.includes('direct-merge')), [], 'no merge-window ledger read');
 });
