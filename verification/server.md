@@ -13,6 +13,8 @@ Paths: src/server/**, src/server.ts
 
 `npm run dev` serves `src/server.ts` against `DATABASE_URL`; tests start the server in-process over an embedded Postgres. Read a route with `node bin/graphyard.mjs status GY-N` from a configured checkout rather than hand-written requests.
 
+For GY-3006, commit before running `graphyard verify GY-3006 --preserves unit:delivery-observe-sha`: the verification record is bound to HEAD, and observe-sha preserves existing behavior. Build that head with `npm run build`. The core cases are `e2e:create-work-item`, `e2e:board` and `e2e:work-item-detail`; the head's `graphyard.json` declares the isolated server used by the merge trial. Local runs check the implementation; the control plane records the independent trial and trusted evidence after `complete`. Earlier-head results do not verify a new head.
+
 ## Invariants
 
 - Every route authenticates a principal and checks the role the action needs; there is no client-controlled lifecycle-state endpoint.
