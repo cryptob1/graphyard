@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, readdirSync, symlinkSync, writeFileSync } from 'node:fs';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { coordinatorConfinement, readOnlyMountWrapper } from '../src/master/confinement.js';
@@ -146,17 +146,42 @@ test('integration:worker-control-socket-isolation — host Docker, systemd and c
       sessionDirectory: f.worktree, environment: { DOCKER_HOST: `unix://${socket}` }, secretsBus: null });
     assert.ok(tab);
     wrappers.push([...tab.wrapper]);
+    // Neither path is advertised in the environment or the known-directory masks.
+    // Publish one after constructing every wrapper, to rule out a socket inventory.
+    const undeclared = join(f.home, 'executor.sock');
+    const alias = join(f.worktree, 'executor-alias');
+    const abstract = '\0graphyard-fixture-' + process.pid;
+    const undeclaredServer = createServer(connection => { reached++; connection.end('undeclared host executor'); });
+    const abstractServer = createServer(connection => { reached++; connection.end('abstract host executor'); });
+    await new Promise<void>(resolve => undeclaredServer.listen(undeclared, resolve));
+    await new Promise<void>(resolve => abstractServer.listen(abstract, resolve));
+    symlinkSync(undeclared, alias);
+    try {
     for (const wrapper of wrappers) {
       run(wrapper, f.worktree, process.execPath, ['-e', `
         const net = require('node:net'), fs = require('node:fs'), assert = require('node:assert/strict');
         const endpoints = [${JSON.stringify(socket)}, ${JSON.stringify(runtimeSocket)}, ${JSON.stringify(herdrSocket)}, '/run/docker.sock', '/var/run/docker.sock', '/run/dbus/system_bus_socket',
-          ${JSON.stringify(join(sockets, 'bus'))}, ${JSON.stringify(join(sockets, 'systemd', 'private'))}];
+          ${JSON.stringify(join(sockets, 'bus'))}, ${JSON.stringify(join(sockets, 'systemd', 'private'))},
+          ${JSON.stringify(undeclared)}, ${JSON.stringify(alias)}, ${JSON.stringify(abstract)}];
         Promise.all(endpoints.map(path => new Promise((resolve, reject) => {
           const socket = net.connect(path); socket.on('connect', () => { socket.destroy(); reject(new Error('host socket reached: ' + path)); });
           socket.on('error', () => resolve());
         }))).catch(error => { console.error(error); process.exitCode = 1; });
         assert.ok(!fs.existsSync('/dev/disk'));
+        // Local IPC remains usable for tools and checks within the allocated scratch.
+        const own = '/tmp/own-' + process.pid + '.sock';
+        const server = net.createServer(connection => connection.end('local IPC'));
+        server.listen(own, () => {
+          const connection = net.connect(own);
+          let data = '';
+          connection.on('data', chunk => data += chunk);
+          connection.on('end', () => { assert.equal(data, 'local IPC'); server.close(); });
+        });
       `]);
+    }
+    } finally {
+      await new Promise<void>(resolve => undeclaredServer.close(() => resolve()));
+      await new Promise<void>(resolve => abstractServer.close(() => resolve()));
     }
     assert.equal(reached, 0, 'no host command executor received a connection');
     assert.ok(existsSync(socket), 'the host socket itself survives');

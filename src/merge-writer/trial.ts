@@ -14,6 +14,7 @@ import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master/host-memory.js';
 import { parseFailedTests } from '../model/base-failure.js';
 import { bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';
+import { socketConfinementWords } from '../master/socket-confinement.js';
 import { configHome } from '../install/secrets.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -158,7 +159,8 @@ export function trialConfinement(hidden: readonly string[], reexposed: readonly 
   return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch, environment),
     ...masks, ...readable.filter(existsSync).map(path => realpathSync(path)).flatMap(path => ['--ro-bind', path, path]),
     ...binds.flatMap(path => ['--bind', path, path]),
-    ...processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), secretsBus: null }, []), '--'];
+    ...processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), secretsBus: null }, []), '--',
+    ...socketConfinementWords(binds)];
 }
 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */

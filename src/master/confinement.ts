@@ -5,6 +5,7 @@ import { defaultChildRun } from '../child-runner.js';
 import { slotsDirectoryVariable } from './verification-slots.js';
 import { herdrTarget } from './herdr.js';
 import { configHome } from '../install/secrets.js';
+import { socketConfinementWords } from './socket-confinement.js';
 import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
 
 // Every runtime carries the same outer namespace, including runtimes with their own sandbox:
@@ -317,7 +318,9 @@ export function readOnlyMountWrapper(input: { coordinatorRoot: string; sessionDi
     ...protectAdmin.flatMap(path => ['--ro-bind', path, path]),
     ...shared.filter(path => !sharedDirectories.includes(path)).flatMap(path => ['--bind', path, path]),
     ...kept.flatMap(path => isDirectoryPath(path) ? ['--bind', path, path] : ['--ro-bind', path, path]),
-    ...cli.flatMap(path => ['--ro-bind', path, path]), ...channels, '--'];
+    ...cli.flatMap(path => ['--ro-bind', path, path]), ...channels, '--',
+    ...socketConfinementWords([...own, ...writable, ...kept.filter(isDirectoryPath), ...commonGitDir, ...sharedDirectories],
+      channels.flatMap((word, index) => word === '--ro-bind' && channels[index + 1] !== '/dev/null' ? [channels[index + 2]] : []))];
 }
 
 /** The one refusal text for a launch whose coordinator confinement cannot be applied (GY-888): the head names the runtime and the checkout, `problem` says what is missing. */
