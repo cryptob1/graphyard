@@ -242,7 +242,7 @@ td.today { color: var(--muted); }
     <h2 id="stuck">When something goes wrong</h2>
     <p>A failed trial on both main and the change is a base failure. The writer holds the change; the master diagnoses the failing check and files or advances repair work. Workers implement the repair with all gates intact.</p>
     <p>The deploy supervisor can restore a failed deployment. Required app-case failures are recorded for recovery through the merge writer. A liveness watchdog only detects incomplete loop cycles; it cannot judge delivery progress.</p>
-    <p>At this storyboard's source base, existing master panes are not prompted about failures. GY-3047 candidate ca55ddb7c2a7 adds changed-cause wakes and a bounded heartbeat; verify the loaded and serving commits before relying on it. The handoff shown here describes the master's job, not proof that the wake repair is deployed.</p>
+    <p>The loop prompts the master when blockers, failed operations, shared-base failures or deployment failures change, even if Herdr labels the master working. Unchanged causes are remembered across restarts. While work remains, a fallback heartbeat re-prompts after 30 minutes by default. The master applies routine repairs without human approval.</p>
   </section>
 
   <footer>Graphyard · roles and delivery, November 2026.</footer>
@@ -385,7 +385,7 @@ td.today { color: var(--muted); }
   A(label('routine repair needs no human approval')).at(91, 480, 480).out(95.5);
 
   // 9 · Master decides (96–108): concrete failure and responsibility.
-  A(card(620, 64, 'Trial check fails on main and the change', 'merge writer holds it as a base failure', 'bad')).at(96.4, 480, 135).out(107.5);
+  A(card(620, 64, 'Trial check fails on main and the change', 'writer holds it · loop prompts the master', 'bad')).at(96.4, 480, 135).out(107.5);
   A(card(620, 64, 'Master AI diagnoses and files a repair', 'worker implements · writer retries with all gates intact', 'steel')).at(98.6, 480, 270).out(107.5);
   A(label('Running cycles alone do not prove delivery progress')).at(101.2, 480, 405).out(107.5);
   A(label('Check item history, merged commit, serving commit and test results', 't-sub')).at(103, 480, 450).out(107.5);
@@ -408,7 +408,7 @@ td.today { color: var(--muted); }
     [60, 70, 'Only the merge writer pushes main using its deploy key. Done means merged, not necessarily live.'],
     [70, 82, 'A separate deploy supervisor builds and serves main. Deployment health and required live cases show release status.'],
     [82, 96, 'The deploy supervisor restores a failed deployment when safe. The master diagnoses repair work; workers implement it.'],
-    [96, 108, 'Example: a check fails on both main and the change. The writer holds it; the master diagnoses a repair. Running cycles alone prove no delivery progress.'],
+    [96, 108, 'Example: a check fails on both main and the change. The loop prompts the master to diagnose a repair. Running cycles alone prove no delivery progress.'],
     [108, 120, 'People keep exactly three decisions. The master applies the rest; review, proof and routine repairs proceed automatically.'],
   ];
   const capEl = document.getElementById('caption');

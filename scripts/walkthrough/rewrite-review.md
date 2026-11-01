@@ -1,34 +1,33 @@
 # GY-3048 documentation review
 
-Reviewed README and every Markdown file under docs, including protocol. No docs/history directory exists at base `1eb4f41b9a91`. Generated indexes were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata.
+Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `1e80c20737cf`.
 
-The existing handwritten set went from **10,971 to 7,961 words (27.4% shorter)**. The new rendering guide adds 308 words. This report is outside that guide count.
+The handwritten set went from **11,378 to 8,626 words (24.2% shorter)**, including the new rendering guide. This report is outside that guide count. The earlier attempt's counts used its older base; these counts include the merged wake and runtime-isolation documentation.
 
 | Reviewed file | Before | After |
 | --- | ---: | ---: |
-| `README.md` | 277 | 417 |
-| `docs/README.md` | 167 | 213 |
-| `docs/coordination.md` | 447 | 343 |
+| `README.md` | 277 | 427 |
+| `docs/coordination.md` | 447 | 339 |
 | `docs/delivery-redesign.md` | 310 | 168 |
 | `docs/delivery.md` | 679 | 561 |
 | `docs/deployment.md` | 797 | 554 |
-| `docs/development.md` | 485 | 392 |
+| `docs/development.md` | 698 | 605 |
 | `docs/glossary.md` | 542 | 510 |
-| `docs/how-graphyard-works.md` | 560 | 533 |
+| `docs/how-graphyard-works.md` | 560 | 545 |
 | `docs/install.md` | 457 | 369 |
 | `docs/master-agent-reference.md` | 303 | 238 |
 | `docs/master-agent-sessions.md` | 2019 | 808 |
-| `docs/master-agent.md` | 646 | 556 |
+| `docs/master-agent.md` | 840 | 674 |
 | `docs/onboarding.md` | 641 | 448 |
 | `docs/operations.md` | 551 | 502 |
 | `docs/protocol/work-commands.md` | 615 | 538 |
-| `docs/protocol.md` | 44 | 47 |
 | `docs/setup-from-zero.md` | 521 | 398 |
 | `docs/validation.md` | 1121 | 626 |
+| `docs/walkthrough.md` | 0 | 316 |
 
 Setup-from-zero is the setup checklist; install owns provider/key steps; onboarding owns fleet setup. Delivery owns trial/revert behavior, deployment owns serving, and sessions owns runtime recovery. Other guides link there. Removed issue narration, the old brief word-count table and references to deleted docs tests. Existing section anchors remain.
 
-Checked live source for dispatch, trial acceptance, supervision and serving: master dispatch accepts eligible system-driven items; control-plane acceptance counts trial proofs rather than producer evidence; the watchdog detects incomplete cycles; the deploy service serves main. Source snapshot and pending GY-3047 candidate ca55ddb7c2a7 are explicitly distinguished. No domain behavior or requirement changed.
+Checked live source for dispatch, trial acceptance, supervision and serving: master dispatch accepts eligible system-driven items; control-plane acceptance counts trial proofs rather than producer evidence; the watchdog detects incomplete cycles; the deploy service serves main. Epoch 3 synced merged GY-3047 (`1e80c20737cf`) and replaced the temporary pending-candidate text with implemented changed-cause wakes and the bounded heartbeat. No domain behavior or requirement changed.
 
 Validation:
 

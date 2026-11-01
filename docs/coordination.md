@@ -15,7 +15,7 @@ Only exclusiveResources lock dispatch. Sync and merge trials integrate path over
 
 Graphyard reads exact-head verdicts, not remote review threads. Sensitive changes need approval before merge. Normal changes receive post-merge review; blocking findings become follow-up bugs. Pre-merge `BLOCKING:` findings cause rework once per submission, without a round cap.
 
-Nits end with `(mechanical: CATEGORY)` or `(substantive: CATEGORY)`. Behavior, criteria and scope are substantive. Mechanical nits may get one bot commit limited to the named files; `Rejected bot commit: SHA — reason` rejects it. Use `guide review` for finding classification. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions and budget-test blockers.
+Use `Nit: PATH:LINE — FINDING` for advisory feedback. Graphyard keeps nits in project memory for later workers; no bot fixes them in control-plane mode. Put required fixes on `BLOCKING:` lines. Use `guide review` for the procedure. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions and budget-test blockers.
 
 ## Scope is a plan, not a lock
 

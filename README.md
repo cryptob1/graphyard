@@ -23,7 +23,7 @@ Follow the [setup checklist](docs/setup-from-zero.md) or [install guide](docs/in
 5. The deploy supervisor (`graphyard-deploy.service`, with an install-specific name on new installs) builds and serves new main commits. Deployment health and required end-to-end checks report what is live.
 6. Failures trigger the appropriate retry, rework or recovery. The master handles causes that need judgment, without asking for routine human approval.
 
-For example, if a trial check fails on both the change and main, the merge writer holds it as a base failure. The master diagnoses the failing test and files or advances a repair; a worker fixes it, and the writer retries with the gates intact. Running loop cycles alone do not prove delivery progress: check the item history, merged commit, served commit and required test results. See [current wake behavior](docs/master-agent.md#master-wake-and-delivery-progress) before relying on automatic master prompting.
+For example, if a trial check fails on both the change and main, the merge writer holds it as a base failure. The loop prompts the master with the failure. The master diagnoses the test and files or advances a repair; a worker fixes it, and the writer retries with the gates intact. Running loop cycles alone do not prove delivery progress: check the item history, merged commit, served commit and required test results. See [master wakes and delivery progress](docs/master-agent.md#master-wake-and-delivery-progress) for changed-cause prompts and the fallback heartbeat.
 
 ```mermaid
 flowchart LR

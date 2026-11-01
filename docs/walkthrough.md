@@ -1,7 +1,7 @@
 <!-- page: Understand or contribute | 2 | render and inspect opening media -->
 # Render the opening walkthrough
 
-Edit `scripts/walkthrough/how-graphyard-works.html`, including its stage, captions and static explanation. It uses local font fallbacks, a fixed caption height, ten scenes and a meaningful first frame. The opening distinguishes master AI, loop program, workers and Graphyard ownership. The failure scene illustrates the master's responsibility; the static note identifies GY-3047's pending wake repair.
+Edit `scripts/walkthrough/how-graphyard-works.html`, including its stage, captions and static explanation. It uses local font fallbacks, a fixed caption height, ten scenes and a meaningful first frame. The opening distinguishes master AI, loop program, workers and Graphyard ownership. The failure scene shows the loop handing a failed check to the master; the static explanation covers changed-cause prompts and the fallback heartbeat.
 
 ## Render and encode
 
