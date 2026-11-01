@@ -586,14 +586,14 @@ export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
     + 'it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. ';
 }
 /**
- * GY-2975: what a review brief says about a criterion whose proof pins one case: run the head on one
- * other case the item's own commands accept, and request changes when only the pinned case works.
+ * Review a criterion pinned to one input for generality through code and coverage, within the
+ * reviewer's read-only role. Execution belongs to the automated merge trial.
  * Empty when no criterion pins one, so every other review request stays byte-identical.
  */
 export function singleCaseReviewSection(criteria?: readonly ReviewCriterion[]) {
   const flagged = (criteria ?? []).filter(criterion => pinnedCases(criterion.text).length === 1).map(criterion => criterion.id);
   if (!flagged.length) return '';
-  return `${flagged.join(', ')} ${flagged.length === 1 ? 'checks' : 'check'} one case: a head can pass by tuning to that case. For each, run the head once on one other case its own commands accept — another seed or input — quote both results, and request changes when the head works only on the pinned case. `;
+  return `${flagged.join(', ')} ${flagged.length === 1 ? 'checks' : 'check'} one case: a head can pass by tuning to that case. For each, inspect the implementation and test coverage for other seeds or inputs, and request changes if the code only handles the pinned case or the coverage does not establish the required generality. `;
 }
 /**
  * The criteria rule (GY-166). GY-164 took 19 attempts: its reviewer confirmed both
@@ -608,7 +608,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
   // dropped, and collapsed whitespace changes an indented fragment or exact output it quotes.
   const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
-    + `Judge each acceptance criterion met or unmet at head ${sha}, and state that judgement for every criterion in the review body. `;
+    + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. `;
 }
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _legacy?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
   memory ??= projectMemory;
@@ -630,10 +630,9 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
-    + `Judge whether this diff meets what ${binding.key} requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. `
-    + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command; post it as soon as you have judged the diff, without asking for confirmation. `
-    + `GH_CONFIG_DIR points at this launch's review binding and one-time verdict token. `
-    + `Once posted, stop; Graphyard closes this session once it observes your verdict. `
+    + `Posting that review is granted to this session's role, not a permission to request: post without asking for confirmation. `
+    + `GH_CONFIG_DIR holds this launch's review binding and one-time verdict token. `
+    + `After posting, stop; Graphyard closes the session. `
     + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
 }
 
