@@ -819,7 +819,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
   // finished review it belongs to pins its role at the concurrency limit. Judged here, where the
   // slot is spent: the first tick records the miss, the second ends the session with the missing
   // pane named, and the request the slot held back launches in this tick or the next. A completed
-  // post-merge ledger record needs only the first miss after launch grace. An unread
+  // review ledger record needs only the first miss after launch grace. An unread
   // registry or an unread Herdr is a gap: nothing is judged and the misses stand as they were.
   if (effects.registry && effects.endRegistrySession && herdr) {
     const document = await effects.registry();
@@ -832,11 +832,11 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         misses[orphan.id] = new Date(firstMissedAt).toISOString();
         // The second consecutive miss is the end; an entry survives a failed end, so the next
         // tick retries it rather than starting the grace again.
-        // A completed post-merge verdict already settled the ledger. Its delivered item may be
+        // A completed verdict already settled the ledger. Its item may be
         // absent from this snapshot, so the handle-based close step cannot release its slot.
         // Once its pane is gone it needs no second miss, including after a loop restart.
-        if (!orphan.completedPostMerge && !Number.isFinite(first)) continue;
-        const reason = `${orphan.completedPostMerge ? 'the post-merge review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
+        if (!orphan.completedReview && !Number.isFinite(first)) continue;
+        const reason = `${orphan.completedReview ? 'the review is completed and ' : ''}the Herdr inventory no longer reports pane ${orphan.pane} (${orphan.agentName ?? 'no agent name recorded'}), so its session is gone`;
         try { await effects.endRegistrySession(orphan, reason); tick.registryClosed.push({ work: orphan.work, id: orphan.id, role: orphan.role, pane: orphan.pane }); }
         catch (error) { tick.closeFailures.push({ work: orphan.work ?? '', id: orphan.id, reason: bounded(message(error), closureFailureReasonLimit) }); }
       }

@@ -12,7 +12,7 @@ import type { MasterConfig } from './profiles.js';
 /** The review or proof session whose slot is released: what the item's session handle carries. */
 export interface RegistrySlot { key: string; id: string; kind: 'review' | 'proof'; head: string | null; pane: string | null; agentName: string | null }
 /** A live registry session of this host no Herdr pane backs, with the pane that would back it. */
-export interface OrphanedRegistrySession { id: string; role: string; work: string | null; pane: string; agentName: string | null; completedPostMerge?: boolean }
+export interface OrphanedRegistrySession { id: string; role: string; work: string | null; pane: string; agentName: string | null; completedReview?: boolean }
 
 /**
  * The live reviewer or producer sessions of `host` that no pane of `agents` backs (GY-2945): a
@@ -21,11 +21,11 @@ export interface OrphanedRegistrySession { id: string; role: string; work: strin
  * A session inside its launch grace is still starting and is never judged, and one whose record
  * names no pane (a launch that never confirmed one, or a headless run) is left to the passes that
  * own it. `agents` null is a listing that could not be read: a gap, never a miss. Pure.
- * A completed post-merge record also names its settled purpose, even when its delivered item
+ * A completed review record also names its settled purpose, even when its delivered item
  * has left the open-work snapshot; the dispatcher can release it on the first confirmed miss.
  */
 export function orphanedRegistrySessions(registry: AgentRegistry, host: string | null | undefined, agents: { pane_id?: string }[] | null,
-  records: { session?: string; pane?: string | null; agentName?: string | null; runtime?: string; state?: string; postMerge?: boolean }[], now: number): OrphanedRegistrySession[] {
+  records: { session?: string; pane?: string | null; agentName?: string | null; runtime?: string; state?: string }[], now: number): OrphanedRegistrySession[] {
   if (!agents) return [];
   const panes = new Set(agents.map(agent => agent.pane_id).filter((pane): pane is string => !!pane)), named = new Map(records.filter(record => record.session).map(record => [record.session!, record]));
   const orphans: OrphanedRegistrySession[] = [];
@@ -35,7 +35,7 @@ export function orphanedRegistrySessions(registry: AgentRegistry, host: string |
     const record = named.get(session.id);
     if (!record?.pane || record.runtime === 'pi' || panes.has(record.pane)) continue;
     orphans.push({ id: session.id, role: session.role, work: session.work, pane: record.pane, agentName: record.agentName ?? null,
-      ...(session.role === 'reviewer' && record.postMerge && record.state === 'completed' ? { completedPostMerge: true } : {}) });
+      ...(session.role === 'reviewer' && record.state === 'completed' ? { completedReview: true } : {}) });
   }
   return orphans;
 }

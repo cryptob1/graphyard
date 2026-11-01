@@ -1,16 +1,19 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Work } from '../src/model.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, type FleetSession } from '../src/model/registry.js';
+import { exactApproval } from '../src/model/review.js';
 import type { FleetClient } from '../src/fleet.js';
 import { loadMasterConfig, type MasterConfig } from '../src/master.js';
-import { launchReview, readReviewLedger, reconcileReviews } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews, updateReviewLedger } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from '../src/master/registry-slot.js';
+import { daemonEffects, emptyDaemonState, runCycle } from '../src/master-daemon.js';
 import { fleet as launchFleet, requested } from './helpers/review-fleet.js';
 
 // Keep managed checkouts in the fixture too when verify runs this file directly, without the
@@ -95,7 +98,7 @@ test('unit:reconcile-closes-orphaned-registry-sessions — a registry session a 
     const registry = memoryRegistry(config.hostId, await claudeLogin('reviewer-account'));
     const probe = { registry: registry.client, quota: false, cacheMs: 0 };
 
-    // A reviewer session the old loop launched; its verdict was posted and the ledger record
+    // A reviewer session the old loop launched; its approval was dismissed and the ledger record
     // settled — but the restart left the registry session standing, as nothing the successor loop
     // tracks names it (the incident's state).
     const item = requested(1);
@@ -104,9 +107,9 @@ test('unit:reconcile-closes-orphaned-registry-sessions — a registry session a 
     const sessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === requestId)!.session!;
     const pane = launched.pane!;
     assert.deepEqual(registry.live().map(session => session.id), [sessionId], 'the registry counts the fresh review live');
-    const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 7, submittedAt: new Date().toISOString() };
+    const verdict = { state: 'DISMISSED', reviewer: 'graphyard-reviewer[bot]', reviewId: 7, submittedAt: new Date().toISOString() };
     await reconcileReviews(host.root, config, { run: host.run, work: [item], agents: [...host.agents], observe: async () => verdict });
-    assert.equal((await readReviewLedger(host.root)).reviews.find(record => record.requestId === requestId)!.state, 'completed', 'the ledger record settled on its verdict');
+    assert.equal((await readReviewLedger(host.root)).reviews.find(record => record.requestId === requestId)!.state, 'failed', 'the dismissed approval leaves the ledger failed');
     assert.deepEqual(registry.live().map(session => session.id), [sessionId], 'the registry still counts the finished review');
     assert.equal(host.agents.some(agent => agent.pane_id === pane), false, 'the pane went with the session');
 
@@ -134,15 +137,15 @@ test('unit:reviewer-slot-freed-after-orphan-close — the request the orphan hel
     const registry = memoryRegistry(config.hostId, await claudeLogin('reviewer-account'), 1);
     const probe = { registry: registry.client, quota: false, cacheMs: 0 };
     // The reviewer role runs one session at a time, and its one slot is held by a session the
-    // predecessor loop launched for GY-501, whose verdict was posted and whose ledger record
+    // predecessor loop launched for GY-501, whose approval was dismissed and whose ledger record
     // settled — the pane went with it, and the request it answered stands only on the item.
     const done = requested(1), waiting = requested(2);
     const launched = await launchReview(host.root, done, 'review-a', host.agents, new Date().toISOString(), { run: host.run, mint: host.mint, requestId: done.autoDispatch!.review!.id, probe });
     const sessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === done.autoDispatch!.review!.id)!.session!;
     assert.deepEqual(registry.live().map(session => session.id), [sessionId]);
-    const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 7, submittedAt: new Date().toISOString() };
+    const verdict = { state: 'DISMISSED', reviewer: 'graphyard-reviewer[bot]', reviewId: 7, submittedAt: new Date().toISOString() };
     await reconcileReviews(host.root, config, { run: host.run, work: [done], agents: [...host.agents], observe: async () => verdict });
-    assert.equal((await readReviewLedger(host.root)).reviews.find(record => record.requestId === done.autoDispatch!.review!.id)!.state, 'completed');
+    assert.equal((await readReviewLedger(host.root)).reviews.find(record => record.requestId === done.autoDispatch!.review!.id)!.state, 'failed');
     assert.equal(host.agents.some(agent => agent.pane_id === launched.pane), false, "the finished review's pane is gone");
     assert.deepEqual(registry.live().map(session => session.id), [sessionId], 'the registry still counts it');
 
@@ -233,7 +236,7 @@ for (const orphaned of [false, true]) test(`integration:post-merge-review-slot-r
     const tick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects(host, config, registry, () => [waiting], 7, from));
     assert.deepEqual(tick.registryClosed, [{ work: done.key, id: sessionId, role: 'reviewer', pane: launched.pane }]);
     assert.deepEqual(tick.launched.map(entry => entry.work), [waiting.key], 'the independent review launches on the next eligible cycle');
-    assert.match(registry.registry.sessions.find(session => session.id === sessionId)!.endReason!, /post-merge review is completed.*pane /);
+    assert.match(registry.registry.sessions.find(session => session.id === sessionId)!.endReason!, /review is completed.*pane /);
     assert.equal(registry.live().length, 1);
     assert.notEqual(registry.live()[0].id, sessionId);
     assert.deepEqual(waiting.autoDispatch, requirements, 'slot repair does not change the current review request or requirements');
@@ -242,4 +245,125 @@ for (const orphaned of [false, true]) test(`integration:post-merge-review-slot-r
     assert.deepEqual([after.state, after.verdict, after.sha, after.baseSha, after.policyRevision, after.requestId],
       [completed.state, completed.verdict, merge, parent, completed.policyRevision, requestId]);
   } finally { await host.cleanup(); }
+});
+
+// Exercise production wiring over HTTP and on-disk ledgers, rather than tickEffects. The
+// external world is a scratch registry service and Herdr; no live installation is changed.
+for (const postMerge of [false, true]) test(`integration:post-merge-review-slot-release — real daemon effects release a completed ${postMerge ? 'post-merge' : 'ordinary COMMENTED'} reviewer and select the next request`, async () => {
+  const host = await fleet({ name: 'review-a', agentName: 'review-a', kind: 'claude', concurrency: 1 }, 'review-a');
+  const config = await loadMasterConfig(host.root);
+  const registry = memoryRegistry(config.hostId, await claudeLogin('daemon-reviewer'), 1);
+  const calls: string[] = [];
+  const http = createServer(async (request, response) => {
+    try {
+      calls.push(`${request.method} ${request.url}`);
+      assert.equal(request.headers.authorization, `Bearer ${await readFile(config.credentialFile, 'utf8').then(token => token.trim())}`);
+      let body = ''; for await (const chunk of request) body += chunk;
+      const input = body ? JSON.parse(body) : {};
+      let result: unknown;
+      if (request.url === '/api/agent-registry/document') result = await registry.client.document();
+      else if (request.url === '/api/agent-registry/select') result = await registry.client.select(input);
+      else if (/^\/api\/agent-registry\/sessions\/[^/]+\/end$/.test(request.url!)) {
+        await registry.client.end(request.url!.split('/')[4], input.reason); result = {};
+      } else if (request.url?.endsWith('/review-launch')) result = { launch: 'next-independent-launch' };
+      else throw new Error(`Unexpected scratch API request: ${request.url}`);
+      response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(result));
+    } catch (error) { response.writeHead(500); response.end(JSON.stringify({ error: String(error) })); }
+  });
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  try {
+    config.herdrWorkspace = 'w4G';
+    config.url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
+    const file = join(host.root, '.graphyard/master.json');
+    await writeFile(file, JSON.stringify(config), { mode: 0o600 });
+    const done = requested(1), waiting = requested(2);
+    done.key = postMerge ? 'GY-3007' : 'GY-3004';
+    done.observation!.source = waiting.observation!.source = 'control-plane';
+    const incident = postMerge
+      ? { session: 'ef7f783c-72bb-470d-88f0-f682f26e06ee', pane: 'w4G:p3B', start: '2026-11-01T21:36:42.225Z', close: '2026-11-01T21:37:15.320Z', manual: '2026-11-01T21:41:37Z' }
+      : { session: 'dcf298f7-eb46-482f-aaaf-4472459d7dbe', pane: 'w4G:p3D', start: '2026-11-01T21:41:44.279Z', close: '2026-11-01T21:42:24.330Z', manual: '2026-11-01T21:47:02Z' };
+    if (postMerge) {
+      done.stage = 'done'; done.delivery = { mergeSha: 'c'.repeat(40), mergedAt: incident.close, authorizationRevision: 1 }; done.postMergeReview = 'owed';
+    }
+    const requestId = postMerge ? `post-merge:${done.key}:${done.delivery!.mergeSha}` : done.autoDispatch!.review!.id;
+    await launchReview(host.root, done, 'review-a', host.agents, new Date().toISOString(), {
+      run: host.run, requestId, ...(postMerge ? { postMerge: { mergeSha: done.delivery!.mergeSha, baseTip: 'b'.repeat(40) } } : {}),
+      probe: { registry: registry.client, quota: false, cacheMs: 0 },
+      registerLaunch: async (_work, input) => {
+        done.reviewLaunch = { ...input, id: 'incident-launch', requester: 'master', at: incident.start, verdict: null };
+        return { launch: 'incident-launch' };
+      },
+    });
+    done.reviewLaunch!.verdict = { sha: done.reviewLaunch!.head, baseSha: done.reviewLaunch!.baseTip, state: 'COMMENTED',
+      reviewer: done.reviewLaunch!.reviewer, reviewId: 2992534, submittedAt: incident.close, body: 'AC-1 met', source: 'control-plane' };
+    if (postMerge) done.postMergeReview = 'reviewed';
+    await reconcileReviews(host.root, config, { run: host.run, work: [done], agents: [...host.agents], now: () => new Date(incident.close) });
+    await updateReviewLedger(host.root, ledger => {
+      const record = ledger.reviews.find(entry => entry.requestId === requestId)!;
+      record.session = incident.session; record.pane = incident.pane; record.requestedAt = incident.start;
+    });
+    Object.assign(registry.registry.sessions[0], { id: incident.session, selectedAt: incident.start });
+    // No account home means unknown quota, which is eligible without contacting any provider.
+    registry.registry.accounts[0].credential.home = null;
+    const settled = (await readReviewLedger(host.root)).reviews[0];
+    done.observation!.reviews = [{ id: 2992534, sha: settled.sha, state: 'COMMENTED', reviewer: done.reviewLaunch!.reviewer }];
+    assert.equal(settled.state, 'completed'); assert.equal(settled.closedAt, incident.close);
+    assert.equal(settled.verdict!.state, 'COMMENTED'); assert.equal(host.agents.length, 0);
+    // The completed request is no longer queued; COMMENTED still leaves its review gate closed.
+    done.autoDispatch!.review = null;
+    const preserved = structuredClone({ done, waiting });
+    let clock = Date.parse(incident.start) + 4 * 60_000;
+    const snapshot = async () => ({ work: postMerge ? [waiting] : [done, waiting], now: new Date(clock).toISOString() });
+    let readable = true;
+    const run: typeof host.run = (command, args) => {
+      if (args[0] === 'agent' && args[1] === 'list') {
+        if (!readable) throw new Error('inventory unreadable');
+        return JSON.stringify({ result: { agents: [...host.agents] } });
+      }
+      return host.run(command, args);
+    };
+    const real = daemonEffects(host.root, config, { snapshot, run, mutate: async () => ({}) });
+    const state = emptyDaemonState(config);
+    state.cycle = postMerge ? 2170 : 2185;
+    const cycle = async () => {
+      let tick: Awaited<ReturnType<typeof runDispatchTick>> | undefined;
+      const failures: string[] = [];
+      await runCycle(config, state, { ...real, masterSession: undefined, mergeWriter: null,
+        dispatchTick: async snapshot => { tick = await real.dispatchTick!(snapshot) as typeof tick; },
+      }, () => clock, undefined, line => failures.push(line));
+      assert.deepEqual(failures, []);
+      assert.ok(tick, 'the real daemon cycle ran dispatch');
+      return tick;
+    };
+    const grace = await cycle();
+    assert.deepEqual(grace.registryClosed, []); assert.equal(registry.live()[0].id, incident.session);
+    clock = Math.max(Date.parse(incident.manual), Date.parse(incident.start) + 6 * 60_000);
+    readable = false;
+    assert.equal((await cycle()).registryClosed, undefined, 'unreadable inventory is a gap');
+    assert.equal(registry.live()[0].id, incident.session);
+    readable = true;
+    host.agents.push({ name: settled.agentName, pane_id: incident.pane, agent_status: 'working' });
+    // A completed pane that could not yet close remains counted.
+    host.refuseClose.set(incident.pane, Infinity);
+    assert.deepEqual((await cycle()).registryClosed, []);
+    assert.equal(registry.live()[0].id, incident.session);
+    host.agents.length = 0;
+    const released = await cycle();
+    assert.deepEqual(released.closeFailures, []);
+    assert.deepEqual(released.registryClosed, [{ work: done.key, id: incident.session, role: 'reviewer', pane: incident.pane }]);
+    assert.deepEqual(released.launched.map(entry => entry.work), [waiting.key], JSON.stringify(released));
+    assert.match(registry.registry.sessions[0].endReason!, /review is completed.*pane w4G:/);
+    assert.equal(registry.live().length, 1); assert.notEqual(registry.live()[0].id, incident.session);
+    const again = await cycle();
+    assert.deepEqual(again.registryClosed, []); assert.deepEqual(again.launched, []);
+    assert.ok(calls.includes('GET /api/agent-registry/document'));
+    assert.equal(calls.filter(call => call === `POST /api/agent-registry/sessions/${incident.session}/end`).length, 1);
+    assert.ok(calls.includes('POST /api/agent-registry/select'));
+    const after = (await readReviewLedger(host.root)).reviews.find(record => record.id === settled.id)!;
+    assert.deepEqual([after.verdict, after.sha, after.baseSha, after.policyRevision, after.requestId],
+      [settled.verdict, settled.sha, settled.baseSha, settled.policyRevision, settled.requestId]);
+    assert.deepEqual({ done, waiting }, preserved, 'COMMENT stays non-approving; no gates, requests or requirements change');
+    assert.equal(done.gates.find(gate => gate.name === 'review')!.passed, false);
+    assert.equal(exactApproval(done), null, 'COMMENTED cannot supply independent approval');
+  } finally { await new Promise<void>(resolve => http.close(() => resolve())); await host.cleanup(); }
 });
