@@ -23,6 +23,10 @@ import { masterConfigSchema } from '../src/master.js';
 import { reconcileReviews, saveReviewLedger } from '../src/reviewer.js';
 import { neededRework } from '../src/daemon/rework.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2030-05-01 instant is the loop's injected clock and the explicit
 // `now` of evaluate(); new Date() only stamps documents the Postgres half writes and reads back.
 
@@ -149,7 +153,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`); await store.init();
   engine = new Engine(store, 120, repository);
-  engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine.submissionObserver = null
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = controlPlane(engine, credentials, null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -172,7 +176,7 @@ const baseEffects = (work: () => Promise<Work[]>, at: () => number) => ({
 
 test('unit:pr-era-history-loads — a work item whose history carries pull-request observations, PR numbers and GitHub check results loads and evaluates; it progresses through the merge writer\'s trial and merge with no GitHub request; master status shows no Main guard or GitHub budget line', { timeout: 300_000 }, async () => {
   // Submitted as today's workers submit, then rewritten as a release that still observed GitHub left it.
-  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'PR-era history before GY-2010', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'PR-era history before GY-2010', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:a', 'e2e:fixture'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   await engine.execute(worker, 'claim', work.id, {}, randomUUID());
   await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'worker-host', path: join(checkout, '.graphyard', 'worktrees', 'GY-1-1'), branch }, randomUUID());
@@ -221,7 +225,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   };
   const master = config(), state = emptyDaemonState(master);
   const reads = mergeWriterReads(master, checkout, run, { base: managed, record, merger: async () => 'control-plane', trial });
-  const effects = { ...baseEffects(async () => [(await store.workDocument(work.id))!], () => clock), mergeWriter: { ...reads, advisory: undefined } } as unknown as DaemonEffects;
+  const effects = { ...baseEffects(async () => [(await store.workDocument(work.id))!], () => clock), mergeWriter: reads } as unknown as DaemonEffects;
   const realFetch = globalThis.fetch, requested: string[] = [];
   globalThis.fetch = ((input: string | URL | Request, init?: RequestInit) => { const target = String(input instanceof Request ? input.url : input); requested.push(target); return realFetch(input, init); }) as typeof fetch;
   const actions: string[] = [];
@@ -291,7 +295,7 @@ test('unit:shadow-gate-removed — the shadow gate is gone: its modules and rout
   const run: ChildRun = (command, args, options) => { children.push([command, ...args]); return defaultChildRun(command, args, options); };
   const reads = mergeWriterReads(master, checkout, run, { base: managed, record: async () => { throw new Error('nothing to record'); }, merger: async () => 'control-plane', trial: async () => { throw new Error('nothing to trial'); } });
   // A shadow port that throws on any touch: a cycle that ran the old gate fails here.
-  const effects = { ...baseEffects(async () => [], () => clock), mergeWriter: { ...reads, advisory: undefined } } as unknown as DaemonEffects;
+  const effects = { ...baseEffects(async () => [], () => clock), mergeWriter: reads } as unknown as DaemonEffects;
   await runCycle(master, state, effects, () => clock);
   await mergeWriterIdle(state);
   assert.ok(!children.some(args => args.some(arg => arg.startsWith('graphyard/') || arg.includes('refs/heads/graphyard/'))), `no worker branch was fetched: ${JSON.stringify(children)}`);

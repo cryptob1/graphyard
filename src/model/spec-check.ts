@@ -45,7 +45,7 @@ declare module './work.js' {
 /** How long a spec-check launch stands: its token's life, after which the loop closes the session and launches again. */
 export const specCheckLaunchMs = 3_600_000;
 
-/** Who owes one: every feature item — a "No user-facing change" feature too; bugs and chores skip it, as EGM skips small clear fixes. */
+/** Who owes one: every feature item; bugs and chores skip it, as EGM skips small clear fixes. */
 export const needsSpecCheck = (work: Pick<Work, 'type'>): boolean => work.type === 'feature';
 
 /** The check that judged the item's current requirements, or null: master requirements bumped the revision, so one more check runs before dispatch. */

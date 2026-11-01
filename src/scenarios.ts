@@ -11,7 +11,7 @@ import type { Store } from './store.js';
  * GY-1708: scenario id the capacity fault-class filing cites as `e2e:capacity-limit-redispatch`.
  * Revision 1 ships in this module (`capacityLimitRedispatchRevision`); listing, create and
  * run-recording materialize it into the scenarios table so filings, e2e sync and case runs work
- * on a fresh install without a prior sync. The matching optional case under `e2e/cases/` stays
+ * on a fresh install without a prior sync. The matching case under `e2e/cases/` stays
  * the source e2e sync revises later.
  */
 export const capacityLimitRedispatchScenario = 'capacity-limit-redispatch';
@@ -41,13 +41,13 @@ export function capacityLimitRedispatchRevision(createdAt = new Date().toISOStri
     kind: 'command', name: 'mid-attempt capacity redispatch proofs',
     // Through the reserving harness: e2e stepEnvironment omits GRAPHYARD_TEST_PORT, so
     // `node --test` would bind fixed ports outside any reserved window.
-    run: 'node --import tsx tests/helpers/run-tests.ts tests/capacity-redispatch-preserves-attempt.test.ts tests/capacity-hold-respects-machine-bounds.test.ts',
+    run: 'node --import tsx tests/helpers/run-tests.ts tests/capacity-hold-respects-machine-bounds.test.ts tests/capacity-silent-exhaustion.test.ts',
     timeoutSeconds: 600,
   });
   const definition = {
     id: capacityLimitRedispatchScenario,
     title: 'Mid-attempt provider limit exhaustion redispatches without losing work',
-    purpose: 'Asserts the shipped capacity-limit-redispatch scenario revision is listed and runs the mid-attempt redispatch proofs (hold, failover, preserved work, truthful role bounds) without creating backlog items.',
+    purpose: 'Asserts the shipped capacity-limit-redispatch scenario revision is listed and runs the mid-attempt redispatch proofs (hold, failover on silent exhaustion, truthful role bounds) without creating backlog items.',
     setup: [] as string[],
     steps: [listStep, proofStep],
     expected: [
@@ -59,7 +59,7 @@ export function capacityLimitRedispatchRevision(createdAt = new Date().toISOStri
     runner: caseRunner,
     testPath: `e2e/cases/${capacityLimitRedispatchScenario}.json`,
     tags: ['capacity'],
-    required: false,
+    required: true,
   };
   return { ...definition, revision: 1, hash: createHash('sha256').update(JSON.stringify(definition)).digest('hex'), createdAt, createdBy };
 }

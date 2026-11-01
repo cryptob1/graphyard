@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
-import { dirname, join, relative, isAbsolute } from 'node:path';
+import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
@@ -127,7 +127,9 @@ export const credentialTrialVariable = (name: string) =>
 /** The trial child's environment: the isolated test one, with every credential and Graphyard control removed and git's global configuration off. */
 export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !credentialTrialVariable(name)));
-  return { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  // Use the running Node installation before host version-manager shims: the trial's empty
+  // home intentionally cannot supply the host's mise trust/configuration to those shims.
+  return { ...kept, PATH: [dirname(process.execPath), kept.PATH].filter(Boolean).join(delimiter), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 }
 
 /**
@@ -201,8 +203,8 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
  * suite builds under it has a length bound. A root clean when chosen is checked again once the
  * trial ends (`TrialEnvironmentError`): no point-in-time check keeps a shared folder clean.
  */
-export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots()) =>
-  roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
+export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots(), exists: (path: string) => boolean = existsSync) =>
+  roots.find(root => exists(root) && !lookupPoisoned(root, exists)) ?? sessionDirectory;
 /**
  * Where a trial's short checkout may go (GY-2020): a short folder on disk in the coordinator's home,
  * made on demand. Never /tmp, /var/tmp or the tmpdir: the suite treats a checkout under any of them

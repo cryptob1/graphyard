@@ -22,6 +22,10 @@ import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 import { pullOnce, transportRetries } from '../scripts/graphyard-pull.mjs';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import WorkDetails from '../web/pages/work-details.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2026-09-01 boundAt is reviewer config and the 2026-09-20 `at`/clock is the fixed now handed to reconcileActions and evaluate; Date.now() serves only the live engine tests.
 
 /**
@@ -78,7 +82,7 @@ const expireLease = (item: Work) => store.pool.query("UPDATE work_items SET docu
 
 let sequence = 0;
 async function created(overrides: Record<string, unknown> = {}) {
-  const item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Inverted loop ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], ...overrides }, randomUUID());
+  const item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Inverted loop ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }], ...overrides }, randomUUID());
   return item;
 }
 const release = async (item: Work) => engine.execute(operator, 'ready', item.id, {}, randomUUID());
@@ -298,7 +302,7 @@ const fleetConfig = masterConfigSchema.parse({
 
 test('integration:worker-pull-model — a free worker asks the control plane for its next assignment, p90 ready-to-claim stays inside two minutes, and nothing tracks runtime health', async () => {
   const offered: Work[] = [];
-  for (let index = 0; index < 4; index++) offered.push(await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: `Pull ${index}`, priority: index === 0 ? 0 : 3, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID())));
+  for (let index = 0; index < 4; index++) offered.push(await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: `Pull ${index}`, priority: index === 0 ? 0 : 3, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID())));
 
   // The pull: one call, one credential, no configuration. `agent-b` appears in no master profile
   // and no Herdr inventory; the control plane still hands it the work it is entitled to claim.
@@ -317,7 +321,7 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   for (const item of assigned) await engine.execute(item.lease!.owner === worker.id ? worker : otherWorker, 'release', item.id, { epoch: item.lease!.epoch }, randomUUID());
 
   // An item another worker already holds is never offered twice: a racing pull skips it.
-  const contested = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Contested', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const contested = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Contested', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID()));
   const [first, second] = await Promise.all([engine.pullAssignment(worker, { work: contested.id }, randomUUID()), engine.pullAssignment(otherWorker, { work: contested.id }, randomUUID())]);
   const winners = [first, second].filter(result => result.assigned);
   assert.equal(winners.length, 1, 'the coordination lock decides the race; the loser is told nothing was left');
@@ -327,8 +331,8 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   // A pull that timed out after its claim committed is retried with the same key: it replays the
   // claim it already made. Without that the retry would take a second item and the worker would
   // hold a lease it was never told about, until it lapsed into a reclaim.
-  const replayable = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Replayed pull', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
-  const alsoOffered = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Second offer', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const replayable = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Replayed pull', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID()));
+  const alsoOffered = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Second offer', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID()));
   const retryKey = randomUUID();
   const won = await engine.pullAssignment(worker, {}, retryKey);
   assert.ok(won.assigned, 'the pull claimed an item');
@@ -347,8 +351,8 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   // One key can only ever claim one item, including when the retry races the call it is retrying:
   // the claim and its receipt are written in one transaction, so whichever reaches an offer first
   // wins and the other replays that assignment instead of taking a second.
-  const raced = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Raced pull', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
-  const alsoRaced = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Raced pull 2', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID()));
+  const raced = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Raced pull', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID()));
+  const alsoRaced = await release(await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Raced pull 2', criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID()));
   const racedKey = randomUUID();
   const [one, two] = await Promise.all([engine.pullAssignment(worker, { work: raced.id }, racedKey), engine.pullAssignment(worker, { work: alsoRaced.id }, racedKey)]);
   const assignments = [one, two].filter(result => result.assigned);
@@ -386,7 +390,7 @@ test('integration:worker-pull-model — a free worker asks the control plane for
   const latencies: number[] = [];
   for (let index = 0; index < 10; index++) {
     const actor = index % 2 ? worker : otherWorker;
-    const item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Polled ${index}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
+    const item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Polled ${index}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID());
     // The loop is already polling when the item is released, exactly as an idle session is.
     const loop = runWorkerPull(() => engine.pullAssignment(actor, { work: item.id }, randomUUID()), { intervalMs: pollMs, maxPolls: 300 });
     await release(item);
@@ -776,7 +780,7 @@ test('integration:typed-next-action — the gate evaluator and the action comput
   const at = '2026-09-20T12:00:00.000Z';
   const base_: Work = {
     id: 'work-2', key: 'GY-2', title: 'Agreement', description: '', type: 'feature', priority: 2, dependencies: [], 
-    criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }], policy: { checks: ['test'], review: true }, stage: 'backlog', revision: 1, policyRevision: 1,
+    criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }], policy: { checks: ['test'], review: true }, stage: 'backlog', revision: 1, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: false, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null,
     reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [], gates: [],
   } as unknown as Work;
@@ -798,16 +802,16 @@ test('integration:typed-next-action — the gate evaluator and the action comput
     assert.equal(action!.kind, refusalAction(probe, failing.name, failing.reasons[0]));
   }
   // An unfinished dependency belongs to the other item: this one names no action at all. Both
-  // fixtures here opt out of the e2e filing rule, so the dependency is the ready gate's only word;
-  // an item with a filing refusal of its own answers that first (GY-2981).
-  const dependency = evaluated({ ready: true, id: 'work-3', key: 'GY-3', description: 'No user-facing change: dependency fixture' });
-  const dependent = { ...evaluated({ ready: true, dependencies: ['work-3'], description: 'No user-facing change: dependent fixture' }) };
+  // fixtures here carry the e2e proof the filing rule owes, so the dependency is the ready gate's
+  // only word; an item with a filing refusal of its own answers that first (GY-2981).
+  const dependency = evaluated({ ready: true, id: 'work-3', key: 'GY-3' });
+  const dependent = { ...evaluated({ ready: true, dependencies: ['work-3'] }) };
   Object.assign(dependent, evaluate(dependent, [dependent, dependency], new Date(at)));
   assert.match(dependent.gates.find(gate => gate.name === 'ready')!.reasons[0], /Dependency GY-3 is unfinished/);
   assert.equal(nextAction(dependent, [dependent, dependency], new Date(at)), null);
   assert.equal(nextAction(dependency, [dependent, dependency], new Date(at))!.kind, 'dispatch', 'the dependency is the one that gets dispatched');
   // A filing refusal is the item's own beside a dependency: it is answered while the dependency ships.
-  const both = evaluated({ ready: true, dependencies: ['work-3'] });
+  const both = evaluated({ ready: true, dependencies: ['work-3'], criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] });
   Object.assign(both, evaluate(both, [both, dependency], new Date(at)));
   const own = nextAction(both, [both, dependency], new Date(at));
   assert.equal(own!.kind, 'attention', 'the filing refusal is this item\'s own');

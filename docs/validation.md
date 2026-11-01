@@ -1,13 +1,13 @@
 <!-- page: Build integrations | 2 | cases -->
 # E2E validation
 
-## Every user-facing item carries an e2e: proof
+## Every item carries an e2e: proof
 
-An item of type `feature` or `bug` — work a user can see — must carry at least one criterion with an `e2e:` proof: the end-to-end case the merge writer's trial runs against the served head before the item can land. `master create` and `master requirements` refuse one otherwise, naming the case format and the opt-out. A head whose bound case is missing or failing is refused by the merge trial, the same way failing tests refuse it.
+Every item — chore, bug or feature — must carry a criterion with an `e2e:` proof, naming a new or existing case the merge trial runs against the served head. No description opts out. Cases that create work must also give those items an E2E binding; a manual or unit proof alone is insufficient. `master create` and `master requirements` refuse missing proofs, naming the case format. The trial refuses missing or failing cases.
 
 - **Binding.** An `e2e:NAME` proof binds to `e2e/cases/NAME.json` on the head. A trial of a head that carries the proof but not the case refuses it: `e2e:NAME has no case at e2e/cases/NAME.json`. A new case registers when the head adding it merges and syncs, not before create.
 - **Serve declaration.** The repository's graphyard.json declares how a head is served for end-to-end runs, `e2e.serve`: `"e2e": { "serve": { "command", "url", "readySeconds" } }` — `command` runs in the trial checkout until `url` answers, waited for at most `readySeconds` for a 2xx answer, and stopped with SIGTERM once the cases have run; teardown waits for serving descendants' cleanup before killing what remains. The cases' bearer token reaches it as `GRAPHYARD_E2E_TOKEN`. Graphyard's own declaration runs `scripts/e2e-serve.mjs`, the head's control plane on a temporary embedded database. A repository that already declares a previewable application (`delivery.applications`, a static site or Compose project) needs no `serve`: the trial runs each case against the application `delivery.cases` binds it to (or the only one declared), served the way a preview is. Create refuses an `e2e:` proof in a repository that declares neither, naming the declaration to add.
-- **Opt-out.** Work with nothing a user can see — refactors, docs, headless-only and control-plane-internal changes — opens its description with `No user-facing change:` followed by a reason, and then owes no e2e proof.
+- **Onboarding gives both.** `init --scan --apply` writes `e2e/cases/served-head.json` when no case exists and `e2e.serve` when no previewable application serves a head. The fallback Node server serves graphyard.json; replace it with the application's server. `graphyard up` publishes these files; its onboarding item names the first case.
 - **Open items.** The ready gate runs this validation against every open unheld item under today's policy; refused with the same message, it dispatches once `master requirements` adds what is missing. Claimed and submitted items are not refused.
 - **Real-world checks.** A `human:NAME` proof is allowed only where the criterion names the physical thing checked (a phone call, a printed page, a card in a terminal). Once the head is ready, Needs you asks once with steps, commit and preview URL. The person's pass or fail with a note is a trusted run: pass merges, fail reworks, a new head re-asks.
 
@@ -50,6 +50,8 @@ Container writes; attestor, collector read; never add the runner account. Collec
 `timeoutSeconds` (600). `secrets: ["NAME"]` from `~/.config/graphyard/INSTALL/e2e-secrets.TARGET.env` (0600, uncommitted) as variables and `{{secret:NAME}}`, redacted. `e2e run CASE|--tag T|--all --url URL` prints failing steps, exits non-zero. Without a wired repository the delivery cases pend; without previews the preview cases do. Cases belong to the repository they live in: a managed repository's **Tests** page lists exactly the cases synced from its `e2e/cases/` and the runs recorded against them — never Graphyard's built-in scenarios, which register only on an install managing `cryptob1/graphyard` itself; with no cases the page says so and how to add one. A seeded or synced revision carries the time it landed, never the epoch.
 
 **Required `uat` cases run on every deploy** (`GRAPHYARD_UAT_URL`, `GRAPHYARD_SUITE_DETAIL`; static sites loop back `GRAPHYARD_UAT_STATIC`); `e2e record REPORT` records attempts ([`e2e:record` agent](delivery.md#e2e-record-credential)).
+
+Graphyard's trial server (`scripts/e2e-serve.mjs`) manages `cryptob1/graphyard`, so its fresh database lists the shipped scenarios, including the required capacity-limit-redispatch case. That case runs the capacity hold and silent-exhaustion tests through the port-reserving test runner.
 
 ## Release verdicts
 

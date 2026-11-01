@@ -10,8 +10,8 @@ import { setupAddress, setupChecklist, type SetupItem, type SetupItemId } from '
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
 import { sshOrigin } from './merger-mode.js';
-import { fileOnboardingWork, onboardingChecks } from './onboarding.js';
-import { findOnboardingWork, onboardingBranch, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
+import { fileOnboardingWork, onboardingChecks, onboardingFirstCase } from './onboarding.js';
+import { findOnboardingWork, onboardingBranch, onboardingCasePath, onboardingWait, waitedFor, type OnboardingWait } from './model/onboarding-work.js';
 import { coordinatorCheckoutRefusal, coordinatorCheckoutRoot, dirtyCheckoutPaths, readCoordinatorCheckout } from './master/profiles.js';
 import { redactString } from './evidence-replay.js';
 import { recordSupervision } from './master/config.js';
@@ -25,7 +25,7 @@ import type { GitHubCli } from './install/github.js';
 import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
-import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, liftLoopPins, type LoopCodeReading } from './repository-setup.js';
+import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, liftLoopPins, removeHeldCliPin, type LoopCodeReading } from './repository-setup.js';
 import { loopCodeRoot } from './daemon/checkout-state.js';
 import { recordHerdrInstance } from './master/config.js';
 
@@ -202,11 +202,13 @@ export interface UpDependencies {
    */
   loopCode?(): Promise<LoopCodeReading | null>;
   /**
-   * GY-1859: lift the known-good pin and the held-snapshot pointer that hold the install's loop and
+   * GY-1859: lift the known-good pin that holds the install's loop and
    * slots on another commit (repository-setup's liftLoopPins), so a unit rewritten or restarted
    * next starts this CLI; answers what it lifted.
    */
   liftLoopPins?(): Promise<string[]>;
+  /** Remove the retired held-cli pointer even when the master-loop step is already complete. */
+  removeHeldCliPin?(): Promise<void>;
   /** Agent mode: drive the App manifest page at URL in the master's browser profile, recorded as a master browser flow. */
   driveApp?(url: string, handoff: Handoff): Promise<DriveOutcome>;
   /** GY-1477: this host's Tailscale node (its MagicDNS name and tailnet address), or null without a running Tailscale. */
@@ -899,12 +901,22 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // GY-1480: only the workflows the apply reports writing are claimed, and the publish refuses
       // when any of them is not on disk, so a change never says it carries a workflow it lacks.
       const workflows: string[] = Array.isArray(applied?.delivery?.workflows) ? applied.delivery.workflows.filter((path: unknown) => typeof path === 'string') : [];
+      // GY-3037: the first case the apply wrote for the e2e rule is onboarding output like the rest,
+      // published in the same commit; and the serve declaration it writes when no application serves
+      // a head is the deployed control plane's policy, which an install reads from graphyard.json —
+      // so the install runs again once, this run, before the item that carries it is filed.
+      const firstCase: string[] = typeof applied?.delivery?.firstCase === 'string' ? [applied.delivery.firstCase] : [];
+      if (applied?.delivery?.serve === true || firstCase.length) {
+        const result = await deps.cli(installArgs('--apply'));
+        claim = await rememberSignIn(deps.root, state, result.stdout) ?? claim;
+        if (result.code !== 0) throw childStop('control-plane', installArgs('--apply'), result);
+      }
       // The files are written to this checkout only; the base branch needs them before any work is
       // delivered, so they are published as one commit on `graphyard/onboarding` (the base is
       // protected, never pushed to) and the commit is submitted as a work item by head sha, exactly
       // as a worker's `complete --head` submits (GY-2938): no pull request is opened.
-      const published = await deps.publishOnboarding(workflows).catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
-      const carried = workflows.length ? `onboarding files with ${workflows.join(', ')}` : 'onboarding files (no delivery workflow was written)';
+      const published = await deps.publishOnboarding([...workflows, ...firstCase]).catch((error: any) => { throw new UpStop(`onboarding: publishing the onboarding files failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun graphyard up to retry`, upExitCodes.failed); });
+      const carried = [...workflows, ...firstCase].length ? `onboarding files with ${[...workflows, ...firstCase].join(', ')}` : 'onboarding files (no delivery workflow was written)';
       if (!published) return `${carried}: the base branch already holds them`;
       // GY-1478: the commit is filed as a work item the loop owns, so its reviewer reviews it,
       // the checks run and it merges under the normal gates; nothing waits on a person.
@@ -1003,6 +1015,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       const read = await deps.loopCode().then(answer => answer ?? 'no reading came back', (error: any) => String(error?.message ?? error).split('\n')[0].slice(0, 400) || 'the reading was rejected');
       return typeof read === 'string' ? { error: read, reading: null } : { error: read.error, reading: read };
     };
+    await deps.removeHeldCliPin?.();
     if (state.completed.includes('master-loop') && deps.loopCode) {
       const recorded = await readLoopCode();
       if (recorded?.error || recorded?.reading?.loopStale) {
@@ -1025,9 +1038,9 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
       // A unit that starts another checkout is rewritten; one on this checkout whose process loaded other code is restarted.
       const rewriteLoop = !!loopStale && reading?.loopReplace !== 'restart';
       let rewrote: string | null = null;
-      // A known-good pin or held snapshot would bring a rewritten unit — and the loop's own alignment
-      // a restarted one — back onto the pinned commit, so it is lifted first and the step still waits
-      // for the exact commit below.
+      // A known-good pin would bring a rewritten unit — and the loop's own alignment a restarted
+      // one — back onto the pinned commit, so it is lifted first and the step still waits for the
+      // exact commit below.
       if (loopStale && deps.liftLoopPins) {
         const lifted = await deps.liftLoopPins().catch(error => { throw new UpStop(`master-loop: ${loopStale}, and lifting the pin that holds it there failed: ${String(error?.message ?? error).split('\n')[0]}; rerun ${rerun()}`, upExitCodes.failed); });
         if (lifted.length) deps.emit({ kind: 'note', text: `master-loop: lifted ${lifted.join(' and ')}, so the unit starts this CLI instead; graphyard master recover --to SHA pins a release again.` });
@@ -1569,7 +1582,7 @@ export async function redeemSignInClaim(link: string, fetcher: typeof fetch = fe
 }
 
 /** What `init --scan --apply` writes and the manual flow commits (docs/setup-from-zero.md, step 6). */
-export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json'] as const;
+export const onboardingFiles = ['AGENTS.md', '.gitignore', 'graphyard.json', onboardingCasePath] as const;
 export { onboardingBranch };
 /** The onboarding files every apply writes; a publish without one refuses (GY-1480). */
 export const onboardingRequiredFiles = ['AGENTS.md', 'graphyard.json'] as const;
@@ -1694,15 +1707,14 @@ export function upDependencies(root: string, cliPath: string, request: UpRequest
     loopRefusal: async () => coordinatorCheckoutRefusal(await loopCheckout(), 'the master loop'),
     // GY-1859: the loop unit is judged against the CLI running up, whose launcher and checkout are this run's.
     loopCode: async () => readLoopCode(root, { cliPath }),
-    // GY-1899: the held snapshot's pointer lives under the checkout this CLI runs from, where the
-    // loop's holdCliAt wrote it — a lift that read the managed repository would remove nothing.
-    liftLoopPins: async () => liftLoopPins(root, { repository: request.repository, heldRoot: loopCodeRoot(cliPath, root) }),
+    removeHeldCliPin: async () => removeHeldCliPin(loopCodeRoot(cliPath, root)),
+    liftLoopPins: async () => liftLoopPins(root, { repository: request.repository }),
     fileOnboarding: async (commit, operatorTokenFile, requestId) => {
       const server = await serverUrl();
       let token = '';
       try { token = operatorTokenFile ? (await readFile(operatorTokenFile, 'utf8')).trim() : ''; } catch { /* no credential on this machine */ }
       if (!server || token.length < 32) return null;
-      return fileOnboardingWork({ server, token, commit, checks: await onboardingChecks(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
+      return fileOnboardingWork({ server, token, commit, checks: await onboardingChecks(root), caseId: await onboardingFirstCase(root), host: hostname(), path: resolve(root, '.graphyard', 'onboarding'), requestId });
     },
     work: async () => {
       const url = await serverUrl(), token = await masterToken();

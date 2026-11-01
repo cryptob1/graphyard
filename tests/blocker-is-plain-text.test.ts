@@ -11,6 +11,10 @@ import type { Services } from '../src/server/routes.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-2875 AC-2: a blocker is plain text. The worker or master sets and clears it; nothing probes or
  * classifies it. Parking a decision only a human may make still records the request the human
@@ -25,13 +29,13 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('blocker-plain-text-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('blocker_plain_text');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/blocker_plain_text`); await store.init();
-  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null
   services = { engine, repository: 'owner/project', principals: [] } as unknown as Services;
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
 async function claimed(title: string) {
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:blocker-is-plain-text'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:blocker-is-plain-text', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));

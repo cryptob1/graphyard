@@ -12,7 +12,7 @@ const { databaseUrl } = JSON.parse(await readFile('.graphyard/e2e-serve.json', '
 const sha = '1234567890abcdef1234567890abcdef12345678', at = '2026-01-01T00:00:00.000Z';
 const candidate = (pr, branch) => ({ sha, baseSha: sha, pr, branch, author: 'w', createdAt: at });
 const item = (id, key, title, fields) => ({
-  id, key, title, description: 'No user-facing change: seeded for plain status words.',
+  id, key, title, description: 'Seeded for plain status words.',
   type: 'chore', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }],
   policy: { checks: ['test'], review: true }, policyRevision: 1, revision: 1, stageEnteredAt: at,
   ready: true, epoch: 1, lease: null, workspaces: [], evidence: [], violations: [], createdAt: at, updatedAt: at, ...fields,

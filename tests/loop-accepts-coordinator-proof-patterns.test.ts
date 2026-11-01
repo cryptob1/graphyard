@@ -14,6 +14,10 @@ import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-2934: since GY-2876 a coordinator's roster entry may carry --proof patterns (the install's master
  * carries manual:*), and the loop refused every such credential, so it never started. The loop now runs
@@ -30,7 +34,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('coordinator-proofs-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('coordinator_proofs');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/coordinator_proofs`); await store.init();
-  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
@@ -62,7 +66,7 @@ test('unit:loop-accepts-coordinator-proof-patterns — master run --once runs a 
     await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true });
   }
 
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Proven by hand', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:checked'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Proven by hand', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:checked', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   await assert.rejects(engine.execute(coordinator, 'evidence', w.id, { proof: 'manual:checked', sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), policyRevision: w.policyRevision, result: 'pass', executed: 1, skipped: 0 }, randomUUID()),
     /Evidence submission is not permitted/, 'a coordinator never submits evidence, whatever its patterns');
