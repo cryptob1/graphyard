@@ -67,7 +67,9 @@ exec ${target} "$@"
 });
 
 for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failure-names-cause — ${phase} startup errors retry as host failures without refusing an item`, async () => {
-  const input = await fixture(undefined, phase === 'install');
+  const emptyPath = await temporaryDirectory('toolchain-empty-path');
+  const hidden = await temporaryDirectory('toolchain-hidden');
+  const input = { ...await fixture(undefined, phase === 'install'), hidden: [hidden] };
   const work = { id: 'work', key: 'GY-3044', candidate: { sha: input.mergeSha }, submission: {}, criteria: [], risk: 'normal' } as unknown as Work;
   for (const diagnostic of [
     'mise ERROR Config files in /host/.config/mise/config.toml are not trusted',
@@ -75,11 +77,20 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
     '/usr/bin/env: ‘node’: No such file or directory',
     '/bin/sh: 1: npm: not found',
     '/bin/bash: line 1: npx: command not found',
+    'bwrap: execvp npm: No such file or directory',
   ]) {
     const events: MergeRecordEvent[] = [];
     const invocations: string[][] = [];
     const run: ChildRun = (command, args, options) => {
-      if (command === 'npm') { invocations.push(args); throw Object.assign(new Error('cannot start'), { status: diagnostic.includes('mise ERROR') ? 1 : 127, stderr: diagnostic }); }
+      if (command === 'npm') {
+        invocations.push(args);
+        if (diagnostic.startsWith('bwrap:')) {
+          // Spawn the real confinement wrapper successfully, then fail its toolchain exec.
+          assert.ok(options?.wrapper?.length);
+          return defaultChildRun(command, args, { ...options, env: { ...options?.env, PATH: emptyPath } });
+        }
+        throw Object.assign(new Error('cannot start'), { status: diagnostic.includes('mise ERROR') ? 1 : 127, stderr: diagnostic });
+      }
       return defaultChildRun(command, args, options);
     };
     const ports: MergePorts = {
