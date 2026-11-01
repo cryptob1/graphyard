@@ -14,7 +14,7 @@ import { APP_PENDING, checkoutLauncherOf, type AgentEnvironment, type Supervisio
 import { withoutMasterInstructions } from './instructions.js';
 import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
-import { controlPlaneAttention } from './attention.js';
+import { controlPlaneAttention, retiredAppRemedy } from './attention.js';
 import { writeFailure } from './worktrees.js';
 
 export async function privateFile(file: string) {
@@ -268,7 +268,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   attention.push(...supervision, ...(unrecorded ? [unrecorded] : []));
   // Each installation fact keeps its own remedy: a permission shortfall is a GitHub migration, a
   // capacity variable is a deployment setting, and production lag is a deploy to confirm.
-  const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? 'Accept the GitHub App permission request (run graphyard github-setup --update-permissions on the machine holding .graphyard/github-app.json, or graphyard master browser app-permissions and installation-accept, for the exact steps)'
+  const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? retiredAppRemedy
     : delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
     : production?.incidents.length ? `Deploy main: ${production.attention[0] ?? production.incidents[0].reason}` : null;
   const profiles = 'graphyard master environments --apply to generate worker, reviewer and producer profiles from the logged-in agent accounts';

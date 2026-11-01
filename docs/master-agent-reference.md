@@ -15,6 +15,8 @@ Human: `park GY-N EPOCH KIND NEEDED --ask ASK --recommend TEXT --why WHY [--choi
 
 ## Recovery
 
+`master browser` is removed. If an older control plane reports App permissions or held integration jobs, the master uses `graphyard install --repo OWNER/NAME --plan`, then `--apply`, to install the merge writer's deploy key in place of the retired App integration.
+
 A dead supervisor's lease lapses; the close step keeps what the attempt had not committed on its branch and records it for the redispatch's handoff, then reconciles the lease and the item is claimable again.
 
 ### Producer-runtime faults

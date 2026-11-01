@@ -12,6 +12,7 @@ import { autonomyContract } from '../src/autonomy.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
+import { controlPlaneAttention } from '../src/master/attention.js';
 // Time-bomb allowance (GY-1694): every 2030-01-01 instant is judged at a 2030 `now`/observedAt the test passes (localNow pinned where the probe runs); the lone new Date() status call carries no fixture instant.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
@@ -53,7 +54,16 @@ test('master init verifies a coordinator and repository before writing private l
     const short = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, appPermissions: { app: 'graphyard-owner-project', installationUrl: 'https://github.com/settings/installations/4242', verifiedAt: '2030-01-01T00:00:00Z', error: null, suspended: false, missing: [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'], reasons: [] }], attention: [shortfall] }, heldJobs: 2 }));
     const announced = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, short as typeof fetch);
     assert.equal(announced.attention[0], shortfall); assert.match(announced.attention[1], /2 integration jobs are held/);
-    assert.match(announced.next, /github-setup --update-permissions/);
+    assert.match(announced.next, /install --repo OWNER\/NAME --plan, then --apply/);
+    assert.doesNotMatch(announced.next, /master browser|github-setup/);
+    const legacy = controlPlaneAttention(await (await short()).json());
+    assert.equal(legacy.attentionItems.length, 2);
+    for (const item of legacy.attentionItems) {
+      assert.equal(item.role, 'master');
+      assert.equal(item.human, false);
+      assert.match(item.next, /install --repo OWNER\/NAME --plan, then --apply/);
+      assert.doesNotMatch(item.next, /master browser|github-setup/);
+    }
     assert.equal((await stat(join(root, '.graphyard/master.json'))).mode & 0o777, 0o600);
     assert.equal(execFileSync('git', ['check-ignore', '.graphyard/master.json'], { cwd: root, encoding: 'utf8' }).trim(), '.graphyard/master.json');
     const agents = await readFile(join(root, 'AGENTS.md'), 'utf8');
