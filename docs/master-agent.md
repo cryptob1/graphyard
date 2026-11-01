@@ -21,6 +21,8 @@ Items carry an optional `owner`, a principal with `sessionKind: "human"`, separa
 
 `master restart` restarts `graphyard-master.service`; from the confined master session it files a request the loop serves. The loop restarts itself when [graphyard-deploy.service](delivery.md) serves a commit it did not load.
 
+When merge validation refuses a queued head for a shared base failure, the loop sends the diagnosis (including assertion or crash detail) and next repair action to the registered master, even if Herdr still labels it working. An absent master receives the unresolved cause in its launch handover. The cursor records `lastWake` and subject digests: repeated cycles and restarts do not prompt again for unchanged causes; changed details or base wake again, and resumed delivery clears the subject. Failed delivery stays pending for retry. `master status` separates the coordinator's session state from `delivery`, naming a shared-base stall, its reason and next agent action. The master files or advances the repair without human approval; every test and merge requirement remains in force.
+
 ### System-driven items
 
 Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, loop-owned `rework`. The master attests unproduced `manual:` proofs per head, base and policy revision.
