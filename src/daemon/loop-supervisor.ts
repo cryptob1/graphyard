@@ -1,7 +1,6 @@
 // Concern: GY-916 — the loop's own supervisor unit: detecting it from the process's cgroup, telling a
 // self-restart that succeeded (the unit's stop ended the awaited systemctl) from one that failed, and
-// re-applying the unit before the loop re-executes through it — with its ExecStart following the
-// held-cli pin (GY-1790). Split out of upgrade.ts, which re-exports it.
+// re-applying the unit before the loop re-executes through it. Split out of upgrade.ts, which re-exports it.
 import { readFileSync } from 'node:fs';
 
 /** The supervisor unit the loop itself runs under, when systemd supervises it: read from the process's own cgroup, like an executor's. */
