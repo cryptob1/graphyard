@@ -198,8 +198,9 @@ test('unit:rework-resumes-with-findings-and-falls-back — a CHANGES_REQUESTED r
     const { resumeExitWindowMs } = await import('../src/master/session-resume.js');
     const exitAtOnce = async (earlyExitKeepsLeaseMs?: number) => {
       const surrendered: string[] = [];
+      // This child has no descendants; a detached process tests lease surrender without a user systemd bus.
       await supervise(process.execPath, ['-e', 'process.exit(1)'], 2, async () => ({ updatedAt: new Date().toISOString(), lease: { epoch: 2, expiresAt: new Date(Date.now() + 120_000).toISOString() } }) as never,
-        { detached: false, intervalMs: 20, graceMs: 25, session: { visible: () => null, surrender: async cause => { surrendered.push(cause); } }, ...(earlyExitKeepsLeaseMs ? { earlyExitKeepsLeaseMs } : {}) });
+        { detached: true, intervalMs: 20, graceMs: 25, session: { visible: () => null, surrender: async cause => { surrendered.push(cause); } }, ...(earlyExitKeepsLeaseMs ? { earlyExitKeepsLeaseMs } : {}) });
       return surrendered;
     };
     assert.deepEqual(await exitAtOnce(resumeExitWindowMs), [], 'a resume that exits at once keeps the lease');

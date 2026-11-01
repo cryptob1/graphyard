@@ -656,7 +656,8 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
   git('init', '-q', '-b', 'main'); writeFileSync(join(repo, 'a.txt'), 'one\n'); git('add', '-A'); git('commit', '-q', '-m', 'base');
   const mergeSha = git('rev-parse', 'HEAD');
   const sessions = await temporaryDirectory('soak-trial-sessions', tmpdir()), clean = await temporaryDirectory('soak-trial-tmp', tmpdir());
-  const home = await temporaryDirectory('soak-trial-home', tmpdir());
+  // Shared temporary roots can hold a stray .git; the real trial checkout root lives in the home.
+  const home = await temporaryDirectory('soak-trial-home', homedir());
   const [trials] = trialCheckoutRoots(home);
   const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 1e12 });
   // The live owners: this process all day, and a child that dies at midday.
