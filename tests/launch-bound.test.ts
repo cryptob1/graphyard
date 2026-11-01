@@ -39,7 +39,7 @@ function requested(key: string, sha: string): Work {
 function config(credentialFile: string): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'vishrog', masterAgentName: 'graphyard-master-project',
     reviewer: { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', credentialFile: join(credentialFile, '..', 'reviewer.json'), boundAt: at },
-    reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', concurrency: 2 }], producers: [], run: { awaitReviewers: [] } });
+    reviewers: [{ name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', concurrency: 2 }], producers: [] });
 }
 
 test('unit:launch-bound — a launch its runtime never acknowledges fails on its own past the bound, naming the runtime and host, and is no plane-wide timeout', async () => {
@@ -79,7 +79,7 @@ test('unit:launch-bound — GY-1373: one reviewer launch on a dead runtime fails
     };
     const cursor = emptyDispatchCursor(settings);
     const started = Date.now();
-    const tick = await runDispatchTick(settings, cursor, effects, () => clock, undefined, undefined, 150);
+    const tick = await runDispatchTick(settings, cursor, effects, () => clock, undefined, 150);
     assert.ok(Date.now() - started < 5_000, 'the tick ends once the bound fails the hung launch');
     assert.deepEqual(launched, ['GY-1364'], 'the next request launched in the same tick');
     assert.deepEqual(tick.launched.map(entry => entry.work), ['GY-1364']);

@@ -10,7 +10,6 @@ import { humanOnlySubjects } from '../waits.js';
 import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
-import { directMergeStatus } from '../../direct-merge.js';
 import { autoMergeStatus, mergeWriterStatus } from '../../merger-mode.js';
 import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
@@ -74,8 +73,6 @@ export const statusRoutes = defineRoutes('status', [
         // quota and reset time. `?host=` (or the executor-host header) judges placement for that
         // executor. It names hosts and login homes, so implementers and producers do not read it.
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
-        // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
-        directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
         // The merge writer (merger-mode.ts): always the control plane.
         mergeWriter: mergeWriterStatus,
         // Automatic merging (GY-1927): off, a gate-passing candidate is held until a merge decision releases it.

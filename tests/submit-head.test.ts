@@ -64,7 +64,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('submit-head-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('submit_head_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/submit_head_test`); await store.init();
-  engine = new Engine(store, 120, repository); engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });

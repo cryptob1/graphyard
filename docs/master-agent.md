@@ -21,6 +21,10 @@ Items carry an optional `owner`, a principal with `sessionKind: "human"`, separa
 
 `master restart` restarts `graphyard-master.service`; from the confined master session it files a request the loop serves. The loop restarts itself when [graphyard-deploy.service](delivery.md) serves a commit it did not load.
 
+When merge validation refuses a queued head for a shared base failure, the loop sends the diagnosis (including assertion or crash detail) and next repair action to the registered master, even if Herdr still labels it working. An absent master receives the unresolved cause in its launch handover. The cursor records `lastWake` and subject digests: repeated cycles and restarts do not prompt again for unchanged causes; changed details or base wake again, and resumed delivery clears the subject. Failed delivery stays pending for retry. `master status` separates the coordinator's session state from `delivery`, naming a shared-base stall, its reason and next agent action. The master files or advances the repair without human approval; every test and merge requirement remains in force.
+
+The same handoff includes unresolved worker blockers, failed launch/review/proof operations and abandoned requests, with affected work and the recorded reason. A failed deployment of the managed repository also reaches its master. Resolved causes disappear. While scoped work remains, `run.masterHeartbeatMinutes` (default 30) bounds the fallback re-prompt since the last wake or session start, including stale working labels; successful wakes reset that timer across loop restarts. Routine repair uses typed agent actions without relaxing gates.
+
 ### System-driven items
 
 Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, loop-owned `rework`. The master attests unproduced `manual:` proofs per head, base and policy revision.
@@ -31,8 +35,12 @@ Every `feature` or `bug` item the master files carries a criterion with an `e2e:
 
 ### Session liveness is reconciled, not trusted
 
-Each dispatch reconciles reviewer and producer sessions; a handle closes at the second consecutive miss, and so does the agent-registry session a restarted loop left standing — the ledger record names its pane, and the role's slot frees with it. `blocked` frees its slot; its [reason](protocol/work-commands.md#blocked-work) stays on the item until the master clears it.
+Each dispatch reconciles reviewer and producer sessions; a handle closes at the second consecutive miss, and so does the agent-registry session a restarted loop left standing — the ledger record names its pane, and the role's slot frees with it. A completed review (including COMMENTED and post-merge) releases its registry slot on the first readable inventory that shows its pane gone, after launch grace, even when its delivered item is absent from open work. Its verdict and review requirements stay unchanged. `blocked` frees its slot; its [reason](protocol/work-commands.md#blocked-work) stays on the item until the master clears it.
+
+The GY-3052 incidents completed within launch grace: GY-3007 launched at 21:36:42Z and closed at 21:37:15Z; GY-3004 launched at 21:41:44Z and closed at 21:42:24Z. Manual release at 21:41:37Z and 21:47:02Z preceded two eligible missing-pane snapshots. The old second-miss path therefore had not fired; delivered items also lacked an open-work handle for normal close. Completed ledger records now suffice on the first eligible miss, without making COMMENTED an approval.
 
 ## Automatic dispatch at submit
 
 Past the build gate: a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then a review once passed (`run.reviewerProfile`, producer profiles, 4 sessions each; **concurrency is per role**, 1–20, default 1). Unanswered sessions relaunch, then `dispatch.abandoned`.
+
+Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. An exact-head control-plane approval lets the head proceed to the merge writer's trial immediately. Old settings files still load with `run.awaitReviewers` and `run.awaitReviewersMinutes` ignored; old dispatch cursors load with `botReviewers` discarded.
