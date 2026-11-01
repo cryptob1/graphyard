@@ -169,3 +169,66 @@ test('unit:reconcile-closes-orphaned-registry-sessions — an unreadable or abse
   // And a gap judges nothing: no listing, no orphans, whatever the ledgers name.
   assert.deepEqual(orphanedRegistrySessions(emptyRegistry(), 'h', null, [{ session: 's', pane: 'p' }], Date.now()), []);
 });
+
+for (const orphaned of [false, true]) test(`integration:post-merge-review-slot-release — ${orphaned ? 'an existing completed ledger orphan' : 'normal verdict reconciliation'} frees the only slot with the delivered item absent`, async () => {
+  const host = await fleet({ name: 'review-a', agentName: 'review-a', kind: 'claude', concurrency: 1 }, 'review-a');
+  try {
+    const config = await loadMasterConfig(host.root);
+    const registry = memoryRegistry(config.hostId, await claudeLogin('post-merge-reviewer'), 1);
+    const done = requested(1), waiting = requested(2), merge = 'c'.repeat(40), parent = 'b'.repeat(40);
+    done.stage = 'done';
+    done.delivery = { mergeSha: merge, mergedAt: new Date().toISOString(), authorizationRevision: 1 };
+    done.postMergeReview = 'owed';
+    const requestId = `post-merge:${done.key}:${merge}`;
+    const launched = await launchReview(host.root, done, 'review-a', host.agents, new Date().toISOString(), {
+      run: host.run, requestId, postMerge: { mergeSha: merge, baseTip: parent },
+      probe: { registry: registry.client, quota: false, cacheMs: 0 },
+      registerLaunch: async (_work, input) => {
+        done.reviewLaunch = { ...input, id: 'post-merge-launch', requester: 'master', at: new Date().toISOString(), verdict: null };
+        return { launch: 'post-merge-launch' };
+      },
+    });
+    const record = (await readReviewLedger(host.root)).reviews.find(entry => entry.requestId === requestId)!;
+    const sessionId = record.session!;
+    done.reviewLaunch!.verdict = { sha: merge, baseSha: parent, state: 'COMMENTED', reviewer: done.reviewLaunch!.reviewer, reviewId: 2992534,
+      submittedAt: new Date().toISOString(), body: 'AC-1 met', source: 'control-plane' };
+    done.postMergeReview = 'reviewed';
+    const requirements = structuredClone(waiting.autoDispatch);
+    const verdict = structuredClone(done.reviewLaunch!.verdict);
+    const from = Date.now(), cursor = emptyDispatchCursor(config);
+    if (orphaned) {
+      await reconcileReviews(host.root, config, { run: host.run, work: [done], agents: [...host.agents] });
+    } else {
+      // The normal loop sees the verdict and closes the pane; its inventory was read before close.
+      const first = await runDispatchTick(config, cursor, tickEffects(host, config, registry, () => [done], 6, from));
+      assert.deepEqual(first.closeFailures, []);
+    }
+    const completed = (await readReviewLedger(host.root)).reviews.find(entry => entry.id === record.id)!;
+    assert.equal(completed.state, 'completed');
+    assert.ok(completed.closedAt);
+    assert.ok(completed.requestClosedAt);
+    assert.ok(completed.headReleasedAt);
+    assert.equal(host.agents.some(agent => agent.pane_id === launched.pane), false);
+    assert.deepEqual(registry.live().map(session => session.id), [sessionId], 'reproduce the completed-ledger/live-slot incident');
+
+    // Launch grace and unreadable inventory remain gaps, and a live pane remains counted.
+    const names = [{ ...completed }];
+    const document = await registry.client.document();
+    assert.deepEqual(orphanedRegistrySessions(document, config.hostId, [], names, Date.parse(document.sessions[0].selectedAt)), []);
+    assert.deepEqual(orphanedRegistrySessions(document, config.hostId, null, names, from + 6 * 60_000), []);
+    assert.deepEqual(orphanedRegistrySessions(document, config.hostId, [{ pane_id: completed.pane! }], names, from + 6 * 60_000), []);
+
+    // No handle or delivered item is available to the close step, and a restarted loop has no misses.
+    const tick = await runDispatchTick(config, emptyDispatchCursor(config), tickEffects(host, config, registry, () => [waiting], 7, from));
+    assert.deepEqual(tick.registryClosed, [{ work: done.key, id: sessionId, role: 'reviewer', pane: launched.pane }]);
+    assert.deepEqual(tick.launched.map(entry => entry.work), [waiting.key], 'the independent review launches on the next eligible cycle');
+    assert.match(registry.registry.sessions.find(session => session.id === sessionId)!.endReason!, /post-merge review is completed.*pane /);
+    assert.equal(registry.live().length, 1);
+    assert.notEqual(registry.live()[0].id, sessionId);
+    assert.deepEqual(waiting.autoDispatch, requirements, 'slot repair does not change the current review request or requirements');
+    assert.deepEqual(done.reviewLaunch!.verdict, verdict);
+    const after = (await readReviewLedger(host.root)).reviews.find(entry => entry.id === record.id)!;
+    assert.deepEqual([after.state, after.verdict, after.sha, after.baseSha, after.policyRevision, after.requestId],
+      [completed.state, completed.verdict, merge, parent, completed.policyRevision, requestId]);
+  } finally { await host.cleanup(); }
+});
