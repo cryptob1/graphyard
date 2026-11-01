@@ -3,6 +3,10 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+
+// Every filed fixture owes an E2E proof and the serve declaration its trial needs.
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
@@ -17,8 +21,8 @@ import type { Principal } from '../src/model.js';
  * reviewer's brief — no new gate, no refusal.
  */
 const warningOf = (id: string) => `${id} checks one case; a head can pass it by tuning to that case — name at least three, or say why one is enough.`;
-const multi = { id: 'AC-2', text: 'The campaign completes every mission on seeds 42, 7 and 1', proofs: ['unit:campaign-everywhere'] };
-const single = { id: 'AC-1', text: 'The campaign completes every mission on seed 42', proofs: ['unit:campaign-seed-42'] };
+const multi = { id: 'AC-2', text: 'The campaign completes every mission on seeds 42, 7 and 1', proofs: ['unit:campaign-everywhere', 'e2e:fixture'] };
+const single = { id: 'AC-1', text: 'The campaign completes every mission on seed 42', proofs: ['unit:campaign-seed-42', 'e2e:fixture'] };
 
 const operator: Principal = { id: 'operator', role: 'admin' };
 let pg: InstanceType<typeof EmbeddedPostgres>, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string, token: string;

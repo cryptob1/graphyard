@@ -626,11 +626,24 @@ export async function onboardingChecks(root: string): Promise<string[] | null> {
   return checks.length ? checks : null;
 }
 
+/**
+ * The repository's first E2E case id, alphabetically: the one its onboarding item names as the
+ * `e2e:` proof every item owes (GY-3037). Onboarding's apply leaves at least one case on disk —
+ * `e2e/cases/served-head.json` when the repository had none — so null means an apply that has not
+ * run, and the create of an item naming no case is refused as the rule refuses it.
+ */
+export async function onboardingFirstCase(root: string): Promise<string | null> {
+  const names = await readdir(resolve(root, 'e2e/cases')).catch((error: any) => { if (error.code === 'ENOENT') return [] as string[]; throw error; });
+  return names.filter(name => name.endsWith('.json')).sort().map(name => name.slice(0, -'.json'.length))[0] ?? null;
+}
+
 export interface OnboardingFiling {
   /** The control plane's address and the operator's admin credential: only an operator may create, claim and submit for an item it files. */
   server: string; token: string;
   /** The onboarding commit on `graphyard/onboarding`, submitted like a worker's `complete --head`, and the checks its item requires (null: the control plane's default). */
   commit: string; checks: string[] | null;
+  /** The repository's first E2E case, which the item's criterion names as its `e2e:` proof (GY-3037). */
+  caseId: string | null;
   /** Where the workspace is registered: this machine, and a path under the checkout no worktree uses. */
   host: string; path: string;
   /** Fixed before the first try: each step's idempotency key derives from it, so a rerun replays the filing instead of filing twice. */
@@ -652,7 +665,7 @@ export async function fileOnboardingWork(filing: OnboardingFiling, fetcher: type
     if (!response.ok) throw new Error(`the control plane refused the onboarding item's ${step}: ${String(answer?.error ?? answer?.message ?? response.status).slice(0, 300)}`);
     return answer;
   };
-  const created = await call('work', 'create', onboardingWorkRequest(filing.commit, filing.checks));
+  const created = await call('work', 'create', onboardingWorkRequest(filing.commit, filing.checks, filing.caseId));
   const id = typeof created?.id === 'string' ? created.id : '', key = typeof created?.key === 'string' ? created.key : '';
   if (!id || !key) throw new Error('the control plane named no work item for the onboarding change');
   await call(`work/${id}/ready`, 'ready', {});

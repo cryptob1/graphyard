@@ -15,6 +15,7 @@ import { evidenceProves } from '../src/model/mechanical-proofs.js';
 import type { Principal, ScopeFile, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
@@ -76,7 +77,7 @@ async function fixture(options: { artifactStorage?: 'external' | 'postgres'; req
   await validation.define(operator, { kind: 'reuse', id: policy.id, expectedRevision: 0, environment, enabled: true, freshnessSeconds: 3600,
     relevant: { dependencies: ['package.json'], lockfiles: ['package-lock.json', '**/yarn.lock'], buildInputs: ['Dockerfile', 'tsconfig.json'], configuration: ['config/**', '.env.example'], migrations: ['migrations/**'], services: { api: ['src/**'] } },
     ignorable: ['docs/**', 'README.md', '*.md'], ...options.policy }, id());
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Reuse fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Reuse fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behavior is proven', proofs: [proof, 'e2e:fixture'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/reuse-${n}`, branch: `graphyard/reuse-${n}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: n }, id());

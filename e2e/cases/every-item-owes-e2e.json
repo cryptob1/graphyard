@@ -1,0 +1,325 @@
+{
+  "id": "every-item-owes-e2e",
+  "title": "Every item owes an e2e proof: a chore, a bug and a feature are refused without one, whatever the description says, and accepted with one",
+  "description": "POST /api/work refuses an item of every type whose criteria name no e2e: proof, whether or not the description opens 'No user-facing change:', naming the case binding; the same creates succeed once a criterion carries an e2e: proof.",
+  "tags": [
+    "api",
+    "work",
+    "filing"
+  ],
+  "target": "uat",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "a chore with no e2e proof is refused",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: chore without proof {{case}} {{run}}",
+        "description": "Created by the every-item-owes-e2e E2E case.",
+        "type": "chore",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "Nothing to prove",
+            "proofs": [
+              "unit:nothing"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 400,
+      "expect": [
+        {
+          "path": "issues.0.message",
+          "includes": "a chore item owes an end-to-end proof"
+        },
+        {
+          "path": "issues.0.message",
+          "includes": "e2e/cases/NAME.json"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "a bug with no e2e proof is refused",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: bug without proof {{case}} {{run}}",
+        "description": "Created by the every-item-owes-e2e E2E case.",
+        "type": "bug",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "Nothing to prove",
+            "proofs": [
+              "unit:nothing"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 400,
+      "expect": [
+        {
+          "path": "issues.0.message",
+          "includes": "a bug item owes an end-to-end proof"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "a feature with no e2e proof is refused",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: feature without proof {{case}} {{run}}",
+        "description": "Created by the every-item-owes-e2e E2E case.",
+        "type": "feature",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "Nothing to prove",
+            "proofs": [
+              "unit:nothing"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 400,
+      "expect": [
+        {
+          "path": "issues.0.message",
+          "includes": "a feature item owes an end-to-end proof"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the opt-out sentence does not excuse a chore",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: chore opt-out {{case}} {{run}}",
+        "description": "No user-facing change: the refactor moves code without changing behaviour.",
+        "type": "chore",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "Nothing to prove",
+            "proofs": [
+              "unit:nothing"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 400,
+      "expect": [
+        {
+          "path": "issues.0.message",
+          "includes": "a chore item owes an end-to-end proof"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the opt-out sentence does not excuse a bug",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: bug opt-out {{case}} {{run}}",
+        "description": "No user-facing change: the refactor moves code without changing behaviour.",
+        "type": "bug",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "Nothing to prove",
+            "proofs": [
+              "unit:nothing"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 400,
+      "expect": [
+        {
+          "path": "issues.0.message",
+          "includes": "a bug item owes an end-to-end proof"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "the opt-out sentence does not excuse a feature",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: feature opt-out {{case}} {{run}}",
+        "description": "No user-facing change: headless control-plane work only.",
+        "type": "feature",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "Nothing to prove",
+            "proofs": [
+              "unit:nothing"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 400,
+      "expect": [
+        {
+          "path": "issues.0.message",
+          "includes": "a feature item owes an end-to-end proof"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "a chore with an e2e proof is accepted",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: chore with proof {{case}} {{run}}",
+        "description": "Created by the every-item-owes-e2e E2E case.",
+        "type": "chore",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "The target accepts an item whose criterion names an e2e case",
+            "proofs": [
+              "e2e:every-item-owes-e2e"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 200,
+      "expect": [
+        {
+          "path": "stage",
+          "equals": "backlog"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "a bug with an e2e proof is accepted",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: bug with proof {{case}} {{run}}",
+        "description": "Created by the every-item-owes-e2e E2E case.",
+        "type": "bug",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "The target accepts an item whose criterion names an e2e case",
+            "proofs": [
+              "e2e:create-work-item"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 200,
+      "expect": [
+        {
+          "path": "stage",
+          "equals": "backlog"
+        }
+      ]
+    },
+    {
+      "kind": "http",
+      "name": "a feature with an e2e proof is accepted",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "Filing-rule probe: feature with proof {{case}} {{run}}",
+        "description": "Created by the every-item-owes-e2e E2E case.",
+        "type": "feature",
+        "priority": 3,
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "The target accepts an item whose criterion names an e2e case",
+            "proofs": [
+              "e2e:every-item-owes-e2e"
+            ]
+          }
+        ],
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        }
+      },
+      "status": 200,
+      "expect": [
+        {
+          "path": "stage",
+          "equals": "backlog"
+        }
+      ]
+    }
+  ]
+}

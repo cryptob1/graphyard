@@ -14,6 +14,10 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-115: mechanical verification precedes review. Each test is named for the proof it produces:
 // integration:proofs-precede-review (AC-1) and integration:worker-self-verifies (AC-2).
 
@@ -59,7 +63,7 @@ const gate = (item: Work, name: string) => item.gates.find(entry => entry.name =
 test('integration:proofs-precede-review — a head is reviewed without waiting on producers, and a head that fails a trusted proof returns to its worker naming the criterion', async () => {
   let item = await submitted('Proofs precede review', [
     { id: 'AC-1', text: 'Parses', proofs: ['unit:vbr-parse', 'integration:vbr-flow'] },
-    { id: 'AC-2', text: 'Documented', proofs: ['manual:vbr-docs'] },
+    { id: 'AC-2', text: 'Documented', proofs: ['manual:vbr-docs', 'e2e:fixture'] },
   ]);
   item = await engine.observe(item.id, item.revision, observed(item, H));
   // The head builds and its reviewer is asked for; no producer is.

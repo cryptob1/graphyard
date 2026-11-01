@@ -9,6 +9,10 @@ import { ownerHoldRefusal } from '../src/model/loop-owned.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-2605: an item whose own record reserves its release to the owner (GY-1857's 'Owner hold:') is
 // released only by the owner's human admin session; ordinary and loop-owned releases are unchanged.
 const repository = 'owner/hold';
@@ -24,8 +28,8 @@ const call = async (credential: string, path: string, body: unknown) => {
 const reload = async (id: string) => (await store.list()).find(item => item.id === id)!;
 const heldInput = { type: 'chore', title: 'Owner hold: schedule credential isolation when the owner says so', 
   description: 'Deferred by the owner. This item stays in the backlog until the owner releases it.',
-  criteria: [{ id: 'AC-1', text: 'The owner decides when the work is scheduled', proofs: ['manual:owner-schedules-credential-isolation'] }], reason: 'Owner deferral' };
-const ordinaryInput = { type: 'chore', title: 'Ordinary backlog work', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Next by priority' };
+  criteria: [{ id: 'AC-1', text: 'The owner decides when the work is scheduled', proofs: ['manual:owner-schedules-credential-isolation', 'e2e:fixture'] }], reason: 'Owner deferral' };
+const ordinaryInput = { type: 'chore', title: 'Ordinary backlog work', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], reason: 'Next by priority' };
 const created = async (input: unknown) => { const result = await call(master.token, 'work', input); assert.equal(result.status, 200, JSON.stringify(result.body)); return result.body as Work; };
 const release = (credential: string, work: Work) => call(credential, `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Release it' });
 const fixture = (fields: Partial<Work>) => ({ key: 'GY-1', title: 'Work', description: '', criteria: [], ...fields }) as unknown as Work;
@@ -93,8 +97,11 @@ test('unit:release-normal-backlog-applies — an ordinary backlog item still rel
 });
 
 test('unit:release-loop-owned-refused — a loop-owned observation item is still refused as loop-owned', async () => {
-  const work = await created({ type: 'chore', title: 'Observe the master checkout on the serving release', criteria: [{ id: 'AC-1', text: 'Checkout restored', proofs: ['manual:checkout-restore-on-serving-release'] }], reason: 'Observe' });
-  const refused = await release(master.token, work);
+  const work = await created({ type: 'chore', title: 'Observe the master checkout on the serving release', criteria: [{ id: 'AC-1', text: 'Checkout restored', proofs: ['manual:checkout-restore-on-serving-release', 'e2e:fixture'] }], reason: 'Observe' });
+  // A pre-existing observation-only item remains loop-owned; new filings still owe an E2E case.
+  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{criteria}',$2::jsonb) WHERE id=$1",
+    [work.id, JSON.stringify([{ id: 'AC-1', text: 'Checkout restored', proofs: ['manual:checkout-restore-on-serving-release'] }])]);
+  const refused = await release(master.token, await reload(work.id));
   assert.equal(refused.status, 409); assert.match(refused.body.error, /is loop-owned/); assert.doesNotMatch(refused.body.error, /owner hold/);
   const after = await reload(work.id);
   assert.equal(after.stage, 'backlog'); assert.equal(after.ready, false);

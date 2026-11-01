@@ -29,9 +29,9 @@ The same handoff includes unresolved worker blockers, failed launch/review/proof
 
 Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, loop-owned `rework`. The master attests unproduced `manual:` proofs per head, base and policy revision.
 
-### File user-facing items with an e2e: proof by default
+### File every item with an e2e: proof
 
-Every `feature` or `bug` item the master files carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — the case the merge trial runs against the served head — unless the change has nothing a user can see, and then the description opens `No user-facing change: <reason>`. `master create` and `master requirements` refuse anything else, naming the case format and the opt-out ([validation](validation.md)).
+Every item carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — new or existing, run by the merge trial against the served head. There is no chore exemption and no opt-out sentence: `master create` and `master requirements` refuse anything else, naming the case format ([validation](validation.md)). Loop repairs name `e2e:create-work-item`; follow-ups reuse delivered cases (legacy items: `create-work-item`); onboarding names the repository's first case.
 
 ### Session liveness is reconciled, not trusted
 

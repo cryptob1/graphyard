@@ -25,7 +25,7 @@ import { actionAccount, nextActionKinds, sameAction } from './model/next-action.
 import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
-import { filingRefusal, userFacingProofRefusal } from './model/user-facing.js';
+import { filingRefusal, e2eProofRefusal } from './model/user-facing.js';
 import { physicalCheckRefusal } from './model/human-proof.js';
 import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
@@ -46,10 +46,10 @@ import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, sav
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
-// GY-2965: the requirements an item of type feature or bug carries at create (AC-1), and the
-// serve declaration an e2e: proof needs in the repository it is created in (AC-3). Both refuse at
-// parse time, before any scenario is resolved; the same validation is `filingRefusal` (model/user-facing.ts).
-const userFacingCreateRefusal = filingRefusal;
+// GY-3037: the e2e proof every item carries at create, and the serve declaration an e2e: proof
+// needs in the repository it is created in. Both refuse at parse time, before any scenario is
+// resolved; the same validation is `filingRefusal` (model/user-facing.ts).
+const filingCreateRefusal = filingRefusal;
 const publicArtifactUrl = z.url().max(2000).refine(value => {
   const parsed = new URL(value);
   return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password;
@@ -66,7 +66,7 @@ const retiredField = z.unknown().transform(() => undefined).optional();
 const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.string().trim().min(1).max(500).nullable(), line: z.number().int().positive().nullable(), durationMs: z.number().int().min(0).nullable() }).strict();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField })
-    .superRefine((data, ctx) => { const refusal = userFacingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
+    .superRefine((data, ctx) => { const refusal = filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ owner: createSchema.shape.owner, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
@@ -1324,9 +1324,9 @@ export class Engine {
     demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
     demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
     demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
-    // GY-2965: a user-facing item keeps its e2e proof through a revision; the opt-out sentence still excuses one.
-    const userFacing = userFacingProofRefusal({ type: work!.type, description: work!.description, criteria: data.criteria });
-    demand(!userFacing, userFacing!);
+    // GY-3037: an item keeps its e2e proof through a revision; no description excuses one.
+    const e2e = e2eProofRefusal({ type: work!.type, description: work!.description, criteria: data.criteria });
+    demand(!e2e, e2e!);
     const unphysical = physicalCheckRefusal(data.criteria);
     demand(!unphysical, unphysical!);
     demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
