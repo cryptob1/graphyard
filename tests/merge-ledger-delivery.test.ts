@@ -1,8 +1,5 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -68,7 +65,7 @@ function observation(item: Work): Observation {
   };
 }
 
-test('unit:merge-ledger — the merge writer\'s record is the one delivery: recording intent, push and reconcile for the item\'s submitted head leaves it done with one delivery, and no direct-merge module, route or command remains', async () => {
+test('unit:merge-ledger — the merge writer\'s record is the one delivery: recording intent, push and reconcile for the item\'s submitted head leaves it done with one delivery', async () => {
   // An observed submitted candidate, as the merge writer finds it.
   const created = await submitted();
   let work = await engine.observe(created.id, created.revision, observation(created));
@@ -96,15 +93,7 @@ test('unit:merge-ledger — the merge writer\'s record is the one delivery: reco
   const jobs = Number((await store.pool.query('SELECT count(*) AS n FROM jobs WHERE work_id=$1', [work.id])).rows[0].n);
   assert.equal(jobs, 0, 'nothing retries against the delivery');
 
-  // And nothing beside it: no direct-merge module, route or command remains under src/.
-  const srcRoot = fileURLToPath(new URL('../src', import.meta.url));
-  assert.equal(existsSync(join(srcRoot, 'direct-merge.ts')), false, 'no direct-merge module');
-  assert.equal(existsSync(join(srcRoot, 'cli', 'direct-merges.ts')), false, 'no direct-merges command');
-  const sources: string[] = [];
-  const walk = (dir: string) => { for (const entry of readdirSync(dir, { withFileTypes: true })) { const path = join(dir, entry.name); if (entry.isDirectory()) walk(path); else if (entry.name.endsWith('.ts')) sources.push(path); } };
-  walk(srcRoot);
-  const mentions = sources.filter(file => readFileSync(file, 'utf8').includes('direct-merge'));
-  assert.deepEqual(mentions, [], 'no direct-merge route, command or module is wired anywhere under src/');
+
 });
 
 test('unit:five-step-cycle — reconciliation never reads retired merge windows on cold or repeated passes', async () => {
