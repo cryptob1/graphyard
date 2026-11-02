@@ -733,7 +733,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCr
     + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. `;
 }
 function reviewReadSection(cliPath: string, head: string) {
-  return `Read bound cases with git show ${head}:PATH, using snapshot paths; rg and cat read surrounding code. node ${cliPath} --help lists commands; node ${cliPath} guide review is supported and needs no worker or coordinator credential. Use snapshot metadata; there is no graphyard show command. `;
+  return `Read snapshot paths: git show ${head}:PATH; surrounding code: rg, cat. node ${cliPath} --help lists commands; node ${cliPath} guide review is supported and needs no worker or coordinator credential. No graphyard show command. `;
 }
 /** Recover exploratory mistakes without relaxing the read-only role or hiding real blockers. */
 function reviewRecoverySection() {
@@ -748,7 +748,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
   memory ??= projectMemory;
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification, scenarioRequirements);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
-  return `Independent Graphyard reviewer for ${config.repository}: review #${binding.pr}, head ${binding.sha}, base ${binding.baseSha}, policy revision ${binding.policyRevision}, item ${binding.key}. `
+  return `Independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
