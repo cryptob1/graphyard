@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { reviewPrompt, reviewStandard } from '../src/reviewer.js';
+import { reviewPrompt, reviewStandard, reviewRetryPrompt } from '../src/reviewer.js';
 import { pinnedCases, singleCaseWarnings } from '../src/model.js';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
@@ -48,4 +48,24 @@ test('unit:reviewer-static-criteria — generated GitHub, control-plane and post
   }
   assert.doesNotMatch(reviewStandard({ key: binding.key, head, base }, [proofBinding]), /checks one case|check one case/);
   assert.doesNotMatch(reviewStandard({ key: binding.key, head, base }), /checks one case|check one case/);
+});
+
+
+test('review brief bindings also reach GitHub launches and legacy retries without invented pins', () => {
+  const criteria = [{ id: 'AC-1', text: 'Coverage is inspectable.', proofs: ['integration:review-brief-proof-bindings', 'e2e:review-brief-proof-bindings'] }];
+  const pins = [{ proof: 'e2e:review-brief-proof-bindings', revision: 3, environment: 'local', hash: 'c'.repeat(64) }];
+  const config = { repository: 'owner/project', cliPath: '/bin/graphyard.mjs' };
+  const briefs = [
+    reviewPrompt(config, binding, undefined, undefined, criteria, undefined, undefined, undefined, undefined, undefined, undefined, undefined, pins),
+    reviewRetryPrompt(config.repository, binding, criteria, config.cliPath, pins),
+  ];
+  for (const brief of briefs) {
+    assert.ok(brief.includes('[AC-1] proofs: [{"proof":"integration:review-brief-proof-bindings"},{"proof":"e2e:review-brief-proof-bindings","caseId":"review-brief-proof-bindings","path":"e2e/cases/review-brief-proof-bindings.json","revision":3,"environment":"local","hash":"' + 'c'.repeat(64) + '"}]'));
+    assert.ok(brief.includes(`git show ${head}:PATH`));
+    assert.match(brief, /guide review is supported and needs no worker or coordinator credential/);
+    assert.match(brief, /repository reads and reviews only/);
+  }
+  const unpinned = reviewPrompt(config, binding, undefined, undefined, criteria);
+  assert.match(unpinned, /e2e\/cases\/review-brief-proof-bindings.json/);
+  assert.doesNotMatch(unpinned, /"revision":|"environment":|"hash":/);
 });

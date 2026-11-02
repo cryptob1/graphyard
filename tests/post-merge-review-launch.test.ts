@@ -12,10 +12,10 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { dispatchFailureLimit, emptyDispatchCursor, runDispatchTick, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
 import { owedPostMergeReviews, postMergeRequestId, postMergeRefusalProbeMs } from '../src/model/post-merge-review.js';
-import { launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, saveReviewerProfile, reviewRetryPrompt } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { readReviewBinding } from '../src/review-post.js';
-import { startedAtOnce } from './helpers/launch-shell.js';
+import { startedAtOnce, expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Every instant this file holds is derived from the run's own clock (GY-1694): a base reading taken
 // at load and offsets from it. No calendar literal is constructed, so no wall-clock reading here is
@@ -202,4 +202,59 @@ test('unit:post-merge-review-refused-launch-recovers — a request the loop stop
   const reviewedItem = await stored(work.id);
   assert.equal(reviewedItem.postMergeReview, 'reviewed');
   assert.deepEqual(owedPostMergeReviews([reviewedItem]), []);
+});
+
+
+test('integration:review-brief-proof-bindings — real ordinary and post-merge launches retain exact task proof inputs for retries', async () => {
+  for (const postMerge of [false, true]) {
+    const work = deliveredPrLess(postMerge ? 'GY-9011' : 'GY-9010');
+    // The criterion text deliberately supplies no proof or path: only structured launch inputs do.
+    work.criteria = [{ id: 'AC-1', text: 'The reviewer receives executable coverage bindings.', proofs: ['integration:review-brief-proof-bindings', 'e2e:review-brief-proof-bindings'] }];
+    work.scenarioRequirements = [{ proof: 'e2e:review-brief-proof-bindings', revision: 7, environment: 'uat', hash: 'd'.repeat(64) }];
+    if (!postMerge) {
+      work.candidate!.pr = 9010;
+      work.stage = 'review'; work.delivery = undefined; work.postMergeReview = undefined;
+      work.observation!.merged = false; work.observation!.mergeSha = null;
+    }
+    await insert(work);
+    const prompts: string[] = [];
+    const run = (command: string, args: string[]) => {
+      if (args[0] === 'pane' && args[1] === 'run') {
+        const launch = expandTypedCommand(args[3]);
+        prompts.push(requestOf(launch.kind, launch.args)!);
+      }
+      return herdr(command, args);
+    };
+    await launchReview(root, work, 'reviewer-claude', [], at(), { run, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) });
+    const record = (await readReviewLedger(root)).reviews.find(entry => entry.key === work.key)!;
+    assert.deepEqual(record.reviewInputs, { criteria: work.criteria, scenarioRequirements: work.scenarioRequirements });
+    // A changed later snapshot must not replace the launch facts when its session is reminded.
+    const retry = reviewRetryPrompt(repository, record, [{ id: 'AC-9', text: 'Later data', proofs: ['e2e:wrong-case'] }], launcher);
+    assert.equal(prompts.length, 1);
+    for (const brief of [prompts[0], retry]) {
+      assert.match(brief, /\[AC-1\] proofs:/);
+      for (const proof of work.criteria[0].proofs) assert.ok(brief.includes(proof));
+      assert.ok(brief.includes('"caseId":"review-brief-proof-bindings","path":"e2e/cases/review-brief-proof-bindings.json"'));
+      assert.ok(brief.includes('"revision":7,"environment":"uat","hash":"' + 'd'.repeat(64) + '"'));
+      assert.ok(brief.includes(`git show ${postMerge ? M : H}:PATH`));
+      assert.ok(brief.includes(`git diff ${B} ${postMerge ? M : H}`));
+      assert.ok(brief.includes(`node ${launcher} guide review`));
+      assert.match(brief, /policy revision 1/);
+      assert.match(brief, /missing later trusted results do not block review; missing or inadequate test implementation can/);
+      assert.match(brief, /Post exactly one verdict/);
+      assert.match(brief, /one review posted with --event COMMENT/);
+      assert.match(brief, /one-time token/);
+      assert.doesNotMatch(brief, /Later data|e2e:wrong-case|graphyard show GY-/);
+    }
+    assert.deepEqual([record.sha, record.baseSha, record.policyRevision], [postMerge ? M : H, B, 1]);
+    assert.equal((await stored(work.id)).reviewLaunch!.reviewer, 'graphyard-reviewer[bot]');
+    await assert.rejects(launchReview(root, work, 'reviewer-claude', [], at(), { run, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) }), /pending|already/);
+    assert.equal(prompts.length, 1, 'one session answers this head');
+    const session = await readReviewBinding(record.sessionDirectory!);
+    const body = { event: 'APPROVE', body: verdictBody, sha: record.sha, token: session.verdictToken };
+    const accepted = await request(session.verdictToken!, `work/${work.id}/review-verdict`, body);
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+    const repeated = await request(session.verdictToken!, `work/${work.id}/review-verdict`, body);
+    assert.ok([401, 409].includes(repeated.status), 'the session cannot decide a second time');
+  }
 });

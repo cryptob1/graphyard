@@ -1,0 +1,18 @@
+{
+  "id": "review-brief-proof-bindings",
+  "title": "Independent reviewer launch and retry briefs carry exact proof bindings",
+  "description": "Exercises real ordinary and post-merge review launches with proof names absent from criterion text, exact scenario pins, supported reads, snapshot retries and independent one-verdict authority.",
+  "tags": [
+    "review",
+    "regression"
+  ],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/post-merge-review-launch.test.ts tests/reviewer-static-criteria.test.ts tests/review-verdict.test.ts",
+      "timeoutSeconds": 240
+    }
+  ]
+}
