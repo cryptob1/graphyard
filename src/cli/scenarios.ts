@@ -75,11 +75,6 @@ export const scenarioCommands = defineCommands([
     run: async ({ api, print }) => print(await api('scenarios')),
   },
   {
-    name: 'scenario',
-    help: ['  scenario file.json           Publish a scenario version (operator)'],
-    run: async ({ id, api, print }) => print(await api('scenarios', JSON.parse(await readFile(id!, 'utf8')))),
-  },
-  {
     name: 'e2e',
     help: [
       '  e2e list                     Validate and list the E2E cases under e2e/cases/',

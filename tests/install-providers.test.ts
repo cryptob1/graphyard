@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { stat } from 'node:fs/promises';
-import { buildPlan, coreEnv, materializeInstall, prepareInstall } from '../src/install/index.js';
+import { stat, writeFile } from 'node:fs/promises';
+import { buildPlan, coreEnv, installRequestFromArgs, materializeInstall, prepareInstall } from '../src/install/index.js';
 import { variableMarker } from '../src/install/adapters.js';
 import { harness, type Harness } from './install-harness.js';
 
@@ -107,4 +107,32 @@ test('an observed value is compared by fingerprint only when it is a credential'
   assert.match(variableMarker('DATABASE_URL', 'postgres://graphyard:secret@db:5432/graphyard'), /^sha:[0-9a-f]{12}$/);
   assert.match(variableMarker('GITHUB_PRIVATE_KEY', 'pem'), /^sha:[0-9a-f]{12}$/);
   assert.equal(variableMarker('HOST', '0.0.0.0'), '0.0.0.0');
+});
+
+test('retired install flags are rejected while remaining compose and local flags parse', () => {
+  for (const provider of ['compose', 'local']) {
+    const args = ['--repo', 'owner/project', '--provider', provider, '--plan', '--port', '4317', '--review-policy', 'agent'];
+    assert.equal(installRequestFromArgs(args).request.port, 4317);
+    for (const flag of ['ssh-host', 'ssh-user', 'ssh-key', 'server-type', 'location', 'workspace', 'target', 'migrate', 'max-monthly', 'confirm-price', 'logs', 'herdr-only', 'profiles-only', 'fresh-cursor', 'required-check', 'review-count']) {
+      assert.throws(() => installRequestFromArgs([...args, `--${flag}`]), /Unknown option/);
+    }
+    assert.throws(() => installRequestFromArgs(['--repo', 'owner/project', '--provider', provider, '--review-policy', 'github']), /Use --review-policy agent/);
+  }
+});
+
+test('an older install.json loads with retired deployment fields stripped', async () => {
+  const fixture = await harness({ provider: 'compose' });
+  try {
+    const session = await materializeInstall(await prepareInstall(fixture.root, inputsFor(), fixture.deps));
+    const at = new Date().toISOString();
+    await writeFile(`${session.directory}/install.json`, JSON.stringify({
+      version: 1, installId: session.installId, repository: 'owner/project', provider: 'compose',
+      baseBranch: 'main', reviewPolicy: 'github', createdAt: at, updatedAt: at,
+      deployment: { sshHost: null, sshUser: 'root', local: false, port: 4317, image: null },
+    }));
+    const loaded = await prepareInstall(fixture.root, inputsFor(), fixture.deps, 'plan');
+    assert.deepEqual(loaded.record?.deployment, { local: false, port: 4317, image: null });
+    assert.equal(loaded.reviewPolicy, 'agent');
+    assert.equal((await buildPlan(loaded)).provider, 'compose');
+  } finally { await fixture.cleanup(); }
 });

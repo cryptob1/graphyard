@@ -62,3 +62,5 @@ Preserve gates. Use CLI blockers for genuine failures; park only human decisions
 ## Manual fallback (unsupported platforms)
 
 Use [deployment](deployment.md#manual-fallback).
+
+The CLI accepts compose and local providers. Retired remote-provider flags and branch-protection options (`--required-check`, `--review-count`, and `--review-policy github`) are no longer accepted; reviews use agents. Older `install.json` records still load, with retired SSH deployment fields discarded. `init --delivery` accepts only `local`; existing delivery policy records remain readable. Use `principal add|remove` for roster changes and `e2e sync` to publish case definitions. The loop handles merging automatically.

@@ -233,26 +233,6 @@ const originBase = (root: string) => {
 };
 
 /**
- * GY-1480: write the delivery workflow into a checkout whose scan finds no CI of its own; null when
- * it has CI. Unchanged content is left alone, so a rerun is idempotent, and a file that differs from
- * the render — an operator's edit — is kept and reported as drift, never overwritten. The caller
- * publishes the path with the other onboarding files, so the onboarding change carries it.
- */
-export async function writeDeliveryWorkflow(root: string, base = originBase(root)): Promise<{ path: string; state: 'written' | 'unchanged' | 'drift' } | null> {
-  const input = await collectScanInput(root);
-  if (!hasNoCi(input)) return null;
-  const workflow = renderDeliveryWorkflow(detectStack(input), base);
-  const target = resolve(root, workflow.path);
-  let current: string | null = null;
-  try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  if (current === workflow.content) return { path: workflow.path, state: 'unchanged' };
-  if (current !== null) return { path: workflow.path, state: 'drift' };
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, workflow.content, { mode: 0o644 });
-  return { path: workflow.path, state: 'written' };
-}
-
-/**
  * GY-1901: under the local mode, remove the delivery workflow an earlier mode generated; null when
  * there is none. Only the exact render is removed: an edited file is kept and reported as drift.
  */

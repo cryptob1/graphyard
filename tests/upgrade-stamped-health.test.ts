@@ -134,7 +134,7 @@ test('unit:upgrade-serves-stamped-release — graphyard upgrade of an installed 
     const installed = await composeInstall(cliRoot, `${imageRepository}:${previousVersion}`, workdir, port, docker);
     const url = `http://127.0.0.1:${port}`;
     const record = { provider: 'compose', repository: 'upgrade-gate/fixture', baseBranch: 'main', reviewPolicy: 'github', principals: [], noGithubApp: true,
-      deployment: { sshHost: null, sshUser: 'root', local: false, port, image: `${imageRepository}:${previousVersion}` } } as unknown as InstallRecord;
+      deployment: { local: false, port, image: `${imageRepository}:${previousVersion}` } } as unknown as InstallRecord;
     const target = resolveTarget(cliRoot, version);
     const inputs: UpgradeInputs = { cliRoot, repoRoot: cliRoot, current: checkoutRelease(cliRoot), target, databaseSchema: target.schema, install: record, url,
       backupFile: join(workdir, 'backup.json'), cliChanges: cliChangesOf(cliRoot) };
