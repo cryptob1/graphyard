@@ -514,16 +514,15 @@ export function harnessDecision(plan: Pick<HarnessPlan, 'allow' | 'deny'>, comma
 // The master's own loop, and nothing else. A harness allowlist is a prompt policy, not an
 // authority boundary: branch protection and Graphyard's required check remain the enforcement.
 export function masterHarnessPlan(input: { harness: string; root: string; cliPath: string; repository: string; baseBranch: string; credentialHome: string }): HarnessPlan {
-  const note = 'These rules remove operator keypresses from the master\'s own routine commands, including the GitHub administration flows the auto-mode classifier otherwise refuses as a permission grant, CI bypass, or self-modification. They grant no merge path and no credential read; the enforced merge boundary stays branch protection plus the App-bound Graphyard check.';
+  const note = 'These rules remove operator keypresses from the master\'s own routine commands, including the audited review-thread resolution the auto-mode classifier otherwise refuses as a permission grant, CI bypass, or self-modification. They grant no merge path and no credential read; the enforced merge boundary stays the control plane\'s guarded merge, whose deploy key is the only push.';
   if (input.harness === 'codex') return { harness: 'codex', file: null, allow: [], deny: [], note,
     manual: `# Add to $CODEX_HOME/config.toml (default ~/.codex/config.toml)\n[projects.${JSON.stringify(input.root)}]\ntrust_level = "trusted"\n` };
   if (input.harness !== 'claude') return { harness: input.harness, file: null, allow: [], deny: [], manual: null,
     note: `Graphyard generates harness permissions for Claude Code and trust configuration for Codex; ${input.harness} has no generated rules, so its own approval configuration applies.` };
   const cli = `node ${input.cliPath}`;
   const allow: HarnessRule[] = [
-    { rule: `Bash(${cli} master:*)`, why: 'Run the master\'s own coordinator commands: status, dispatch, review, reviewer, browser, harness, run, merge, and guide.' },
+    { rule: `Bash(${cli} master:*)`, why: 'Run the master\'s own coordinator commands: status, dispatch, review, reviewer, harness, run, merge, and guide.' },
     { rule: `Bash(${cli} master review:*)`, why: 'The reviewer launcher. Listed on its own because the classifier reads launching a second agent as a permission grant; the launched reviewer holds a read-only, hour-long App token and no Graphyard credential.' },
-    { rule: `Bash(${cli} master browser:*)`, why: 'The browser administration flows: App permission updates and installation acceptance through the operator\'s own browser profile, each recorded, verified through the API, and written to the audit ledger. The flow invokes agent-browser itself, so this is the only rule the browser needs; the classifier otherwise refuses browser control as a permission grant.' },
     { rule: `Bash(${cli} status:*)`, why: 'Read control-plane and work-item status without an operator keypress.' },
     { rule: `Bash(${cli} diagnose:*)`, why: 'Explain a refusing gate for an item the master is routing.' },
     { rule: `Bash(${cli} events:*)`, why: 'Read the immutable history the master reports from.' },
@@ -535,10 +534,9 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     { rule: 'Bash(gh pr diff:*)', why: 'Read the candidate diff while routing or triaging a review.' },
     { rule: 'Bash(gh pr checks:*)', why: 'Read CI results for a candidate.' },
     { rule: 'Bash(gh api user)', why: 'Name the GitHub identity an audit entry attributes an administration action to.' },
-    { rule: 'Bash(gh api user/installations*)', why: 'Read the control-plane App\'s installation and the permissions it grants, before and after an installation acceptance. Installation writes have no API path the master may take directly; master browser installation-accept is the only one.' },
     { rule: 'Bash(gh api apps/*)', why: 'Read the permissions a public App record requests, to verify an App permission update.' },
     { rule: 'Bash(jq:*)', why: 'Filter the JSON that the commands above print, without leaving the session.' },
-    { rule: 'Read(./.graphyard/master-actions/**)', why: 'Read the recorded steps, screenshots, and audit ledger of browser administration flows.' },
+    { rule: 'Read(./.graphyard/master-actions/**)', why: 'Read the master\'s administration records, the promotion audit included.' },
     { rule: 'Write(./.graphyard/profiles/**)', why: 'Write the worker and reviewer profile files the master installs with master worker add and master reviewer add.' },
     { rule: 'Edit(./.graphyard/profiles/**)', why: 'Revise those profile files; they contain no credential, only a path to one.' },
   ];
@@ -560,7 +558,7 @@ export function masterHarnessPlan(input: { harness: string; root: string; cliPat
     { rule: 'Bash(gh api *DELETE*)', why: 'Deleting protection, a check, or an installation is never reconciliation, wherever the method flag sits in the command.' },
     { rule: 'Bash(gh api *PUT*)', why: 'Replacing whole branch protection could drop the App-bound check, and adding a repository to an installation is a grant; only subresource PATCHes and the recorded browser flows change those, wherever the method flag sits in the command.' },
     { rule: 'Bash(gh api *POST*)', why: 'The master creates nothing through the API: no review, comment, check run, or installation.' },
-    { rule: 'Bash(agent-browser *)', why: 'The operator\'s browser profile is their identity and is driven only by the recorded master browser flows. A direct command would open that profile outside the three flows, and its cookies, state, restore, and auth-vault commands would export the operator\'s login; the recorded steps and screenshots under .graphyard/master-actions are the way to inspect what a flow saw.' },
+    { rule: 'Bash(agent-browser *)', why: 'The operator\'s browser profile is their identity: its cookies, state, restore, and auth-vault commands would export the operator\'s login, and no Graphyard flow drives it.' },
     { rule: 'Bash(git push:*)', why: 'The master implements nothing and pushes nothing.' },
     { rule: `Read(//${input.credentialHome}/**)`, why: 'Coordinator, worker, and reviewer credentials live here; the master uses them through the CLI and never reads their bytes.' },
     { rule: 'Read(./.graphyard/connection.json)', why: 'Holds an individual Graphyard credential.' },

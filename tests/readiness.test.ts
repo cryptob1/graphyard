@@ -14,7 +14,7 @@ test('a fully configured through-merge repository is ready, and every missing it
   const ready = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: example });
   assert.equal(ready.ready, true); assert.deepEqual(ready.summary, { ready: ready.items.length, missing: 0, unknown: 0 });
   assert.ok(ready.items.every(i => i.status === 'ready' && i.recovery === null));
-  assert.match(ready.next, /submit a real PR/);
+  assert.match(ready.next, /file what you want built/);
   // Nothing supplied: nothing is ready, and each item says what to do. Unknown is never ready.
   const bare = readinessChecklist('through-merge', {});
   assert.equal(bare.ready, false); assert.equal(bare.summary.ready, 0);

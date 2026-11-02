@@ -6,7 +6,6 @@ import { dirname, resolve } from 'node:path';
 import { checkAgentEnvironment, discoverAgentEnvironments } from './master/environments.js';
 import type { AgentEnvironment } from './master/profiles.js';
 import { sharedGitPaths, workerPaths } from './worker-sandbox.js';
-import { mergerNotRequired } from './model/setup-checklist.js';
 import type { LoopCodeReading } from './repository-setup.js';
 import { installUnitsFile, parseInstallUnits } from './install/units.js';
 import { defaultChildRun } from './child-runner.js';
@@ -22,11 +21,8 @@ import { readServeRecord, serveRecordPath } from './serve-app.js';
  */
 export const setupSteps = {
   install: 'docs/setup-from-zero.md step 3 (install the control plane)',
-  app: 'docs/setup-from-zero.md step 4 (register the GitHub App)',
-  reviewer: 'docs/setup-from-zero.md step 4 (reviewer and revert-approver Apps)',
   environments: 'docs/setup-from-zero.md step 8 (agent environments)',
   sandbox: 'docs/setup-from-zero.md step 9 (worker sandbox)',
-  releaseFiling: 'issue GRAPHYARD_RELEASE_TOKEN to an operator agent holding no capability, scoped to this repository (graphyard operator-agent setup FILE --token-stdin)',
   loopCode: 'rerun graphyard up --agent from this checkout (docs/setup-from-zero.md step 10, start the master)',
   unitOverrides: 'docs/setup-from-zero.md#troubleshooting-manual-steps (remove the drop-in)',
   serve: 'restart this install\'s deploy unit so it checks main out, builds and serves it again (graphyard upgrade --watch)',
@@ -49,8 +45,6 @@ export interface SetupFromZeroInput {
   environments: string;
   /** Probes that the worker confinement can write PATHS; null when it can, else the reason. */
   sandbox?: (paths: string[]) => string | null;
-  /** GY-1614: the `/api/status` answer to GRAPHYARD_RELEASE_TOKEN, or the failure it met; read from the plane when unset here. */
-  releaseFiling?: { status: any | null; failure?: string };
   /** GY-1859: what the install's loop and executor units run against this CLI; read beside the install when unset here. */
   loopCode?: LoopCodeReading | null;
   /** GY-2159: `systemctl --user ARGS` for the unit-overrides line; the user manager when unset here. */
@@ -159,49 +153,6 @@ async function sandboxCheck(root: string, probe: (paths: string[]) => string | n
   return refused ? check('fail', `the worker confinement cannot write the shared Git paths: ${refused}`) : check('pass', `the worker confinement writes ${existing.length} shared Git paths under ${paths.commonDir}`);
 }
 
-/**
- * Pure: why the control plane would refuse to create work as `actor`, the principal a filing
- * credential names (its `/api/status` actor), or null when it is admitted.
- */
-export function followUpFilingRefusal(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[]; workItems?: string[] } } | null | undefined, repository: string | null | undefined) {
-  if (!actor?.role) return 'the filing credential names no principal';
-  if (actor.role === 'admin') return null;
-  if (actor.role !== 'operator-agent') return `${actor.id} has role ${actor.role}, which cannot create work (Operator permission required)`;
-  if (!repository || !actor.scope?.repositories?.includes(repository)) return `operator agent ${actor.id}'s scope does not include ${repository ?? 'the repository'}`;
-  if (!actor.scope?.workItems?.includes('*')) return `operator agent ${actor.id} lacks wildcard work scope, which creating work requires`;
-  return null;
-}
-/** Pure: what `actor` holds beyond creating work in `repository` alone, or null when nothing. */
-export function followUpFilingExcess(actor: { id?: string; role?: string; capabilities?: string[]; scope?: { repositories?: string[] } }, repository?: string | null) {
-  if (actor.role === 'admin') return `${actor.id} is an admin, which can claim, approve and administer far beyond filing`;
-  const extra = actor.capabilities ?? [];
-  if (extra.length) return `operator agent ${actor.id} also holds ${extra.join(', ')}; the filing credential holds no capability`;
-  const otherRepositories = repository ? (actor.scope?.repositories ?? []).filter(other => other !== repository) : [];
-  return otherRepositories.length ? `operator agent ${actor.id} can also create work in ${otherRepositories.join(', ')}; the filing credential is scoped to ${repository} alone` : null;
-}
-
-/**
- * GY-1614: whether the control plane would admit the follow-up a failed release candidate files
- * with GRAPHYARD_RELEASE_TOKEN, judged from the principal that token authenticates as, and whether
- * that principal holds more than the filing identity needs.
- */
-export function releaseFilingCheck(filing: NonNullable<SetupFromZeroInput['releaseFiling']>, repository: string | null): SetupCheck {
-  const filingRepository = repository ?? filing.status?.repository;
-  const refusal = filing.status ? followUpFilingRefusal(filing.status.actor, filingRepository) : `the control plane did not accept the credential: ${filing.failure ?? 'no answer'}`;
-  const excess = refusal ? null : followUpFilingExcess(filing.status.actor, filingRepository);
-  return { id: 'release-filing', status: refusal || excess ? 'fail' : 'pass', step: setupSteps.releaseFiling,
-    detail: refusal ? `GRAPHYARD_RELEASE_TOKEN would be refused filing a failed candidate's follow-up: ${refusal}`
-      : excess ? `GRAPHYARD_RELEASE_TOKEN is broader than filing needs: ${excess}` : `GRAPHYARD_RELEASE_TOKEN files follow-ups as ${filing.status.actor.id}` };
-}
-
-/** The plane's answer to GRAPHYARD_RELEASE_TOKEN, at the server the CLI addresses (src/cli/context.ts), or undefined when it is unset. */
-async function readReleaseFiling(root: string, env: NodeJS.ProcessEnv) {
-  const token = env.GRAPHYARD_RELEASE_TOKEN;
-  if (!token) return undefined;
-  const base = env.GRAPHYARD_URL ?? (await readJson(resolve(root, '.graphyard/connection.json')))?.url ?? 'http://127.0.0.1:4310';
-  return planeRequest(base, token)('status').then(status => ({ status }), (error: any) => ({ status: null, failure: String(error.message) }));
-}
-
 /** One printable line per check: `PASS id: detail`, or `FAIL id: detail (fix: step)`. */
 export const setupLine = (check: SetupCheck) => check.status === 'pass' ? `PASS ${check.id}: ${check.detail}` : `FAIL ${check.id}: ${check.detail} (fix: ${check.step})`;
 
@@ -278,16 +229,11 @@ export async function setupFromZeroChecks(input: SetupFromZeroInput): Promise<Se
   lines.push({ id: 'control-plane', status: status ? 'pass' : 'fail', step: setupSteps.install,
     detail: status ? `answered as role ${status.actor?.role ?? 'unknown'}` : `${input.reachable ? `reachable, credential ${credential}` : 'not reachable'}: ${input.failure ?? 'no answer'}` });
   lines.push(await credentialsCheck(input.root, env, input.masterCredential));
-  // GY-1553: the control plane is the merge writer, so no App or reviewer App is needed: both lines
-  // pass as not required, in the same words the Setup checklist uses.
-  for (const [id, step] of [['github-app', setupSteps.app], ['reviewer-app', setupSteps.reviewer]] as const) lines.push({ id, status: 'pass', detail: mergerNotRequired, step });
   lines.push(...await environmentChecks(input.environments));
   lines.push(await sandboxCheck(input.root, input.sandbox ?? bubblewrapProbe));
   const loopCode = await loopCodeCheck(input.root, input.loopCode);
   if (loopCode) lines.push(loopCode);
   lines.push(...await unitOverridesChecks(input.root, input.systemctl ?? userManager, input.platform ?? process.platform));
-  const releaseFiling = input.releaseFiling ?? await readReleaseFiling(input.root, env);
-  if (releaseFiling) lines.push(releaseFilingCheck(releaseFiling, status?.repository ?? null));
   const serve = await serveCheck(input.root);
   if (serve) lines.push(serve);
   return lines;

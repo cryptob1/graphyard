@@ -344,14 +344,6 @@ export const masterRunSchema = z.object({
 }).strict();
 export type MasterRun = z.infer<typeof masterRunSchema>;
 
-// The operator's own authenticated browser profile: a Chrome profile name (such as Default) or the
-// path of a persistent profile directory. Used only by the enumerated master browser flows.
-export const masterBrowserSchema = z.object({
-  profile: z.string().trim().min(1).max(500),
-  executable: z.string().trim().min(1).max(500).optional(),
-}).strict();
-export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
-
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
 /**
  * Who reviews and merges (GY-1501). `autonomous`, the default every existing install keeps: the
@@ -404,8 +396,8 @@ export const masterConfigSchema = forwardTolerant(z.object({
     rerunFailedChecks: z.unknown().optional(),
     optimisticExclude: z.unknown().optional(),
   }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, batchSize: _batchSize, parallelTips: _parallelTips, ciConcurrency: _ciConcurrency, rerunFailedChecks: _reruns, ...kept }) => kept).optional(),
-  // The operator's own authenticated browser profile, used only by master browser flows.
-  browser: masterBrowserSchema.optional(),
+  // The browser profile the retired master browser flows used (GY-3003) is no longer declared:
+  // forwardTolerant keeps it in a master.json an older CLI wrote, and no reader consumes it.
   // The master's operator-agent identity, which applies every decision it makes. Paths only, never tokens.
   operatorAgent: agentIdentitySchema.optional(),
   // GY-1856: credential locations beside the operator config home that every confined session of
