@@ -1,28 +1,28 @@
 # GY-3048 documentation review
 
-Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `37c69b2413d2`.
+Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `0d6b141370fa`.
 
-The handwritten set went from **11,745 to 8,928 words (24.0% shorter)**, including the new rendering guide. This report is outside that guide count. These counts include the newer shipped documentation reconciled in epoch 4.
+The handwritten set went from **12,196 to 9,384 words (23.1% shorter)**, including the new rendering guide. This report is outside that guide count. These counts include the newer shipped documentation reconciled through epoch 7.
 
 | Reviewed file | Before | After |
 | --- | ---: | ---: |
 | `README.md` | 277 | 427 |
-| `docs/coordination.md` | 534 | 415 |
+| `docs/coordination.md` | 534 | 431 |
 | `docs/delivery-redesign.md` | 334 | 193 |
 | `docs/delivery.md` | 725 | 599 |
 | `docs/deployment.md` | 809 | 569 |
 | `docs/development.md` | 698 | 605 |
 | `docs/glossary.md` | 542 | 510 |
-| `docs/how-graphyard-works.md` | 560 | 545 |
+| `docs/how-graphyard-works.md` | 545 | 540 |
 | `docs/install.md` | 457 | 369 |
-| `docs/master-agent-reference.md` | 325 | 268 |
+| `docs/master-agent-reference.md` | 551 | 444 |
 | `docs/master-agent-sessions.md` | 2019 | 823 |
-| `docs/master-agent.md` | 994 | 752 |
+| `docs/master-agent.md` | 1047 | 833 |
 | `docs/onboarding.md` | 641 | 448 |
 | `docs/operations.md` | 541 | 494 |
-| `docs/protocol/work-commands.md` | 614 | 538 |
+| `docs/protocol/work-commands.md` | 654 | 571 |
 | `docs/setup-from-zero.md` | 521 | 398 |
-| `docs/validation.md` | 1154 | 659 |
+| `docs/validation.md` | 1301 | 814 |
 | `docs/walkthrough.md` | 0 | 316 |
 
 Setup-from-zero is the setup checklist; install owns provider/key steps; onboarding owns fleet setup. Delivery owns trial/revert behavior, deployment owns serving, and sessions owns runtime recovery. Other guides link there. Removed issue narration, the old brief word-count table and references to deleted docs tests. Existing section anchors remain.
@@ -48,3 +48,12 @@ Epoch 4 rework:
 - Build, docs checker and `graphyard verify GY-3048` passed after reconciliation; the documentation proof fails against base as expected.
 - Fully decoded both unchanged epoch-3 media assets again. Confirmed H.264 MP4 1200×838 and GIF 800×559, both 120.1 seconds. Visually inspected decoded MP4 frames at 0, 28, 90 and 116 seconds, and GIF opening and 90-second frames: populated opening, distinct roles, readable captions and deploy-supervisor recovery.
 - Self-review judged AC-1, AC-2 and AC-3 met. Updated the second session-liveness summary to preserve completed-review recovery consistently. No blocking finding remains.
+
+
+Epoch 7 rework:
+
+- Brought forward epoch 6's saved merge commit `d560fa71c79f`; `graphyard sync GY-3048` now passes against `0d6b141370fa`. All five files named by the failed trial are reconciled: coordination, how-graphyard-works, master-agent, protocol/work-commands and validation. Preserved the shipped E2E requirement, master account recovery, trial mise isolation and isolated pre-submit reruns, including the related master-agent-reference additions.
+- Refreshed the file counts above against that synced base. No requirement or runtime behavior changed.
+- Build, docs checker and `graphyard verify GY-3048` passed. The documentation proof rendered sample frames and exercised browser controls; its base exercise failed as expected.
+- Self-review caught and fixed the remaining video caption limiting product review to user-facing features. Regenerated both media assets from the corrected HTML. Fully decoded both with ffmpeg; ffprobe confirms MP4 H.264 1200×838 and GIF 800×559, both 120.1 seconds. Visually inspected opening, review and later recovery frames for role labels, readable captions and correct deploy-supervisor recovery.
+- Ran `review self GY-3048` and judged the diff against the synced base: AC-1 met (roles, failed-check handoff, implemented wakes and three human decisions); AC-2 met (storyboard and regenerated media, rendering, decoding, dimensions and visual checks); AC-3 met (all handwritten guides reviewed, concise task entries, preserved operational rules, refreshed counts and passing links/indexes). No blocking finding remains.
