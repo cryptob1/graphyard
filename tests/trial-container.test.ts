@@ -85,7 +85,7 @@ for (const signal of ['SIGTERM', 'SIGKILL'] as const) test(`integration:worker-h
   await assertWriterStopped(beat);
   if (!existsSync('/etc/graphyard-trial')) {
     const id = await readFile(join(allocation, 'container-id'), 'utf8');
-    await assert.rejects(defaultChildRun('docker', ['--host', 'unix:///var/run/docker.sock', 'inspect', id]), /No such/);
+    await assert.rejects(defaultChildRun('docker', ['--host', 'unix:///var/run/docker.sock', 'inspect', id]), /no such/i);
   }
 });
 
