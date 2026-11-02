@@ -74,7 +74,7 @@ before(async () => {
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: coordinator.id, role: coordinator.role }, repository, baseBranch: 'main', githubAppId: 1234 }));
-  await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
+  await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard', run: { worktreeRoot: await temporaryDirectory('post-merge-launch-checkouts', '/var/tmp') } }, coordinatorStatus as typeof fetch);
   await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', concurrency: 4 });
   const file = join(root, '.graphyard/master.json');
   const storedConfig = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
