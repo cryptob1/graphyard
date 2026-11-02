@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { cp, mkdir, readdir, readFile, symlink, writeFile } from 'node:fs/promises';
+import { cp, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
@@ -9,10 +9,11 @@ import { createRequire } from 'node:module';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { watchPorts, deployHealth } from '../src/cli/upgrade.js';
 import { deployOnce, deployRecordPath, readDeployRecord } from '../src/deploy-watch.js';
-import { activeCliRoot, cliReleasePath } from '../src/install/cli-release.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { restartCause } from '../src/daemon/run.js';
 
+const cliReleasePath = (directory: string, commit: string) => join(directory, 'deploy', 'releases', commit);
+const activeCliRoot = (root: string) => realpath(join(root, '.graphyard', 'cli-current'));
 const source = fileURLToPath(new URL('../', import.meta.url));
 const modules = resolve(createRequire(import.meta.url).resolve('tsx'), '../../..');
 const git = (cwd: string, ...args: string[]) => execFileSync('git', args, { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], env: { ...process.env, GIT_AUTHOR_NAME: 'test', GIT_AUTHOR_EMAIL: 'test@test', GIT_COMMITTER_NAME: 'test', GIT_COMMITTER_EMAIL: 'test@test' } }).trim();
@@ -74,10 +75,14 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
   let waitForInstall = Promise.resolve(), installStarted = Promise.resolve(), failInstall = false, unhealthy: string | null = null;
   let waitForBuild = Promise.resolve();
   const installs: string[] = [], restarts: string[] = [], previews: string[] = [];
+  let pending: Promise<unknown> | undefined;
   try {
     const ports = await watchPorts({ cliRoot: checkout, repoRoot: checkout, repository: 'owner/project', url, run: async (command, args, options) => {
-      if (command === 'npm') {
-        const root = args[args.indexOf('--prefix') + 1]!; installs.push(root); started?.();
+      // Recognize the predecessor's shell invocation too, so exercising the base fails
+      // on its mutation of the active tree, without installing dependencies over the network.
+      const oldInstall = command === 'sh' && /^npm ci --prefix "([^"]+)"$/.exec(args[1] ?? '');
+      if (command === 'npm' || oldInstall) {
+        const root = oldInstall ? oldInstall[1]! : args[args.indexOf('--prefix') + 1]!; installs.push(root); started?.();
         await waitForInstall;
         if (failInstall) {
           await mkdir(join(root, 'node_modules'), { recursive: true });
@@ -109,7 +114,8 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     waitForInstall = new Promise(done => { releaseInstall = done; }); installStarted = new Promise(done => { started = done; });
     waitForBuild = new Promise(done => { releaseBuild = done; });
     const building = new Promise<void>(done => { buildStarted = done; });
-    const pending = deployOnce(file, ports, () => {}); await installStarted;
+    pending = deployOnce(file, ports, () => {}); await installStarted;
+    assert.equal(git(legacy, 'rev-parse', 'HEAD'), a, 'the active legacy CLI source stays unchanged throughout install');
     for (let index = 0; index < 3; index++) await check();
     assert.equal(git(legacy, 'rev-parse', 'HEAD'), a); assert.equal(git(checkout, 'rev-parse', 'HEAD'), a);
     assert.deepEqual(await readFile(join(legacy, 'node_modules/tsx/dist/loader.mjs')), oldLoader);
@@ -119,7 +125,7 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     assert.deepEqual(await readFile(join(legacy, 'node_modules/tsx/dist/loader.mjs')), oldLoader);
     assert.deepEqual(await readFile(join(legacy, 'src/cli/context.ts')), oldSource);
     releaseBuild(); assert.equal(await pending, 'deployed');
-    assert.equal(activeCliRoot(legacy), cliReleasePath(directory, b)); await check(); await check(checkout);
+    assert.equal(await activeCliRoot(legacy), cliReleasePath(directory, b)); await check(); await check(checkout);
     assert.match(restartCause({ credentialFile: join(base, 'token'), cliPath: join(legacy, 'bin/graphyard.mjs') }, checkout, a) ?? '', /deploy unit serves/);
     assert.equal(await ports.head(), b); assert.deepEqual(previews, [b]);
 
@@ -130,11 +136,11 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     assert.equal(readDeployRecord(file)?.tip, b); assert.equal(readDeployRecord(file)?.failed, c);
     assert.match(readDeployRecord(file)?.reason ?? '', /build failed:.*npm/);
     for (let index = 0; index < 3; index++) await check();
-    assert.equal(activeCliRoot(legacy), cliReleasePath(directory, b));
+    assert.equal(await activeCliRoot(legacy), cliReleasePath(directory, b));
 
     failInstall = false; const d = await commit('D'); unhealthy = d;
     assert.equal(await deployOnce(file, ports, () => {}), 'rolled-back');
-    assert.equal(served, b); assert.equal(activeCliRoot(legacy), cliReleasePath(directory, b)); await check();
+    assert.equal(served, b); assert.equal(await activeCliRoot(legacy), cliReleasePath(directory, b)); await check();
     assert.equal(installs.filter(path => path === cliReleasePath(directory, b)).length, 1, 'rollback reuses retained dependencies');
     assert.deepEqual(await readFile(join(legacy, 'node_modules/tsx/dist/loader.mjs')), oldLoader);
     assert.deepEqual(await readFile(join(legacy, 'src/cli/context.ts')), oldSource);
@@ -150,6 +156,8 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     assert.equal((mismatch.err.match(/release handover: retry/g) ?? []).length, 3);
     assert.equal(apiCalls, callsBefore, 'true mismatch never reaches the API');
   } finally {
+    releaseInstall?.(); releaseBuild?.();
+    await pending?.catch(() => {});
     server.closeAllConnections(); await new Promise<void>(done => server.close(() => done()));
     if (previousHome === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = previousHome;
   }
