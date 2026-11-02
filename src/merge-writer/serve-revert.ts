@@ -175,8 +175,15 @@ export interface ServeRevertPorts {
   file(input: RelandInput): Promise<{ key?: string } | null>;
 }
 
+/** A prepared revert, persisted before the loop starts its trial and push. */
+export interface PreparedServeRevert { culprit: Work; mergeSha: string; revertSha: string }
+
+/** The loop schedules the shared trial and push beside its cycle; standalone callers await it. */
+export type ScheduleServeRevert = (prepared: PreparedServeRevert, run: () => Promise<ServeRevertResult>) => Promise<void>;
+
 /** What one serve revert came to. */
 export type ServeRevertResult =
+  | { outcome: 'scheduled' }
   | { outcome: 'reverted'; culprit: Work; mergeSha: string; revertSha: string; reland: string | null }
   | { outcome: 'held'; culprit: Work; mergeSha: string; reason: string }
   | { outcome: 'retry'; culprit: Work; mergeSha: string; revertSha: string; reason: string }
@@ -216,9 +223,10 @@ export async function trialAndPushRevert(ports: Pick<ServeRevertPorts, 'trial' |
  * retried, never held. A merge named by `alreadyReverted` stays reverted: reverting it again
  * would re-apply its change onto its own revert and oscillate main while the serve keeps
  * failing. A filing that fails (or a loop that cannot file) still stands on the pushed revert:
- * the re-land rides as null and the loop files it from the recorded revert.
+ * the re-land rides as null and the loop files it from the recorded revert. The loop supplies
+ * `schedule` to persist the prepared revert before running its trial and push beside the cycle.
  */
-export async function runServeRevert(ports: ServeRevertPorts, input: ServeFailure & { lastVerified: string; baseTip: string; baseBranch: string; work: readonly Work[]; alreadyReverted?: readonly string[] }): Promise<ServeRevertResult> {
+export async function runServeRevert(ports: ServeRevertPorts, input: ServeFailure & { lastVerified: string; baseTip: string; baseBranch: string; work: readonly Work[]; alreadyReverted?: readonly string[]; schedule?: ScheduleServeRevert }): Promise<ServeRevertResult> {
   const commits = await serveRangeCommits(ports.git, input.lastVerified, input.serve);
   if (!commits.length) return { outcome: 'up-to-date' };
   const culprit = selectServeCulprit(commits, input.work, input.failingCase);
@@ -227,12 +235,19 @@ export async function runServeRevert(ports: ServeRevertPorts, input: ServeFailur
   const revert = await revertMergeCommit(ports.git, { mergeSha: culprit.mergeSha, before: culprit.before, baseTip: input.baseTip, subject: culprit.subject });
   if ('conflict' in revert) return { outcome: 'held', culprit: culprit.item, mergeSha: culprit.mergeSha,
     reason: `the revert of ${culprit.item.key}'s merge ${culprit.mergeSha.slice(0, 12)} does not apply cleanly on ${input.baseTip.slice(0, 12)}: ${revert.conflict.slice(0, 20).join(', ')}` };
-  const files = (await ports.git(['diff', '--name-only', input.baseTip, revert.revertSha])).split('\n').map(line => line.trim()).filter(Boolean);
-  const decided = await trialAndPushRevert(ports, { revertSha: revert.revertSha, files, baseTip: input.baseTip, culpritKey: culprit.item.key, mergeSha: culprit.mergeSha });
-  if ('retry' in decided) return { outcome: 'retry', culprit: culprit.item, mergeSha: culprit.mergeSha, revertSha: revert.revertSha, reason: decided.retry };
-  if ('held' in decided) return { outcome: 'held', culprit: culprit.item, mergeSha: culprit.mergeSha, reason: decided.held };
-  const reland = relandItemFor(culprit.item, { ...input, mergeSha: culprit.mergeSha });
-  let filed: { key?: string } | null = null;
-  try { filed = await ports.file(reland); } catch { filed = null; }
-  return { outcome: 'reverted', culprit: culprit.item, mergeSha: culprit.mergeSha, revertSha: revert.revertSha, reland: filed?.key ?? null };
+  const run = async (): Promise<ServeRevertResult> => {
+    const files = (await ports.git(['diff', '--name-only', input.baseTip, revert.revertSha])).split('\n').map(line => line.trim()).filter(Boolean);
+    const decided = await trialAndPushRevert(ports, { revertSha: revert.revertSha, files, baseTip: input.baseTip, culpritKey: culprit.item.key, mergeSha: culprit.mergeSha });
+    if ('retry' in decided) return { outcome: 'retry', culprit: culprit.item, mergeSha: culprit.mergeSha, revertSha: revert.revertSha, reason: decided.retry };
+    if ('held' in decided) return { outcome: 'held', culprit: culprit.item, mergeSha: culprit.mergeSha, reason: decided.held };
+    const reland = relandItemFor(culprit.item, { ...input, mergeSha: culprit.mergeSha });
+    let filed: { key?: string } | null = null;
+    try { filed = await ports.file(reland); } catch { filed = null; }
+    return { outcome: 'reverted', culprit: culprit.item, mergeSha: culprit.mergeSha, revertSha: revert.revertSha, reland: filed?.key ?? null };
+  };
+  if (input.schedule) {
+    await input.schedule({ culprit: culprit.item, mergeSha: culprit.mergeSha, revertSha: revert.revertSha }, run);
+    return { outcome: 'scheduled' };
+  }
+  return run();
 }

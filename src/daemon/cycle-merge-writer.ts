@@ -13,7 +13,7 @@ import { defaultMergeWriterRetrials, mergeWriterSettings, trialTimeoutMinutes } 
 import { mergeStallMs } from '../model/merge-ledger.js';
 import { mergeSubject, trialMerge, TrialTimeoutError, trialHiddenPaths } from '../merge-writer/trial.js';
 import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPreviewPorts, type LivePreview } from '../merge-writer/preview.js';
-import { relandItemFor, relandTitle, revertMergeCommit, selectServeCulprit, serveRangeCommits, trialAndPushRevert, type RelandInput } from '../merge-writer/serve-revert.js';
+import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
 import { loadProjectDelivery } from '../project-applications.js';
 import { defaultMergeBatch, mergeBatch, type BatchResult } from '../merge-writer/batch.js';
 import { baseFailureHoldMs, criterionProofs, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
@@ -463,59 +463,52 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
     if (fetched === owed.baseTip && cycle.now() - Date.parse(owed.at) < baseFailureHoldMs) return false;
     revertState.retry = null;
   }
-  let baseTip: string, commits: Awaited<ReturnType<typeof serveRangeCommits>>;
+  let baseTip: string;
+  try { baseTip = fetched ?? (await reads.fetch()).toLowerCase(); } catch { return false; }
+  let onStep: ((step: string) => void) | undefined;
   try {
-    baseTip = fetched ?? (await reads.fetch()).toLowerCase();
-    commits = await serveRangeCommits(git, revertState.lastVerified, serve);
+    const result = await runServeRevert({
+      git,
+      trial: (sha, files, item) => reads.trial(sha, files, item, baseTip, onStep),
+      push: reads.push,
+      // The persisted pushed-revert record owns filing and its retries (fileOwedRelands).
+      file: async () => null,
+    }, {
+      ...failing, lastVerified: revertState.lastVerified, baseTip, baseBranch: reads.baseBranch,
+      work: snapshot.work, alreadyReverted: revertState.reverts.map(entry => entry.mergeSha),
+      schedule: async ({ culprit, mergeSha, revertSha }, run) => {
+        const key = culprit.key, id = culprit.id, startedAt = at();
+        const context: RevertFlight = { ...failing, mergeSha, revertSha, baseTip };
+        const entry: Flight = { key, id, head: revertSha, startedAt, settled: null, revert: context };
+        // Publish the flight only after persisting its revert, so restart recovery can
+        // recognize a push even when the process dies before it records the result.
+        writer.inFlight = { key, id, head: revertSha, startedAt, attempt: randomUUID(), step: 'revert trial', stepStartedAt: startedAt, revert: context };
+        try { await cycle.effects.persist(state); } catch (error) { writer.inFlight = null; throw error; }
+        flights.set(state, entry);
+        onStep = step => {
+          if (writer.inFlight?.head !== revertSha) return;
+          writer.inFlight = { ...writer.inFlight, step, stepStartedAt: at() };
+          void cycle.effects.persist(state).catch(() => {});
+        };
+        void run().then(decided => {
+          if (decided.outcome === 'reverted') entry.settled = { revert: { ok: true } };
+          else if (decided.outcome === 'held' || decided.outcome === 'retry')
+            entry.settled = { revert: { ok: false, reason: decided.reason, retry: decided.outcome === 'retry' } };
+        }).catch(error => { entry.settled = { error }; });
+      },
+    });
+    if (result.outcome === 'already-reverted') {
+      revertState.answered = { serve, lastVerified: revertState.lastVerified };
+      return true;
+    }
+    if (result.outcome === 'held') {
+      revertState.held = { serve, culprit: result.culprit.key, reason: result.reason.slice(0, 2000), at: at() };
+      performed.push(storeAction(state, mergeWriterActionKey(result.culprit.key, result.mergeSha), { kind: 'merge', work: result.culprit.key, principal: null, state: 'failed',
+        detail: `Held: ${result.reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: at() }));
+      return true;
+    }
+    return result.outcome === 'scheduled';
   } catch { return false; }
-  const culprit = selectServeCulprit(commits, snapshot.work, failing.failingCase);
-  if (!culprit) return false;
-  // One merge reverts once: reverting it again would re-apply its change onto its own revert
-  // and oscillate main while the serve keeps failing. The failing serve still reads as the
-  // release health the re-land carries. The answer is recorded, so the still-failing serve
-  // reads nothing until the serve or the baseline moves.
-  if (revertState.reverts.some(entry => entry.mergeSha === culprit.mergeSha)) {
-    revertState.answered = { serve, lastVerified: revertState.lastVerified };
-    return true;
-  }
-  let revert: Awaited<ReturnType<typeof revertMergeCommit>>;
-  try { revert = await revertMergeCommit(git, { mergeSha: culprit.mergeSha, before: culprit.before, baseTip, subject: culprit.subject }); }
-  catch { return false; }
-  if ('conflict' in revert) {
-    // No trial can judge a commit that was never made: the revert is held at once.
-    const reason = `the revert of ${culprit.item.key}'s merge ${culprit.mergeSha.slice(0, 12)} does not apply cleanly on ${baseTip.slice(0, 12)}: ${revert.conflict.slice(0, 20).join(', ')}`;
-    revertState.held = { serve, culprit: culprit.item.key, reason: reason.slice(0, 2000), at: at() };
-    performed.push(storeAction(state, mergeWriterActionKey(culprit.item.key, culprit.mergeSha), { kind: 'merge', work: culprit.item.key, principal: null, state: 'failed',
-      detail: `Held: ${reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: at() }));
-    return true;
-  }
-  const key = culprit.item.key, id = culprit.item.id, revertSha = revert.revertSha, startedAt = at();
-  const context: RevertFlight = { ...failing, mergeSha: culprit.mergeSha, revertSha, baseTip };
-  const entry: Flight = { key, id, head: revertSha, startedAt, settled: null, revert: context };
-  // The flight is published only once its in-flight entry, naming the revert, is persisted
-  // (GY-1852): a failed persist leaves nothing in flight and the next cycle starts afresh, and a
-  // restart past the push is settled from the entry (`reconcileServeRevert`).
-  const attempt = randomUUID();
-  writer.inFlight = { key, id, head: revertSha, startedAt, attempt, step: 'revert trial', stepStartedAt: startedAt, revert: context };
-  try { await cycle.effects.persist(state); } catch { writer.inFlight = null; return false; }
-  flights.set(state, entry);
-  const onStep = (step: string) => {
-    // The culprit is delivered, so its ledger takes no trial-step record — only the in-flight entry moves.
-    if (writer.inFlight?.head !== revertSha) return;
-    writer.inFlight = { ...writer.inFlight, step, stepStartedAt: new Date(cycle.now()).toISOString() };
-    void cycle.effects.persist(state).catch(() => {});
-  };
-  void (async () => {
-    try {
-      const files = (await git(['diff', '--name-only', baseTip, revertSha])).split('\n').map(line => line.trim()).filter(Boolean);
-      const decided = await trialAndPushRevert({ trial: (sha, trialFiles, item) => reads.trial(sha, trialFiles, item, baseTip, onStep), push: reads.push },
-        { revertSha, files, baseTip, culpritKey: key, mergeSha: culprit.mergeSha });
-      entry.settled = 'ok' in decided ? { revert: { ok: true } }
-        : 'held' in decided ? { revert: { ok: false, reason: decided.held } }
-        : { revert: { ok: false, reason: decided.retry, retry: true } };
-    } catch (error) { entry.settled = { error }; }
-  })();
-  return true;
 }
 
 /** A full 40-hex sha, the only serve record this step acts on. */
