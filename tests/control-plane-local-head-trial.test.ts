@@ -123,7 +123,7 @@ test('integration:control-plane-local-head-trial — a head present only in the 
   const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
   const records: { kind: string }[] = [];
   const reads = mergeWriterReads(fixtureConfig, checkout, writerRun, {
-    base: worktreeBase, merger: async () => 'control-plane', trial,
+    base: worktreeBase,  trial,
     record: async (_work, event) => { records.push({ kind: event.kind }); return {}; },
   });
 

@@ -22,7 +22,7 @@ import { verificationEnvironment, verificationSlotsDirectory } from './verificat
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
  * tuning its own configuration through the CLI's owned fields (`master config` — a direct edit of
- * master.json would reach autoMerge and the credential and identity paths onboarding owns, so it
+ * master.json would reach the credential and identity paths onboarding owns, so it
  * is not granted), restarting and reading the durable loop's exact unit, administering the
  * deployment it verifies, and re-running CI for a candidate. None of these reaches a merge, a
  * verdict, evidence, or a credential; the enforced boundaries are unchanged.

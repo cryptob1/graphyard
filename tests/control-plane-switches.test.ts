@@ -110,7 +110,7 @@ test('unit:merge-writer-waits-out-upgrade — the cycle in which a merge lands s
   const trialled: string[] = [];
   const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
     trial: async (_mergeSha: string, _files: string[], target: Work) => { trialled.push(target.key); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; },
-    push: async () => 'pushed', holds: async () => false, record: async () => {}, merger: async () => 'control-plane' } as unknown as MergeWriterReads;
+    push: async () => 'pushed', holds: async () => false, record: async () => {}} as unknown as MergeWriterReads;
   const state = emptyDaemonState(config);
   const cycle = () => ({ state, effects: { mergeWriter: reads, persist: async () => {}, fileFaultClass: async () => ({ key: 'GY-900' }) } as unknown as DaemonEffects, now: () => start, snapshot: { work, now: iso(start) }, performed: [] as any[] }) as unknown as Cycle;
   await mergeWriterStep(cycle());
@@ -132,7 +132,7 @@ test('unit:upgrade-waits-for-trial — the merge writer reports a trial in fligh
   const held = new Promise<void>(resolve => { release = resolve; });
   const reads = { baseBranch: 'main', retrials: 1, now: () => start, fetch: async () => base, merge: async (headSha: string) => ({ mergeSha: sha(`merge:${headSha}`), files: ['src/app.ts'] }),
     trial: async () => { await held; return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: [], proofs: {} }; },
-    push: async () => 'pushed', holds: async () => false, record: async () => {}, merger: async () => 'control-plane' } as unknown as MergeWriterReads;
+    push: async () => 'pushed', holds: async () => false, record: async () => {}} as unknown as MergeWriterReads;
   const state = emptyDaemonState(config);
   const cycle = { state, effects: { mergeWriter: reads, persist: async () => {}, fileFaultClass: async () => ({ key: 'GY-900' }) } as unknown as DaemonEffects, now: () => start, snapshot: { work, now: iso(start) }, performed: [] as any[] } as unknown as Cycle;
   assert.equal(mergeWriterInFlight(state), false, 'nothing in flight before a trial starts');

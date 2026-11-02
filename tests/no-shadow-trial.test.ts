@@ -42,7 +42,7 @@ test('unit:no-shadow-trial — the shadow gate is deleted: a cycle with submitte
   const work = [submitted(2, 5), submitted(1, 30)];
   const trials: string[] = [];
   const mergeWriter: MergeWriterReads = {
-    baseBranch: 'main', retrials: 3, now: () => start, merger: async () => 'control-plane',
+    baseBranch: 'main', retrials: 3, now: () => start,
     fetch: async () => tip,
     merge: async head => ({ mergeSha: sha(`merge:${head}`), files: ['src/app.ts'] }),
     trial: async mergeSha => { trials.push(mergeSha); return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0, skipped: 0 } } }; },

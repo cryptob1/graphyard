@@ -160,15 +160,7 @@ export async function atomicPrivateText(file: string, value: string) {
   await chmod(file, 0o600);
 }
 
-/** Records automatic merging on the plane (`POST /api/auto-merge`) with the coordinator credential; an unchanged value writes nothing. */
-async function recordAutoMerge(url: string, token: string, autoMerge: boolean, fetcher: typeof fetch) {
-  const body = JSON.stringify({ autoMerge, reason: `master init ${autoMerge ? '--auto-merge' : '--no-auto-merge'}` });
-  const response = await fetcher(`${url}/api/auto-merge`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': `master-init-auto-merge:${randomUUID()}` }, body, signal: AbortSignal.timeout(15_000) });
-  if (!response.ok) throw new Error(`Graphyard refused to record automatic merging ${autoMerge ? 'on' : 'off'} (${response.status}: ${(await response.text()).slice(0, 300)}); master.json was written, and the plane's setting is unchanged`);
-  return response.json() as Promise<{ autoMerge: boolean }>;
-}
-
-export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; autoMerge?: boolean; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>;
+export async function setupMaster(root: string, input: { url: string; token: string; cliPath: string; hostId?: string; herdrWorkspace?: string; credentialDirectory?: string; mergeMethod?: 'merge' | 'squash' | 'rebase'; run?: Partial<MasterRun>;
   /** Install the loop's supervisor (GY-114). Explicit, never implied: only `master init` passes it. */
   installSupervisor?: boolean;
   /** Replace an installed unit that runs a different loop; `master init --replace-supervisor`. */
@@ -217,7 +209,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   // records among them, and any field a future command adds to the schema, so rerunning setup (as
   // `up`'s master-loop step does) can no longer drop an identity another command wrote and strand
   // every goal in acceptance drafting.
-  const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath, repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), autoMerge: input.autoMerge ?? previous?.autoMerge ?? true, mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run } });
+  const config = masterConfigSchema.parse({ ...previous, version: 1, url, credentialFile, cliPath, repository: detected.repository, baseBranch: status.baseBranch, githubAppId: appPending ? APP_PENDING : status.githubAppId, hostId: input.hostId ?? previous?.hostId ?? hostname(), herdrWorkspace: input.herdrWorkspace ?? previous?.herdrWorkspace, masterAgentName: previous?.masterAgentName ?? sessionName('graphyard-master', repositoryName), mergeMethod: input.mergeMethod ?? previous?.mergeMethod ?? 'merge', workers: previous?.workers ?? [], reviewers: previous?.reviewers ?? [], producers: previous?.producers ?? [], run: { ...previous?.run, ...input.run } });
   const instructionsFile = resolve(root, 'AGENTS.md');
   let existing = ''; let mode = 0o644;
   try { const info = await lstat(instructionsFile); if (!info.isFile()) throw new Error('Refusing to replace a non-regular AGENTS.md'); mode = info.mode & 0o777; existing = await readFile(instructionsFile, 'utf8'); }
@@ -230,10 +222,6 @@ export async function setupMaster(root: string, input: { url: string; token: str
   const { writeFile, rename } = await import('node:fs/promises');
   await writeFile(temporary, instructions, { mode, flag: 'wx' }); await rename(temporary, instructionsFile); await chmod(instructionsFile, mode);
   await saveDiscovery(root);
-  // GY-1927: an explicit --[no-]auto-merge is recorded on the plane, which alone enforces it; a rerun without either flag (as `up` makes) never moves it.
-  // A plane that predates the setting (its status carries none) merges on gates alone, and setup says so.
-  const autoMerge = input.autoMerge === undefined || !status.autoMerge ? status.autoMerge ?? null : await recordAutoMerge(url, token, input.autoMerge, fetcher);
-  const unrecorded = input.autoMerge === false && !status.autoMerge ? 'This control plane records no automatic-merging setting, so --no-auto-merge holds nothing: it merges every gate-passing candidate; deploy main and rerun master init --no-auto-merge' : null;
   /**
    * The loop's supervisor is installed here, by setup, rather than left to a guide somebody may
    * follow end to end and still finish with an unsupervised loop (GY-114). The unit is written
@@ -263,7 +251,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
   // are — in the same words `master status` will keep using — rather than left for whoever
   // eventually notices the silence. A refused install is stated with what the operator runs.
   const supervision = !supervisor ? [] : supervisor.wrote === 'refused' ? [`${supervisor.reason}: ${supervisor.instruction}`] : loopSupervisionAttention(supervisor).map(gap => `${gap.text}: ${gap.next}`);
-  attention.push(...supervision, ...(unrecorded ? [unrecorded] : []));
+  attention.push(...supervision);
   // Capacity drift and production lag each name their own remedy.
   const remedy = delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
     : production?.incidents.length ? `Deploy main: ${production.attention[0] ?? production.incidents[0].reason}` : null;
@@ -275,7 +263,7 @@ export async function setupMaster(root: string, input: { url: string; token: str
     const health = await checkAgentEnvironment(environment, { quota: false });
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
-  return { repository: config.repository, server: config.url, role: status.actor.role, autoMerge: autoMerge ? autoMerge.autoMerge !== false : true, workers: config.workers.length, run: config.run, config: '.graphyard/master.json', attention,
+  return { repository: config.repository, server: config.url, role: status.actor.role, workers: config.workers.length, run: config.run, config: '.graphyard/master.json', attention,
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.
@@ -323,10 +311,9 @@ export async function saveProducerProfile(root: string, profileInput: unknown, v
  * provider runs with its own secret, the deployment the loop verifies, which reviewer profile
  * answers first, the producer session budget, the quota ceiling, how often the loop promotes to
  * production, and a profile's account order.
- * Everything else — autoMerge, the merge method, server and repository binding, credential and
+ * Everything else — the merge method, server and repository binding, credential and
  * identity paths, the environment inventory — is onboarding's or the operator's: no CLI path
- * writes it, and the master's harness grants no direct edit of master.json, so flipping autoMerge
- * or re-pointing a credential can never be a routine master action.
+ * writes it, and the master's harness grants no direct edit of master.json, so re-pointing a credential can never be a routine master action.
  */
 export const masterOwnedRunFields = ['intervalSeconds', 'dispatchIntervalSeconds', 'proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'deploymentShaField', 'productionEnvironment', 'reviewerProfile', 'producerTimeoutMinutes', 'acknowledgementSeconds', 'inactivityMinutes', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes', 'promoteEveryMinutes', 'deploymentReuseMinutes'] as const;
 const masterClearableRunFields = ['proofWorkflow', 'smokeWorkflow', 'deploymentUrl', 'productionEnvironment', 'reviewerProfile', 'quotaCeilingPercent', 'masterSessionMinutes', 'masterHeartbeatMinutes', 'promoteEveryMinutes', 'deploymentReuseMinutes'] as const;
@@ -355,7 +342,7 @@ export function masterSettingsFromArgs(args: string[]): MasterOwnedSettings {
  * The only configuration write a master session can reach: it applies the owned fields above to
  * the loaded configuration and revalidates the whole file through the master config schema before
  * writing it, exactly as the operator's own commands do. Unknown fields are refused by
- * `masterSettingsFromArgs` and again here, so an autoMerge flip or a credential re-point is
+ * `masterSettingsFromArgs` and again here, so a credential re-point is
  * refused wherever it enters.
  */
 export async function saveMasterSettings(root: string, changes: MasterOwnedSettings) {

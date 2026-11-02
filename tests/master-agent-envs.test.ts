@@ -449,7 +449,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     assert.deepEqual(tuned.changed, ['intervalSeconds', 'deploymentUrl', 'quotaCeilingPercent', 'accounts:review-oc']);
     assert.equal(after.run.intervalSeconds, 25); assert.equal(after.run.quotaCeilingPercent, 90);
     assert.equal(after.run.deploymentUrl, 'https://graphyard.example/api/health');
-    assert.equal(after.autoMerge, false, 'an autoMerge flip never rides the owned fields');
+    assert.equal('autoMerge' in after, false, 'the retired setting is dropped');
     assert.equal(after.credentialFile, before.credentialFile, 'credential paths never move through the owned fields');
     assert.deepEqual(after.reviewers.find(profile => profile.name === 'review-oc')!.accounts, ['opencode-a']);
     await assert.rejects(saveMasterSettings(root, { intervalSeconds: null }), /can only be set, never cleared/);

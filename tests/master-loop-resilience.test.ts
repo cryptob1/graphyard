@@ -181,7 +181,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('integration:master-config-reload — a running loop adopts master.json changes to profiles, workspace, run settings and autoMerge without a restart, and refuses a change to what it is bound to by name', async () => {
+test('integration:master-config-reload — a running loop adopts master.json changes to profiles, workspace, run settings without a restart, and refuses a change to what it is bound to by name', async () => {
   const { root, token, cleanup } = await installed();
   try {
     const initial = await loadMasterConfig(root);
@@ -193,40 +193,39 @@ test('integration:master-config-reload — a running loop adopts master.json cha
     await write(config => { config.producers = [{ name: 'producer-b', principal: 'proof-runner-b', agentName: 'produce-b', kind: 'claude', credentialFile: credential }]; config.herdrWorkspace = 'wF'; config.autoMerge = false; config.run.dispatchIntervalSeconds = 20; config.run.reviewerProfile = 'claude-reviewer'; });
     const adopted = await live.reload();
     assert.equal(adopted.refused, null);
-    assert.deepEqual(adopted.changed, ['autoMerge', 'herdrWorkspace', 'producers', 'run.dispatchIntervalSeconds', 'run.reviewerProfile']);
-    assert.deepEqual([live.current.producers.map(profile => profile.name), live.current.herdrWorkspace, live.current.autoMerge, live.current.run.dispatchIntervalSeconds], [['producer-b'], 'wF', false, 20]);
+    assert.deepEqual(adopted.changed, ['herdrWorkspace', 'producers', 'run.dispatchIntervalSeconds', 'run.reviewerProfile']);
+    assert.deepEqual([live.current.producers.map(profile => profile.name), live.current.herdrWorkspace, live.current.run.dispatchIntervalSeconds], [['producer-b'], 'wF', 20]);
     // A change to what the loop is bound to is refused by name; every other change in the same write waits with it.
     await write(config => { config.url = 'https://elsewhere.example'; config.baseBranch = 'release'; config.autoMerge = true; });
     const refused = await live.reload();
     assert.match(refused.refused!, /master\.json changes baseBranch, url, which a running master loop is bound to; restart master run to adopt them/);
-    assert.equal(live.current.autoMerge, false); assert.equal(live.current.url, 'https://graphyard.example');
+    assert.equal(live.current.url, 'https://graphyard.example');
     await writeFile(file, '{ not json', { mode: 0o600 });
     assert.match((await live.reload()).refused!, /could not be reloaded .*keeps the settings it last loaded/);
     assert.deepEqual(masterConfigChanges(initial, { ...initial, run: { ...initial.run, intervalSeconds: 30 } }), { changed: ['run.intervalSeconds'], bound: [] });
   } finally { await cleanup(); }
 
-  // The coordination loop adopts autoMerge between cycles and records a refusal once, as an escalation naming the setting.
+  // The coordination loop adopts configuration between cycles and records a standing refusal once.
   const directory = await temporaryDirectory('resilience-daemon');
   try {
     const coordinator = join(directory, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });
-    const manual = masterConfig(coordinator, { autoMerge: false }), automatic = masterConfig(coordinator, { autoMerge: true });
+    const manual = masterConfig(coordinator, {}), automatic = masterConfig(coordinator, { herdrWorkspace: 'wF' });
     const mergeable = work({ stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
     const log: string[] = [];
     let cycles = 0;
     const reloads = [
       { config: manual, changed: [], refused: null, at: iso(0) },
-      { config: automatic, changed: ['autoMerge'], refused: null, at: iso(1000) },
+      { config: automatic, changed: ['herdrWorkspace'], refused: null, at: iso(1000) },
       { config: automatic, changed: [], refused: '.graphyard/master.json changes url, which a running master loop is bound to; restart master run to adopt it', at: iso(2000) },
       { config: automatic, changed: [], refused: '.graphyard/master.json changes url, which a running master loop is bound to; restart master run to adopt it', at: iso(3000) },
     ];
     const state = emptyDaemonState(manual);
-    // Cycles are counted at the reload that opens each one, not per snapshot read. GitHub merges
-    // (GY-1235): autoMerge changes no loop step, but the reload still adopts it as a recorded change.
+    // Cycles are counted at the reload that opens each one, not per snapshot read.
     const effects = daemonEffects({ snapshot: async () => { if (cycles >= 4) process.emit('SIGUSR2' as NodeJS.Signals); return { work: [mergeable], now: iso(0) }; } }, log);
     const result = await runDaemon(manual, state, effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: () => {}, reload: async () => reloads[Math.min(cycles++, reloads.length - 1)] });
     assert.equal(result.cycles.length, 4);
     const actions = Object.values(state.actions);
-    assert.ok(actions.some(action => action.kind === 'config' && /Adopted .*autoMerge/.test(action.detail)));
+    assert.ok(actions.some(action => action.kind === 'config' && /Adopted .*herdrWorkspace/.test(action.detail)));
     assert.equal(actions.filter(action => action.kind === 'config' && action.state === 'failed' && /bound to; restart master run/.test(action.detail)).length, 1, 'a standing refusal is recorded once');
     assert.equal(state.config!.refused, reloads[3].refused);
     const noted = await noteConfigReload(emptyDaemonState(manual), reloads[2], async () => {});
