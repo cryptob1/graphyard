@@ -10,7 +10,7 @@ import type { DeploymentObservation } from './delivery.js';
 // SHA, at one configuration revision); what a validation result *may be attributed to* (the
 // exact manifest, the test bundle and the target an independent observer saw running for
 // the whole execution window); and what happened when the two diverged (the append-only
-// attribution ledger the analytics read). Nothing here trusts a client-supplied SHA, a
+// attribution ledger). Nothing here trusts a client-supplied SHA, a
 // deployment's self-report, or a mutable work snapshot as proof of what ran where.
 
 const sha256 = (value: unknown) => createHash('sha256').update(canonical(value)).digest('hex');
@@ -25,24 +25,23 @@ export function canonical(value: unknown): string {
 
 export interface ManifestService { service: string; digest: string; sourceSha: string }
 /**
- * A release manifest. `digestHash` is the content address of what runs (service → artifact
+ * A candidate manifest. `digestHash` is the content address of what runs (service → artifact
  * digest) and is what an observed target is matched against; `hash` also binds each
  * service's source SHA and the configuration revision, so two manifests that run the same
  * bytes under different configuration are different manifests. Both are derived from
- * append-only records — a release revision or a build attestation — never supplied.
+ * the trusted build attestation, never supplied.
  */
-export interface ReleaseManifest {
+export interface CandidateManifest {
   hash: string; digestHash: string;
   environment: { id: string; revision: number }; configurationRevision: number;
   services: ManifestService[];
-  source: { kind: 'release'; releaseId: string; releaseRevision: number; buildId: string; sourceSha: string; members: { workId: string; key: string; mergeSha: string; included: boolean }[]; createdBy: string; createdAt: string }
-    | { kind: 'build-attestation'; buildId: string; workId: string; sourceSha: string; baseSha: string; producer: string; at: string };
+  source: { kind: 'build-attestation'; buildId: string; workId: string; sourceSha: string; baseSha: string; producer: string; at: string };
 }
 /** The content address of what runs: identical to the release registry's `manifestHash`, so observed targets match releases directly. */
 export const digestHash = (artifacts: { service: string; digest: string }[]) => sha256([...artifacts].sort((a, b) => a.service.localeCompare(b.service)).map(a => [a.service, a.digest]));
 export const manifestHash = (services: ManifestService[], configurationRevision: number) => sha256({ v: 1, configurationRevision, services: [...services].sort((a, b) => a.service.localeCompare(b.service)).map(s => [s.service, s.digest, s.sourceSha]) });
 
-export function candidateManifest(build: BuildAttestation, environment: { id: string; revision: number }): ReleaseManifest {
+export function candidateManifest(build: BuildAttestation, environment: { id: string; revision: number }): CandidateManifest {
   const services = build.artifacts.map(a => ({ service: a.service, digest: a.digest, sourceSha: build.sourceSha }));
   return { hash: manifestHash(services, environment.revision), digestHash: digestHash(build.artifacts), environment, configurationRevision: environment.revision, services,
     source: { kind: 'build-attestation', buildId: build.id, workId: build.workId, sourceSha: build.sourceSha, baseSha: build.baseSha, producer: build.producer, at: build.at } };

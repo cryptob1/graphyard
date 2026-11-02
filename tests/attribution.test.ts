@@ -11,7 +11,7 @@ import { Delivery, type Release } from '../src/delivery.js';
 import { defineScenario } from '../src/scenarios.js';
 import { currentEvidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { server } from '../src/server.js';
-import { candidateManifest, compatibilitySignature, digestHash, manifestHash, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
+import { candidateManifest, compatibilitySignature, digestHash, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
@@ -299,7 +299,7 @@ test('integration:immutable-attribution-history', async () => {
   // Two observers disagreeing over the same instant is ambiguity, not a decision.
   await observe(f, B); await observe(f, A, { actor: secondObserver, registration: f.refs.secondObserver, epoch: f.secondEpoch });
   const contested = targetIdentity(await observations(), B); assert.equal(contested.ambiguous, true); assert.match(contested.reasons.join(' '), /Overlapping observations/);
-  // Immutable-preview use is visible on every request; the history of each request is readable per work item and never rewritten.
+  // Immutable-preview use is visible on every request; its ledger history is never rewritten.
   assert.equal(fresh.attribution?.targetKind, 'immutable-preview');
   const history = await records(f.w.id);
   assert.ok(history.some(record => record.kind === 'superseded' && record.requestId === f.r.id));
@@ -467,7 +467,7 @@ test('integration:attribution-security-regressions', async () => {
   await assert.rejects(validation.result(worker, report(f, fresh), id()), /trusted collector/);
   const unmeasured: any = await validation.result(collector, report(f, fresh, B, { measurement: 'unknown' }), id()); assert.equal(unmeasured.passed, false);
   assert.ok((await records(f.w.id, 'unsupported-claim-refused')).some(r => r.details.claim === 'collector-target' && /without a measured identity/.test(r.details.reason)), "(await records(f.w.id, 'unsupported-claim-refused')).some(r => r.details.claim === 'collector-target' && /without a meas");
-  // No arbitrary client-controlled lifecycle-state endpoint: attribution exposes reads only, and the ledger refuses edits.
+  // No client-controlled lifecycle-state endpoint exists, and the ledger refuses edits.
   for (const path of ['/api/attribution/reanchor', '/api/attribution/state', '/api/attribution/records', `/api/attribution/work/${f.w.id}`]) assert.equal((await api(path, tokens.operator, { method: 'POST', body: '{"state":"rescheduled"}' })).status, 404, path);
   await assert.rejects(store.pool.query("UPDATE attribution_records SET kind='rescheduled' WHERE kind='reanchor-blocked'"), /append-only/);
   await assert.rejects(store.pool.query('DELETE FROM attribution_reanchors'), /append-only/);
