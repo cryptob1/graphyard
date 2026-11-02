@@ -132,6 +132,8 @@ async function installed() {
   const claudeHome = join(homes, 'claude-b');
   await mkdir(claudeHome, { recursive: true });
   await writeFile(join(claudeHome, '.credentials.json'), JSON.stringify({ claudeAiOauth: { accessToken: 'claude-b-token', refreshToken: 'r', expiresAt: Date.now() + 5 * 3_600_000, subscriptionType: 'max' } }), { mode: 0o600 });
+  // The stubbed fallback starts no Claude process and trusts only this fixture's checkout.
+  await writeFile(join(claudeHome, '.claude.json'), JSON.stringify({ projects: { [root]: { hasTrustDialogAccepted: true } } }));
   const credential = join(credentials, 'worker.token');
   await writeFile(credential, 'worker-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const config = await loadMasterConfig(root);

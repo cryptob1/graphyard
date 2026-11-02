@@ -167,13 +167,6 @@ function connectAccountRoutes(): import('../routes.js').Route[] {
       demand((readers as readonly string[]).includes(actor.role), 'Connect requests are readable by admin, coordinator, slice-lead and reader identities', 403);
       return { connects: (await services.engine.store.transaction(async db => foldConnectEvents((await readConnectEvents(db)).rows))).map(withoutSealed) };
     } },
-  { method: 'GET', path: '/api/agent-registry/connect/hosts', handle: async ({ actor, services }) => {
-      demand((readers as readonly string[]).includes(actor.role), 'Connect hosts are readable by admin, coordinator, slice-lead and reader identities', 403);
-      const rows = (await services.engine.store.transaction(async db => db.query(`SELECT payload->'host' AS host, created_at FROM events WHERE work_id IS NULL AND kind='${connectEventPrefix}host-key' ORDER BY seq DESC`))).rows;
-      const seen = new Map<string, string>();
-      for (const row of rows) if (!seen.has(row.host) && typeof row.host === 'string') seen.set(row.host, row.created_at.toISOString());
-      return { hosts: [...seen.entries()].map(([host, registeredAt]) => ({ host, registeredAt })) };
-    } },
   { method: 'GET', path: '/api/agent-registry/connect/requests', handle: async ({ actor, url, services }) => {
       demand((configurators as readonly string[]).includes(actor.role), 'Pending connect requests are read by the host\'s executor identity', 403);
       const host = url.searchParams.get('host')?.trim() || null;

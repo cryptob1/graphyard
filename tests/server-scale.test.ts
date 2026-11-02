@@ -122,7 +122,7 @@ async function read(path: string, token = tokens.coordinator) {
 
 function dashboard(work: Work[], now: number, overrides: Partial<Dashboard> = {}): Dashboard {
   const noop = () => {};
-  const status = { actor: { id: 'operator', role: 'admin' }, humanOnly: [], executors: { live: 0, liveMs: 60_000, served: [], unserved: [], attention: [] }, delegation: null, github: false, reviewProviders: ['github'], reviewerApps: [], jobs: [], heldJobs: 0, now: iso(now) };
+  const status = { actor: { id: 'operator', role: 'admin' }, humanOnly: [], executors: { live: 0, liveMs: 60_000, served: [], unserved: [], attention: [] }, delegation: null, github: false, reviewProviders: ['github'], jobs: [], heldJobs: 0, now: iso(now) };
   const d: Dashboard = {
     token: 'scale', work, status, error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: now, jobs: [], query: '', setQuery: noop,
@@ -189,26 +189,4 @@ test('unit:snapshot-bounded — the work snapshot sends open items whole and set
   for (const view of views) assert.doesNotThrow(() => renderToStaticMarkup(createElement('div', null, view.render(dashboard(work, now, { view: view.id })))), `the ${view.id} page renders`);
   const page = renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(work, now), item: history.body as Work }));
   assert.match(page, new RegExp(delivered.key));
-});
-
-test('unit:status-degrades-per-section — a failed request is logged with its route and the SQL statement that timed out', async () => {
-  // The server's request error log names the route and the statement that timed out.
-  const strict = new Store(databaseUrl);
-  // The report runs on the report pool (GY-491), under its own statement timeout.
-  strict.reportPool.options.statement_timeout = 1;
-  const slowServer = server(new Engine(strict, 120, 'owner/project'), [{ ...coordinator, token: tokens.coordinator }]);
-  await new Promise<void>(resolve => slowServer.listen(0, '127.0.0.1', resolve));
-  const logged: string[] = [], original = console.error;
-  console.error = (...args: unknown[]) => { logged.push(args.map(String).join(' ')); };
-  try {
-    const response = await fetch(`http://127.0.0.1:${(slowServer.address() as AddressInfo).port}/api/analytics/attribution`, { headers: { Authorization: `Bearer ${tokens.coordinator}` } });
-    assert.equal(response.status, 500);
-  } finally {
-    console.error = original;
-    await new Promise<void>(resolve => slowServer.close(() => resolve()));
-    await strict.close();
-  }
-  const line = logged.find(entry => entry.startsWith('request failed'));
-  assert.ok(line, logged.join('\n'));
-  assert.match(line, /^request failed GET \/api\/analytics\/attribution: canceling statement due to statement timeout \(statement: /);
 });

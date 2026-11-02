@@ -42,7 +42,7 @@ test('unit:automatic-reviews-run-in-parallel — with run.reviewerProfile set an
     const parallel = await fleet({ name: 'claude-reviewer', agentName: 'claude-reviewer', kind: 'claude' }, 'claude-reviewer');
     try {
       const more = [requested(4), requested(5), requested(6)];
-      const results = await Promise.allSettled(more.map(item => launchReview(parallel.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: parallel.run, mint: parallel.mint, requestId: item.autoDispatch!.review!.id })));
+      const results = await Promise.allSettled(more.map(item => launchReview(parallel.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: parallel.run, registerLaunch: parallel.registerLaunch, requestId: item.autoDispatch!.review!.id })));
       assert.deepEqual(results.map(result => result.status === 'rejected' ? String(result.reason) : 'launched'), ['launched', 'launched', 'launched']);
       assert.equal(new Set(starts(parallel.calls)).size, 3);
     } finally { await parallel.cleanup(); }
@@ -80,7 +80,7 @@ test('unit:settled-reviewer-releases-name — a reviewer whose request settled b
     host.agents[0].agent_status = 'idle';
     assert.deepEqual(host.agents.map(agent => [agent.name, agent.pane_id, agent.agent_status]), [['claude-reviewer', pane, 'idle']]);
     // While it sits there it holds the only name: a launch on it is refused.
-    await assert.rejects(launchReview(host.root, second, 'claude-reviewer', [...host.agents], new Date().toISOString(), { run: host.run, mint: host.mint, requestId: second.autoDispatch!.review!.id }), /claude-reviewer is already visible in Herdr/);
+    await assert.rejects(launchReview(host.root, second, 'claude-reviewer', [...host.agents], new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: second.autoDispatch!.review!.id }), /claude-reviewer is already visible in Herdr/);
 
     // The next dispatcher pass closes the settled session's pane and launches the next review on the name, in that one tick.
     host.refuseClose.clear();
@@ -107,7 +107,7 @@ test('unit:automatic-reviews-run-in-parallel — launches answering different re
   try {
     // Six launches at once, each handed the same empty inventory: the ledger's pending sessions, read under its lock, are what count.
     const items = [1, 2, 3, 4, 5, 6].map(n => requested(n));
-    const results = await Promise.allSettled(items.map(item => launchReview(host.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: host.run, mint: host.mint, requestId: item.autoDispatch!.review!.id })));
+    const results = await Promise.allSettled(items.map(item => launchReview(host.root, item, 'claude-reviewer', [], new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: item.autoDispatch!.review!.id })));
     assert.equal(results.filter(result => result.status === 'fulfilled').length, automaticReviewerConcurrency, 'exactly the default number launch');
     for (const result of results.filter(result => result.status === 'rejected')) assert.match(String((result as PromiseRejectedResult).reason), /profile claude-reviewer is at its concurrency limit \(4 running, limit 4/);
     assert.equal(host.agents.length, automaticReviewerConcurrency);

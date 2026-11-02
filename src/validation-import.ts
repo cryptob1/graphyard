@@ -218,7 +218,7 @@ export const sealRoles = ['admin', 'operator-agent'] as const;
 export type SealAuthority = { mayseal: true; role: string } | { mayseal: false; role: string; needed: string[] };
 /**
  * GY-1882: whether `actor` may seal, answered without sealing anything or writing an event, so a
- * caller checks its credential before it relies on a seal (`GET /api/validation/import/seal-authority`).
+ * sealing checks the caller's credential before writing a seal.
  */
 export const sealAuthority = (actor: Principal): SealAuthority =>
   (sealRoles as readonly string[]).includes(actor.role) ? { mayseal: true, role: actor.role } : { mayseal: false, role: actor.role, needed: [...sealRoles] };

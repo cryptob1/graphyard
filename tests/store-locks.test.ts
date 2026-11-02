@@ -1,3 +1,4 @@
+import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
@@ -270,9 +271,9 @@ test('integration:index-matches-documents — the index equals the documents aft
   await check('created');
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID()); await check('released');
   assert.ok((await store.pool.query('SELECT due_at FROM work_index WHERE id=$1', [w.id])).rows[0].due_at, 'a pending dispatch row is due');
-  const claimed = await engine.claimNextAction(executor, { host: 'host-1', kinds: ['dispatch'], work: w.key }, randomUUID());
+  const claimed = await claimFixture(store, executor, { host: 'host-1', kinds: ['dispatch'], work: w.key });
   assert.ok(claimed.action); await check('action claimed');
-  await engine.settleClaimedAction(executor, claimed.action!.id, { result: 'failed', reason: 'no worker free' }, randomUUID()); await check('action failed');
+  await settleFixture(store, executor, claimed.action!.id, { result: 'failed', reason: 'no worker free' }); await check('action failed');
   w = await engine.execute(worker, 'claim', w.id, {}, randomUUID()); await check('leased');
   assert.equal((await store.pool.query('SELECT owner FROM work_index WHERE id=$1', [w.id])).rows[0].owner, worker.id);
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: '/tmp/indexed', branch: 'graphyard/indexed' }, randomUUID());

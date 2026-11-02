@@ -1,13 +1,13 @@
-import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { mkdir, readFile, rm, realpath, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { dirname, basename, isAbsolute, join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, assertOutsideWorktrees, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, loadStoredMasterConfig, markReprompted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerIdentitySchema, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerIdentity, type ReviewerProfile } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, atomicPrivateWrite, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, loadStoredMasterConfig, markReprompted, onSelectedSession, readCredentialFile, prepareSessionHarness, privateFile, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerProfile } from './master.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { sessionConfinement } from './master/launch.js';
 import { credentialMaskFor, type CredentialMask } from './master/confinement.js';
@@ -18,9 +18,7 @@ import { withVerificationPath } from './master/verification-slots.js';
 import { findingLocation } from './review-cap.js';
 import { writeReviewBinding } from './review-post.js';
 import type { FleetProbe } from './fleet.js';
-/** The most threads one pull-request-era launch listed, and the most comment IDs one thread's record kept; bounds the fields old ledger records still carry. */
-const listedThreadLimit = 100, threadAliasLimit = 50;
-import { carriedApproval, declaredPostDeploy, implementerIdentities, pinnedCases, type Work } from './model.js';
+import { declaredPostDeploy, implementerIdentities, pinnedCases, type Work } from './model.js';
 import { dataDirectory, removeSessionCheckout, type FilesystemProbe, type SessionCheckout } from './install/worktree-root.js';
 import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { sessionLiveness, type RuntimeSession, type SessionHandle } from './model/sessions.js';
@@ -34,18 +32,9 @@ import { conflictingVerdictStates } from './model/review-conflict.js';
 import type { ControlPlaneReviewLaunch } from './model/post-merge-review.js';
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
-export const reviewerCredentialSchema = z.object({
-  appId: z.number().int().positive(),
-  installationId: z.number().int().positive(),
-  slug: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/),
-  repository: z.string().regex(/^[\w.-]+\/[\w.-]+$/),
-  privateKey: z.string().min(64).max(20_000),
-}).strict();
-export type ReviewerCredential = z.infer<typeof reviewerCredentialSchema>;
-
 /** The most BLOCKING lines of a post-merge verdict that are each filed as their own follow-up item (GY-1525 AC-4). */
 export const postMergeFindingsMax = 100;
-const currentReviewRecordSchema = z.object({
+export const reviewRecordSchema = z.object({
   id: z.string().uuid(),
   key: z.string().min(1).max(40),
   pr: z.number().int().positive(),
@@ -95,31 +84,6 @@ const currentReviewRecordSchema = z.object({
    * when nothing was started.
    */
   launching: z.literal(true).optional(),
-  // Pull-request-era thread fields (GY-2010): records written before then still load; nothing writes them.
-  threadReadFailure: z.string().min(1).max(500).optional(),
-  threadsListed: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
-  threadAliases: z.record(z.string().min(1).max(200), z.array(z.string().min(1).max(200)).max(threadAliasLimit * 2)).optional(),
-  unaccounted: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
-  threadResolution: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
-    overridden: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(), outdated: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit * 2),
-    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1).max(50), implicit: z.boolean().optional() }).optional(),
-  /** The threads this session's approval named on its `Follow-up threads:` line: nits, each answered and resolved, nothing filed (GY-166, GY-1249). `item`, `findings`, `releasedAt`, `keyReuse`, `clientError` and `stoppedAt` appear only on records from before GY-1249. */
-  followUps: z.object({ at: z.string().min(1).max(40), reviewId: z.number().int().positive(), named: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
-    threads: z.array(z.object({ id: z.string().min(1).max(200), author: z.string().max(200), path: z.string().max(1000), line: z.number().int().nullable(), outdated: z.boolean(), excerpt: z.string().max(300), createdAt: z.string().max(40).optional(), url: z.string().max(1000).optional() }).strict()).max(listedThreadLimit),
-    findings: z.array(z.object({ path: z.string().min(1).max(1000).nullable(), line: z.number().int().nullable(), text: z.string().min(1).max(500) }).strict()).max(50).optional(),
-    /** The observation (the control plane's `at`) the loop last checked the resolved threads against, and those GitHub showed reopened since. */
-    observedAt: z.string().min(1).max(40).optional(), reopened: z.array(z.string().min(1).max(200)).max(listedThreadLimit).optional(),
-    item: z.string().min(1).max(40).optional(), replied: z.array(z.string().min(1).max(200)).max(listedThreadLimit), resolved: z.array(z.string().min(1).max(200)).max(listedThreadLimit),
-    refused: z.array(z.string().min(1).max(300)).max(100), failure: z.string().min(1).max(500).optional(), attempts: z.number().int().min(1),
-    /** The approval's body was read and classified: `named` is its Follow-up line. Until then every listed thread stays set aside (followUpThreadIds). */
-    classified: z.boolean().optional(),
-    /** When the loop saw the approval of a failed filing stop standing: the record is pinned until then (pinnedSessionRecords). */
-    releasedAt: z.string().min(1).max(40).optional(),
-    /** How a create refused as a key reuse was resolved (GY-598): linked to the approval's existing item, or filed under its body key. */
-    keyReuse: z.enum(['linked', 'rekeyed']).optional(),
-    /** The unchanged 4xx error the filing's consecutive attempts failed with, and when that run stopped its retries (retry-stop.ts). */
-    clientError: z.object({ error: z.string().min(1).max(500), count: z.number().int().min(1) }).strict().optional(), stoppedAt: z.string().min(1).max(40).optional() }).optional(),
-  /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
   criteriaOnly: z.literal(true).optional(),
   /** Authoritative task inputs carried by this launch, retained verbatim for its retry. */
   reviewInputs: z.object({
@@ -130,8 +94,7 @@ const currentReviewRecordSchema = z.object({
   reviewRound: z.object({ previousHead: sha40.optional(), changesRequested: z.number().int().nonnegative(),
     /** The findings verbatim of the change request the prompt deltas from (GY-1988), when the item's observation — not the ledger, which keeps no body — holds that round: the re-review opens with one Earlier: line per finding. */
     earlierFindings: z.array(z.string().min(1).max(300)).max(10).optional(),
-    /** The approval of this head that Graphyard last withdrew for leaving listed threads unaccounted, and those threads (GY-959). */
-    withdrawn: z.object({ reviewId: z.number().int().positive(), threads: z.array(z.string().min(1).max(200)).min(1).max(listedThreadLimit) }).strict().optional() }).strict().optional(),
+  }).strip().optional(),
   /** Control-plane mode (GY-1525): the verdict posts to the API, bound by a one-time token whose sha256 alone is kept here, under the launch the control plane registered. */
   mode: z.literal('control-plane').optional(),
   verdictTokenHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
@@ -140,13 +103,7 @@ const currentReviewRecordSchema = z.object({
   postMerge: z.literal(true).optional(),
   /** What the loop did with a post-merge verdict: the follow-up item filed per BLOCKING finding, the nits kept in project memory, and a filing failure to retry. `memory` is set only once the write succeeds so a failed write stays retryable. */
   postMergeFollowUps: z.object({ at: z.string().min(1).max(40), filed: z.array(z.object({ key: z.string().min(1).max(40), finding: z.string().min(1).max(300), index: z.number().int().min(0).optional() }).strict()).max(postMergeFindingsMax), through: z.number().int().min(0).optional(), pending: z.number().int().min(1).optional(), memory: z.number().int().min(0).optional(), failure: z.string().min(1).max(500).optional() }).strict().optional(),
-}).strict();
-// Old ledgers load without reviving the retired bot round (GY-3016).
-export const reviewRecordSchema = z.preprocess(value => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
-  const { mechanicalFix: _plan, freshRead: _read, ...record } = value as Record<string, unknown>;
-  return record;
-}, currentReviewRecordSchema);
+}).strip();
 export type ReviewRecord = z.infer<typeof reviewRecordSchema>;
 // The bound is enforced on write (boundSessionLedger), never on read: a ledger written before the
 // bound existed, or by hand, is still read, and the next write brings it inside the bound.
@@ -345,10 +302,7 @@ export async function updateReviewLedger<T>(root: string, change: (ledger: Revie
 async function saveChangedRecords(root: string, mine: ReviewRecord[], before: Map<string, string>, lock?: ReviewLedgerLockOptions) {
   const changed = new Map(mine.filter(record => JSON.stringify(record) !== before.get(record.id)).map(record => [record.id, record]));
   if (!changed.size) return;
-  // A follow-up filing this pass left as it read it is taken from the ledger as it stands: another pass
-  // may have filed it since, under the approval's lock (fileApprovedFollowUps), and saved it at once.
-  const unchangedFiling = (record: ReviewRecord) => { const was = before.get(record.id); return was !== undefined && JSON.stringify(JSON.parse(was).followUps) === JSON.stringify(record.followUps); };
-  await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(record => { const mineRecord = changed.get(record.id); return !mineRecord ? record : unchangedFiling(mineRecord) ? { ...mineRecord, followUps: record.followUps } : mineRecord; }); }, lock);
+  await updateReviewLedger(root, ledger => { ledger.reviews = ledger.reviews.map(record => changed.get(record.id) ?? record); }, lock);
 }
 
 /** A reservation whose launcher never confirmed the runtime within this long died mid-launch. */
@@ -390,60 +344,11 @@ export function vanishedSettledSession(handle: Pick<SessionHandle, 'id' | 'pane'
   return records.some(record => record.state !== 'pending' && record.requestId === handle.id && record.agentName === handle.agentName);
 }
 
-// Reviewer credentials live beside the coordinator credential, outside every worktree.
+// Reviewer session bindings live beside the coordinator credential, outside every worktree.
 export function reviewerCredentialDirectory(config?: Pick<MasterConfig, 'credentialFile'>, input?: string) {
   if (input) return resolve(input);
   return config ? resolve(config.credentialFile, '../..', 'reviewers') : resolve(process.env.GRAPHYARD_CONFIG_HOME ?? resolve(homedir(), '.config/graphyard'), 'reviewers');
 }
-export async function readReviewerCredential(root: string, file: string): Promise<ReviewerCredential> {
-  await privateFile(file);
-  await assertOutsideWorktrees(root, file, 'Reviewer credential file');
-  return reviewerCredentialSchema.parse(JSON.parse(await readFile(file, 'utf8')));
-}
-
-function assertReviewerKey(privateKey: string) {
-  if (!/^-----BEGIN (RSA )?PRIVATE KEY-----/m.test(privateKey)) throw new Error('The reviewer App private key must be the PEM GitHub issued for that App');
-  try { createSign('RSA-SHA256').update('graphyard').sign(privateKey); }
-  catch { throw new Error('The reviewer App private key is not a usable RSA key'); }
-}
-export function appJwt(appId: number, privateKey: string, now = Date.now()) {
-  const issued = Math.floor(now / 1000);
-  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString('base64url');
-  const unsigned = `${encode({ alg: 'RS256', typ: 'JWT' })}.${encode({ iat: issued - 60, exp: issued + 540, iss: String(appId) })}`;
-  return `${unsigned}.${createSign('RSA-SHA256').update(unsigned).sign(privateKey, 'base64url')}`;
-}
-
-// The reviewer session receives an installation token scoped to one repository and to the two
-// permissions a review needs. GitHub caps installation tokens at one hour; anything longer,
-// broader, or able to write code is refused before it reaches a session.
-export async function mintReviewerToken(credential: ReviewerCredential, repository: string, _fetcher: typeof fetch = fetch, _now = Date.now()): Promise<{ token: string; expiresAt: string; permissions: Record<string, string> }> {
-  void credential; void repository;
-  // GY-2010: GitHub App installation tokens are gone; reviews post through the control plane.
-  throw new Error('GitHub App reviewer tokens are removed; reviews post through the control-plane review verdict');
-}
-
-export async function bindReviewer(root: string, input: { appId: number; installationId: number; slug: string; privateKey: string; credentialDirectory?: string },
-  verify: (credential: ReviewerCredential) => Promise<{ repository: string; permissions: Record<string, string> }>) {
-  const config = await loadStoredMasterConfig(root);
-  if (input.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App; an identity cannot independently review the work it gates');
-  assertReviewerKey(input.privateKey);
-  const candidate = reviewerCredentialSchema.parse({ appId: input.appId, installationId: input.installationId, slug: input.slug, repository: config.repository, privateKey: input.privateKey });
-  const observed = await verify(candidate);
-  if (observed.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('The reviewer App installation does not cover the managed repository');
-  if (observed.permissions.contents === 'write' || observed.permissions.administration || observed.permissions.checks === 'write') throw new Error('The reviewer App installation can write code, checks, or administration; a reviewer identity must not');
-  const requested = reviewerCredentialDirectory(config, input.credentialDirectory);
-  if (requested === resolve(root) || requested.startsWith(`${resolve(root)}/`)) throw new Error('Reviewer credentials must be stored outside the managed repository');
-  await mkdir(requested, { recursive: true, mode: 0o700 });
-  const directory = await realpath(requested);
-  await assertOutsideWorktrees(root, directory, 'Reviewer credential directory');
-  const credentialFile = resolve(directory, `${config.repository.replace('/', '-')}-${input.appId}.json`);
-  await atomicPrivateWrite(credentialFile, candidate);
-  const reviewer: ReviewerIdentity = reviewerIdentitySchema.parse({ appId: input.appId, installationId: input.installationId, slug: input.slug, credentialFile, boundAt: new Date().toISOString() });
-  await atomicPrivateWrite(resolve(root, '.graphyard/master.json'), { ...config, reviewer });
-  return { reviewer: { appId: reviewer.appId, installationId: reviewer.installationId, slug: reviewer.slug, credentialFile: reviewer.credentialFile }, controlPlaneAppId: config.githubAppId,
-    identity: `${reviewer.slug}[bot]`, permissions: observed.permissions, next: 'Add a reviewer profile with master reviewer add, then launch a review with master review GY-N' };
-}
-
 export async function saveReviewerProfile(root: string, profileInput: unknown) {
   const profile = reviewerProfileSchema.parse(profileInput);
   const config = await loadStoredMasterConfig(root);
@@ -520,11 +425,7 @@ export function reviewHistory(records: ReviewRecord[], binding: Pick<ReviewBindi
   // The findings ride only with the observation's round (GY-1988): a ledger verdict keeps no body, so its head deltas without them.
   const earlierFindings = previousHead && earlier && earlier.head === previousHead && earlier.findings.length
     ? earlier.findings.slice(0, 10).map(finding => finding.slice(0, 300)) : undefined;
-  // The latest approval of this very head that Graphyard withdrew as incomplete: the relaunch is told why (GY-959).
-  const incomplete = records.filter(record => record.key === binding.key && record.pr === binding.pr && record.sha === binding.sha && record.verdict?.state === 'DISMISSED' && record.unaccounted?.length)
-    .sort((a, b) => (Date.parse(a.verdict!.submittedAt) || 0) - (Date.parse(b.verdict!.submittedAt) || 0)).at(-1);
-  return { ...(previousHead ? { previousHead } : {}), ...(earlierFindings ? { earlierFindings } : {}), changesRequested: Math.max(recorded, carried),
-    ...(incomplete ? { withdrawn: { reviewId: incomplete.verdict!.reviewId, threads: incomplete.unaccounted! } } : {}) };
+  return { ...(previousHead ? { previousHead } : {}), ...(earlierFindings ? { earlierFindings } : {}), changesRequested: Math.max(recorded, carried) };
 }
 
 /**
@@ -551,11 +452,9 @@ export function reviewRoundSection(sha: string, history?: ReviewHistory) {
   const delta = history.previousHead && history.earlierFindings?.length
     ? `You already reviewed an earlier head of this item, ${history.previousHead}: this round judges only what changed since then. Read the change with git diff ${history.previousHead} ${sha}. Your earlier round named these findings, verbatim: ${history.earlierFindings.map(finding => `- ${finding}`).join(' ')} `
       + `Start the review body with one line per earlier finding, exactly "Earlier: <finding> — FIXED" when this head fixes it or "Earlier: <finding> — NOT FIXED" when it does not. Judge only lines that changed since ${history.previousHead}: a new finding on code unchanged since ${history.previousHead} goes on a "Nit: PATH:LINE — FINDING" line — an advisory note kept with the verdict body and in project memory, not a change request and not a new item. `
-    : history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch --no-write-fetch-head origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}, plus the still-unresolved review threads. `
+    : history.previousHead ? `You already reviewed an earlier head of this pull request, ${history.previousHead}. This round reviews only what changed since then: git fetch --no-write-fetch-head origin ${history.previousHead} ${sha} && git diff ${history.previousHead}..${sha}. `
       + 'Do not raise findings on code that is unchanged since that head unless an acceptance criterion is unmet. ' : '';
-  return delta
-    + (history.withdrawn ? `A previous approval of this head, review ${history.withdrawn.reviewId}, was withdrawn by Graphyard because its Resolved, Follow-up and Overridden threads lines did not account for listed review thread${history.withdrawn.threads.length === 1 ? '' : 's'} ${history.withdrawn.threads.join(' ')}: a thread described only in prose, or named by an ID that is neither its thread ID nor one of its listed comment IDs, is not accounted for. `
-      + `Name each of ${history.withdrawn.threads.length === 1 ? 'that thread' : 'those threads'} by its thread ID on exactly one of those closing lines. ` : '');
+  return delta;
 }
 
 
@@ -654,19 +553,6 @@ export function cliUnreachableRefusal(config: Partial<Pick<MasterConfig, 'cliPat
 }
 
 /**
- * GY-866: an interactive approver's or escalation handler's own directory under the managed
- * worktree root, never the coordinator checkout, anchored like a reviewer's so `gh` and `git`
- * reads reach the repository from where it starts. Its launch hands it the coordinator root in
- * GRAPHYARD_REPOSITORY_ROOT, which the CLI resolves the `graphyard master` commands its request
- * runs from, since the directory holds no installation of its own.
- */
-export async function coordinationCheckout(root: string, config: MasterConfig, key: string, sha: string | undefined, filesystem?: FilesystemProbe) {
-  const checkout = await allocateManagedCheckout(root, config, 'approval', key, sha ?? '0'.repeat(40), randomUUID(), filesystem);
-  await anchorSessionCheckout(root, checkout.directory);
-  return checkout;
-}
-
-/**
  * Control-plane mode (GY-1525): the prompt names the head and base SHAs and reads them from the
  * shared object store the session's checkout is anchored to; nothing names a pull request, and the
  * `review post` command needs none. A post-merge review judges the delivered merge commit against
@@ -742,7 +628,7 @@ function reviewAutonomySection() {
     + reviewRecoverySection()
     + `Record a genuine blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:). After posting, stop; Graphyard closes the session.`;
 }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, scenarioRequirements: Work['scenarioRequirements'] = []) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _legacy?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, scenarioRequirements: Work['scenarioRequirements'] = []) {
   memory ??= projectMemory;
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification, scenarioRequirements);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
@@ -762,7 +648,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + 'Read-only: no edits, Git mutations, work claims or evidence submissions; do not run the project\'s build, tests, or servers. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
     + `Posting that review is granted to this session's role, not a permission to request: post without asking for confirmation. `
-    + `GH_CONFIG_DIR: reviewer credential, expires within the hour; repository reads and reviews only. `
+    + `GH_CONFIG_DIR holds this launch's review binding and one-time verdict token. `
     + reviewAutonomySection();
 }
 
@@ -868,15 +754,6 @@ const launcherPath = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.u
 export function reviewPostSection(cliPath: string, changes: string) {
   return `Post exactly one verdict, only through Graphyard, with the review body on standard input: node ${cliPath} review post --event APPROVE <<'EOF' … EOF (use --event REQUEST_CHANGES instead ${changes}). `
     + 'It binds the verdict to the launched head and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. Never post a review any other way. ';
-}
-
-async function writeReviewerSession(directory: string, token: string) {
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  const { writeFile, chmod } = await import('node:fs/promises');
-  const file = resolve(directory, 'hosts.yml');
-  await writeFile(file, `github.com:\n    oauth_token: ${token}\n    git_protocol: https\n`, { mode: 0o600, flag: 'wx' });
-  await chmod(file, 0o600);
-  return file;
 }
 
 /**
@@ -991,7 +868,6 @@ export async function clearReviewerProfileRefusal(config: Pick<MasterConfig, 'cr
 
 export async function launchReview(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: ChildRun;
-  mint?: (credential: ReviewerCredential, repository: string) => Promise<{ token: string; expiresAt: string }>;
   now?: () => Date;
   /** The control-plane review request this launch answers; recorded so the request is never launched twice. */
   requestId?: string;
@@ -1018,22 +894,9 @@ export async function launchReview(root: string, work: Work, profileName: string
   const now = dependencies.now ?? (() => new Date());
   // The automatic profile's unset concurrency reads as its default here too (GY-1072), so the launch names and counts its sessions as the dispatcher does.
   const config = await loadMasterConfig(root);
-  // Control-plane mode (GY-1525): a head the control plane observed itself, or a delivered merge
-  // commit, is reviewed without GitHub — no reviewer App, no token, no threads; the verdict posts to
-  // the API as the launch's one-time token.
   const postMerge = dependencies.postMerge;
   const product = !!dependencies.product;
   if (product && postMerge) throw new Error('A product review judges a candidate head, never a delivered merge commit');
-  const plane = !!postMerge || work.observation?.source === 'control-plane';
-  if (product && !plane) throw new Error(`${work.key} was not observed by the control plane; a product review launches for a control-plane head`);
-  // No preview is required: the product prompt walks the head's preview when one runs, and otherwise
-  // walks the app as currently served against the head's diff — a repository with no previewable
-  // application must still reach its product review (GY-2989 rework: the trial a head would serve
-  // by cannot run while the review gate holds for this very review).
-  // A GitHub-backed launch (token mint, commit and thread reads) is deferred while the gh login is rate-limited, before any record is reserved.
-  if (!config.reviewer && !plane) throw new Error('Register the reviewer GitHub App with master reviewer setup or master reviewer bind before launching a review');
-  // The App is narrowed once, for the launch closure below as much as for this line.
-  const reviewerApp = config.reviewer ?? null;
   const profile: ReviewerProfile | undefined = profileName ? config.reviewers.find(item => item.name === profileName) : config.reviewers.length === 1 ? config.reviewers[0] : undefined;
   if (!profile) {
     // GY-1850: a launch naming a profile no configured one carries is a configuration fault, not a
@@ -1058,21 +921,16 @@ export async function launchReview(root: string, work: Work, profileName: string
   // (the missing name written, or a replacement one the dispatcher now selects), so the fault is over.
   if (await readReviewerProfileRefusal(config)) await clearReviewerProfileRefusal(config);
   const binding = postMerge ? await postMergeBinding(root, work, postMerge, dependencies.run) : assertReviewCandidate(work, observedAt, dependencies.request);
-  if (reviewerApp && binding.author.toLowerCase() === `${reviewerApp.slug}[bot]`.toLowerCase()) throw new Error('The reviewer App authored this pull request; an identity cannot independently review its own work');
-  // The reviewer principal a control-plane launch registers: the bound reviewer App's bot login
-  // (`${slug}[bot]`, the identity GitHub shows for the App) when one is configured, else the
-  // profile's agent name, which every session of the profile posts as. The launch route accepts
-  // exactly this shape (server/review-verdict.ts reviewLaunchBodySchema, GY-2008).
-  const reviewerIdentity = reviewerApp ? `${reviewerApp.slug}[bot]` : profile.agentName;
-  if (plane && !postMerge && implementerIdentities(work).includes(reviewerIdentity)) throw new Error(`${reviewerIdentity} implemented ${work.key}; an identity cannot independently review its own work`);
-  const verdictToken = plane ? randomBytes(32).toString('hex') : null;
-  const verdictTokenHash = verdictToken ? createHash('sha256').update(verdictToken, 'utf8').digest('hex') : null;
+  const reviewerIdentity = profile.agentName;
+  if (!postMerge && implementerIdentities(work).includes(reviewerIdentity)) throw new Error(`${reviewerIdentity} implemented ${work.key}; an identity cannot independently review its own work`);
+  const verdictToken = randomBytes(32).toString('hex');
+  const verdictTokenHash = createHash('sha256').update(verdictToken, 'utf8').digest('hex');
   // One request, one session (GY-124). Under the ledger lock, as one step: records for a superseded
   // head are closed, the launch is refused when the request or the candidate already has a pending
   // record or a Herdr session, and otherwise a pending record is reserved for this session before
   // anything is started, so a second launcher — in this process or another — finds it and stands down.
   const id = randomUUID();
-  const sessionDirectory = resolve(reviewerApp ? dirname(reviewerApp.credentialFile) : reviewerCredentialDirectory(config), 'sessions', id);
+  const sessionDirectory = resolve(reviewerCredentialDirectory(config), 'sessions', id);
   const reservation = await updateReviewLedger(root, async ledger => {
     // A record for a superseded head never blocks a review request for the current head: every
     // such record is closed as cancelled with the reason on the record, and this launch proceeds.
@@ -1113,12 +971,12 @@ export async function launchReview(root: string, work: Work, profileName: string
     // Read before this launch's own record joins the ledger: the rounds before this one. A control-plane
     // re-review takes its earlier round from the item's own observation (GY-1988): its verdicts are
     // recorded there, never on the ledger by pull-request number, and only there do its findings live.
-    const reviewRound = reviewHistory(ledger.reviews, binding, reviewerIdentity, plane && !postMerge ? earlierChangeRequest(work.observation, binding.sha) : null);
+    const reviewRound = reviewHistory(ledger.reviews, binding, reviewerIdentity, !postMerge ? earlierChangeRequest(work.observation, binding.sha) : null);
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound, reviewInputs: { criteria: work.criteria, scenarioRequirements: work.scenarioRequirements },
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}),
       // Only the token's hash is ever recorded (GY-1525); the token itself lives in the session's binding alone.
-      ...(plane ? { mode: 'control-plane', verdictTokenHash, ...(postMerge ? { postMerge: true } : {}) } : {}) });
+      mode: 'control-plane', verdictTokenHash, ...(postMerge ? { postMerge: true } : {}) });
     ledger.reviews.push(record);
     return { record };
   });
@@ -1148,36 +1006,26 @@ export async function launchReview(root: string, work: Work, profileName: string
       // refused before a credential is minted, a checkout allocated or a launch registered.
       const cliRefusal = cliUnreachableRefusal(config, credentialMaskFor(config, {}));
       if (cliRefusal) throw new LauncherUnavailableError(cliRefusal);
-      let credential: ReviewerCredential | null = null;
-      if (reviewerApp && !plane) {
-        credential = await readReviewerCredential(root, reviewerApp.credentialFile);
-        if (credential.appId !== reviewerApp.appId || credential.installationId !== reviewerApp.installationId || credential.slug !== reviewerApp.slug) throw new Error('The stored reviewer credential does not match the recorded reviewer identity; rerun master reviewer bind');
-        if (credential.appId === config.githubAppId) throw new Error('The reviewer App must be a different GitHub App from the Graphyard control-plane App');
-      }
-      const mint = dependencies.mint ?? ((value: ReviewerCredential, repository: string) => mintReviewerToken(value, repository));
       // Before a token exists: the one place this session may check the head out, under the managed
       // worktree root — durable storage with room left, outside every worktree.
       const checkout = await allocateManagedCheckout(root, config, 'review', binding.key, binding.sha, id, dependencies.filesystem);
       await anchorSessionCheckout(root, checkout.directory);
       const discard = () => removeSessionCheckout(root, dirname(checkout.directory), checkout.directory).catch(() => {});
-      let minted: { token: string; expiresAt: string };
-      // A control-plane session holds no GitHub token: its directory carries the binding alone, and its launch expires with the token hour.
-      if (plane) { minted = { token: '', expiresAt: new Date(now().getTime() + 3_600_000).toISOString() }; try { await mkdir(sessionDirectory, { recursive: true, mode: 0o700 }); } catch (error) { await discard(); throw error; } }
-      else try { minted = await mint(credential!, config.repository); await writeReviewerSession(sessionDirectory, minted.token); }
-      catch (error) { await discard(); throw error; }
+      const minted = { expiresAt: new Date(now().getTime() + 3_600_000).toISOString() };
+      try { await mkdir(sessionDirectory, { recursive: true, mode: 0o700 }); } catch (error) { await discard(); throw error; }
       // The launch's own binding, from that same read, beside the credential (GY-1492): review post
       // checks the verdict against it. A launch that cannot write it starts nothing and keeps no credential.
       try {
         await writeReviewBinding(sessionDirectory, { repository: config.repository, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, criteriaOnly: true,
-          ...(plane ? { mode: 'control-plane' as const, head: binding.sha, baseTip: binding.baseSha, verdictToken: verdictToken!,
+          mode: 'control-plane' as const, head: binding.sha, baseTip: binding.baseSha, verdictToken: verdictToken!,
             // A control-plane re-review (GY-1988): the head it deltas from, and the paths its earlier findings named, so review post can judge a BLOCKING: line against the hunks changed since that head.
-            ...(plane && !postMerge && reservation.record.reviewRound?.previousHead ? { previousHead: reservation.record.reviewRound.previousHead,
-              ...(earlierBindingPaths(reservation.record.reviewRound.earlierFindings).length ? { earlierPaths: earlierBindingPaths(reservation.record.reviewRound.earlierFindings) } : {}) } : {}) } : {}) });
+            ...(!postMerge && reservation.record.reviewRound?.previousHead ? { previousHead: reservation.record.reviewRound.previousHead,
+              ...(earlierBindingPaths(reservation.record.reviewRound.earlierFindings).length ? { earlierPaths: earlierBindingPaths(reservation.record.reviewRound.earlierFindings) } : {}) } : {}) });
       } catch (error) { await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
       // The control plane registers the launch before the session starts (GY-1525): the reviewer
       // principal, head, base tip and token hash. A launch it refuses starts nothing.
       let registered: { launch: string } | null = null;
-      if (plane) {
+      {
         try { registered = await (dependencies.registerLaunch ?? registerControlPlaneLaunch(config))(work, { reviewer: reviewerIdentity, head: binding.sha, baseTip: binding.baseSha, tokenHash: verdictTokenHash!, expiresAt: minted.expiresAt, postMerge: !!postMerge, ...(product ? { product: true } : {}) }); }
         catch (error) { await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error; }
       }
@@ -1194,7 +1042,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         // The harness follows the account's runtime, so a cross-runtime failover keeps its role rules.
         const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, pr: binding.pr, checkout: checkout.worktree });
         await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
-        const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, ...(plane ? { GRAPHYARD_URL: config.url } : {}) };
+        const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_REVIEW: `${binding.key}@${binding.sha}`, GRAPHYARD_URL: config.url };
         startedTab = true;
         const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
           '--label', `${binding.key} review · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], dependencies.run));
@@ -1203,7 +1051,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) } : null, reservation.record.reviewInputs?.scenarioRequirements), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) }, reservation.record.reviewInputs?.scenarioRequirements), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -1235,7 +1083,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         await rm(sessionDirectory, { recursive: true, force: true }); await discard(); throw error;
       }
       return { review: record.id, requestId: record.requestId ?? null, work: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, profile: profile.name, agentName,
-        pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, ...(plane ? { mode: 'control-plane' as const, launch: registered?.launch ?? null } : {}),
+        pane: record.pane, checkout: checkout.directory, reviewer: reviewerIdentity, tokenExpiresAt: minted.expiresAt, approvals: launch.plan.approvals, delivery, mode: 'control-plane' as const, launch: registered?.launch ?? null,
         account: selected.account ? { environment: selected.account.name, kind: selected.account.kind, quota: selected.health?.quota ?? null, skipped: selected.skipped } : null,
         recorded: 'the request is recorded; master status reconciles the verdict and closes the session' };
     });
@@ -1444,7 +1292,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   const ledger = await readReviewLedger(root);
   if (!ledger.reviews.length) return { reviews: ledger.reviews, changed: 0, released: [] as { pane: string; agentName: string }[] };
   const before = new Map(ledger.reviews.map(record => [record.id, JSON.stringify(record)]));
-  const reviewer = config.reviewer ? `${config.reviewer.slug}[bot]` : 'control-plane';
+  const reviewer = 'control-plane';
   const readVerdict = dependencies.observe;
   // A substituted read that fails is that read's failure, not the pass's: the record stays as it was
   // for the next pass, and the rest of the pass makes no further read, which would fail the same way.
@@ -1482,7 +1330,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
     }
     const answered = new Set(ledger.reviews.filter(entry => entry.id !== record.id && entry.key === record.key && entry.sha === record.sha && entry.verdict).map(entry => entry.verdict!.reviewId));
     // A control-plane session's verdict is on the item (`reviewLaunch.verdict`, server/review-verdict.ts).
-    const observed = record.verdict ?? (record.mode === 'control-plane' ? controlPlaneVerdict(record, dependencies.work) : await observe(record, reviewer, answered));
+    const observed = record.verdict ?? (readVerdict ? await observe(record, reviewer, answered) : controlPlaneVerdict(record, dependencies.work));
     if (observed === unread) continue;
     const verdict = observed ?? undefined;
     const refusedLaunch = !verdict && record.mode === 'control-plane' ? controlPlaneRefusal(record, dependencies.work) : null;
@@ -1582,84 +1430,12 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
   return { reviews: changed && !unsaved ? (await readReviewLedger(root)).reviews : ledger.reviews, changed, released, ...(unsaved ? { unsaved } : {}) };
 }
 
-/** Whether a completed approval binds the item's current candidate, or the head whose approval was carried onto it. */
-function approvesCurrentHead(record: ReviewRecord, work: Work[]): boolean {
-  const item = work.find(entry => entry.key === record.key);
-  return !!item && item.stage !== 'done' && !item.observation?.merged && approvesFinalHead(record, work);
-}
-/** Whether a completed approval binds the item's last candidate, delivered or not: its nit threads are still answered after the merge. */
-function approvesFinalHead(record: ReviewRecord, work: Work[]): boolean {
-  const verdict = record.verdict;
-  if (record.state !== 'completed' || verdict?.state !== 'APPROVED') return false;
-  const item = work.find(entry => entry.key === record.key);
-  if (!item?.candidate || item.candidate.pr !== record.pr) return false;
-  const carried = carriedApproval(item);
-  return item.candidate.sha === record.sha || !!carried && carried.originalSha === record.sha && (carried.reviewId === undefined || carried.reviewId === verdict.reviewId);
-}
-
-
 /** The errors of a lock location this process may not write: a read-only mount, or one it lacks permission on. */
 const unwritableLockCodes = new Set(['EROFS', 'EACCES', 'EPERM']);
 /** Why the review ledger could not be written, when the error is its location refusing writes; undefined for any other error. */
 const unwritableLedger = (error: unknown) => unwritableLockCodes.has((error as { code?: string } | null)?.code ?? '')
   ? `the review ledger ${reviewLedgerSpec.path} cannot be written (${(error as { code: string }).code}: ${(error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 200)}), so this pass's changes are left for a pass that can write it`
   : undefined;
-
-/**
- * How long after an approval of the current head the loop holds back thread rework for the threads
- * that review was shown while its follow-ups are not yet filed: the dispatcher files them on its own
- * schedule, beside the cycle. Past the bound the threads return to rework so a stalled filing shows.
- */
-export const followUpFilingBoundMs = 30 * 60_000;
-
-/**
- * The review threads, per item key, that the loop files and resolves as follow-up (GY-166), so no
- * thread-rework decision is requested for them meanwhile: those a standing approval of the item's
- * current head (or of the head whose approval was carried onto it) named on its `Follow-up threads:`
- * line, until filing them has failed on every retry — then they return to rework, where the stuck
- * item shows. While a failed filing has not yet read and classified the approval's body, every
- * thread listed to that review is set aside instead, on the same retry bound. An approval the head has moved past sets nothing aside, since the loop no longer files
- * for it. With `pending`, also the threads listed to a review whose
- * approval of the current head (or carried onto it) GitHub already shows but whose filing the loop has not yet recorded,
- * for `followUpFilingBoundMs` after that approval: that approval judged each of them fixed or
- * follow-up, and none BLOCKING.
- */
-export function followUpThreadIds(records: ReviewRecord[], work: Work[], pending?: { reviewer: string; now: number }): Map<string, Set<string>> {
-  const ids = new Map<string, Set<string>>();
-  const add = (key: string, threads: string[]) => { const set = ids.get(key) ?? new Set<string>(); for (const id of threads) set.add(id); ids.set(key, set); };
-  for (const record of records) {
-    const filing = record.followUps;
-    if (record.state === 'completed' && record.verdict?.state === 'APPROVED' && filing?.reviewId === record.verdict.reviewId) {
-      if (filing.failure && filing.attempts >= threadResolutionAttempts || !approvesCurrentHead(record, work)) continue;
-      // Every thread the approval named, but one it could not have judged: opened after it, or not open then.
-      const refused = filing.refused.map(entry => entry.slice(0, entry.indexOf(':')));
-      // A thread the loop resolved that GitHub showed reopened since (checkReopenedFollowUps): the
-      // filing never answers it twice, so it returns to rework instead of sitting aside.
-      const reopened = filing.reopened ?? [];
-      add(record.key, [...filing.named, ...filing.threads.map(thread => thread.id)].filter(id => !refused.includes(id) && !reopened.includes(id)));
-      // A failed filing that never read and classified the approval's body (the review could not be
-      // read) does not yet know which listed threads it judged FOLLOW-UP; that approval judged none of
-      // them BLOCKING, so every one stays set aside until the body is classified or the retries are spent.
-      if (filing.failure && !filing.classified) add(record.key, record.threadsListed ?? []);
-      continue;
-    }
-    if (!pending || !record.threadsListed?.length || record.verdict && record.verdict.state !== 'APPROVED' || filing && filing.reviewId === record.verdict?.reviewId) continue;
-    const item = work.find(entry => entry.key === record.key);
-    if (!item?.candidate || item.candidate.pr !== record.pr) continue;
-    // The reviewed head itself, or a Graphyard-authored tip its approval was carried onto (a base
-    // refresh or the merge queue's tip), exactly as approvesCurrentHead accepts it once filed.
-    const carried = item.candidate.sha === record.sha ? null : carriedApproval(item);
-    if (item.candidate.sha !== record.sha && carried?.originalSha !== record.sha) continue;
-    const approvedAt = Math.max(...(item.observation?.reviews ?? []).filter(review => review.sha === record.sha && review.state === 'APPROVED' && review.reviewer.toLowerCase() === pending.reviewer.toLowerCase()
-      && (!carried || carried.reviewId === undefined || carried.reviewId === review.id))
-      .map(review => Date.parse(review.submittedAt ?? '')).filter(Number.isFinite));
-    if (Number.isFinite(approvedAt) && pending.now - approvedAt < followUpFilingBoundMs) add(record.key, record.threadsListed);
-  }
-  return ids;
-}
-
-/** How many times a thread resolution that failed on a GitHub read or write is retried. */
-export const threadResolutionAttempts = 3;
 
 /**
  * A settled reviewer whose pane the sweep could not close in `settledCloseAttempts` tries (GY-1072):
@@ -1671,11 +1447,4 @@ export function heldNameAttention(records: ReviewRecord[]) {
     .map(record => ({ subject: record.key,
       text: `Settled reviewer session ${record.agentName} on ${record.key} (${record.state}, request ${record.requestId ?? record.id}) still holds its agent name in pane ${record.pane}: ${settledCloseAttempts} closes failed, the last with ${record.closeFailure}`.slice(0, 1000),
       next: `herdr pane close ${record.pane} (a pane that is already gone counts as closed); the next dispatch tick clears the failure` }));
-}
-
-// Independent confirmation that the App is installed on the managed repository, using a token
-// minted the same way a review session's token is minted.
-export async function verifyReviewerInstallation(credential: ReviewerCredential, _fetcher?: typeof fetch): Promise<{ repository: string; permissions: Record<string, string> }> {
-  void credential;
-  throw new Error('GitHub App reviewer installation verification is removed; bind no reviewer App under the control-plane merger');
 }

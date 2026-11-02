@@ -11,7 +11,7 @@ import { Delivery, type Release } from '../src/delivery.js';
 import { defineScenario } from '../src/scenarios.js';
 import { currentEvidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { server } from '../src/server.js';
-import { attributionDrilldown, candidateManifest, compatibilitySignature, computeAttribution, digestHash, manifestHash, readAttribution, releaseManifest, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
+import { candidateManifest, compatibilitySignature, digestHash, signatureDifferences, targetIdentity, windowIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
@@ -159,19 +159,6 @@ test('integration:release-manifest-attribution', async () => {
   await assert.rejects(delivery.createRelease(worker, { id: 'worker-release', expectedRevision: 0, environment: f.environment, sourceSha: otherSha, buildId: id(), manifest: artifactsOf(B), members: [] }, id()), /promotion principal/);
   await assert.rejects(delivery.createRelease(observer, { id: 'observer-release', expectedRevision: 0, environment: f.environment, sourceSha: otherSha, buildId: id(), manifest: artifactsOf(B), members: [], delegate: { registration: f.refs.observer, epoch: f.epoch } }, id()), /revoked or principal role/);
   const rel = await release(f, B, otherSha, [{ workId: member.id, mergeSha: 'e'.repeat(40) }, { workId: (await delivered('c'.repeat(40))).id, mergeSha: 'c'.repeat(40), included: false }]);
-  const manifest = releaseManifest(rel);
-  assert.equal(manifest.digestHash, rel.manifestHash, 'the content address of what runs is the release registry hash');
-  assert.deepEqual(manifest.services.map(s => [s.service, s.digest, s.sourceSha]), [['api', B.api, otherSha], ['web', B.web, otherSha]], 'every service maps to an artifact digest and a source SHA');
-  assert.equal(manifest.configurationRevision, f.environment.revision);
-  assert.notEqual(manifestHash(manifest.services, 2), manifest.hash, 'a configuration revision change is a different manifest');
-  assert.notEqual(manifestHash(manifest.services.map(s => ({ ...s, sourceSha: sha })), 1), manifest.hash, 'a source change is a different manifest even for identical digests');
-  assert.equal(manifest.source.kind, 'release');
-  const members = manifest.source.kind === 'release' ? manifest.source.members : [];
-  assert.deepEqual(members.map(m => [m.workId === member.id, m.included]), [[true, true], [false, false]], 'membership, including a visible exclusion, comes from the release record');
-  // Read through the API: the manifest is derived from the append-only release row, which no role can edit.
-  const read = await api(`/api/attribution/manifest/${rel.id}/${rel.revision}`, tokens.auditor);
-  assert.equal(read.status, 200); assert.equal(read.body.hash, manifest.hash); assert.equal(read.body.source.members.length, 2);
-  assert.equal((await api(`/api/attribution/manifest/${rel.id}/9`)).status, 404);
   await assert.rejects(store.pool.query("UPDATE releases SET document=jsonb_set(document,'{sourceSha}',to_jsonb($2::text)) WHERE id=$1", [rel.id, sha]), /append-only/);
   await assert.rejects(store.pool.query('DELETE FROM releases WHERE id=$1', [rel.id]), /append-only/);
   // A candidate manifest derives from the trusted build attestation the same way; a worker cannot attest one and a mutable self-report establishes nothing.
@@ -312,14 +299,11 @@ test('integration:immutable-attribution-history', async () => {
   // Two observers disagreeing over the same instant is ambiguity, not a decision.
   await observe(f, B); await observe(f, A, { actor: secondObserver, registration: f.refs.secondObserver, epoch: f.secondEpoch });
   const contested = targetIdentity(await observations(), B); assert.equal(contested.ambiguous, true); assert.match(contested.reasons.join(' '), /Overlapping observations/);
-  // Immutable-preview use is visible on every request; the history of each request is readable per work item and never rewritten.
+  // Immutable-preview use is visible on every request; its ledger history is never rewritten.
   assert.equal(fresh.attribution?.targetKind, 'immutable-preview');
-  const history = await api(`/api/attribution/work/${f.w.id}`, tokens.master);
-  assert.equal(history.status, 200); assert.ok(history.body.records.some((r: any) => r.kind === 'superseded' && r.requestId === f.r.id), "history.body.records.some((r: any) => r.kind === 'superseded' && r.requestId === f.r.id)"); assert.ok(history.body.records.some((r: any) => r.kind === 'rescheduled'), "history.body.records.some((r: any) => r.kind === 'rescheduled')");
-  const redacted = await api(`/api/attribution/work/${f.w.id}`, tokens.auditor);
-  assert.equal(redacted.body.authorized, false); assert.ok(redacted.body.records.every((r: any) => r.requestId === null && r.attemptId === null), "redacted.body.records.every((r: any) => r.requestId === null && r.attemptId === null)");
-  assert.equal((await api(`/api/attribution/work/${f.w.id}`, tokens.runner)).status, 403, 'a worker without the assignment cannot read the history');
-  assert.equal((await api(`/api/attribution/work/${f.w.id}`, tokens.implementer)).status, 200, 'the assigned worker reads its own item');
+  const history = await records(f.w.id);
+  assert.ok(history.some(record => record.kind === 'superseded' && record.requestId === f.r.id));
+  assert.ok(history.some(record => record.kind === 'rescheduled'));
   await cleanup(f);
 });
 
@@ -436,129 +420,6 @@ test('integration:reanchor-races', async () => {
 });
 
 /** Backdate ledger rows for window tests: inserts are the only write the ledger accepts. */
-async function backdate(work: Work, kind: string, daysAgo: number, details: Record<string, unknown> = {}) {
-  await store.pool.query('INSERT INTO attribution_records(work_id,work_key,proof,environment_id,candidate_id,request_id,attempt_id,kind,recorded_at,dedupe,details) VALUES($1,$2,$3,$4,NULL,NULL,NULL,$5,$6,$7,$8)',
-    [work.id, work.key, 'e2e:window', 'env-window', kind, new Date(Date.now() - daysAgo * 86_400_000), `${kind}:backdated:${randomUUID()}`, JSON.stringify({ state: kind === 'target-mismatch' ? 'mismatched' : 'matched', mismatchedServices: 1, reason: `backdated ${daysAgo}d`, ...details })]);
-}
-
-test('integration:attribution-analytics-metrics', async () => {
-  const report = (await api('/api/analytics/attribution?window=30', tokens.auditor)).body;
-  const m = report.metrics;
-  // Every metric named by the acceptance criteria exists, carries a state and, where a distribution applies, average/median/p90/n.
-  for (const key of ['targetMismatches', 'paidRunsAvoided', 'superseded', 'rescheduled', 'convergenceWait', 'reanchors', 'signatureRegenerations', 'candidateToReleaseDrift', 'multiServiceConvergence', 'immutablePreviewShare', 'unsupportedClaims', 'blocked', 'cost']) {
-    assert.ok(m[key], `${key} present`); assert.ok(['measured', 'unavailable', 'blocked'].includes(m[key].state), `${key} has an honest state`);
-    for (const field of ['average', 'median', 'p90', 'n']) assert.ok(field in m[key], `${key}.${field}`);
-    assert.ok(report.definitions[key]?.formula, `${key} is documented with a formula`);
-  }
-  assert.equal(m.targetMismatches.state, 'measured'); assert.ok(m.targetMismatches.count >= 4, "m.targetMismatches.count >= 4");
-  assert.ok(m.paidRunsAvoided.count >= 2, "m.paidRunsAvoided.count >= 2"); assert.ok(m.superseded.count >= 4, "m.superseded.count >= 4"); assert.ok(m.rescheduled.count >= 4, "m.rescheduled.count >= 4"); assert.equal(m.reanchors.count, m.rescheduled.count + (await store.pool.query("SELECT count(*)::int AS n FROM attribution_records WHERE kind='reanchor-blocked'")).rows[0].n);
-  assert.equal(m.convergenceWait.state, 'measured'); assert.ok(m.convergenceWait.n >= 1, "m.convergenceWait.n >= 1"); assert.ok(m.convergenceWait.median !== null && m.convergenceWait.p90 !== null && m.convergenceWait.average !== null, "m.convergenceWait.median !== null && m.convergenceWait.p90 !== null && m.convergenceWait.average !== null");
-  assert.equal(m.candidateToReleaseDrift.unit, 'services'); assert.ok(m.candidateToReleaseDrift.n >= 1, "m.candidateToReleaseDrift.n >= 1"); assert.equal(m.candidateToReleaseDrift.p90, 2);
-  assert.equal(m.signatureRegenerations.state, 'measured'); assert.ok(m.signatureRegenerations.count >= 2, "m.signatureRegenerations.count >= 2"); assert.ok(m.signatureRegenerations.byComponent['build-inputs'] >= 1, "m.signatureRegenerations.byComponent['build-inputs'] >= 1"); assert.ok(m.signatureRegenerations.byComponent.manifest >= 1, "m.signatureRegenerations.byComponent.manifest >= 1");
-  assert.equal(m.immutablePreviewShare.state, 'measured'); assert.ok(m.immutablePreviewShare.sharedStaging >= 1, "m.immutablePreviewShare.sharedStaging >= 1"); assert.ok(m.immutablePreviewShare.ratio > 0 && m.immutablePreviewShare.ratio < 1, "m.immutablePreviewShare.ratio > 0 && m.immutablePreviewShare.ratio < 1");
-  assert.ok(m.unsupportedClaims.count >= 1, 'the undermined pass counts as an unsupported success claim prevented');
-  assert.ok(m.cost.spentUnits >= 3, "m.cost.spentUnits >= 3"); assert.ok(m.cost.savedUnits >= 2, "m.cost.savedUnits >= 2"); assert.ok(m.cost.wastedUnits >= 1, "m.cost.wastedUnits >= 1"); assert.equal(m.cost.attributedUnits, m.cost.spentUnits - m.cost.wastedUnits);
-  // Multi-service convergence: a rollout toward the bound manifest converging service by service.
-  const f = await fixture({ artifacts: B, request: false });
-  await observe(f, { api: B.api, web: A.web });
-  await assert.rejects(validation.createRequest(operator, await requestInput(f, f.c.id), id()), /another manifest/);
-  const partial = (await records(f.w.id, 'target-mismatch')).at(-1)!; assert.equal(partial.details.partialConvergence, true); assert.equal(partial.details.mismatchedServices, 1);
-  await delay(20); await observe(f, B);
-  f.r = await validation.createRequest(operator, await requestInput(f, f.c.id), id()) as ValidationRequest;
-  const converged = (await api('/api/analytics/attribution?window=7')).body.metrics.multiServiceConvergence;
-  assert.equal(converged.state, 'measured'); assert.ok(converged.n >= 1, 'a converged rollout is measured'); assert.ok(converged.median !== null && converged.average !== null && converged.p90 !== null, 'median, average and p90 are reported');
-  const rollout = (await api(`/api/analytics/attribution/drilldown?window=7&metric=multiServiceConvergence`, tokens.master)).body;
-  assert.ok(rollout.rows.some((r: any) => r.workKey === f.w.key && r.kind === 'target-mismatch'), 'the partial rollout drills down to its first partial check'); assert.ok(rollout.rows.some((r: any) => r.workKey === f.w.key && r.kind === 'target-checked'), 'and to the check where every service matched');
-  // Coverage and exclusions are explicit; unknown is never zero.
-  assert.equal(typeof report.coverage.targetChecks, 'number'); assert.ok(Array.isArray(report.coverage.environmentsObserved), "Array.isArray(report.coverage.environmentsObserved)"); assert.ok(Array.isArray(report.exclusions), "Array.isArray(report.exclusions)"); assert.ok(Array.isArray(report.unavailable), "Array.isArray(report.unavailable)");
-  assert.equal(report.window.days, 30); assert.match(report.window.boundaries, /Half-open/);
-  const empty = computeAttribution({ observedAt: new Date().toISOString(), from: new Date(Date.now() - 7 * 86_400_000).toISOString(), to: new Date().toISOString(), days: 7, records: [], recordsTruncated: false, requests: [], requestsTruncated: false, environments: {}, blockedNow: [] });
-  assert.equal(empty.metrics.targetMismatches.state, 'unavailable'); assert.equal(empty.metrics.targetMismatches.count, null); assert.match(empty.metrics.targetMismatches.reason!, /unknown, not zero/);
-  assert.equal(empty.metrics.cost.spentUnits, null); assert.equal(empty.coverage.empty, true); assert.ok(empty.unavailable.length >= 10, "empty.unavailable.length >= 10");
-  await cleanup(f);
-});
-
-test('integration:attribution-analytics-windows', async () => {
-  const f = await fixture({ request: false });
-  await backdate(f.w, 'target-mismatch', 3); await backdate(f.w, 'target-mismatch', 20); await backdate(f.w, 'target-mismatch', 60); await backdate(f.w, 'target-mismatch', 120);
-  const count = async (days: number, asOf?: string) => (await api(`/api/analytics/attribution?window=${days}${asOf ? `&asOf=${encodeURIComponent(asOf)}` : ''}`)).body;
-  const baselineAll = (await store.pool.query("SELECT count(*)::int AS n FROM attribution_records WHERE kind IN ('target-mismatch','target-changed','attribution-undermined') AND recorded_at >= now() - interval '7 days'")).rows[0].n;
-  const seven = await count(7), thirty = await count(30), ninety = await count(90);
-  assert.equal(seven.metrics.targetMismatches.count, baselineAll);
-  assert.equal(thirty.metrics.targetMismatches.count, seven.metrics.targetMismatches.count + 1, '30 days adds the 20-day-old record');
-  assert.equal(ninety.metrics.targetMismatches.count, thirty.metrics.targetMismatches.count + 1, '90 days adds the 60-day-old record and never the 120-day-old one');
-  assert.equal(seven.window.days, 7); assert.equal(Date.parse(seven.window.to) - Date.parse(seven.window.from), 7 * 86_400_000);
-  for (const bad of ['14', 'x', '0']) assert.equal((await api(`/api/analytics/attribution?window=${bad}`)).status, 400, `window ${bad} is refused`);
-  // asOf pins the observation instant, so a report is reproducible; the future is clamped to the clock.
-  const pinned = await count(7, new Date(Date.now() - 15 * 86_400_000).toISOString());
-  assert.equal(pinned.metrics.targetMismatches.count, 1, 'the [22d, 15d) window holds exactly the 20-day-old record');
-  const vacant = await count(7, new Date(Date.now() - 10 * 86_400_000).toISOString());
-  assert.equal(vacant.metrics.targetMismatches.state, 'unavailable'); assert.equal(vacant.metrics.targetMismatches.count, null, 'a window with no target check is unknown, never zero');
-  const future = await count(7, new Date(Date.now() + 86_400_000).toISOString()); assert.ok(Date.parse(future.generatedAt) <= Date.now() + 1000, "Date.parse(future.generatedAt) <= Date.now() + 1000");
-  // The dataset reader is bounded and says so.
-  const dataset = await readAttribution(store, { days: 90 });
-  assert.equal(typeof dataset.recordsTruncated, 'boolean'); assert.ok(dataset.records.length <= 20_000, "dataset.records.length <= 20_000");
-  assert.equal(computeAttribution(dataset).coverage.recordScanLimit, 20_000);
-  await cleanup(f);
-});
-
-test('integration:attribution-analytics-drilldown', async () => {
-  const dataset = await readAttribution(store, { days: 90 });
-  const report = computeAttribution(dataset);
-  for (const metric of ['targetMismatches', 'paidRunsAvoided', 'superseded', 'rescheduled', 'reanchors', 'blocked', 'convergenceWait', 'multiServiceConvergence', 'candidateToReleaseDrift', 'signatureRegenerations', 'immutablePreviewShare', 'unsupportedClaims', 'cost']) {
-    const drill = attributionDrilldown(dataset, { metric, authorized: true });
-    assert.deepEqual(drill.columns, ['workKey', 'kind', 'recordedAt', 'environment', 'release', 'request', 'attempt', 'evidence', 'artifact', 'detail'], `${metric} rows name work, release, request, attempt, evidence and artifact`);
-    assert.ok(drill.rows.length <= 200 && drill.total >= drill.rows.length, `${metric} is bounded`);
-    if (report.metrics[metric as keyof typeof report.metrics].state === 'measured' && !['immutablePreviewShare', 'blocked'].includes(metric)) assert.ok(drill.total > 0, `${metric} has underlying records`);
-  }
-  if (dataset.blockedNow.length) assert.ok(attributionDrilldown(dataset, { metric: 'blocked', authorized: true }).rows.some(r => r.kind === 'blocked-now'), 'standing blocked bindings drill down too');
-  // Authorization-aware: identifiers beyond the work key require an audit role, counts do not.
-  const open = await api('/api/analytics/attribution/drilldown?window=90&metric=rescheduled', tokens.master), closed = await api('/api/analytics/attribution/drilldown?window=90&metric=rescheduled', tokens.auditor);
-  assert.equal(open.status, 200); assert.equal(closed.status, 200); assert.equal(open.body.total, closed.body.total);
-  assert.ok(open.body.rows.some((r: any) => /^[0-9a-f-]{36}$/.test(r.request)), 'audit roles see request identifiers');
-  assert.ok(closed.body.rows.every((r: any) => r.request === 'requires audit role' || r.request === null), 'readers see that an identifier exists, not its value');
-  assert.ok(open.body.rows.some((r: any) => r.artifact && /^build /.test(r.artifact)), 'a rescheduled row names the trusted build attestation it re-anchored to');
-  const undermined = await api('/api/analytics/attribution/drilldown?window=90&metric=unsupportedClaims&key=attribution-undermined', tokens.master);
-  assert.ok(undermined.body.rows.length >= 1, "undermined.body.rows.length >= 1"); assert.ok(undermined.body.rows.every((r: any) => r.kind === 'attribution-undermined' && /^[0-9a-f-]{36}$/.test(r.evidence) && /^[0-9a-f-]{36}$/.test(r.attempt)), 'an undermined pass drills to its evidence and attempt');
-  const unknown = await api('/api/analytics/attribution/drilldown?window=90&metric=nope'); assert.equal(unknown.status, 200); assert.match(unknown.body.error, /Unknown drill-down metric/); assert.equal(unknown.body.rows.length, 0);
-  // Aggregates and their drill-downs read the same ledger: a mutable snapshot edit moves nothing.
-  const someWork = dataset.records[0];
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{title}',to_jsonb('renamed'::text)) WHERE id=$1", [someWork.workId]);
-  assert.equal(computeAttribution(await readAttribution(store, { days: 90 })).metrics.targetMismatches.count, report.metrics.targetMismatches.count);
-  // The operator-agent guard and worker scope hold: a worker reads the analytics but never identifiers.
-  const asWorker = await api('/api/analytics/attribution/drilldown?window=90&metric=cost', tokens.implementer); assert.equal(asWorker.status, 200); assert.ok(asWorker.body.rows.every((r: any) => r.request !== null ? r.request === 'requires audit role' : true), "asWorker.body.rows.every((r: any) => r.request !== null ? r.request === 'requires audit role' : true)");
-});
-
-test('integration:attribution-cost-accounting', async () => {
-  const f = await fixture();
-  await observe(f, A);
-  const before = (await api('/api/analytics/attribution?window=7')).body.metrics.cost;
-  // One acknowledged attempt is one spent unit; a result the observers support is attributed.
-  const command = await start(f);
-  const passed: any = await validation.result(collector, report(f, command), id()); assert.equal(passed.passed, true);
-  const spent = (await api('/api/analytics/attribution?window=7')).body.metrics.cost;
-  assert.equal(spent.spentUnits, before.spentUnits + 1); assert.equal(spent.attributedUnits, before.attributedUnits + 1); assert.equal(spent.wastedUnits, before.wastedUnits);
-  assert.ok(spent.n >= before.n + 1 && spent.median !== null, 'run durations form the distribution');
-  // A run whose target changed during execution is spent and wasted, and its success claim is refused as evidence.
-  const g = await fixture(); await observe(g, A);
-  const running = await start(g);
-  await observe(g, B);
-  const failed: any = await validation.result(collector, report(g, running), id());
-  assert.equal(failed.accepted, true); assert.equal(failed.passed, false); assert.match(failed.reasons.join(' '), /changed or mismatched during the execution window/);
-  const wasted = (await api('/api/analytics/attribution?window=7')).body.metrics.cost;
-  assert.equal(wasted.spentUnits, spent.spentUnits + 1); assert.equal(wasted.wastedUnits, spent.wastedUnits + 1);
-  assert.ok((await records(g.w.id, 'unsupported-claim-refused')).some(r => r.details.claim === 'collector-target'), "(await records(g.w.id, 'unsupported-claim-refused')).some(r => r.details.claim === 'collector-target')");
-  // A refused grant costs nothing and is a saved unit; a deterministic model, never a price.
-  const h = await fixture(); await observe(h, B);
-  assert.equal(((await validation.dispatch(runner, { registration: h.refs.runner }, id())) as any).request, null);
-  const saved = (await api('/api/analytics/attribution?window=7')).body.metrics.cost;
-  assert.equal(saved.savedUnits, wasted.savedUnits + 1); assert.equal(saved.spentUnits, wasted.spentUnits); assert.match(saved.model, /never priced/);
-  assert.equal(computeAttribution(await readAttribution(store, { days: 7 })).metrics.cost.savedUnits, saved.savedUnits, 'the report is a pure function of the dataset');
-  // A client claim cannot become attribution proof or a cost entry: the ledger has no client write path.
-  for (const path of ['/api/attribution/records', '/api/analytics/attribution', '/api/attribution/work/' + f.w.id]) assert.equal((await api(path, tokens.operator, { method: 'POST', body: JSON.stringify({ kind: 'rescheduled' }) })).status, 404, `${path} accepts no POST`);
-  await cleanup(f); await cleanup(g); await cleanup(h);
-});
-
 test('integration:attribution-security-regressions', async () => {
   const f = await fixture();
   await attest(f, B);
@@ -606,11 +467,11 @@ test('integration:attribution-security-regressions', async () => {
   await assert.rejects(validation.result(worker, report(f, fresh), id()), /trusted collector/);
   const unmeasured: any = await validation.result(collector, report(f, fresh, B, { measurement: 'unknown' }), id()); assert.equal(unmeasured.passed, false);
   assert.ok((await records(f.w.id, 'unsupported-claim-refused')).some(r => r.details.claim === 'collector-target' && /without a measured identity/.test(r.details.reason)), "(await records(f.w.id, 'unsupported-claim-refused')).some(r => r.details.claim === 'collector-target' && /without a meas");
-  // No arbitrary client-controlled lifecycle-state endpoint: attribution exposes reads only, and the ledger refuses edits.
+  // No client-controlled lifecycle-state endpoint exists, and the ledger refuses edits.
   for (const path of ['/api/attribution/reanchor', '/api/attribution/state', '/api/attribution/records', `/api/attribution/work/${f.w.id}`]) assert.equal((await api(path, tokens.operator, { method: 'POST', body: '{"state":"rescheduled"}' })).status, 404, path);
   await assert.rejects(store.pool.query("UPDATE attribution_records SET kind='rescheduled' WHERE kind='reanchor-blocked'"), /append-only/);
   await assert.rejects(store.pool.query('DELETE FROM attribution_reanchors'), /append-only/);
-  assert.equal((await api('/api/analytics/attribution?window=7', tokens.implementer)).status, 200);
+  assert.equal((await api('/api/analytics/attribution?window=7', tokens.implementer)).status, 404);
   assert.equal((await fetch(`${url}/api/analytics/attribution?window=7`)).status, 401);
   await cleanup(f);
 });

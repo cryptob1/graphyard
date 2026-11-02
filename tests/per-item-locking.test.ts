@@ -114,42 +114,6 @@ test('unit:per-item-locking heartbeats on different items run while a dispatch h
   await blocked;
 });
 
-test('unit:per-item-locking a heartbeat committing between renewClaimedAction read and write is not overwritten', { timeout: 60_000 }, async () => {
-  const coordinator: Principal = { id: 'coordinator', role: 'coordinator' };
-  engine.principals.push(coordinator);
-
-  const work = await claimed(workers[4]);
-  // Place an open action row in work's actionQueue.
-  const actionRow = { id: randomUUID(), kind: 'dispatch', target: 'implementation', state: 'claimed', attempts: 1, claim: { executor: 'exec-1', host: 'host-1', principal: coordinator.id, claimedAt: new Date().toISOString(), expiresAt: new Date(Date.now() + 60_000).toISOString(), renewals: 0 }, history: [] };
-  await store.pool.query("UPDATE work_items SET document=jsonb_set(document, '{actionQueue}', jsonb_build_object('actions', jsonb_build_array($2::jsonb))) WHERE id=$1", [work.id, JSON.stringify(actionRow)]);
-  const updatedWork = (await store.list()).find(w => w.id === work.id)!;
-
-  const originalActionOwner = (engine as any).actionOwner.bind(engine);
-  let intercepted = false;
-  let heartbeatCommitted: any = null;
-  (engine as any).actionOwner = async (db: any, id: string) => {
-    const result = await originalActionOwner(db, id);
-    if (!intercepted && result && result.id === work.id) {
-      intercepted = true;
-      heartbeatCommitted = await heartbeat(workers[4], updatedWork);
-    }
-    return result;
-  };
-
-  try {
-    const renewed = await engine.renewClaimedAction(coordinator, actionRow.id, { executor: 'exec-1', leaseSeconds: 30 });
-    assert.ok(intercepted, 'heartbeat was committed between read and write');
-    assert.ok(heartbeatCommitted, 'heartbeat succeeded');
-    assert.equal(renewed.action.claim?.renewals, 1, 'action was renewed');
-
-    const stored = (await store.list()).find(w => w.id === work.id)!;
-    assert.equal(stored.lease?.expiresAt, heartbeatCommitted!.lease?.expiresAt, 'heartbeat renewal was preserved');
-    assert.equal(stored.actionQueue?.actions[0].claim?.renewals, 1, 'action renewal was preserved');
-  } finally {
-    (engine as any).actionOwner = originalActionOwner;
-  }
-});
-
 test('unit:per-item-locking commands that read fleet state still serialise on the fleet lock', { timeout: 60_000 }, async () => {
   const holder = hold({ fleetLock: true });
   await holder.taken;

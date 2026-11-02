@@ -4,24 +4,7 @@ import type { ApprovalIdentity } from './carry.js';
 
 export const reviewProviders = ['github'] as const;
 export type ReviewProvider = typeof reviewProviders[number];
-const identifier = z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
-// A runtime label is descriptive provenance (which agent produced the review), never authority.
-const runtimeName = z.string().trim().regex(/^[a-z0-9][a-z0-9.+_-]{0,39}$/);
-// Registered reviewer identities are numeric GitHub App/bot identities, not display names.
-export const reviewerAppSchema = z.object({
-  id: identifier, runtime: runtimeName,
-  appId: z.number().int().positive(), botUserId: z.number().int().positive(),
-  displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
-}).strict();
-export type ReviewerApp = z.infer<typeof reviewerAppSchema>;
 export const distinct = (values: unknown[]) => new Set(values.map(value => JSON.stringify(value))).size === values.length;
-export const reviewerAppsSchema = z.array(reviewerAppSchema).max(50)
-  .refine(apps => distinct(apps.map(app => app.id)), 'Reviewer App identifiers must be unique')
-  .refine(apps => distinct(apps.map(app => app.appId)), 'Reviewer GitHub App IDs must be unique')
-  .refine(apps => distinct(apps.map(app => app.botUserId)), 'Reviewer bot user IDs must be unique');
-export function parseReviewerApps(raw: string | undefined): ReviewerApp[] {
-  return reviewerAppsSchema.parse(JSON.parse(raw?.trim() || '[]'));
-}
 
 // `github` is the default provider: the reviewer session the loop launches, whose verdict the control plane records on the observation
 // (server/review-verdict.ts). The identifier predates the control-plane merger and is kept so stored policies still read.

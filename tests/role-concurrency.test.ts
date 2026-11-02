@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -11,7 +11,7 @@ import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, reconcileProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -19,7 +19,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
-// Time-bomb allowance (GY-1694): the 2026-09-21 `at` stamps the requested() fixtures; the tests stamp items, verdicts and mint expiry from the real clock alone.
+// Time-bomb allowance (GY-1694): the 2026-09-21 `at` stamps the requested() fixtures; the tests stamp items, verdicts and registerLaunch expiry from the real clock alone.
 
 // GY-107: one review and one proof run at a time fleet-wide, because each role had a single fixed
 // session name. Each test is named for the proof it produces: integration:concurrent-reviews,
@@ -53,7 +53,7 @@ const fixedRequestId = (n: number, slot: string) => `${fixedTag(n, slot)}${creat
 /** A submitted, observed candidate for item N, with its review request recorded under a fixed id. */
 function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): Work {
   const candidate = { sha: sha40(`a${n}`), baseSha: B, pr: 200 + n, branch: `graphyard/gy-${200 + n}-1`, author: 'implementer' };
-  const item = { id: `work-${200 + n}`, key: `GY-${200 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [], 
+  const item = { id: `work-${200 + n}`, key: `GY-${200 + n}`, title: `Item ${n}`, description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Unit', proofs: ['unit:concurrency'] }, { id: 'AC-2', text: 'Integration', proofs: ['integration:concurrency'] }, { id: 'AC-3', text: 'Manual', proofs: ['manual:concurrency'] }],
     policy: { checks: ['test', 'typecheck'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: `/w/gy-${200 + n}`, branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: candidate.pr }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -66,7 +66,7 @@ function requested(n: number, overrides: Partial<Work> = {}, now = new Date()): 
 }
 
 /**
- * A master bound to a reviewer App with a stubbed Herdr: every typed launch becomes a visible
+ * A master with a stubbed Herdr: every typed launch becomes a visible
  * agent, every `pane close` removes one, and each tab gets its own pane, so what the launchers
  * count against a profile's limit is exactly what they started.
  */
@@ -75,8 +75,6 @@ async function fleet(profiles: { reviewers: unknown[]; producers: { name: string
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
-  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   for (const profile of profiles.reviewers) await saveReviewerProfile(root, profile);
   for (const profile of profiles.producers) {
     const credentialFile = join(credentialDirectory, `${profile.name}.token`); await writeFile(credentialFile, `${profile.principal}-token-`.padEnd(40, 'x'), { mode: 0o600 });
@@ -99,7 +97,7 @@ async function fleet(profiles: { reviewers: unknown[]; producers: { name: string
     if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
     return JSON.stringify({ result: {} });
   };
-  const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+  const registerLaunch = async () => ({ launch: 'fixture-launch' });
   /** The dispatcher wired to the real launchers, the stubbed Herdr, and a live configuration. */
   const effects = (items: () => Work[], config: () => MasterConfig): DispatchEffects => ({
     snapshot: async () => ({ work: items(), now: new Date().toISOString() }),
@@ -107,12 +105,12 @@ async function fleet(profiles: { reviewers: unknown[]; producers: { name: string
     credentials: async list => Object.fromEntries(list.map(profile => [profile.name, { available: true, reason: null }])),
     reconcileReviews: (work, herdr) => reconcileReviews(root, config(), { run, work, agents: herdr, observe: () => null }),
     reconcileProducers: (work, herdr) => reconcileProducers(root, config(), work, herdr, { run }),
-    launchReview: (work, request, profile, herdr, observedAt) => launchReview(root, work, profile.name, herdr, observedAt, { run, mint, requestId: request.id }),
+    launchReview: (work, request, profile, herdr, observedAt) => launchReview(root, work, profile.name, herdr, observedAt, { run, registerLaunch, requestId: request.id }),
     launchProducer: (work, request, profile, herdr, observedAt) => launchProducer(root, work, request, profile, herdr, observedAt, { run }),
     persist: async () => {},
   });
   const cleanup = async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); };
-  return { root, credentialDirectory, agents, calls, seen, run, mint, effects, cleanup };
+  return { root, credentialDirectory, agents, calls, seen, run, registerLaunch, effects, cleanup };
 }
 const starts = (calls: string[][]) => calls.filter(call => call[0] === 'agent' && call[1] === 'rename').map(call => call[3]);
 const tag = (requestId: string) => requestId.slice(0, 8);
@@ -145,7 +143,7 @@ test('integration:concurrent-reviews — a reviewer profile with concurrency 3 r
     assert.deepEqual(full.launched.filter(entry => entry.kind === 'review'), []); assert.deepEqual(full.refused, []);
     const held = full.waiting.find(entry => entry.kind === 'review')!;
     assert.equal(held.work, 'GY-204'); assert.match(held.reason, /every reviewer profile is busy: claude-reviewer: at its concurrency limit \(3 running, limit 3\)/);
-    await assert.rejects(launchReview(host.root, fourth, 'claude-reviewer', host.agents, new Date().toISOString(), { run: host.run, mint: host.mint, requestId: fourth.autoDispatch!.review!.id }), /Reviewer profile claude-reviewer is at its concurrency limit \(3 running, limit 3: review-claude-[0-9a-f]{8}, review-claude-[0-9a-f]{8}, review-claude-[0-9a-f]{8}\)/);
+    await assert.rejects(launchReview(host.root, fourth, 'claude-reviewer', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: fourth.autoDispatch!.review!.id }), /Reviewer profile claude-reviewer is at its concurrency limit \(3 running, limit 3: review-claude-[0-9a-f]{8}, review-claude-[0-9a-f]{8}, review-claude-[0-9a-f]{8}\)/);
     // A verdict settles one session; its slot goes to the waiting request on the next tick.
     const verdict = { state: 'APPROVED', reviewer: 'graphyard-reviewer[bot]', reviewId: 77, submittedAt: new Date().toISOString() };
     await reconcileReviews(host.root, config, { run: host.run, work: items, agents: host.agents, observe: record => record.key === 'GY-201' ? verdict : null });

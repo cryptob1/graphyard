@@ -33,7 +33,7 @@ const identities = {
 /** A local control plane: no App, a worker and a reviewing account; the loop starts on restart. */
 interface World { calls: { args: string[]; stdin?: string; env?: Record<string, string> }[]; installed: boolean; loop: boolean; supervised: number; deployKeys?: number }
 const status = (w: World) => w.installed ? {
-  github: true, githubRepository: 'acme/shop', appPermissions: { missing: [] }, reviewerApps: [],
+  github: true, githubRepository: 'acme/shop',
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
   setup: { protection: 'checks', loop: w.loop },
 } : null;
