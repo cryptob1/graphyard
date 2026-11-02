@@ -1,7 +1,7 @@
 // Concern: the Compose adapter of an item's local preview (GY-1903) — one isolated, bounded Compose project per preview, its pages published, and every container, volume and network removed after it.
 import { execFile } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, resolve, sep } from 'node:path';
 import { previewSiteByteLimit, previewSiteFileLimit, previewSitePathSchema, type PreviewSiteFile } from './project-previews.js';
 import { processPidNamespace, processStartTicks, tempOwnerGone, tempOwnerJudgeable, tmpReclaimMinAgeMs, type TempOwner } from './tmp-reclaim.js';
@@ -65,6 +65,11 @@ const followed = (path: string): string => {
     try { return join(realpathSync(at), ...rest); } catch { if (dirname(at) === at) return path; rest.unshift(basename(at)); }
   }
 };
+const insideCheckout = (path: string, checkout: string) => {
+  const root = followed(resolve(checkout)), real = followed(path);
+  return real === root || real.startsWith(root + sep);
+};
+
 /**
  * Why the resolved Compose configuration cannot be previewed, one sentence each: a bind mount, build
  * context, env or secret file outside the change's checkout once its symbolic links are followed (a
@@ -156,11 +161,12 @@ const keyed = (value: unknown): Record<string, unknown> => Array.isArray(value)
  * any resolved configuration can be checked. Read as text before Compose reads it, so it fails closed:
  * the words anywhere (or a YAML escape that could spell them) refuse the file.
  */
-export async function composeSourceProblems(checkout: string, file: string): Promise<string[]> {
+export async function composeSourceProblems(checkout: string, file: string, isolatedTrial = false): Promise<string[]> {
   const root = followed(resolve(checkout)), real = followed(resolve(root, file));
   if (real !== root && !real.startsWith(`${root}${sep}`)) return [`the Compose file ${file} is outside the change's checkout`];
   const text = await readFile(real, 'utf8');
   const problems: string[] = [];
+  if (isolatedTrial && /\blabel_file\b/.test(text)) problems.push(`the Compose file ${file} declares label files, which Compose reads before isolation checks`);
   if (/\b(?:include|extends)\b/.test(text)) problems.push(`the Compose file ${file} includes or extends other Compose files, which Compose reads before the preview can check where they are; inline them`);
   if (/\\[xuU]/.test(text)) problems.push(`the Compose file ${file} writes a character by an escape, which could spell a key the preview cannot check`);
   return problems;
@@ -178,6 +184,8 @@ export interface ComposeStackOptions {
   /** Where the generated configuration is written: the preview's own directory, outside the checkout. */
   scratch: string;
   docker?: Docker; fetcher?: typeof fetch;
+  /** Trial services receive copied checkout content, never host bind mounts. */
+  isolatedTrial?: boolean;
 }
 export function composeStack(options: ComposeStackOptions): ComposeStack {
   const docker = options.docker ?? defaultDocker, env = options.environment;
@@ -192,7 +200,7 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
       const dotenv = join(options.scratch, 'preview.env');
       await writeFile(dotenv, '');
       const compose = (file: string) => ['compose', '--env-file', dotenv, '-f', file, '-p', options.project];
-      const sources = await composeSourceProblems(options.checkout, options.file);
+      const sources = await composeSourceProblems(options.checkout, options.file, options.isolatedTrial);
       if (sources.length) throw new Error(`the Compose application cannot be previewed in isolation: ${sources.join('; ')}`);
       const config = async (...flags: string[]) => JSON.parse(await docker([...compose(options.file), 'config', '--no-env-resolution', ...flags, '--format', 'json'], { env, cwd: options.checkout, signal, timeoutMs: left() })) as Json;
       // Some Compose versions read env files despite --no-env-resolution; only an uninterpolated pass reliably keeps them declared, so they are checked there first.
@@ -202,13 +210,52 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
       if (envFiles.length) throw new Error(`the Compose application cannot be previewed in isolation: ${envFiles.join('; ')}`);
       const resolved = await config();
       const problems = composeMountProblems(resolved, options.checkout, options.service);
+      if (options.isolatedTrial) {
+        for (const [name, entry] of Object.entries<Json>(resolved.services ?? {})) {
+          for (const key of ['runtime', 'storage_opt', 'credential_spec', 'provider']) if (entry[key]) problems.push(`service ${name} sets ${key}`);
+          if (entry.build?.network === 'host') problems.push(`service ${name} builds in the host network`);
+          if ((entry.security_opt ?? []).some((option: string) => !/^no-new-privileges(?::true|=true)?$/.test(option))) problems.push(`service ${name} sets custom security options`);
+          if (entry.build?.additional_contexts) problems.push(`service ${name} declares additional build contexts`);
+          const build = entry.build;
+          if (build?.dockerfile && !insideCheckout(resolve(build.context, build.dockerfile), options.checkout)) problems.push(`service ${name} reads a Dockerfile outside the checkout`);
+        }
+        for (const [name, volume] of Object.entries<Json>(resolved.volumes ?? {}))
+          if (volume?.driver_opts || (volume?.driver && volume.driver !== 'local')) problems.push(`volume ${name} declares host driver options`);
+        for (const [name, network] of Object.entries<Json>(resolved.networks ?? {}))
+          if (network?.driver_opts || (network?.driver && network.driver !== 'bridge')) problems.push(`network ${name} declares host driver options`);
+      }
       const declaredServices = Object.keys(resolved.services ?? {}).length;
       if (declaredServices > options.bounds.services) problems.push(`the Compose file declares ${declaredServices} services, more than the ${options.bounds.services} a preview runs`);
       if (problems.length) throw new Error(`the Compose application cannot be previewed in isolation: ${problems.join('; ')}`);
       const generated = join(options.scratch, 'compose.preview.json');
-      await writeFile(generated, JSON.stringify(composePreviewConfig(resolved, { ...options, owner: currentOwner() })));
+      const config_ = composePreviewConfig(resolved, { ...options, owner: currentOwner() });
+      const copies: { service: string; source: string; target: string }[] = [];
+      if (options.isolatedTrial) for (const [name, entry] of Object.entries<Json>(config_.services)) {
+        entry.volumes = (entry.volumes ?? []).filter((volume: Json) => {
+          if (volume.type !== 'bind') return true;
+          copies.push({ service: name, source: volume.source, target: volume.target });
+          return false;
+        });
+        entry.cap_drop = ['ALL'];
+      }
+      await writeFile(generated, JSON.stringify(config_));
       started = true;
-      await docker([...compose(generated), '--project-directory', options.checkout, 'up', '--detach', '--build', '--wait', '--wait-timeout', String(Math.ceil(left() / 1000))], { env, cwd: options.checkout, signal, timeoutMs: left() });
+      if (options.isolatedTrial) {
+        await docker([...compose(generated), '--project-directory', options.checkout, 'create', '--build'], { env, cwd: options.checkout, signal, timeoutMs: left() });
+        for (const copy of copies) {
+          const id = (await docker([...compose(generated), 'ps', '--all', '--quiet', copy.service], { env, signal, timeoutMs: left() })).trim();
+          if (!/^[a-f0-9]{12,64}$/.test(id)) throw new Error(`service ${copy.service} has no unique container for checkout content`);
+          // Recreate the mount's absolute target in a private staging tree. Copy
+          // its contents into the container root so missing parents and existing
+          // directories behave like a bind, without giving the engine a host mount.
+          const stage = await mkdtemp(join(options.scratch, 'content-'));
+          const destination = join(stage, resolve('/', copy.target));
+          await mkdir(dirname(destination), { recursive: true });
+          await cp(realpathSync(copy.source), destination, { recursive: true, dereference: false });
+          await docker(['cp', stage + '/.', `${id}:/`], { env, signal, timeoutMs: left() });
+        }
+      }
+      await docker([...compose(generated), '--project-directory', options.checkout, 'up', '--detach', options.isolatedTrial ? '--no-build' : '--build', '--wait', '--wait-timeout', String(Math.ceil(left() / 1000))], { env, cwd: options.checkout, signal, timeoutMs: left() });
       const published = (await docker([...compose(generated), 'port', options.service, String(options.port)], { env, signal, timeoutMs: left() })).trim().split('\n')[0] ?? '';
       const port = /^127\.0\.0\.1:(\d{1,5})$/.exec(published)?.[1];
       if (!port) throw new Error(`service ${options.service} published no loopback port for ${options.port} (${published || 'none'})`);

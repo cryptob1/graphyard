@@ -951,6 +951,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         enter('tests');
         const ran = await containerTrialE2e({
           worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
+          networkWrapper: network => trialContainerWords([checkout.directory, place, temporary], trialContainerDependencies(input.root), undefined, network),
           scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
         });
         // Bounded so the trial record the merge writer posts stays within its schema.

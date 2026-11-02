@@ -6,7 +6,11 @@ import { fileURLToPath } from 'node:url';
 import { checkoutGitDirectory } from '../master/checkout-git.js';
 import { writeFile, readFile } from 'node:fs/promises';
 import type { ChildRun } from '../child-runner.js';
-import type { TrialE2eCase } from './e2e-trial.js';
+import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
+import { composeBounds, composeProjectName, composeStack, defaultDocker, dockerEnvironment } from '../compose-preview.js';
+import { execFileSync } from 'node:child_process';
+import { mkdtemp } from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 
 export const trialContainerImage = 'graphyard-trial:local';
 export const trialHarness = '/graphyard-harness';
@@ -24,7 +28,7 @@ if os.getuid() == 0:
 docker = ['docker', '--host', 'unix:///var/run/docker.sock']
 args = docker + ['create', '--name', container_name, '-i', '--init',
         '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
-        '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=bridge',
+        '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=' + spec['network'],
         '--user', str(os.getuid()) + ':' + str(os.getgid()),
         '--tmpfs', '/tmp:rw,nosuid,nodev,exec,mode=1777',
         '--tmpfs', '/var/tmp:rw,nosuid,nodev,exec,mode=1777',
@@ -78,7 +82,7 @@ finally:
         pass
 `;
 
-export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage): string[] {
+export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge'): string[] {
   const mounts: [string, string, boolean][] = [];
   const add = (path: string, readonly: boolean, target = path) => {
     // Linked installs and harness dependencies can name the same target. Docker
@@ -104,7 +108,7 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
       ...mounts.flatMap(([source, target, readonly]) => [readonly ? '--ro-bind' : '--bind', source, target]),
       '--remount-ro', '/', '--'];
   }
-  return ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ image, mounts })];
+  return ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ image, mounts, network })];
 }
 
 /** Dependencies referenced by a linked checkout and its shared install. */
@@ -112,27 +116,54 @@ export function trialContainerDependencies(root: string): string[] {
   return [...new Set([checkoutGitDirectory(root), join(root, 'node_modules'), harnessModules].filter(existsSync))];
 }
 
-/** Serving and E2E clients share one private network, including loopback binds. */
+/** Only trusted orchestration receives Docker access; candidate commands receive a private root. */
 export async function containerTrialE2e(input: {
   worktree: string; mergeSha: string; proofs: readonly string[]; env: Record<string, string>;
   scratch: string; budgetMs: number; wrapper: readonly string[]; run: ChildRun; log: (line: string) => void;
+  networkWrapper: (network: string) => readonly string[];
 }): Promise<TrialE2eCase[]> {
-  const result = join(input.scratch, 'e2e-result.json');
-  const script = join(input.scratch, 'e2e-run.mjs');
-  const data = { worktree: input.worktree, mergeSha: input.mergeSha, proofs: input.proofs, env: input.env, scratch: input.scratch, budgetMs: input.budgetMs };
-  await writeFile(script, `
-import { runTrialE2eCases } from '${trialHarness}/src/merge-writer/e2e-trial.ts';
-import { execFileSync } from 'node:child_process';
+  const holds = async (path: string) => {
+    try { execFileSync('git', ['-C', input.worktree, 'cat-file', '-e', input.mergeSha + ':' + path], { stdio: 'ignore' }); return true; }
+    catch { return false; }
+  };
+  return runTrialE2eCases({ ...input, holds, runGroup: async (target, proofs, group) => {
+    const deadline = Date.now() + group.budgetMs;
+    const left = () => Math.max(1, deadline - Date.now());
+    let stack: ReturnType<typeof composeStack> | undefined;
+    let origin: string | undefined;
+    let wrapper = input.wrapper;
+    try {
+      if ('kind' in target && target.kind === 'compose') {
+        const environment = dockerEnvironment(input.env);
+        // Unpredictable project identities prevent collisions between parallel trials of a head.
+        const project = composeProjectName('trial-e2e-' + target.id, randomUUID());
+        stack = composeStack({ checkout: input.worktree, file: target.file, service: target.service, port: target.port,
+          project, environment, variables: {}, bounds: composeBounds(), isolatedTrial: true,
+          scratch: await mkdtemp(join(input.scratch, 'compose-')) });
+        await stack.start(AbortSignal.timeout(left()), left());
+        const id = (await defaultDocker(['ps', '--quiet', '--filter', 'label=com.docker.compose.project=' + project,
+          '--filter', 'label=com.docker.compose.service=' + target.service], { env: environment, timeoutMs: left() })).trim();
+        if (!/^[a-f0-9]{12,64}$/.test(id)) throw new Error('the Compose HTTP service has no unique running container');
+        wrapper = input.networkWrapper('container:' + id);
+        origin = 'http://127.0.0.1:' + target.port;
+      }
+      const directory = await mkdtemp(join(input.scratch, 'e2e-'));
+      const result = join(directory, 'result.json'), script = join(directory, 'run.mjs');
+      const data = { worktree: input.worktree, mergeSha: input.mergeSha, env: input.env, scratch: directory, budgetMs: left() };
+      await writeFile(script, `
+import { runTrialE2eGroup } from '${trialHarness}/src/merge-writer/e2e-trial.ts';
 import { writeFileSync } from 'node:fs';
-const input = ${JSON.stringify(data)};
-const cases = await runTrialE2eCases({ ...input, log: console.log, holds: async path => {
-  try { execFileSync('git', ['-C', input.worktree, 'cat-file', '-e', input.mergeSha + ':' + path], { stdio: 'ignore' }); return true; }
-  catch { return false; }
-} });
+const cases = await runTrialE2eGroup(${JSON.stringify(target)}, ${JSON.stringify(proofs)},
+  { ...${JSON.stringify(data)}, proofs: [], holds: async () => true, log: console.log }, ${JSON.stringify(origin)});
 writeFileSync(${JSON.stringify(result)}, JSON.stringify(cases));
 `);
-  input.log(String(await input.run('node', ['--import', `${trialHarness}/node_modules/tsx/dist/loader.mjs`, script], {
-    cwd: input.worktree, env: input.env, timeoutMs: input.budgetMs, wrapper: input.wrapper,
-  })));
-  return JSON.parse(await readFile(result, 'utf8')) as TrialE2eCase[];
+      input.log(String(await input.run('node', ['--import', `${trialHarness}/node_modules/tsx/dist/loader.mjs`, script], {
+        cwd: input.worktree, env: input.env, timeoutMs: left(), wrapper,
+      })));
+      return JSON.parse(await readFile(result, 'utf8')) as TrialE2eCase[];
+    } catch (error) {
+      return proofs.map(proof => ({ proof, case: proof.slice(4), executed: 0, failed: 1,
+        failingStep: error instanceof Error ? error.message : String(error) }));
+    } finally { await stack?.close(); }
+  } });
 }
