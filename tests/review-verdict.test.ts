@@ -362,7 +362,7 @@ test('integration:review-verdict-identity-independent — review-launch is the c
   const registered = await stored(work.id);
   assert.deepEqual([registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester, registered.reviewLaunch!.head, registered.reviewLaunch!.tokenHash, registered.reviewLaunch!.verdict], ['review-claude-1', coordinator.id, H, hashOf(token), null]);
   assert.equal(JSON.stringify(registered).includes(token), false, 'the item holds the hash, never the token');
-  assert.ok(tokenRegistered(http.services, hashOf(token)), 'the token authenticates the reviewer principal until the verdict');
+  assert.ok(await tokenRegistered(http.services, hashOf(token)), 'the token authenticates the reviewer principal until the verdict');
   // Another token, a configured identity, or the wrong head: refused, nothing recorded.
   const stranger = freshToken();
   assert.equal((await request(stranger, `work/${work.id}/review-verdict`, verdict(stranger, 'APPROVE'))).status, 401, 'an unregistered token authenticates nobody');
@@ -381,7 +381,7 @@ test('integration:review-verdict-identity-independent — review-launch is the c
   assert.deepEqual([recorded.length, recorded[0].reviewer, recorded[0].how, recorded[0].reason], [1, 'review-claude-1', 'implemented', independenceRefusal('review-claude-1', 'implemented', 'GY-9002')]);
   const afterRefusal = await stored(implemented.id);
   assert.deepEqual([afterRefusal.reviewLaunch!.refused!.reason, afterRefusal.reviewLaunch!.verdict, afterRefusal.observation!.reviews], [independenceRefusal('review-claude-1', 'implemented', 'GY-9002'), null, []]);
-  assert.equal(tokenRegistered(http.services, hashOf(own)), false, 'the refused launch\'s token is withdrawn');
+  assert.equal(await tokenRegistered(http.services, hashOf(own)), false, 'the refused launch\'s token is withdrawn');
   assert.equal((await request(own, `work/${implemented.id}/review-verdict`, verdict(own, 'APPROVE'))).status, 401);
   // The reviewer is the launch's requester: refused the same way.
   const requested = await insert(item('GY-9003'));
@@ -408,7 +408,7 @@ test('integration:review-verdict-recorded-once — the verdict is appended to ob
   assert.equal(landed.gates.find(gate => gate.name === 'review')!.passed, true, 'exactApproval and the review gate read the control-plane verdict unchanged');
   assert.deepEqual([landed.reviewLaunch!.verdict!.state, landed.reviewLaunch!.verdict!.reviewId, landed.reviewLaunch!.verdict!.source], ['APPROVED', approved.body.reviewId, 'control-plane']);
   assert.equal((await events(sensitive.id, 'review.verdict')).length, 1);
-  assert.equal(tokenRegistered(http.services, hashOf(token)), false, 'the token is spent with the verdict');
+  assert.equal(await tokenRegistered(http.services, hashOf(token)), false, 'the token is spent with the verdict');
   // The same request again replays; a different one for the same launch is refused as a second verdict, whoever posts it.
   const replayed = await request(token, `work/${sensitive.id}/review-verdict`, verdict(token, 'APPROVE'), key);
   assert.equal(replayed.status, 401, 'the spent token no longer authenticates');
@@ -546,7 +546,7 @@ test('integration:control-plane-reviewer-profile-launch — without a reviewer A
     assert.equal(record!.launch, launched.launch, 'the session record carries the launch the route allocated');
     const registered = await stored(work.id);
     assert.deepEqual([registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester, registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.verdict], [reviewerIdentity, coordinator.id, H, B, null]);
-    assert.ok(tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), 'the launch token authenticates the bot identity');
+    assert.ok(await tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), 'the launch token authenticates the bot identity');
     // The widening is the `[bot]` suffix alone: every other shape stays a refusal, so independent
     // review is not weakened to let the launch through.
     for (const bad of ['review claude', 'reviewer[deputy]', 'sla[bot]ug', `${reviewerIdentity} extra`])
@@ -603,7 +603,7 @@ test('integration:control-plane-reviewer-profile-independence — the launched r
     // One launch yields one verdict; the spent token is withdrawn.
     const second = await request(tokenOf(coordinator), `work/${work.id}/review-verdict`, verdict(token, 'APPROVE'));
     assert.deepEqual([second.status, second.body.error], [409, secondVerdictRefusal('GY-9008', H)]);
-    assert.equal(tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), false);
+    assert.equal(await tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), false);
     // The reviewer identity implementing the item: the launcher refuses before anything starts, and the
     // route refuses the verdict with review.independence-refused recorded and the token withdrawn.
     const implemented = await insert(item('GY-9009', { implementers: [reviewerIdentity], workspaces: [] }));
@@ -614,7 +614,7 @@ test('integration:control-plane-reviewer-profile-independence — the launched r
     const refused = await request(own, `work/${implemented.id}/review-verdict`, verdict(own, 'APPROVE'));
     assert.deepEqual([refused.status, refused.body.error], [403, independenceRefusal(reviewerIdentity, 'implemented', 'GY-9009')]);
     assert.equal((await events(implemented.id, 'review.independence-refused')).length, 1);
-    assert.equal(tokenRegistered(http.services, hashOf(own)), false);
+    assert.equal(await tokenRegistered(http.services, hashOf(own)), false);
     assert.equal((await request(own, `work/${implemented.id}/review-verdict`, verdict(own, 'APPROVE'))).status, 401);
     // The launch's requester as its reviewer: refused the same way.
     const requested = await insert(item('GY-9010'));

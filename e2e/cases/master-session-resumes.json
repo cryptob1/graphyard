@@ -1,0 +1,13 @@
+{
+  "id": "master-session-resumes",
+  "title": "A restarted master reopens its current native conversation",
+  "description": "Ends actual master fixture processes on Claude and Codex, reloads persisted daemon state, relaunches via native resume and reads the resulting native ids and transcripts. Registry allocations change independently; failed launches retain the authoritative conversation. Fixtures require Linux bubblewrap, no provider credentials, accounts or network.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "native master resume and persistence",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/master-session-resumes.test.ts tests/master-conversation-e2e.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

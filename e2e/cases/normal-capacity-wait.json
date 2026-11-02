@@ -1,0 +1,16 @@
+{
+  "id": "normal-capacity-wait",
+  "title": "Live registry capacity queues worker dispatch until a slot frees",
+  "description": "Exercises registry selection, repeated saturated dispatch cycles, slot release and master wake decisions; real launcher and registry failures remain actionable.",
+  "tags": ["capacity"],
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "registry capacity and dispatch regression proofs",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/agent-registry.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
