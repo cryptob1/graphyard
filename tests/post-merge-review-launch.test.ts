@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -12,10 +12,10 @@ import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { dispatchFailureLimit, emptyDispatchCursor, runDispatchTick, unknownParent, type DispatchEffects } from '../src/auto-dispatch.js';
 import { owedPostMergeReviews, postMergeRequestId, postMergeRefusalProbeMs } from '../src/model/post-merge-review.js';
-import { launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, saveReviewerProfile, reviewRetryPrompt } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { readReviewBinding } from '../src/review-post.js';
-import { startedAtOnce } from './helpers/launch-shell.js';
+import { startedAtOnce, expandTypedCommand, requestOf } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Every instant this file holds is derived from the run's own clock (GY-1694): a base reading taken
 // at load and offsets from it. No calendar literal is constructed, so no wall-clock reading here is
@@ -62,7 +62,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('post-merge-launch-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('post_merge_launch_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/post_merge_launch_test`); await store.init();
-  const engine = new Engine(store, 120, repository); engine.submissionObserver = null
+  const engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -74,7 +74,7 @@ before(async () => {
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: coordinator.id, role: coordinator.role }, repository, baseBranch: 'main', githubAppId: 1234 }));
-  await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
+  await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard', run: { worktreeRoot: await temporaryDirectory('post-merge-launch-checkouts', '/var/tmp') } }, coordinatorStatus as typeof fetch);
   await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', concurrency: 4 });
   const file = join(root, '.graphyard/master.json');
   const storedConfig = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
@@ -202,4 +202,84 @@ test('unit:post-merge-review-refused-launch-recovers — a request the loop stop
   const reviewedItem = await stored(work.id);
   assert.equal(reviewedItem.postMergeReview, 'reviewed');
   assert.deepEqual(owedPostMergeReviews([reviewedItem]), []);
+});
+
+
+test('integration:review-brief-proof-bindings — real ordinary and post-merge launches retain exact task proof inputs for retries', async () => {
+  // GY-3055 COMMENT3006142 stopped on these reviewer-selected paths, even though
+  // authorized surrounding-code reads were available. Reproduce the exact search and recover.
+  const discovery = await temporaryDirectory('review-brief-path-discovery');
+  await symlink(fileURLToPath(new URL('../', import.meta.url)), join(discovery, 'checkout'));
+  const pattern = 'reviewLaunch|specCheckLaunch|policyRevision';
+  assert.throws(() => execFileSync('rg', ['-n', pattern,
+    'checkout/src/server/routes/review.ts', 'checkout/src/model/post-merge-review.ts',
+    'checkout/tests/review-verdict.test.ts', 'checkout/tests/spec-check.test.ts',
+  ], { cwd: discovery, stdio: 'pipe' }), (error: any) => {
+    assert.equal(error.status, 2);
+    assert.match(error.stderr.toString(), /checkout\/src\/server\/routes\/review.ts: No such file or directory/);
+    assert.match(error.stderr.toString(), /checkout\/tests\/spec-check.test.ts: No such file or directory/);
+    return true;
+  });
+  const paths = execFileSync('rg', ['--files', 'checkout/src', 'checkout/tests'], { cwd: discovery, encoding: 'utf8' }).split('\n');
+  const corrected = ['checkout/src/server/review-verdict.ts', 'checkout/tests/spec-check-before-dispatch.test.ts'];
+  for (const path of corrected) assert.ok(paths.includes(path));
+  assert.match(execFileSync('rg', ['-n', pattern, ...corrected], { cwd: discovery, encoding: 'utf8' }), /reviewLaunch|specCheckLaunch|policyRevision/);
+  for (const postMerge of [false, true]) {
+    const work = deliveredPrLess(postMerge ? 'GY-9011' : 'GY-9010');
+    // The criterion text deliberately supplies no proof or path: only structured launch inputs do.
+    work.criteria = [{ id: 'AC-1', text: 'The reviewer receives executable coverage bindings.', proofs: ['integration:review-brief-proof-bindings', 'e2e:review-brief-proof-bindings'] }];
+    work.scenarioRequirements = [{ proof: 'e2e:review-brief-proof-bindings', revision: 7, environment: 'uat', hash: 'd'.repeat(64) }];
+    if (!postMerge) {
+      work.candidate!.pr = 9010;
+      work.stage = 'review'; work.delivery = undefined; work.postMergeReview = undefined;
+      work.observation!.merged = false; work.observation!.mergeSha = null;
+    }
+    await insert(work);
+    const prompts: string[] = [];
+    const run = (command: string, args: string[]) => {
+      if (args[0] === 'pane' && args[1] === 'run') {
+        const launch = expandTypedCommand(args[3]);
+        prompts.push(requestOf(launch.kind, launch.args)!);
+      }
+      return herdr(command, args);
+    };
+    await launchReview(root, work, 'reviewer-claude', [], at(), { run, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) });
+    const record = (await readReviewLedger(root)).reviews.find(entry => entry.key === work.key)!;
+    assert.deepEqual(record.reviewInputs, { criteria: work.criteria, scenarioRequirements: work.scenarioRequirements });
+    // A changed later snapshot must not replace the launch facts when its session is reminded.
+    const retry = reviewRetryPrompt(repository, record, [{ id: 'AC-9', text: 'Later data', proofs: ['e2e:wrong-case'] }], launcher);
+    assert.match(retry, /otherwise finish the authorized reads and judge it before posting/);
+    assert.equal(prompts.length, 1);
+    for (const brief of [prompts[0], retry]) {
+      assert.match(brief, /\[AC-1\] proofs:/);
+      for (const proof of work.criteria[0].proofs) assert.ok(brief.includes(proof));
+      assert.ok(brief.includes('"caseId":"review-brief-proof-bindings","path":"e2e/cases/review-brief-proof-bindings.json"'));
+      assert.ok(brief.includes('"revision":7,"environment":"uat","hash":"' + 'd'.repeat(64) + '"'));
+      assert.ok(brief.includes(`git show ${postMerge ? M : H}:PATH`));
+      assert.ok(brief.includes(`git diff ${B} ${postMerge ? M : H}`));
+      assert.ok(brief.includes(`node ${launcher} guide review`));
+      assert.match(brief, /policy revision 1/);
+      assert.match(brief, /missing later trusted results do not block review; missing or inadequate test implementation can/);
+      assert.match(brief, /Post exactly one verdict/);
+      assert.match(brief, /one review posted with --event COMMENT/);
+      assert.match(brief, /one-time token/);
+      assert.match(brief, /mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker/);
+      assert.match(brief, /Discover the correct path with rg --files or command with CLI --help, then retry the authorized read/);
+      assert.match(brief, /necessary input remains unavailable through authorized equivalent reads/);
+      assert.match(brief, /genuine permission, identity, binding or runtime failure prevents judging it/);
+      assert.match(brief, /Do not blanket-ignore errors, run builds\/tests\/servers, edit code, expand credentials, guess evidence or weaken a criterion/);
+      assert.doesNotMatch(brief, /If a command you need is refused or cannot succeed/);
+      assert.doesNotMatch(brief, /Later data|e2e:wrong-case|graphyard show GY-/);
+    }
+    assert.deepEqual([record.sha, record.baseSha, record.policyRevision], [postMerge ? M : H, B, 1]);
+    assert.equal((await stored(work.id)).reviewLaunch!.reviewer, 'graphyard-reviewer[bot]');
+    await assert.rejects(launchReview(root, work, 'reviewer-claude', [], at(), { run, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) }), /pending|already/);
+    assert.equal(prompts.length, 1, 'one session answers this head');
+    const session = await readReviewBinding(record.sessionDirectory!);
+    const body = { event: 'APPROVE', body: verdictBody, sha: record.sha, token: session.verdictToken };
+    const accepted = await request(session.verdictToken!, `work/${work.id}/review-verdict`, body);
+    assert.equal(accepted.status, 200, JSON.stringify(accepted.body));
+    const repeated = await request(session.verdictToken!, `work/${work.id}/review-verdict`, body);
+    assert.ok([401, 409].includes(repeated.status), 'the session cannot decide a second time');
+  }
 });

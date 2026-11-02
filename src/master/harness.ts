@@ -491,9 +491,9 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
  * worker's own harness, so the rework the control plane authorizes is carried out by the attempt it
  * dispatches, with no human shell.
  */
-export function branchRestoration(input: { cliPath: string; key: string; epoch: number; pr: number; reviewedHead: string }) {
+export function branchRestoration(input: { cliPath: string; key: string; epoch: number; reviewedHead: string }) {
   const cli = `node ${input.cliPath}`;
-  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} ${input.pr}`];
+  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} --head`];
 }
 /**
  * The shell commands a blocker names: each backtick-quoted command line, or, in a blocker that

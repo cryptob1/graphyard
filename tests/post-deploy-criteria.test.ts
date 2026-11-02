@@ -151,9 +151,11 @@ test('unit:post-deploy-criteria — the reviewer judges a declared criterion on 
   assert.match(section, /on this head's pre-merge evidence/);
   assert.match(section, /never request changes or hold the merge because the live install or deployed release has not shown it yet/);
   assert.match(section, /it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item/);
-  // GitHub mode and control-plane mode both carry it; an item with none keeps its request byte-identical.
+  // Proof metadata changes the bindings, while the rest of an ordinary request stays identical.
   const plain = reviewPrompt(config, binding, undefined, undefined, ordinary);
-  assert.equal(plain, reviewPrompt(config, binding, undefined, undefined, ordinary.map(({ id, text }) => ({ id, text }))));
+  const withoutProofs = reviewPrompt(config, binding, undefined, undefined, ordinary.map(({ id, text }) => ({ id, text })));
+  assert.equal(plain, withoutProofs.replace('[AC-1] proofs: []', '[AC-1] proofs: [{"proof":"unit:covered"}]'));
+  assert.ok(plain.includes('[AC-1] proofs: [{"proof":"unit:covered"}]'));
   assert.ok(!plain.includes('post-deploy verification'));
   assert.ok(reviewPrompt(config, binding, undefined, undefined, declared).includes(section));
   const plane = { head: binding.sha, baseTip: binding.baseSha };

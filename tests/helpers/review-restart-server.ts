@@ -5,7 +5,7 @@ import { server } from '../../src/server.js';
 
 const store = new Store(process.argv[2]!);
 const engine = new Engine(store, 120, 'owner/project');
-engine.submissionObserver = null;
+engine.gitRunner = null;
 const http = server(engine, [
   { id: 'master', role: 'coordinator', token: 'restart-test-master' },
   { id: 'implementer', role: 'worker', token: 'restart-test-worker' },

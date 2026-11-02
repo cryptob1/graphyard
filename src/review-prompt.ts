@@ -1,6 +1,6 @@
 import { repeatingPaths as loopRepeatingPaths, touchesRepeatingPath } from './model/repeating-paths.js';
 import { verificationMapDigest, type VerificationMap } from './verification-maps.js';
-import { declaredPostDeploy, pinnedCases } from './model.js';
+import { declaredPostDeploy, pinnedCases, type Work } from './model.js';
 export type ReviewCriterion = { id: string; text: string; proofs?: readonly string[] };
 /**
  * The shared simplicity paragraph (GY-1999): defined once here and interpolated verbatim into every
@@ -41,11 +41,20 @@ export function singleCaseReviewSection(criteria?: readonly ReviewCriterion[]) {
  * GY-2972: the finding classification and verdict rules moved to `guide review`; the brief names
  * that topic beside the criteria instead of restating them.
  */
-export function criteriaRuleSection(key: string, sha: string, criteria: { id: string; text: string }[] = []) {
+export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCriterion[] = [], scenarioRequirements: Work['scenarioRequirements'] = []) {
   // Each criterion verbatim: a condition cut from its tail would be judged FOLLOW-UP and silently
   // dropped, and collapsed whitespace changes an indented fragment or exact output it quotes.
   const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
+  const proofs = criteria.map(criterion => {
+    const bindings = (criterion.proofs ?? []).map(proof => ({
+      proof,
+      ...(proof.startsWith('e2e:') ? { caseId: proof.slice(4), path: `e2e/cases/${proof.slice(4)}.json` } : {}),
+      ...(scenarioRequirements.find(pin => pin.proof === proof) ?? {}),
+    }));
+    return `[${criterion.id}] proofs: ${JSON.stringify(bindings)}`;
+  }).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
+    + (proofs ? `Launch snapshot proof bindings: ${proofs}. Unlisted scenario pins are absent from this snapshot; do not invent revisions. ` : '')
     + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. `;
 }
 
@@ -78,12 +87,12 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
  * request stays byte-identical whatever a session's history and memory hold; a self-review passes
  * none, and judges the diff by the shared standard alone.
  */
-export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], files?: readonly string[] | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
+export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], files?: readonly string[] | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string; scenarioRequirements?: Work['scenarioRequirements'] } | null) {
   return `Read the change with: git diff ${binding.base} ${binding.head} (both commits are in this session's object store; git show --stat ${binding.head} lists its files). `
     + (context?.memory ?? '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
     + (context?.round ?? '')
-    + criteriaRuleSection(binding.key, binding.head, criteria)
+    + criteriaRuleSection(binding.key, binding.head, criteria, context?.scenarioRequirements)
     + postDeployReviewSection(criteria)
     + singleCaseReviewSection(criteria)
     + controlPlaneFindingSection
