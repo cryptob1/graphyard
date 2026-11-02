@@ -43,7 +43,7 @@ function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin'): Dashboar
     token: 'fixture', work, status: boardStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
     operatorAgents: [], operatorAgentsError: null, features: { validation: null, releases: null, automation: null }, events: [], editingRequirements: false, setEditingRequirements: noop,
-    codexAvailable: false, sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, role), refresh: async () => {},
+    sessionEpoch: { current: 0 }, api: async (path: string) => boardApi(path, role), refresh: async () => {},
     action: async () => {}, setError: noop, signOut: noop, ...overrides,
   };
   // The board GET /api/board serves over the same work (GY-200): the Work page renders its groups.
@@ -209,8 +209,7 @@ test('unit:ui-item-first-screen — an item page says on its first screen what s
   assert.match(left, /Waiting for someone else to approve the latest code/);
   // Review status is the review gate's verdict, whichever provider gave it.
   const reviewRow = (item: Work) => /<dt>Review<\/dt><dd>([^<]+)<\/dd>/.exec(markup(createElement(WorkDetails, { ...dashboard({ work: board().map(entry => entry.key === item.key ? item : entry) }), item })))?.[1];
-  const codex = { ...find('GY-16'), policy: { ...find('GY-16').policy, reviewProvider: 'codex' }, observation: { ...find('GY-16').observation!, reviews: [] } } as Work;
-  assert.equal(reviewRow(codex), 'Approved', 'a Codex approval, recorded outside GitHub reviews, reads as approved');
+  assert.equal(reviewRow(find('GY-16')), 'Approved');
   assert.equal(reviewRow(find('GY-22')), 'Waiting for approval');
   const changes = { ...find('GY-21'), gates: find('GY-21').gates.map(gate => gate.name === 'review' ? { ...gate, passed: false, reasons: ['Outstanding change requests must be resolved through a new review'] } : gate) } as Work;
   assert.equal(reviewRow(changes), 'Changes requested', 'an approval beside an open change request is not reported as approved');

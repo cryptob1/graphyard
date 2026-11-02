@@ -4,11 +4,12 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID, generateKeyPairSync } from 'node:crypto';
+import { createHash, randomBytes, randomUUID, generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
+import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
@@ -168,6 +169,7 @@ async function assertOneSession(master: Awaited<ReturnType<typeof reviewerMaster
 }
 
 test('unit:one-reviewer-per-request — the cycle step and the dispatcher launching for the same request in one tick start one session with one record, recorded before its runtime starts', async () => {
+  await sessionProviderContract();
   const master = await reviewerMaster();
   try {
     // GY-1111: the dispatcher losing used to read as "both stood down" — its refusal is settled as its
@@ -242,6 +244,41 @@ before(async () => {
   engine = new Engine(store, 120, 'owner/project'); engine.principals = [operator, implementer, producer];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
+
+/** Create rejects retired providers; the default accepts the actual session verdict route. */
+async function sessionProviderContract() {
+  const input = { type: 'chore', title: 'Session review only', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x', 'e2e:fixture'] }] };
+  for (const reviewProvider of ['codex', 'agent'])
+    await assert.rejects(engine.execute(operator, 'create', null, { ...input, policy: { reviewProvider } }, randomUUID()), /github/);
+  let item = await engine.execute(operator, 'create', null, input, randomUUID());
+  assert.equal(item.policy.reviewProvider, undefined, 'the omitted provider uses session review');
+  item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
+  item = await engine.execute(implementer, 'claim', item.id, {}, randomUUID());
+  item = await engine.execute(implementer, 'workspace', item.id, { epoch: 1, host: 'machine-a', path: `/tmp/gy124/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-1` }, randomUUID());
+  item = await engine.execute(implementer, 'submit', item.id, { epoch: 1, pr: 121 }, randomUUID());
+  const candidate = { sha: H, baseSha: B, pr: 121, branch: item.workspaces[0].branch, author: implementer.id };
+  item = await engine.observe(item.id, item.revision, { ...observation(candidate), candidate, source: 'control-plane', files: ['src/store/pools.ts'] });
+  assert.equal(item.gates.find(gate => gate.name === 'review')!.passed, false);
+  const coordinator = { id: 'session-launcher', role: 'coordinator' as const, token: 'launcher-credential-'.padEnd(40, 'x') };
+  const http = server(engine, [coordinator]);
+  await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${(http.address() as { port: number }).port}/api/work/${item.id}`;
+  const post = async (path: string, token: string, body: unknown) => {
+    const response = await fetch(`${url}/${path}`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': randomUUID() }, body: JSON.stringify(body) });
+    assert.equal(response.status, 200, JSON.stringify(await response.json()));
+  };
+  try {
+    const token = randomBytes(32).toString('hex');
+    await post('review-launch', coordinator.token, { reviewer: 'independent-session', head: H, baseTip: B, tokenHash: createHash('sha256').update(token).digest('hex'), expiresAt: new Date(Date.now() + 3600000).toISOString() });
+    await post('review-verdict', token, { event: 'APPROVE', body: 'The submitted change satisfies its criteria.', sha: H, token });
+    const recorded = await store.workItem(item.id);
+    assert.equal(recorded!.gates.find(gate => gate.name === 'review')!.passed, true);
+    assert.equal(recorded!.observation!.reviews[0].source, 'control-plane');
+  } finally {
+    await new Promise<void>(resolve => http.close(() => resolve()));
+    engine.principals = [operator, implementer, producer];
+  }
+}
 
 test('integration:conflicting-verdicts-surfaced — APPROVED then CHANGES_REQUESTED on one head for one request is a conflict: both recorded, attention raised, neither acted on, and a fresh review resolves it', async () => {
   let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Two verdicts on one head', criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x', 'e2e:fixture'] }] }, randomUUID());

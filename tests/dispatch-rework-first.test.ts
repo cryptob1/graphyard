@@ -30,7 +30,7 @@ function reopenReverted(work: Work, now: Date) {
   work.stage = 'ready'; work.stageEnteredAt = now.toISOString();
   delete work.delivery;
   work.submission = null; work.candidate = null; work.observation = null;
-  work.mergeAuthorization = null; work.mergeExecution = null; work.reviewRequest = null;
+  work.mergeAuthorization = null; work.mergeExecution = null;
   work.reworkRequested = false;
 }
 /** A returned rework: the earlier attempt's submission stands, sent back for a new claim. */
