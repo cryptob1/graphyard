@@ -533,7 +533,7 @@ test('unit:fast-failure-backoff — a transient read failure costs seconds, not 
     } as unknown as Work;
   };
 
-  test('unit:daemon-single-merge-trial — a cycle with submitted heads starts exactly one trial (the merge writer\'s), a cursor carrying old shadow verdicts loads without them, and master status has no shadowGate', async () => {
+  test('unit:daemon-single-merge-trial — a cycle with submitted heads starts exactly one trial (the merge writer\'s), a cursor preserves old shadow verdicts as passive data, and master status has no shadowGate', async () => {
 
     const directory = await temporaryDirectory('no-shadow-trial');
     const config = configFor(join(directory, 'coordinator.token'));
@@ -561,11 +561,11 @@ test('unit:fast-failure-backoff — a transient read failure costs seconds, not 
     assert.deepEqual(trials, [sha(`merge:${sha('head1')}`)], 'one trial, the merge writer\'s, of the oldest head');
     assert.ok(!('shadowGate' in daemonSummary(state, start, 60_000, config.hostId)), 'the loop summary has no shadowGate');
 
-    // A cursor an older loop wrote, its shadow verdicts included, loads; the verdicts are dropped.
+    // A cursor an older loop wrote preserves its shadow verdicts as passive unknown data.
     const legacy = { ...emptyDaemonState(config), shadow: [{ key: 'GY-1', id: 'w1', head: sha('head1'), baseTip: tip, mergeSha: null, risk: 'normal', build: 'pass', tests: { passed: 0, failed: [], files: 0 }, conflict: [], durationMs: 1, at: iso(start), outcome: 'pending' }] };
     await writeFile(daemonStatePath(config), JSON.stringify(legacy));
     const loaded = await readDaemonState(root, config);
-    assert.ok(!('shadow' in loaded), 'the old verdicts are not carried');
+    assert.deepEqual((loaded as unknown as typeof legacy).shadow, legacy.shadow, 'the old verdicts are preserved as passive data');
     assert.equal(loaded.repository, 'owner/project');
   });
 
