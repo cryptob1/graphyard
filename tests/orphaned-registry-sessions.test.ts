@@ -50,7 +50,7 @@ function memoryRegistry(host: string, home: string, concurrency = 4) {
     runtimes: proposedRuntimes.filter(runtime => runtime.name === 'claude'),
     models: [{ name: 'opus', id: 'claude-opus-5' }],
     accounts: [{ name: 'reviewer-account', runtime: 'claude', model: 'opus', credential: { host, home } }],
-    roles: [{ name: 'reviewer', accounts: ['reviewer-account'], concurrency }],
+    roles: [{ name: 'reviewer', accounts: ['reviewer-account'], policy: { args: ['--setting-sources', 'user'] }, concurrency }],
     reason: 'fixture reviewer fleet',
   }, { actor: 'operator', at: new Date().toISOString() }).registry;
   const at = () => new Date().toISOString();
@@ -82,7 +82,7 @@ function tickEffects(host: Awaited<ReturnType<typeof fleet>>, config: MasterConf
     credentials: async () => ({}),
     reconcileReviews: (work, herdr) => reconcileReviews(host.root, config, { run: host.run, work, agents: herdr }),
     reconcileProducers: async () => ({ producers: [] }),
-    launchReview: (work, request, profile, herdr, observedAt) => launchReview(host.root, work, profile.name, herdr, observedAt, { run: host.run, mint: host.mint, requestId: request.id, probe: { registry: registry.client, quota: false, cacheMs: 0 } }),
+    launchReview: (work, request, profile, herdr, observedAt) => launchReview(host.root, work, profile.name, herdr, observedAt, { run: host.run, registerLaunch: host.registerLaunch, requestId: request.id, probe: { registry: registry.client, quota: false, cacheMs: 0 } }),
     launchProducer: async () => { throw new Error('no producer is launched here'); },
     registry: async () => registry.client.document(),
     endRegistrySession: (session, reason) => endRegistrySessionById(config, session.id, reason, registry.client),
@@ -103,7 +103,7 @@ test('unit:reconcile-closes-orphaned-registry-sessions — a registry session a 
     // tracks names it (the incident's state).
     const item = requested(1);
     const requestId = item.autoDispatch!.review!.id;
-    const launched = await launchReview(host.root, item, 'review-a', host.agents, new Date().toISOString(), { run: host.run, mint: host.mint, requestId, probe });
+    const launched = await launchReview(host.root, item, 'review-a', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId, probe });
     const sessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === requestId)!.session!;
     const pane = launched.pane!;
     assert.deepEqual(registry.live().map(session => session.id), [sessionId], 'the registry counts the fresh review live');
@@ -140,7 +140,7 @@ test('unit:reviewer-slot-freed-after-orphan-close — the request the orphan hel
     // predecessor loop launched for GY-501, whose approval was dismissed and whose ledger record
     // settled — the pane went with it, and the request it answered stands only on the item.
     const done = requested(1), waiting = requested(2);
-    const launched = await launchReview(host.root, done, 'review-a', host.agents, new Date().toISOString(), { run: host.run, mint: host.mint, requestId: done.autoDispatch!.review!.id, probe });
+    const launched = await launchReview(host.root, done, 'review-a', host.agents, new Date().toISOString(), { run: host.run, registerLaunch: host.registerLaunch, requestId: done.autoDispatch!.review!.id, probe });
     const sessionId = (await readReviewLedger(host.root)).reviews.find(record => record.requestId === done.autoDispatch!.review!.id)!.session!;
     assert.deepEqual(registry.live().map(session => session.id), [sessionId]);
     const verdict = { state: 'DISMISSED', reviewer: 'graphyard-reviewer[bot]', reviewId: 7, submittedAt: new Date().toISOString() };

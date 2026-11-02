@@ -9,7 +9,7 @@ import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, grantsAuthorize, unauthorizedProofs } from './model/proof.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, admin, assertReviewerProfiles, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewerApp, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
+import { activeLease, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
@@ -545,8 +545,6 @@ export class Engine {
   // currently have an authorized producer. Authority itself lives in the grant store.
   principals: Principal[] = [];
   // Reviewer identities and the control-plane App are deployment facts, not client input.
-  reviewerApps: ReviewerApp[] = [];
-  controlPlaneAppId?: number;
   /**
    * Reads a submitted head from the control plane's checkout (GY-1523) while the control plane is
    * the merge writer. Left undefined, `git -C` GRAPHYARD_REPOSITORY_ROOT (else the working
@@ -828,7 +826,6 @@ export class Engine {
         if (actor.role === 'operator-agent') {
           authorizeOperatorCommand(actor, command, data, undefined, this.repository);
         } else admin(actor);
-        if (reviewProviderOf(data.policy) === 'agent') assertReviewerProfiles(data.policy.reviewerProfiles, this.reviewerApps, this.controlPlaneAppId);
         demand(data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown dependency');
         demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
         const criteria = this.declareBootstrap(actor, data, [], 1, now);

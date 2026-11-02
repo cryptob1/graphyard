@@ -7,7 +7,7 @@ One stateless container, Postgres: `node "$GRAPHYARD_CLI" install --provider com
 
 ## Variables
 
-`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH`; no remote-side credential variable (the merge writer pushes with the [deploy key](install.md#step-3-deploy-key)); `GRAPHYARD_REVIEWER_APPS`; `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/`s3`); `GRAPHYARD_SIGNIN_CLAIM`:
+`DATABASE_URL`; `HOST`/`PORT` (`0.0.0.0`/`4310`); `GITHUB_REPOSITORY`/`GITHUB_BASE_BRANCH`; no remote-side credential variable (the merge writer pushes with the [deploy key](install.md#step-3-deploy-key)); `GRAPHYARD_GENERATED_FILES`/`GRAPHYARD_REPOSITORY_POLICY`; `GRAPHYARD_BUILD_SHA`; `GRAPHYARD_ARTIFACT_BACKEND` (`postgres`/`s3`); `GRAPHYARD_SIGNIN_CLAIM`:
 
 | Variable | Purpose
 | --- | ---
@@ -44,7 +44,7 @@ A repository whose main declares `.graphyard/serve.json` gets its merged main bu
 
 Set the variables table, register a read-write deploy key ([step 3](install.md#step-3-deploy-key)), then `doctor`. Compose: `cp .env.example .env`, `docker compose --profile full up -d`.
 - `graphyard master setup` plans variables saved credentials derive; `--apply` sets them, audited in `.graphyard/setup-audit.jsonl`. `park` refuses host-doable asks (repository, derived variable, held credential, Confirm-access capture, coordinator checkout or unit record, agent identity); a person's sign-in, enrolment or browser profile stays human.
-- No main guard or revert approver remains; leftover `GRAPHYARD_REVERT_APPROVER_*` are unread and may be deleted.
+- No main guard, revert approver or reviewer App remains; leftover `GRAPHYARD_REVERT_APPROVER_*` and `GRAPHYARD_REVIEWER_APPS` are unread and may be deleted. Reviews use control-plane launch tokens.
 
 Startup migrates retired work-item fields once (GY-3013), including queue, planned-file scope,
 escalation, research and lane fields, and clears standing `Scope request refused` blockers.

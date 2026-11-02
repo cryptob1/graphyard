@@ -48,22 +48,14 @@ test('master init verifies a coordinator and repository before writing private l
   try {
     const result = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
     assert.equal(result.role, 'coordinator');
-    assert.deepEqual(result.attention, []); assert.match(result.next, /^Run graphyard master reviewer setup .* then graphyard master start/);
-    // A permission the installed App lacks is announced with the migration path, and never blocks setup.
-    const shortfall = 'App graphyard-owner-project lacks Contents: write (installed with read), which branch refresh needs to push base refreshes and main-guard revert branches onto the managed repository; accept the pending permission request at https://github.com/settings/installations/4242';
-    const short = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, appPermissions: { app: 'graphyard-owner-project', installationUrl: 'https://github.com/settings/installations/4242', verifiedAt: '2030-01-01T00:00:00Z', error: null, suspended: false, missing: [{ permission: 'contents', required: 'write', granted: 'read', features: ['merge-queue'], reasons: [] }], attention: [shortfall] }, heldJobs: 2 }));
-    const announced = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, short as typeof fetch);
-    assert.equal(announced.attention[0], shortfall); assert.match(announced.attention[1], /2 integration jobs are held/);
-    assert.match(announced.next, /install --repo OWNER\/NAME --plan, then --apply/);
-    assert.doesNotMatch(announced.next, /master browser|github-setup/);
-    const legacy = controlPlaneAttention(await (await short()).json());
-    assert.equal(legacy.attentionItems.length, 2);
-    for (const item of legacy.attentionItems) {
-      assert.equal(item.role, 'master');
-      assert.equal(item.human, false);
-      assert.match(item.next, /install --repo OWNER\/NAME --plan, then --apply/);
-      assert.doesNotMatch(item.next, /master browser|github-setup/);
-    }
+    assert.deepEqual(result.attention, []); assert.match(result.next, /^Run graphyard master environments --apply .* then graphyard master start/);
+    const legacy = controlPlaneAttention({ heldJobs: 2 });
+    assert.equal(legacy.attentionItems.length, 1);
+    const held = legacy.attentionItems[0];
+    assert.equal(held.role, 'master');
+    assert.equal(held.human, false);
+    assert.match(held.next, /install --repo OWNER\/NAME --plan, then --apply/);
+    assert.doesNotMatch(held.next, /master browser|github-setup/);
     assert.equal((await stat(join(root, '.graphyard/master.json'))).mode & 0o777, 0o600);
     assert.equal(execFileSync('git', ['check-ignore', '.graphyard/master.json'], { cwd: root, encoding: 'utf8' }).trim(), '.graphyard/master.json');
     const agents = await readFile(join(root, 'AGENTS.md'), 'utf8');

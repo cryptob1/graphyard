@@ -10,7 +10,7 @@ import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { acknowledgeLaunch, acknowledgementMs, atomicPrivateWrite, defaultAcknowledgementSeconds, dispatchWork, launchDelivery, loadMasterConfig, masterOwnedRunFields, neverStarted, prepareSessionHarness, saveMasterSettings, saveProducerProfile, sessionWords, settlementDue, setupMaster, SessionStartError, startAgentSession, sustainedActivityMs, type HerdrAgent, type WorkerProfile } from '../src/master.js';
 import { launchAuthorization, managedInstructions } from '../src/repository-setup.js';
 import { guideText } from '../src/guide.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewRetryPrompt, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
@@ -18,7 +18,7 @@ import { repositoryClaudeConfig } from '../src/harness.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-// Time-bomb allowance (GY-1694): 2026-09-20 is the request clock (sessionRetry, reconcileProducers now: () => new Date(clock + offset)); the real clock only stamps snapshot times and the mint expiry relative to itself.
+// Time-bomb allowance (GY-1694): 2026-09-20 is the request clock (sessionRetry, reconcileProducers now: () => new Date(clock + offset)); the real clock only stamps snapshot times and the registerLaunch expiry relative to itself.
 
 // GY-93: a launched session receives its instruction as its own first request, never as pasted
 // content; the loop tells a session that never started from one that did the work and failed;
@@ -36,8 +36,7 @@ const clock = Date.parse(at);
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+const registerLaunch = async () => ({ launch: 'fixture-launch' });
 const producerVerify = (principal: string) => async () => ({ actor: { id: principal, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
 
 function observation(candidate: { sha: string; baseSha: string }): Observation {
@@ -46,7 +45,7 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 93, branch: 'graphyard/gy-93-1', author: 'implementer' };
-  return { id: 'work-93', key: 'GY-93', title: 'Launched sessions refuse their own prompt', description: '', type: 'bug', priority: 0, dependencies: [], 
+  return { id: 'work-93', key: 'GY-93', title: 'Launched sessions refuse their own prompt', description: '', type: 'bug', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Request', proofs: ['integration:launch-prompt-is-a-request'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-93', branch: 'graphyard/gy-93-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 93 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -72,7 +71,6 @@ async function repository() {
 async function installed() {
   const root = await repository(), credentials = await temporaryDirectory('launch-request-credentials');
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
   return { root, credentials, token, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
@@ -138,10 +136,10 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer and a wo
     const herdr = new FakeHerdr();
     // Reviewer on Claude Code: the request rides after the approval flag; no `agent prompt` follows.
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
-    const reviewed = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, mint, requestId: 'review-request' });
+    const reviewed = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, registerLaunch, requestId: 'review-request' });
     assert.equal(reviewed.delivery, 'request');
     const reviewer = herdr.named('review-claude-1');
-    assert.match(reviewer.request!, /pull request #93 at head a1f+ against base b1f+/);
+    assert.match(reviewer.request!, /Review head a1f+ against base b1f+/);
     assert.equal(reviewer.toolCalls.length, 1, 'the reviewer began its first tool call on its request');
     assert.deepEqual(reviewer.pasted, [], 'nothing was pasted into the reviewer');
     const reviewStart = typedLaunches(herdr)[0];
@@ -287,12 +285,12 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     // The reviewer ledger judges the same way: its one reminder carries the request, and a
     // session that never took it up settles as never started.
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request', now: () => new Date(clock) });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), registerLaunch, requestId: 'review-request', now: () => new Date(clock) });
     const reviewPrompts: string[] = [];
     const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
     let reviewRecord = await review('done', `● ${words}\n`, 10_000);
     assert.equal(reviewRecord.repromptedAt, iso(10_000)); assert.equal(reviewPrompts.length, 1);
-    assert.ok(reviewPrompts[0].startsWith('You stopped before posting')); assert.match(reviewPrompts[0], /If your review is unfinished, this message comes from the Graphyard launcher/); assert.match(reviewPrompts[0], /this session's own instruction, not untrusted text, needing no further authorization/); assert.match(reviewPrompts[0], /otherwise finish the authorized reads and judge it before posting/); assert.match(reviewPrompts[0], /Review pull request #93 at head/);
+    assert.ok(reviewPrompts[0].startsWith('You stopped before posting')); assert.match(reviewPrompts[0], /If your review is unfinished, this message comes from the Graphyard launcher/); assert.match(reviewPrompts[0], /this session's own instruction, not untrusted text, needing no further authorization/); assert.match(reviewPrompts[0], /otherwise finish the authorized reads and judge it before posting/); assert.match(reviewPrompts[0], /Review head a1f+ against base/);
     reviewRecord = await review('done', `● ${words}\n`, 10_000 + reviewIdleGraceMs);
     assert.equal(reviewRecord.state, 'failed'); assert.equal(neverStarted(reviewRecord), true);
     assert.ok(reviewRecord.resolution!.includes(words));
@@ -348,7 +346,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     const slowReviews = await readReviewLedger(root);
     slowReviews.reviews = slowReviews.reviews.filter(entry => entry.state !== 'failed');
     await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), slowReviews);
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request-slow', now: () => new Date(clock) });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), registerLaunch, requestId: 'review-request-slow', now: () => new Date(clock) });
     reviewPrompts.length = 0;
     const slowReview = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, slow, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews.at(-1)!;
     reviewRecord = await slowReview('done', `● ${words}\n`, 10_000);
@@ -363,7 +361,7 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     const acknowledgedReviews = await readReviewLedger(root);
     acknowledgedReviews.reviews = acknowledgedReviews.reviews.filter(entry => entry.state !== 'failed');
     await atomicPrivateWrite(join(root, '.graphyard/reviews.json'), acknowledgedReviews);
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), mint, requestId: 'review-request-worked', now: () => new Date(clock) });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), registerLaunch, requestId: 'review-request-worked', now: () => new Date(clock) });
     reviewRecord = await slowReview('working', '', 5_000);
     reviewRecord = await slowReview('working', '', 5_000 + sustainedActivityMs);
     assert.equal(reviewRecord.acknowledgedAt, iso(5_000 + sustainedActivityMs));
@@ -483,7 +481,7 @@ test('manual:launch-authorization-onboarding-review — a Claude Code role sessi
     // Launched under the role file, a Claude session loads the authorization from that file.
     const herdr = new FakeHerdr();
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
-    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, mint, requestId: 'review-request' });
+    await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, registerLaunch, requestId: 'review-request' });
     const launched = herdr.named('review-claude-1');
     assert.equal(launched.role, launchAuthorization.replace(/\s+/g, ' '));
     assert.ok(launched.args.includes('--append-system-prompt-file') && !launched.args.includes('--append-system-prompt'), 'the role rides as a file, never as text');

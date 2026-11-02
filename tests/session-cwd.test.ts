@@ -17,7 +17,7 @@ import { bwrapOnPath, readOnlyMountWrapper } from '../src/master/profiles.js';
 import { dataDirectory, worktreeRoot } from '../src/install/worktree-root.js';
 import { atomicPrivateWrite, dispatchWork, loadMasterConfig, saveProducerProfile, setupMaster, type WorkerProfile } from '../src/master.js';
 import { launchProducer, readProducerLedger } from '../src/producer.js';
-import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readySpecCheck } from './helpers/spec-check.js';
@@ -27,8 +27,7 @@ const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f'
 const H = sha40('a1'), B = sha40('b1');
 const at = '2026-09-24T10:00:00.000Z';
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+const registerLaunch = async () => ({ launch: 'fixture-launch' });
 
 function observation(candidate: { sha: string; baseSha: string }): Work['observation'] {
   return { candidate: { ...candidate, pr: 866, branch: 'graphyard/gy-866-7', author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
@@ -36,7 +35,7 @@ function observation(candidate: { sha: string; baseSha: string }): Work['observa
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 866, branch: 'graphyard/gy-866-7', author: 'implementer' };
-  return { id: 'work-866', key: 'GY-866', title: 'Sessions start in their own checkout', description: '', type: 'feature', priority: 0, dependencies: [], 
+  return { id: 'work-866', key: 'GY-866', title: 'Sessions start in their own checkout', description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Own checkout', proofs: ['unit:session-cwd-own-checkout'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-866', branch: 'graphyard/gy-866-7', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 866 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -65,7 +64,6 @@ async function installed() {
   git('config', 'user.name', 'T');
   git('remote', 'add', 'origin', 'https://github.com/owner/project.git');
   await setupMaster(directory, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: join(directory, 'bin', 'graphyard.mjs'), credentialDirectory: credentials, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
-  await bindReviewer(directory, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
   const config = await loadMasterConfig(directory);
   // Session checkouts go to a durable root of the fixture's own, outside the data directory's shared
@@ -124,8 +122,8 @@ test('unit:session-cwd-own-checkout — a reviewer session opens its pane and st
     const home = await temporaryDirectory('session-cwd-claude-home');
     try {
       const stub = herdr();
-      await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', environment: { CLAUDE_CONFIG_DIR: home } });
-      await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: stub.run, mint, requestId: 'review-request' });
+      await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'], environment: { CLAUDE_CONFIG_DIR: home } });
+      await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: stub.run, registerLaunch, requestId: 'review-request' });
       assert.equal(stub.tabs.length, 1, 'one Herdr tab is created for the review');
       const pane = paneCwd(stub.tabs[0]);
       assert.ok(pane, 'the reviewer pane is created with an explicit --cwd');
@@ -153,7 +151,7 @@ test('unit:session-cwd-own-checkout — a producer session opens its pane and st
     try {
       const stub = herdr();
       const proof = 'integration:session-cwd-producer';
-      await saveProducerProfile(root, { name: 'producer-claude', principal: 'proof-runner', agentName: 'produce-claude', kind: 'claude', credentialFile: await fixture.token('producer'), environment: { CLAUDE_CONFIG_DIR: home } },
+      await saveProducerProfile(root, { name: 'producer-claude', principal: 'proof-runner', agentName: 'produce-claude', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: await fixture.token('producer'), environment: { CLAUDE_CONFIG_DIR: home } },
         async () => ({ actor: { id: 'proof-runner', role: 'producer', proofs: ['unit:*', 'integration:*'] } }));
       const request = { id: 'produce-request', kind: 'producer', sha: H, baseSha: B, policyRevision: 1, pr: 866, group: 'integration', proofs: [proof], state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' } as any;
       const item = work({ criteria: [{ id: 'AC-1', text: 'Own checkout', proofs: [proof] }], implementers: ['implementer'], autoDispatch: { review: null, producers: [request], history: [] } } as Partial<Work>);
