@@ -4,7 +4,8 @@ import { mkdir, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { userInfo } from 'node:os';
 import { relative, resolve } from 'node:path';
 import { z } from 'zod';
-import { atomicPrivateWrite, privateFile, type MasterBrowser, type MasterConfig } from './master.js';
+import { type MasterBrowser, type MasterConfig } from './master.js';
+import { atomicPrivateWrite, privateFile } from './private-file.js';
 import type { ProtectionRun } from './protection.js';
 
 /**

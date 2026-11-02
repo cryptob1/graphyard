@@ -1,9 +1,10 @@
+import { privateFile, readCredentialFile, assertOutsideWorktrees, atomicPrivateWrite, atomicPrivateText } from '../private-file.js';
+export { privateFile, readCredentialFile, assertOutsideWorktrees, atomicPrivateWrite, atomicPrivateText } from '../private-file.js';
 // Concern: loading, validating and saving the master config, its credential files and profiles, and live reload.
 import { randomUUID, createHash } from 'node:crypto';
 import { lstat, readFile, realpath, chmod, mkdir } from 'node:fs/promises';
-import { resolve, isAbsolute, dirname, basename, relative, sep } from 'node:path';
+import { resolve, isAbsolute } from 'node:path';
 import { homedir, hostname } from 'node:os';
-import { defaultChildRun } from '../child-runner.js';
 import { sessionName } from '../session-name.js';
 import { discover, assertRepository, localDirectory, saveDiscovery } from '../onboarding.js';
 import { serverOrigin, loadConnection, managedInstructions } from '../repository-setup.js';
@@ -15,21 +16,9 @@ import { withoutMasterInstructions } from './instructions.js';
 import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
 import { controlPlaneAttention } from './attention.js';
-import { writeFailure } from './worktrees.js';
 
-export async function privateFile(file: string) {
-  const info = await lstat(file);
-  if (!info.isFile() || info.mode & 0o077) throw new Error(`${file} must be a regular file with mode 0600`);
-  return info;
-}
 /** The config names a CLI launcher no launch could run — an absolute path this host does not hold (GY-2995). Every session the config would start is refused before it starts, and the launcher and the loop name the fix as configuration attention instead of relaunching. */
 export class LauncherUnavailableError extends Error {}
-export async function readCredentialFile(file: string) {
-  await privateFile(file);
-  const value = (await readFile(file, 'utf8')).trim();
-  if (value.length < 32 || value.length > 10_000) throw new Error('Worker credential file must contain one valid token');
-  return value;
-}
 /**
  * GY-1641: the server origin .graphyard/master.json records (install --apply writes it at the port its
  * adapter bound), or null when none is recorded or it does not parse: what `master init` targets when
@@ -48,38 +37,6 @@ async function readMasterConfig(root: string): Promise<MasterConfig> {
   if (!isAbsolute(config.credentialFile) || credentialFile === repositoryRoot || credentialFile.startsWith(`${repositoryRoot}/`)) throw new Error('Master credential file must be outside the repository and use an absolute path');
   config.credentialFile = credentialFile;
   return config;
-}
-async function repositoryWorktrees(root: string) {
-  let worktrees: string[];
-  try {
-    const records = (await defaultChildRun('git', ['worktree', 'list', '--porcelain', '-z'], { cwd: root })).split('\0');
-    worktrees = records.filter(record => record.startsWith('worktree ')).map(record => resolve(record.slice('worktree '.length)));
-  } catch { throw new Error('Cannot verify credential location because the complete Git worktree inventory is unavailable'); }
-  if (!worktrees.length) throw new Error('Cannot verify credential location because Git returned an empty worktree inventory');
-  // A registered worktree whose path is missing or hidden (a removed proof worktree, or one under
-  // a mount this process cannot see) is compared by its registered path: it cannot be resolved,
-  // but a target lexically inside it is still refused, and it never stops the loop.
-  return Promise.all(worktrees.map(worktree => realpath(worktree).catch(() => worktree)));
-}
-/**
- * Where a path is, or would be created: a target that does not exist yet is judged by its nearest
- * existing ancestor, so a directory can be refused before anything is written into a worktree.
- */
-async function canonicalLocation(target: string) {
-  const missing: string[] = [];
-  for (let current = resolve(target); ; current = dirname(current)) {
-    try { return resolve(await realpath(current), ...missing); }
-    catch (error: any) { if (error?.code !== 'ENOENT' || dirname(current) === current) throw error; missing.unshift(basename(current)); }
-  }
-}
-export async function assertOutsideWorktrees(root: string, target: string, label: string, options: { create?: boolean } = {}) {
-  const canonicalTarget = options.create ? await canonicalLocation(target) : await realpath(target);
-  const worktrees = await repositoryWorktrees(root);
-  for (const worktree of worktrees) {
-    const fromRoot = relative(worktree, canonicalTarget);
-    const inside = fromRoot === '' || fromRoot !== '..' && !fromRoot.startsWith(`..${sep}`) && !isAbsolute(fromRoot);
-    if (inside) throw new Error(`${label} must be outside every worktree of the repository`);
-  }
 }
 export async function externalCredential(root: string, file: string, label: string) {
   if (!isAbsolute(file)) throw new Error(`${label} credential file must use an absolute path outside the repository`);
@@ -145,19 +102,6 @@ export async function inspectProducerCredentials(root: string, profiles: Produce
     catch (error) { health[profile.name] = { available: false, reason: error instanceof Error ? error.message : 'Producer credential is unavailable' }; }
   }
   return withAccountHealth(root, 'producer', profiles, health, probe);
-}
-
-export async function atomicPrivateWrite(file: string, value: unknown) {
-  return atomicPrivateText(file, JSON.stringify(value, null, 2));
-}
-export async function atomicPrivateText(file: string, value: string) {
-  const temporary = `${file}.${randomUUID()}.tmp`;
-  const { writeFile, rename } = await import('node:fs/promises');
-  // A master file that cannot be written because the host is out of room says so: the same
-  // failure reported as an unexplained write error costs an investigation every time.
-  try { await writeFile(temporary, value, { mode: 0o600, flag: 'wx' }); await rename(temporary, file); }
-  catch (error) { throw writeFailure(error, `Writing ${file}`); }
-  await chmod(file, 0o600);
 }
 
 /** Records automatic merging on the plane (`POST /api/auto-merge`) with the coordinator credential; an unchanged value writes nothing. */

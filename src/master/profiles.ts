@@ -3,7 +3,7 @@ import { createHash } from 'node:crypto';
 import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
-import { temporaryDirectories, underTestRunner } from '../supervisor.js';
+import { temporaryDirectories, underTestRunner } from '../runtime-environment.js';
 import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { candidateSettingsSchema, mergeWriterSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';

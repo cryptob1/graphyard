@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { daemonSummary, emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { daemonStatePath, readDaemonState } from '../src/daemon/state-cursor.js';
+import { daemonStatePath, readDaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

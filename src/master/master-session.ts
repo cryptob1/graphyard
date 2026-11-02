@@ -15,7 +15,7 @@ import type { ExhaustionSignal } from '../model/capacity.js';
 import { failureText } from './worktrees.js';
 import type { MasterConfig } from './profiles.js';
 import type { Work } from '../model.js';
-import { simplicityParagraph } from '../reviewer.js';
+import { simplicityParagraph } from '../review-prompt.js';
 
 /** The registry role and profile name the master session launches under. */
 export const masterProfile = 'master';

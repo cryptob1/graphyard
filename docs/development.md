@@ -7,6 +7,8 @@
 
 CLI `src/cli/`, routes `src/server/routes/`, rules `src/model/`, tables `src/store/tables/`, views `web/pages/`, protocol pages `docs/protocol/`.
 
+Keep runtime helpers below launch and coordination modules: environment-file parsing in `src/env-file.ts`, test-host detection in `src/runtime-environment.ts`, private file I/O in `src/private-file.ts`, loop-code readings in `src/loop-code.ts`, and review wording in `src/review-prompt.ts`. Daemon schemas live beside state, separate from cycle execution. `tests/import-cycles.test.ts` counts static imports, re-exports and literal dynamic imports, excluding type-only edges; no runtime component may exceed three modules.
+
 ## Validate a change
 
 ```sh

@@ -1,3 +1,4 @@
+import { simplicityParagraph } from './review-prompt.js';
 // Concern: GY-2992 — the spec check's launcher, prompt and session. When a released feature item
 // owes its spec check, the loop launches one session under a reviewer identity, fresh context: a
 // goldfish with no conversation history and no filer's knowledge, reading only the item and the
@@ -12,13 +13,13 @@ import type { ChildRun } from './child-runner.js';
 import type { FleetProbe } from './fleet.js';
 import type { SandboxExec } from './worker-sandbox.js';
 import {
-  accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab,
-  herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, prepareSessionHarness, readCredentialFile,
-  profileAtLimit, profileSessions, selectAccount, sessionAgentName, startAgentSession,
-  type PromptDelivery, type StartBounds,
+accountLaunch,allocateManagedCheckout,autonomousSession,closeHerdrPane,createdHerdrTab,
+herdrJson,launchStartMs,loadMasterConfig,onSelectedSession,prepareSessionHarness,readCredentialFile,
+profileAtLimit,profileSessions,selectAccount,sessionAgentName,startAgentSession,
+type PromptDelivery,type StartBounds,
 } from './master.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
-import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, simplicityParagraph, verifySessionSandbox } from './reviewer.js';
+import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';
 import { credentialMaskFor } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';

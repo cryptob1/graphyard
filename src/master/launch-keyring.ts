@@ -1,18 +1,9 @@
 // Concern: probing the secrets bus and keyring endpoints a launched session reaches through its confinement.
-import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
-import { setTimeout as sleep } from 'node:timers/promises';
-import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
-import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
-import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, nonInteractiveLaunch } from '../harness.js';
-import { withAutonomyContract } from '../autonomy.js';
-import { underTestRunner } from '../supervisor.js';
-import type { PartialWork } from '../model/capacity.js';
-import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
-import type { MasterRun } from './profiles.js';
-import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
+import { realpathSync, statSync } from 'node:fs';
+import { isAbsolute } from 'node:path';
+import { type ChildRun, defaultChildRun } from '../child-runner.js';
+import { underTestRunner } from '../runtime-environment.js';
+import { isSocketPath, secretsBusPath, type CoordinatorConfinement } from './profiles.js';
 
 /** secretsBusEndpointProblem's answer when the user manager could not judge the endpoint. */
 export const secretsBusUnjudged = 'unjudged' as const;

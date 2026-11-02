@@ -6,7 +6,7 @@ import type { Work } from '../model.js';
 import { missingBaseAncestry } from '../merge-base-ancestry.js';
 import { type ProductionReport, attentionLines } from '../production-watch.js';
 import type { FleetView } from '../model/registry.js';
-import { humanOnlyDecisions } from './harness.js';
+import { humanOnlyDecisions } from '../model/human-request.js';
 import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.js';
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */

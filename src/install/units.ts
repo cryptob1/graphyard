@@ -1,3 +1,4 @@
+import { underTestRunner } from '../runtime-environment.js';
 // Concern: the systemd unit names one installation owns on a host (GY-1441).
 //
 // A host may run several installations side by side — a production coordinator and a pilot from a
@@ -71,9 +72,8 @@ export const userUnitDirectory = (env: NodeJS.ProcessEnv = process.env) =>
  * (supervisor.ts) only writes one: the operator's real units belong to no checkout a test made.
  */
 export function legacyUnitFiles(unitDirectory = userUnitDirectory()): LegacyUnitFile[] {
-  const underTestRunner = !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
   const temporary = canonical(tmpdir());
-  if (underTestRunner && !`${canonical(unitDirectory)}${sep}`.startsWith(`${temporary}${sep}`)) return [];
+  if (underTestRunner() && !`${canonical(unitDirectory)}${sep}`.startsWith(`${temporary}${sep}`)) return [];
   return [legacyLoopUnit, legacyExecutorTemplate].map(name => {
     const path = join(unitDirectory, name);
     try { return { path, text: readFileSync(path, 'utf8') }; } catch (error) { if (!absent(error)) throw error; return { path, text: null }; }

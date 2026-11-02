@@ -1,19 +1,19 @@
 // Concern: launching an agent session — request files, start observation, prompt delivery and acknowledgement.
 import { createHash } from 'node:crypto';
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync } from 'node:fs';
-import { basename, isAbsolute, join, resolve } from 'node:path';
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
+import { basename, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
 import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, nonInteractiveLaunch } from '../harness.js';
 import { withAutonomyContract } from '../autonomy.js';
-import { underTestRunner } from '../supervisor.js';
+import { underTestRunner } from '../runtime-environment.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './profiles.js';
+import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, readOnlyMountWrapper, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
-import { deliverPrompt, herdrErrorText, nameRefusedByRuntime, readSessionScreen, sessionWords, type PromptDelivery } from './prompt-delivery.js';
+import { herdrErrorText, nameRefusedByRuntime, sessionWords, type PromptDelivery } from './prompt-delivery.js';
 import { keyringEndpointWarning, keyringProbeBackoff } from './launch-keyring.js';
 // Prompt delivery moved to prompt-delivery.ts (GY-1863) with the screen a stalled delivery is
 // judged by; the names below are the one address every existing import has always had.

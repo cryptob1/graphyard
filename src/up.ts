@@ -1,3 +1,9 @@
+import { archiveDaemonCursor, daemonStatePath } from './daemon/state.js';
+import { loadStoredMasterConfig } from './master/config.js';
+import { supervisingUnit } from './master/loop-restart.js';
+import { loopStopTimeoutSeconds } from './supervisor.js';
+import { defaultChildRun } from './child-runner.js';
+import { underTestRunner } from './runtime-environment.js';
 import { randomUUID } from 'node:crypto';
 import { spawn, execFileSync, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync } from 'node:fs';
@@ -5,7 +11,6 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { hostname, tmpdir } from 'node:os';
 import { dirname, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
-import { fileURLToPath } from 'node:url';
 import { setupAddress, setupChecklist, type SetupItem, type SetupItemId } from './model/setup-checklist.js';
 import { actionsDirectory, agentBrowserPage, browserProfileMode, offeredSudoMethods, passSudo, recordingPage, submitSudoCode, sudoInstruction, sudoProtectedPage, sudoStateSchema, takeSudoCode, type BrowserPage, type BrowserProfileMode, type RecordedStep, type SudoOptions, type SudoState } from './master-browser.js';
 import { masterCredential, planeRequest } from './setup-from-zero.js';
@@ -22,12 +27,12 @@ import { settleWorkerCredentials } from './install/worker-credentials.js';
 import { ensureDeployKey } from './install/deploy-key.js';
 import type { MergerMode } from './merger-mode.js';
 import type { GitHubCli } from './install/github.js';
-import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
 import { ensureHerdrBinary, ensureHerdrServer, ensureHerdrWorkspace, HerdrSetupFailure, herdrSync, hostHerdrDeps, prepareHerdrInstance, withLocalBin, type HerdrHostDeps } from './herdr-host.js';
 import { herdrBoundElsewhere, herdrPluginBinding, herdrPluginEnabled, serverOrigin, readLoopCode, liftLoopPins, removeHeldCliPin, type LoopCodeReading } from './repository-setup.js';
 import { loopCodeRoot } from './daemon/checkout-state.js';
 import { recordHerdrInstance } from './master/config.js';
+export { readInstallLoopCode } from './loop-code.js';
 
 /** GY-2010: App-import routes are gone; quote the control-plane up path instead. */
 function appImportRoute(repository: string, upFlags = '', _org = false, _ownerType?: string) {
@@ -451,9 +456,9 @@ export async function recordedCredentialAnswers(root: string, server: string, fe
 const recordedCursor = async (root: string) => { const file = (await masterJson(root))?.credentialFile; return typeof file === 'string' ? { credentialFile: resolve(file) } : null; };
 export async function archiveRecordedCursor(root: string) {
   const config = await recordedCursor(root);
-  return config ? (await import('./daemon/state.js')).archiveDaemonCursor(config) : null;
+  return config ? archiveDaemonCursor(config) : null;
 }
-const recordedCursorExists = async (root: string) => { const config = await recordedCursor(root); return !!config && existsSync((await import('./daemon/state.js')).daemonStatePath(config as any)); };
+const recordedCursorExists = async (root: string) => { const config = await recordedCursor(root); return !!config && existsSync(daemonStatePath(config as any)); };
 const processAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
 /**
  * GY-1851: stop this install's master loop and wait for its process to exit: its systemd unit is
@@ -462,15 +467,11 @@ const processAlive = (pid: number) => { try { process.kill(pid, 0); return true;
  * the unit stopped, to start again once the cursor is archived.
  */
 export async function stopRecordedLoop(root: string): Promise<{ unit: string | null }> {
-  const { loadStoredMasterConfig } = await import('./master.js');
-  const { supervisingUnit } = await import('./master/loop-restart.js');
-  const { loopStopTimeoutSeconds } = await import('./supervisor.js');
-  const { defaultChildRun } = await import('./child-runner.js');
   const config = await loadStoredMasterConfig(root);
   const unit = (await supervisingUnit(root, config))?.unit ?? null;
   if (unit) await defaultChildRun('systemctl', ['--user', 'stop', unit], { timeoutMs: (loopStopTimeoutSeconds + 60) * 1000 });
   const cursor = await recordedCursor(root);
-  const lock = cursor ? parseJson(await readFile((await import('./daemon/state.js')).daemonStatePath(cursor as any), 'utf8').catch(() => ''))?.lock : null;
+  const lock = cursor ? parseJson(await readFile(daemonStatePath(cursor as any), 'utf8').catch(() => ''))?.lock : null;
   if (lock && lock.host !== config.hostId && Date.now() - Date.parse(lock.heartbeatAt) < 3 * config.run.intervalSeconds * 1000) throw new Error(`the master loop runs on ${lock.host} (pid ${lock.pid}); stop it there before its cursor is archived`);
   if (lock && lock.host === config.hostId && Number.isInteger(lock.pid) && lock.pid !== process.pid && processAlive(lock.pid)) {
     process.kill(lock.pid, 'SIGTERM');
@@ -1060,7 +1061,7 @@ export async function runUp(request: UpRequest, deps: UpDependencies): Promise<U
         const stopped = await (deps.stopLoop ?? (() => stopRecordedLoop(deps.root)))().catch((error: any) => { throw new UpStop(`master-loop: stopping the master loop before archiving its cursor failed: ${String(error?.message ?? error).split('\n')[0].slice(0, 400)}; rerun ${rerun()}`, upExitCodes.failed); });
         const archived = await archiveRecordedCursor(deps.root);
         if (await recordedCursorExists(deps.root)) throw new UpStop(`master-loop: the master loop's cursor was written again after the loop stopped, so a loop still runs on the old database's cursor; stop it, then rerun ${rerun()}`, upExitCodes.failed);
-        if (stopped.unit) await (deps.startUnit ?? (async (unit: string) => { await (await import('./child-runner.js')).defaultChildRun('systemctl', ['--user', 'start', unit], { timeoutMs: 120_000 }); }))(stopped.unit);
+        if (stopped.unit) await (deps.startUnit ?? (async (unit: string) => { await defaultChildRun('systemctl', ['--user', 'start', unit], { timeoutMs: 120_000 }); }))(stopped.unit);
         else await run('master-loop', ['master', 'restart']);
         fresh = archived ? `the loop started a fresh cursor; the old one (cycle ${archived.cycle}) is archived at ${archived.file}` : 'the loop started a fresh cursor';
         deps.emit({ kind: 'note', text: `Re-issued the coordinator and operator-agent credentials for the fresh database; ${fresh}.` });
@@ -1479,7 +1480,6 @@ export function browserProfileLogin(browser: { profile: string; executable?: str
   } catch { return null; }
   finally { try { opened?.close(); } catch { /* the session may already be gone */ } }
 }
-const underTestRunner = () => !!process.env.NODE_TEST_CONTEXT || process.execArgv.includes('--test') || process.env.npm_lifecycle_event === 'test';
 /** browserProfileLogin, except that under the test runner no real browser is opened. */
 const hostProfileLogin = (browser: { profile: string; executable?: string }) => underTestRunner() ? null : browserProfileLogin(browser);
 /** gh's own record of the login it is signed in as, read from its configuration: no GitHub API request. */
@@ -1645,19 +1645,6 @@ export function forwardSignals(children: Set<ChildProcess>, options: { exit?: (c
   };
   for (const signal of ['SIGINT', 'SIGTERM'] as const) process.on(signal, handler);
   return () => { for (const signal of ['SIGINT', 'SIGTERM'] as const) process.off(signal, handler); };
-}
-
-/**
- * GY-1859: what this install's loop runs against the CLI at CLIPATH — `doctor`'s reading, the
- * same as `up`'s.
- */
-export async function readInstallLoopCode(root: string, options: {
-  cliPath?: string;
-  /** Reads this machine's units; default readLoopCode. */
-  local?: (root: string, cliPath: string) => Promise<LoopCodeReading>;
-} = {}): Promise<LoopCodeReading> {
-  const cliPath = options.cliPath ?? fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-  return (options.local ?? ((at: string, path: string) => readLoopCode(at, { cliPath: path })))(root, cliPath);
 }
 
 /** The real dependencies: this CLI's own commands as children, the master identity's status read. */
