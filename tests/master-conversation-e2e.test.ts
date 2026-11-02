@@ -21,6 +21,10 @@ async function fixture() {
   const scratch = await temporaryDirectory('master-conversation-e2e');
   const root = await temporaryDirectory('checkout', scratch), homes = await temporaryDirectory('accounts', scratch);
   const credentials = await temporaryDirectory('coordinator', scratch);
+  // Trial temp directories can sit below a host's Claude project settings. Keep this
+  // fixture isolated from those settings, and exercise that isolation on every host.
+  await mkdir(join(scratch, '.claude'));
+  await writeFile(join(scratch, '.claude', 'settings.json'), '{}');
   execFileSync('git', ['init', '-q', root]);
   const binary = join(root, 'bin'); await mkdir(binary);
   const runtime = fileURLToPath(new URL('fixtures/master-runtime.mjs', import.meta.url));
@@ -31,7 +35,7 @@ async function fixture() {
     return { name, runtime: name.split('-')[0], model: 'test', credential: { host: 'test-host', home }, enabled: true, maxSessions: null, quota: { ...unobservedQuota } };
   }));
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', repository: 'owner/repo', baseBranch: 'main', hostId: 'test-host', credentialFile: join(credentials, 'coordinator.token'), cliPath: '/bin/graphyard', githubAppId: 1, workers: [], masterAgentName: 'test-master', run: { launchStartSeconds: 10 } });
-  const registry: AgentRegistry = { ...emptyRegistry(), accounts, runtimes: proposedRuntimes.filter(runtime => ['claude', 'codex'].includes(runtime.name)).map(runtime => ({ ...runtime, launch: { ...runtime.launch, environment: { PATH: `${binary}:${process.env.PATH}`, GY_RUNTIME: runtime.name } } })),
+  const registry: AgentRegistry = { ...emptyRegistry(), accounts, runtimes: proposedRuntimes.filter(runtime => ['claude', 'codex'].includes(runtime.name)).map(runtime => ({ ...runtime, launch: { ...runtime.launch, args: [...runtime.launch.args, ...(runtime.name === 'claude' ? ['--setting-sources', 'user'] : [])], environment: { PATH: `${binary}:${process.env.PATH}`, GY_RUNTIME: runtime.name } } })),
     models: [{ name: 'test', id: null, cost: { inputPerMTok: null, outputPerMTok: null }, capability: { tier: 'strong', contextTokens: null } }], roles: [{ name: 'master', accounts: accounts.map(account => account.name), concurrency: 1 }] };
   let accountIndex = 0, allocation = 0, paneId = 0, stallPrompt = false;
   const ended: string[] = [];

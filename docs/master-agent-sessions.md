@@ -80,4 +80,4 @@ Claude and Codex masters resume their current native conversation on the same ac
 
 `master.continuity` persists current/predecessor identities independently of registry allocations. `.graphyard/master-records/` holds full native transcripts, mounted read-only without granting another account home or credentials. `.graphyard/launch/LAUNCH.inputs.jsonl` records launch/wake/retry origins before submission, joined to native input events by unique markers. Tools and partial output never answer a person; a completed assistant final after the input batch does. Pre-upgrade/adopted sessions recover native records from their recorded account and import known delivery origins; failed recovery retains state.
 
-`master-session-resumes` and `master-continues-after-failover` run credential-free runtime fixtures under bubblewrap, inspecting reopened records and confined transcript reads.
+`master-session-resumes` and `master-continues-after-failover` run fixtures with user-only Claude settings under bubblewrap, inspecting resumed records and transcript confinement.
