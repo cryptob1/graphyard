@@ -54,7 +54,6 @@ export const masterCommands = defineCommands([
       '  master defer GY-N NOT-BEFORE REASON  Hold an unleased post-deploy follow-up until NOT-BEFORE',
       '                                (ISO, at most 30 days away) and clear its blocker; no worker launch',
       ...closeHelp,
-      '  master principals [--apply]   Preview or apply a roster rotation keeping live principals',
       '  master restart                Restart this host\'s master loop detached',
       '  master environments [--create KIND,…] [--apply]  Agent accounts, quota, profiles',
       '  master guide                  Print the complete master-agent operating guide',
