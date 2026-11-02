@@ -1,13 +1,13 @@
 # GY-3048 documentation review
 
-Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `0d6b141370fa`.
+Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `f94e14e4b663`.
 
-The handwritten set went from **12,196 to 9,384 words (23.1% shorter)**, including the new rendering guide. This report is outside that guide count. These counts include the newer shipped documentation reconciled through epoch 7.
+The handwritten set went from **12,234 to 9,448 words (22.8% shorter)**, including the new rendering guide. This report is outside that guide count. These counts include the newer shipped documentation reconciled through epoch 8.
 
 | Reviewed file | Before | After |
 | --- | ---: | ---: |
 | `README.md` | 277 | 427 |
-| `docs/coordination.md` | 534 | 431 |
+| `docs/coordination.md` | 516 | 445 |
 | `docs/delivery-redesign.md` | 334 | 193 |
 | `docs/delivery.md` | 725 | 599 |
 | `docs/deployment.md` | 809 | 569 |
@@ -17,7 +17,7 @@ The handwritten set went from **12,196 to 9,384 words (23.1% shorter)**, includi
 | `docs/install.md` | 457 | 369 |
 | `docs/master-agent-reference.md` | 551 | 444 |
 | `docs/master-agent-sessions.md` | 2019 | 823 |
-| `docs/master-agent.md` | 1047 | 833 |
+| `docs/master-agent.md` | 1103 | 883 |
 | `docs/onboarding.md` | 641 | 448 |
 | `docs/operations.md` | 541 | 494 |
 | `docs/protocol/work-commands.md` | 654 | 571 |
@@ -57,3 +57,11 @@ Epoch 7 rework:
 - Build, docs checker and `graphyard verify GY-3048` passed. The documentation proof rendered sample frames and exercised browser controls; its base exercise failed as expected.
 - Self-review caught and fixed the remaining video caption limiting product review to user-facing features. Regenerated both media assets from the corrected HTML. Fully decoded both with ffmpeg; ffprobe confirms MP4 H.264 1200×838 and GIF 800×559, both 120.1 seconds. Visually inspected opening, review and later recovery frames for role labels, readable captions and correct deploy-supervisor recovery.
 - Ran `review self GY-3048` and judged the diff against the synced base: AC-1 met (roles, failed-check handoff, implemented wakes and three human decisions); AC-2 met (storyboard and regenerated media, rendering, decoding, dimensions and visual checks); AC-3 met (all handwritten guides reviewed, concise task entries, preserved operational rules, refreshed counts and passing links/indexes). No blocking finding remains.
+
+
+Epoch 8 rework:
+
+- Confirmed saved epoch-6 commit `d560fa71c79f` is already an ancestor of this branch. Synced `f94e14e4b663` in merge commit `9e9df60530f0`. Resolved coordination and master-agent conflicts; master-agent-sessions merged cleanly. All three files named in the failed trial are reconciled. Preserved GY-3016's advisory nits and GY-3053's queued capacity waits, retries without a lease or cooldown, and wakes for real failures.
+- Refreshed the counts above against the synced base. Build, docs checker and `graphyard verify GY-3048` passed; the documentation proof rendered frames and exercised browser controls, and failed against base as expected.
+- Fully decoded both committed media assets without errors. ffprobe confirms MP4 H.264 1200×838 and GIF 800×559, both 120.1 seconds. Inspected decoded MP4 frames at 0, 55, 100 and 116 seconds and GIF frames at 0 and 100 seconds: readable captions, distinct roles, populated opening, failed-check handoff and exactly three human decisions.
+- Ran `review self GY-3048` and reviewed the diff against the synced base. AC-1 met: roles, ownership, failed-check example, shipped wakes and autonomy are explicit. AC-2 met: corrected storyboard and regenerated assets remain intact, rendering and decoding pass, sample frames are readable, and rendering commands are documented. AC-3 met: all handwritten guides remain reviewed, operational rules and links are preserved, and counts match the current base. No blocking finding remains.
