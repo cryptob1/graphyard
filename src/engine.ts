@@ -41,7 +41,7 @@ import { credentialBlockedReason, credentialFailure } from './worker-credential.
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { loopOwnedRefusal, ownerHoldRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
-import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
+import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
@@ -546,21 +546,11 @@ export class Engine {
   principals: Principal[] = [];
   // Reviewer identities and the control-plane App are deployment facts, not client input.
   /**
-  }
-  /**
-   * Observes the pull request a worker submits before the submission is recorded, so a candidate
-   * that reverts shipped code outside its planned files is refused at `complete` instead of after
-   * review. Left undefined, the deployment's GitHub App (from the environment) observes; null
-   * disables the pre-check, and every later observation still re-derives the refusal.
-   */
-  submissionObserver: ((work: Work, peers?: Work[]) => Promise<Observation>) | null | undefined = undefined;
-  /**
    * Reads a submitted head from the control plane's checkout (GY-1523) while the control plane is
    * the merge writer. Left undefined, `git -C` GRAPHYARD_REPOSITORY_ROOT (else the working
    * directory); null means no checkout, and every head submission is refused as unreadable.
    */
   gitRunner: GitRunner | null | undefined = undefined;
-  /**
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
@@ -570,27 +560,9 @@ export class Engine {
   constructor(public store: Store, public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   /** The commit this process first recorded itself serving (recordPlaneLiveness); undefined until its first tick named one (GY-2177). */
   private servedCommit: string | null | undefined;
-  private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
-    if (data.head !== undefined) return this.observeSubmittedHead(actor, id, { epoch: data.epoch, head: data.head }, key);
-    if (this.submissionObserver === undefined) this.submissionObserver = null;
-    if (!this.submissionObserver || !id) return null;
-    // A replayed submission returns its receipt; it must not depend on the provider again.
-    // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
-    if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    // Without a GitHub App there is nothing to read, and the transaction refuses the pull request.
-    // The landing check reads each open submitted peer's observation scope, which a projection leaves
-    // out (GY-1042): those peers are read whole. This read holds no coordination lock.
-    const all = await withWhole(this.store.leasePool, await lockedWork(this.store.leasePool, [id]), peer => peer.stage !== 'done' && !!peer.submission && !!peer.candidate);
-    const work = all.find(w => w.id === id || w.key === id);
-    if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
-    // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
-    const observation = await this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr! } }, all);
-    await this.reconcileLanded(observation, all);
-    return observation;
-  }
   /**
    * GY-1523: the control plane's own observation of a head submitted with `complete --head`, read
-   * from the shared object store before the transaction, as GitHub is read for a pull request.
+   * from the shared object store before the transaction.
    * Receipt first, so a replayed `complete` runs no git. The candidate's change number is
    * allocated inside the transaction, which binds it to this observation.
    */
@@ -603,6 +575,9 @@ export class Engine {
     // GY-2010: an item a stored adoption (GY-1849) still names completes as a head like any other:
     // its replacement commit is read from the shared object store, never from the pull request.
     if (!work || work.stage === 'done' || !workspace) return null;
+    // A superseded owner reaches the transaction's lease refusal before observation. Leave
+    // expiry to that transaction: a recorded renewal fault may still keep this lease live.
+    if (!work.lease || work.lease.owner !== actor.id || work.lease.epoch !== data.epoch) return null;
     if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
     demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
@@ -633,38 +608,6 @@ export class Engine {
       if (delta.status === 0) observation.headDelta = delta.stdout.split('\n').map(line => line.trim()).filter(Boolean);
     }
     return observation;
-  }
-  /**
-   * GY-744. Reconcile at once the merge of every peer an observation's landing check found already
-   * on the base branch tip while its item still records it unlanded: the peer's pull request is
-   * observed and that observation saved, so the ordinary delivery path records it merged, with its
-   * merge commit, now rather than whenever its own observation comes round — and the stale state
-   * that named it unlanded does not recur. A failure is logged and left to that later observation.
-   *
-   * GY-756. The peer is re-read before it is observed, so several observations in one round that
-   * name the same peer do not each observe it from their own stale snapshot: once one has saved, the
-   * rest find it delivered, or already observed at this head against this base tip, and skip it.
-   * A peer that is not merged (its commits reached the branch while its pull request closed
-   * unmerged) has that observation saved all the same, so it is not re-observed on every cycle
-   * until the base branch moves.
-   */
-  async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
-    const reconciled: Work[] = [];
-    if (!observer) return reconciled;
-    for (const entry of observation?.landing?.landed ?? []) {
-      const known = all.find(item => item.key === entry.key);
-      if (!known) continue;
-      try {
-        const peer: Work | undefined = (await this.store.pool.query('SELECT document FROM work_items WHERE id=$1', [known.id])).rows[0]?.document;
-        if (!peer || peer.stage === 'done' || peer.submission?.pr !== entry.pr) continue;
-        if (peer.observation && peer.observation.candidate.sha === entry.head && observation!.baseTip && peer.observation.baseTip === observation!.baseTip) continue;
-        const seen = await observer(peer, all);
-        reconciled.push(await this.observe(peer.id, peer.revision, seen));
-      } catch (error) {
-        console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
-      }
-    }
-    return reconciled;
   }
   /**
    * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
@@ -844,7 +787,7 @@ export class Engine {
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(compactHeartbeatReceipt(work))]);
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
-    const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
+    const observation = command === 'submit' ? context.observation ?? (data.head !== undefined ? await this.observeSubmittedHead(actor, id, data, key) : null) : null;
     // GY-1735: a claim the observation window refuses rolls its transaction back, so the window a legacy follow-up
     // derives is recorded first, on its own: coordination then holds the item instead of dispatching refused claims.
     // Only a claim the main transaction would judge writes it: a caller without claim authority, or a key that
@@ -1170,9 +1113,8 @@ export class Engine {
         const workspace = work.workspaces.find(w => w.epoch === data.epoch);
         demand(workspace, 'Register the assignment workspace first');
         // GY-1523: the control plane is the only merge writer, so a submission is a head it observed
-        // (`complete --head`). A pull request (an attempt launched before the cutover) is still
-        // recorded; the observation job then reads its head from the shared object store, which
-        // hands it to the merge writer.
+        // (`complete --head`). The HTTP route refuses a bare number (GY-2999); it is a test seam here,
+        // standing for a head without a git checkout.
         let observed = observation, number: number;
         if (data.head !== undefined) {
           demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane; complete ${work.key} ${data.epoch} --head again`, 409);

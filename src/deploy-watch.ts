@@ -1,8 +1,6 @@
-// Concern: the continuous deploy graphyard-deploy.service runs (`graphyard upgrade --watch`): each new
-// base tip is built, restarted and health-checked, and only then — once the server serves the new
-// commit — does the watched checkout move to it and the tip get pinned; a failing one is rolled back
-// to the previous tip, unless it may have migrated the database, and the watch waits for the next tip.
-// The master loop restarts itself onto the tip this records (daemon/run.ts restartCause).
+// The continuous deploy builds, restarts and checks health before publishing the ready CLI.
+// Failed builds leave the healthy pairing alone; failed restarts use schema-aware rollback.
+// The master loop restarts onto the serving tip recorded here (daemon/run.ts restartCause).
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { mkdir, rename, writeFile } from 'node:fs/promises';
@@ -36,7 +34,7 @@ export interface DeployWatchPorts {
   fetch(): Promise<string>;
   /** The commit the checkout holds now: the tip served before the watch recorded one. */
   head(): Promise<string>;
-  /** Moves the watched checkout to the commit; the pass runs it after health, so the CLI checkout never leads the server (GY-2978). */
+  /** Publishes the ready CLI after health; production ports move a pointer, preserving loaded trees. */
   checkout(commit: string): Promise<void>;
   /** Builds the commit in the deploy's own build checkout; the watched checkout does not move for this. */
   build(commit: string): Promise<void>;
@@ -53,10 +51,7 @@ export interface DeployWatchPorts {
   /** The database's schema generation, or null when it cannot be read. */
   database(): Promise<number | null>;
 }
-// GY-2978: `checkout` is the last deploy step but one. The pass builds and restarts the server from
-// the deploy's own build checkout, so the watched checkout — the workers' CLI checkout when the unit
-// watches it — moves only after the new server passed health and serves the same commit; a failed
-// server deploy leaves the CLI where it was, and no healthy deploy opens the skew window again.
+// Publication follows strict server health; production ports atomically select a retained artifact.
 const steps = ['build', 'restart', 'health', 'checkout', 'pin'] as const;
 /** Rollback attempts before the watch stops retrying one and waits for the base to move. */
 export const rollbackAttempts = 5;
@@ -110,9 +105,14 @@ export async function deployOnce(file: string, ports: DeployWatchPorts, log: (li
   } catch (error) {
     const reason = message(error), step = (error as { step?: string }).step;
     if (!previous) { await write({ tip: null, failed: tip, reason }); return 'rolled-back'; }
+    if (step === 'build') {
+      // No server or published CLI changed: leave the healthy pairing running.
+      await write({ tip: previous, failed: tip, reason });
+      return 'rolled-back';
+    }
     // From the restart on — health and, since GY-2978, the checkout move too — the server has started on the tip's
     // code, which may have migrated the database; the previous tip runs only on a generation it supports.
-    if (step !== 'build') {
+    {
       const [after, supported, migrates] = await Promise.all([ports.database().catch(() => null), ports.schema(previous).catch(() => null), ports.schema(tip).catch(() => null)]);
       const ceiling = supported ?? before, reached = after ?? migrates;
       if (ceiling === null || reached === null || reached > ceiling) {

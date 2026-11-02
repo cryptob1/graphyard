@@ -56,7 +56,6 @@ before(async () => {
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = credentials;
-  engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -239,7 +238,7 @@ test('unit:work-snapshot-paged — GET /api/work-snapshot supports paging with c
   assert.equal(coordination.body.hasMore, undefined, 'the coordination view carries no paging fields');
 });
 
-test('integration:api-work-bounded-read — GET /api/work serves the fleet (open items whole, settled deliveries as their stored summaries) and ?pr=N only the item naming that pull request, without reading a settled document whole', async () => {
+test('integration:api-work-bounded-read — GET /api/work serves the fleet (open items whole, settled deliveries as their stored summaries) without reading a settled document whole', async () => {
   // A fleet in production's shape (GY-1778): over a thousand settled deliveries, each weighing
   // what its session history weighs, behind a handful of open items. store.list() served every
   // one of them whole: 134 MB, past the CI plan's abort on every acceptance run.
@@ -292,29 +291,7 @@ test('integration:api-work-bounded-read — GET /api/work serves the fleet (open
   assert.equal(fleet.whole, 0, 'the fleet read reads no settled document whole');
   assert.ok(fleet.result.bytes < settledCount * heavy.length / 4, `the fleet weighs ${fleet.result.bytes} bytes against ${settledCount * heavy.length} bytes of settled history behind it`);
 
-  // The filtered form: the item whose candidate or submission names the pull request, and nothing else.
-  const byCandidate = await settledReadWhole(() => get('work?pr=7777'));
-  assert.deepEqual(items(byCandidate.result.body).map(item => item.key), [candidateOpen.key], 'the pull request\'s candidate item, whole');
-  assert.equal(items(byCandidate.result.body)[0].sessions?.length, 1);
-  assert.equal(byCandidate.whole, 0, 'the filtered read reads no settled document whole');
-  const bySubmission = await settledReadWhole(() => get('work?pr=7778'));
-  assert.deepEqual(items(bySubmission.result.body).map(item => item.key), [submittedOpen.key], 'an item whose submission alone names the pull request is found');
-  assert.equal(bySubmission.whole, 0);
-  const settledMatch = await settledReadWhole(() => get('work?pr=3006'));
-  assert.deepEqual(items(settledMatch.result.body).map(item => [item.key, item.stage, item.sessions?.length ?? 0]), [[settled[6].key, 'done', 0]], 'a settled match is its stored summary');
-  assert.equal(settledMatch.whole, 0);
-  assert.equal((settled[5] as { candidate?: unknown }).candidate, null, 'the fixture settles item 5 without a candidate');
-  const settledBySubmission = await settledReadWhole(() => get('work?pr=3005'));
-  assert.deepEqual(items(settledBySubmission.result.body).map(item => [item.key, item.stage, item.candidate, item.submission?.pr, item.sessions?.length ?? 0]), [[settled[5].key, 'done', null, 3005, 0]], 'a delivery settled without a candidate, its submission alone naming the pull request, is found as its stored summary');
-  assert.equal(settledBySubmission.whole, 0, 'the submission match reads no settled document whole');
-  const none = await settledReadWhole(() => get('work?pr=99999'));
-  assert.deepEqual(none.result.body, [], 'a pull request no item names answers an empty list');
-  assert.equal(none.whole, 0);
-  assert.equal((await get('work?pr=abc')).status, 400);
-  assert.equal((await get('work?pr=0')).status, 400);
-  assert.equal((await get('work?pr=-7')).status, 400);
-
-  // The settled fleet behind both forms: the route this replaced read all of it whole.
+  // The settled fleet behind this read: the route this replaced read all of it whole.
   const listed = await settledReadWhole(() => store.list());
   assert.ok(listed.whole >= settledCount, `store.list() reads every settled document whole (${listed.whole}); the route no longer does`);
 });

@@ -34,7 +34,7 @@ export async function restoreBranchWork(context: CliContext, work: any) {
   const push = quietly('push', `--force-with-lease=refs/heads/${branch}:${tip}`, 'origin', `HEAD:refs/heads/${branch}`);
   if (push.status !== 0) throw new Error(`The lease push of ${branch} was refused${/stale info/.test(push.stderr) ? ': the branch moved after the fetch; fetch again and read the new tip before replacing it' : ''}: ${push.stderr.trim()}`);
   context.print({ key: work.key, epoch, branch, replaced: tip || null, head,
-    next: `The branch holds ${head.slice(0, 12)}. Submit it with complete ${work.key} ${epoch} PR.` });
+    next: `The branch holds ${head.slice(0, 12)}. Submit it with complete ${work.key} ${epoch} --head.` });
 }
 
 /** `worktree GY-N EPOCH [BASE]`: reserve and create a local isolated worktree. */

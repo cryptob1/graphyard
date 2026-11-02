@@ -14,6 +14,7 @@ import { detachRuns } from '../runner/registry.js';
 import { besideCursor } from './state-cursor.js';
 import { deployRecordPath, readDeployRecord } from '../deploy-watch.js';
 import { cliCommit } from '../protocol-version.js';
+import { activeCliRoot } from '../install/cli-release.js';
 import { loopCodeRoot } from './checkout-state.js';
 import { noteControlPlane } from './compose-recovery.js';
 
@@ -73,7 +74,7 @@ export const loopRestartRequestPath = (config: Pick<MasterConfig, 'credentialFil
  * control plane's own regardless of which repository it names (GY-2955): an install managing a
  * different repository still restarts its loop onto the revision the upgrade served.
  */
-export function restartCause(config: Pick<MasterConfig, 'credentialFile' | 'cliPath'>, root: string, loaded: string | null, head = () => cliCommit(loopCodeRoot(config.cliPath, root))): string | null {
+export function restartCause(config: Pick<MasterConfig, 'credentialFile' | 'cliPath'>, root: string, loaded: string | null, head = () => cliCommit(activeCliRoot(loopCodeRoot(config.cliPath, root)))): string | null {
   if (existsSync(loopRestartRequestPath(config))) return 'a master restart was requested';
   const serving = readDeployRecord(deployRecordPath(root))?.tip ?? null;
   return serving && loaded && serving !== loaded && head() === serving ? `the deploy unit serves ${serving.slice(0, 12)}, not ${loaded.slice(0, 12)} this loop loaded` : null;

@@ -20,7 +20,7 @@ CI proofs publish via one producer principal; its posted run binding is Graphyar
 
 ### Production deployment observation
 
-A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; the serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; the launcher always runs the checkout's own code (every `up` removes a stale `.graphyard/held-cli.json`, even when the loop is already current).
+A merge unserved five minutes after new `GRAPHYARD_BUILD_SHA` is `delivery.deployment-incident`; the serving commit comes from the configured endpoint (`master init --deployment-url …`). The loop reuses observations `run.deploymentReuseMinutes` (15). Self-upgrades [deploy](delivery.md) the tip first; the launcher resolves the install's published CLI artifact before loading its dependencies (every `up` removes a stale `.graphyard/held-cli.json`, even when the loop is already current).
 
 ### Serving the managed repository's app
 
@@ -38,7 +38,7 @@ A repository whose main declares `.graphyard/serve.json` gets its merged main bu
 
 ## Backup, upgrade, rollback
 
-**Backup:** `graphyard db backup`, `db verify`, `db fence` before move. **Upgrade:** [upgrade](install.md#upgrading-an-existing-installation); the continuous deploy follows Graphyard's main: build and restart from the install's build worktree, `/healthz?strict` reporting the deployed commit, then the watched checkout moved to the served commit and pinned — a worker CLI's checkout, when the unit watches it, never leads the server (GY-2978) — and it rolls a failed deploy or health check back leaving the checkout as it was; a lease command (`heartbeat`, `claim`, `complete`, `blocked`, `defer`) run from a checkout the server does not match yet proceeds with a one-line warning, every other command refuses by name. **Restore:** `db migrate`, `db restore`.
+**Backup:** `graphyard db backup`, `db verify`, `db fence` before move. **Upgrade:** [upgrade](install.md#upgrading-an-existing-installation); the continuous deploy follows Graphyard's main: dependencies are installed in separate `deploy/build/.graphyard/cli-releases/<commit>` worktrees under the installation directory. The existing `install --plan`/apply flow builds and restarts the exact source, then `/healthz?strict` must pass before `deploy/build/.graphyard/cli-published` is published by atomic symlink rename. Launchers resolve that pointer before loading tsx; the watched checkout and legacy `deploy/build` keep their code and dependencies. Credential-masked sessions keep the stable `deploy/build` tree read-only, including future releases; credentials remain hidden. Published artifacts are retained for running processes and rollback. A failed dependency install leaves the healthy CLI/server pairing untouched; a failed restart or health check uses the existing schema-aware rollback. The coordinator pin and installation gates are unchanged. During the brief server/CLI handover a refused version check permits three visible launcher retries, 500 ms apart, each reloading the pointer; a persistent mismatch still refuses before an API request. Lease commands retain their existing warning behavior. Ordinary deployment needs no manual upgrade or trust change. **Restore:** `db migrate`, `db restore`.
 
 ## Manual fallback
 

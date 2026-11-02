@@ -72,7 +72,7 @@ test('unit:version-skew — a CLI whose release differs from the server refuses 
   try {
     const failure = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env: { ...process.env, GRAPHYARD_VERSION: '1.4.2', GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: origin(server) } }).then(() => null, (error: any) => error);
     assert.match(failure?.stderr, /CLI 1\.4\.2 and server 2\.0\.0 differ: run graphyard upgrade/);
-    assert.deepEqual(requests, ['/healthz'], 'the skewed invocation is refused before its first API request');
+    assert.deepEqual(requests, Array(4).fill('/healthz'), 'the initial probe and three bounded retries send no API request');
   } finally { await close(server); }
 });
 
@@ -112,7 +112,7 @@ test('unit:version-skew — an unreleased build compares commits: another commit
   try {
     const behind = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env }).then(() => null, (error: any) => error);
     assert.match(behind?.stderr, new RegExp(`CLI commit ${head} and server commit ${servingCommit} differ: run graphyard upgrade`));
-    assert.deepEqual(requests, ['/healthz']);
+    assert.deepEqual(requests, Array(4).fill('/healthz'), 'three handover retries still refuse the mismatch before any API request');
     requests.length = 0;
     servingCommit = head;
     const current = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env }).then(() => null, (error: any) => error);
@@ -151,7 +151,7 @@ test('unit:version-skew — an unstamped CLI on a dated checkout takes its relea
     servingVersion = '2026.10.18';
     const behind = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env }).then(() => null, (error: any) => error);
     assert.match(behind?.stderr, /CLI 2026\.10\.17 and server 2026\.10\.18 differ: run graphyard upgrade/);
-    assert.deepEqual(requests, ['/healthz'], 'the skewed invocation is refused before its first API request');
+    assert.deepEqual(requests, Array(4).fill('/healthz'), 'the initial probe and three bounded retries send no API request');
   } finally { await close(server); }
 });
 
