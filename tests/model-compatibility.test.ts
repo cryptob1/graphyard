@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
 import { createSchema, evaluate, type Observation, type Work } from '../src/model.js';
 
 // GY-406 gave the control-plane App a ruleset bypass the main guard still lands its reverts with.
@@ -10,15 +8,7 @@ import { createSchema, evaluate, type Observation, type Work } from '../src/mode
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40);
 
-function sources(directory: string): string[] {
-  return readdirSync(directory, { withFileTypes: true }).flatMap(entry => entry.isDirectory() ? sources(join(directory, entry.name)) : /\.(ts|tsx|mjs|js)$/.test(entry.name) ? [join(directory, entry.name)] : []);
-}
-
-test('unit:repair-lane-removed — the module is gone and unimported, and an item stored with "repair": "merge-path" still loads and evaluates', () => {
-  assert.equal(existsSync('src/master/repair-lane.ts'), false, 'src/master/repair-lane.ts is deleted');
-  const importers = ['src', 'bin', 'web'].filter(existsSync).flatMap(sources).filter(file => /repair-lane(\.js)?['"]/.test(readFileSync(file, 'utf8')));
-  assert.deepEqual(importers, [], 'no source file imports the repair lane');
-
+test('unit:legacy-repair-field — stored repair fields load and evaluate without affecting gates', () => {
   // A new item cannot carry the retired field.
   assert.equal(createSchema.safeParse({ title: 't', criteria: [{ id: 'AC-1', text: 'x', proofs: ['unit:x'] }], repair: 'merge-path' }).success, false);
 

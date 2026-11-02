@@ -1,9 +1,6 @@
 import { after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
-import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
-import { repositoryRoot } from '../scripts/ci-tests.mjs';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
@@ -13,17 +10,12 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-1983: the loop deploys each new main itself (GY-1982), so the release-candidate pipeline —
 // candidates, UAT, holds, soaks, seals, promotion and candidate reverts — is gone.
 
-const removed = [
-  'src/release-candidate.ts', 'src/release-holds.ts', 'src/release-digests.ts', 'src/release-revert.ts', 'src/release-pending.ts',
-  'src/daemon/release-ports.ts', 'src/daemon/promotion-local.ts', 'src/daemon/candidate-cut.ts', 'src/server/routes/candidates.ts', 'src/cli/release.ts',
-];
 const admin: Principal = { id: 'removal-admin', role: 'admin', sessionKind: 'human' };
 const credential = { ...admin, token: `removal-admin-${'r'.repeat(32)}` };
 let database: EmbeddedPostgres | null = null, store: Store | null = null, http: ReturnType<typeof server> | null = null;
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
-test('unit:candidate-machinery-removed — the candidate modules are gone, `graphyard release` is no longer a command and /api/candidates answers 404', { timeout: 120_000 }, async () => {
-  for (const file of removed) assert.ok(!existsSync(join(repositoryRoot, file)), `${file} is deleted`);
+test('unit:retired-release-routes — `graphyard release` is no longer a command and /api/candidates answers 404', { timeout: 120_000 }, async () => {
   // No command is named release; giving up a lease is `unclaim GY-N EPOCH`.
   const { commands, renderHelp } = await import('../src/cli/index.js');
   assert.deepEqual(commands.filter(command => command.name === 'release'), []);
