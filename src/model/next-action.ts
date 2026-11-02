@@ -280,8 +280,6 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
   { gate: 'review', match: /^Product review requested changes/, kind: 'request-rework' },
   { gate: 'review', match: /^Product review rejected/, kind: 'attention' },
   { gate: 'review', match: /^human:\S+ failed a person's check/, kind: 'request-rework' },
-  // An approval whose mechanical nits await the worker bot's round (GY-971): that round is a rework.
-  { gate: 'review', match: /^Approval (\d+ )?of [0-9a-f]+ names \d+ findings? classified mechanical/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test and merge: the merge writer trials and pushes the head itself (GY-2010); its own merge step
   // answers both. No remote check, mergeability or protection refuses a gate any more.

@@ -1,0 +1,15 @@
+{
+  "id": "worker-credit-handoff",
+  "title": "A worker stopped on spent credits hands its work to another account",
+  "description": "Runs the real limit-stop preservation and capacity transaction with real Git worktrees and Postgres: uncommitted work, mixed committed and uncommitted work, and clean trees reach the next attempt's prompt as a saved commit while the spent account is held.",
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "credit stop and successor handoff",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/worker-credit-handoff.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
