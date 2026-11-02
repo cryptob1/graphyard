@@ -49,4 +49,5 @@ Set the variables table, register a read-write deploy key ([step 3](install.md#s
 Startup migrates retired work-item fields once (GY-3013), including queue, planned-file scope,
 escalation, research and lane fields, and clears standing `Scope request refused` blockers.
 The migration preserves stages and event history; evaluations and status reads no longer strip fields.
-Daemon cursor reads strip undeclared top-level and metric keys while validating active fields.
+Daemon cursors still load retired keys and preserve unknown fields across reads and writes for
+forward compatibility, while validating active fields.

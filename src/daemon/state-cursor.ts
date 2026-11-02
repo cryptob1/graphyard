@@ -6,15 +6,15 @@ import { resolve, dirname, basename } from 'node:path';
 import { type MasterConfig, assertOutsideWorktrees, writeFailure, diskExhaustionMessage, reclaimAdvice } from '../master.js';
 import { forwardTolerant } from '../master/profiles.js';
 import { boundDetail } from './text.js';
-import { cycleMetricsSchema, daemonActionSchema, daemonStateSchema, type DaemonAction, type DaemonState } from './state.js';
+import { daemonActionSchema, daemonStateSchema, type DaemonAction, type DaemonState } from './state.js';
 
 /**
- * The cursor drops undeclared top-level and metric fields; active nested records keep unknown fields.
+ * The cursor validates declared fields and preserves unknown fields from newer or retired versions.
  * Built on first use, never at module scope: state.ts and this module import each other, so the
  * schema it wraps does not exist while this file's body runs.
  */
 let tolerated: typeof daemonStateSchema | undefined;
-const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSchema).extend({ metrics: cycleMetricsSchema.array().default([]) }).strip();
+const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSchema);
 /**
  * GY-1960: a cursor record the loop rewrites from what it declares (its release, its latest
  * reload) keeps the fields a newer loop wrote under it. `next` sets every declared field, so only
@@ -41,7 +41,7 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   let raw: string;
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
-  // Unknown cursor and metric fields are retired on read; active nested records remain forward-tolerant.
+  // Preserve unknown cursor fields across reads and writes, including keys retired from the schema.
   const stored = JSON.parse(raw);
   for (const action of Object.values<Record<string, unknown>>(stored.actions ?? {})) delete action.faultClass;
   delete (stored.mergeWriter as Record<string, unknown> | undefined)?.advisory;
