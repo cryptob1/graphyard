@@ -8,6 +8,10 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import type { ActionRow } from '../src/model/actions.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-607: an executor claiming an item's `resync` row saved the item, so the GitHub observation
  * taken meanwhile failed its revision check and was discarded; the item stayed stale, the next
@@ -48,7 +52,7 @@ const resyncRow = (item: Work) => item.actionQueue!.actions.find(row => row.kind
 
 let sequence = 0;
 async function submitted() {
-  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Resync ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Resync ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/resync/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}` }, randomUUID());

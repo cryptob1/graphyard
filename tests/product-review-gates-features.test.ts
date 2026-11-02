@@ -46,16 +46,16 @@ const review = (verdict: ProductReview['verdict'], head = H, findings = 'The wor
 
 const reviewGate = (work: Work) => evaluate(work, [work], new Date()).gates.find(gate => gate.name === 'review')!;
 
-test('unit:product-review-gates-features — who owes one: a feature carrying an e2e: proof does, bugs, chores and "No user-facing change" items do not', () => {
+test('unit:product-review-gates-features — who owes one: a feature carrying an e2e: proof does, bugs and chores do not, and the old opt-out sentence excuses nothing', () => {
   assert.equal(needsProductReview(feature('GY-1')), true);
   const bug = { ...feature('GY-2'), type: 'bug' } as Work;
   assert.equal(needsProductReview(bug), false);
   const chore = { ...feature('GY-3'), type: 'chore' } as Work;
   assert.equal(needsProductReview(chore), false);
   const opted = { ...feature('GY-4'), description: 'No user-facing change: the scheduler internals moved.' } as Work;
-  assert.equal(needsProductReview(opted), false);
+  assert.equal(needsProductReview(opted), true, 'a feature owes its review whatever its description says (GY-3037)');
   const unitOnly = { ...feature('GY-5'), criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] } as Work;
-  assert.equal(needsProductReview(unitOnly), false);
+  assert.equal(needsProductReview(unitOnly), false, 'an item written before the e2e rule still owes no review until it carries the proof');
   // The review is launched and posted through the control plane, so a GitHub-observed head owes none here.
   const github = feature('GY-6');
   github.observation = { ...github.observation!, source: undefined } as never;
@@ -298,7 +298,7 @@ test('unit:product-review-gates-features — a failed product reviewer attempt s
 });
 
 test('unit:product-review-gates-features — the product prompt walks the preview and the served app when one runs, and the served app against the diff when none does', () => {
-  const prompt = reviewPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard' }, { key: 'GY-23', pr: 0, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { head: H, baseTip: B, product: true, previewUrl: 'https://graphyard.example/preview/GY-23/' });
+  const prompt = reviewPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard' }, { key: 'GY-23', pr: 0, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, undefined, undefined, undefined, null, null, null, { head: H, baseTip: B, product: true, previewUrl: 'https://graphyard.example/preview/GY-23/' });
   assert.match(prompt, /product reviewer/);
   assert.match(prompt, /https:\/\/graphyard\.example\/preview\/GY-23\//);
   assert.match(prompt, /agent-browser/);
@@ -307,7 +307,7 @@ test('unit:product-review-gates-features — the product prompt walks the previe
   assert.match(prompt, /Screenshot: /);
   // The fallback a repository with no previewable application gets (GY-2989 rework): the served app,
   // walked against the head's diff — the only way its user-facing features reach a product review.
-  const fallback = reviewPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard' }, { key: 'GY-24', pr: 0, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, undefined, undefined, undefined, null, null, null, null, { head: H, baseTip: B, product: true });
+  const fallback = reviewPrompt({ repository: 'owner/project', cliPath: '/bin/graphyard' }, { key: 'GY-24', pr: 0, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, undefined, undefined, undefined, null, null, null, { head: H, baseTip: B, product: true });
   assert.match(fallback, /not separately previewed/);
   assert.match(fallback, new RegExp(`git diff ${B} ${H}`));
   assert.match(fallback, /agent-browser/);

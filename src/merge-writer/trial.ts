@@ -135,13 +135,22 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
- * GY-2997: the trial child's home — a fresh, empty directory of the trial as HOME and every XDG base
- * directory (as `previewEnvironment` gives a preview), so nothing the merge brings in finds a
- * coordinator credential through HOME or XDG. npm and Playwright caches belong to this allocation
- * too, so cold-cache installs never need writes to the read-only host home.
+ * GY-2997: the trial child's home and caches belong to its allocation. Preserve
+ * explicit host mise resolution for launcher tooling; candidate commands use the
+ * private container's toolchain without mounting the host home.
  */
-export function trialHomeVariables(home: string): Record<string, string> {
-  return { npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
+export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
+  const shared: Record<string, string> = {};
+  for (const [kind, base, fallback] of [
+    ['CONFIG', 'XDG_CONFIG_HOME', '.config'], ['CACHE', 'XDG_CACHE_HOME', '.cache'],
+    ['DATA', 'XDG_DATA_HOME', '.local/share'], ['STATE', 'XDG_STATE_HOME', '.local/state'],
+  ] as const) {
+    const name = `MISE_${kind}_DIR`;
+    const directory = host[base] ?? (host.HOME ? join(host.HOME, fallback) : undefined);
+    if (host[name] !== undefined) shared[name] = host[name];
+    else if (directory) shared[name] = join(directory, 'mise');
+  }
+  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
 export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
@@ -790,7 +799,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const home = join(checkout.directory, 'home');
     await mkdir(home);
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
-    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home) };
+    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
     wrapper = trialContainerWords([checkout.directory, place, temporary], trialContainerDependencies(input.root));
   }
@@ -854,6 +863,15 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   };
   // A child a signal ended, or one the host could not start or capture, says nothing about the merge.
   const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
+  // Bubblewrap can start successfully but fail to exec npm: a plain nonzero exit without a
+  // spawn cause or signal. Its diagnostic still means the host toolchain never started.
+  const wrapperExecFailed = /^bwrap: execvp (?:node|npm|npx): No such file or directory\s*$/m;
+  // Only known mise shim startup diagnostics belong to the host; project mise task errors remain build failures.
+  const toolchainStartFailed = (ended: Ended) => {
+    if (ended.ok) return false;
+    const diagnostic = ended.out.replace(ansiEscape, '');
+    return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR (?:Config files in .+ are not trusted|No version is set for tool (?:node|npm|npx))\s*$|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
+  };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
@@ -920,7 +938,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
         else if (await holds('package-lock.json')) {
           const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
-          if (hostEnded(installed)) throw runnerFailure('install', installed);
+          if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
           if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
         const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
@@ -930,7 +948,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           enter('build');
           enterStep('build');
           const built = await child('build', 'npm', ['run', 'build']);
-          if (hostEnded(built)) throw runnerFailure('build', built);
+          if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
         // GY-2092: a change to the dashboard installs Chromium in the allocated trial home and runs the Playwright suite; a failing browser test refuses the merge like any failing test.

@@ -9,6 +9,10 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 import { fixtureMergeSha, mergeDelivered, mergeIntent } from './helpers/merge-ledger.js';
 
 /**
@@ -47,7 +51,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 
 let sequence = 0;
 async function submitted() {
-  let item = await engine.execute(operator, 'create', null, { type: 'chore', title: `Ledger delivery ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:merge-ledger'] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore', title: `Ledger delivery ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:merge-ledger', 'e2e:fixture'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/merge-ledger/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}-${item.epoch}` }, randomUUID());

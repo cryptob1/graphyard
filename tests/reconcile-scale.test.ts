@@ -9,6 +9,10 @@ import { reconcileRowLockSql, reconcileVersionsSql } from '../src/store/coordina
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-727: the reconciliation tick re-read every work item's full document in every batch, so a
 // pass at 700 items cost items x batches document reads and every mutation queued behind the
 // batches' coordination lock. The pass now reads only the items that can change, once. Since
@@ -38,7 +42,7 @@ let onLocked: ((id: string) => Promise<void>) | undefined;
 let openItems: Work[] = [], heldDone: Work[] = [];
 
 const createItem = async (title: string) =>
-  engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-scale'] }] }, randomUUID());
+  engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-scale', 'e2e:fixture'] }] }, randomUUID());
 
 /** A delivered item nothing is owed for any more, inserted beside its work-index row. */
 const doneDocument = (template: Work, key: string, over: Partial<Work> = {}): Work => ({

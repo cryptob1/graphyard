@@ -25,7 +25,7 @@ import { actionAccount, nextActionKinds, sameAction } from './model/next-action.
 import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
-import { filingRefusal, userFacingProofRefusal } from './model/user-facing.js';
+import { filingRefusal, e2eProofRefusal } from './model/user-facing.js';
 import { physicalCheckRefusal } from './model/human-proof.js';
 import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
@@ -41,15 +41,14 @@ import { credentialBlockedReason, credentialFailure } from './worker-credential.
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { loopOwnedRefusal, ownerHoldRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
-import { mechanicalHoldUntil } from './mechanical-findings.js';
 import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
-// GY-2965: the requirements an item of type feature or bug carries at create (AC-1), and the
-// serve declaration an e2e: proof needs in the repository it is created in (AC-3). Both refuse at
-// parse time, before any scenario is resolved; the same validation is `filingRefusal` (model/user-facing.ts).
-const userFacingCreateRefusal = filingRefusal;
+// GY-3037: the e2e proof every item carries at create, and the serve declaration an e2e: proof
+// needs in the repository it is created in. Both refuse at parse time, before any scenario is
+// resolved; the same validation is `filingRefusal` (model/user-facing.ts).
+const filingCreateRefusal = filingRefusal;
 const publicArtifactUrl = z.url().max(2000).refine(value => {
   const parsed = new URL(value);
   return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password;
@@ -66,14 +65,12 @@ const retiredField = z.unknown().transform(() => undefined).optional();
 const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.string().trim().min(1).max(500).nullable(), line: z.number().int().positive().nullable(), durationMs: z.number().int().min(0).nullable() }).strict();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField })
-    .superRefine((data, ctx) => { const refusal = userFacingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
+    .superRefine((data, ctx) => { const refusal = filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ owner: createSchema.shape.owner, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
-  // GY-1764: the loop reports the review ledger's planned mechanical-fix round for the item (or its absence), the one ground the review gate's hold reads.
-  mechanicalplan: z.object({ reviewId: z.number().int().positive(), head: sha, planned: z.boolean() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
   // GY-860 AC-2: `failure` releases a claim whose worktree the host could not create. The attempt
   // is undone — the epoch returns, the untouched reservation and timeline entry go, the lease is
@@ -411,7 +408,6 @@ function reconcileDueAt(work: Work, all: Work[], now: Date, account: ActionAccou
   // Accepted evidence stops counting once its expiry passes (currentEvidence), so a gate can fail by the clock alone.
   for (const evidence of work.evidence ?? []) considerIso(evidence.expiresAt);
   // The review gate's mechanical hold lapses at its round window, and dispatch's wait on a running split at its limit and grace.
-  consider(mechanicalHoldUntil(work, nowMs));
   for (const lift of stalledActionLifts(work)) consider(lift);
   return due;
 }
@@ -951,14 +947,6 @@ export class Engine {
           && (data.state === 'finished' || handle.state === 'running' && data.observed !== undefined && ['coordinator', 'admin'].includes(actor.role)));
       preserveAssignment(work);
       if (command !== 'create' && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
-      if (command === 'mechanicalplan') {
-        demand(['coordinator', 'admin'].includes(actor.role), 'Coordinator permission required', 403);
-        // `at` is the control plane's own instant of the report: the review gate holds only while the loop
-        // confirmed the plan this recently, so a report whose write or ledger read keeps failing cannot
-        // keep holding a head the ledger no longer plans a round for (GY-1764).
-        work.mechanicalPlan = data.planned ? { reviewId: data.reviewId, head: data.head, at: now.toISOString() } : null;
-        work.mechanicalAnswered = data.planned ? null : { reviewId: data.reviewId, head: data.head };
-      }
       if (command === 'requirements') await this.reviseRequirements(db, actor, work, all, data, now);
       if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; await adoptFollowUpWindow(db, work); }
       if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; await adoptFollowUpWindow(db, work); }
@@ -1324,9 +1312,9 @@ export class Engine {
     demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
     demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
     demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
-    // GY-2965: a user-facing item keeps its e2e proof through a revision; the opt-out sentence still excuses one.
-    const userFacing = userFacingProofRefusal({ type: work!.type, description: work!.description, criteria: data.criteria });
-    demand(!userFacing, userFacing!);
+    // GY-3037: an item keeps its e2e proof through a revision; no description excuses one.
+    const e2e = e2eProofRefusal({ type: work!.type, description: work!.description, criteria: data.criteria });
+    demand(!e2e, e2e!);
     const unphysical = physicalCheckRefusal(data.criteria);
     demand(!unphysical, unphysical!);
     demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');

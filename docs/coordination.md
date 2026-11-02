@@ -3,9 +3,9 @@
 
 ## Write observable criteria
 
-Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:`: producer-runnable on exact head; `manual:`: master attestation unless in `producerProofs`; `e2e:`: [runner](validation.md), and required on every user-facing item — a `feature` or `bug` owes a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json`, which the merge trial runs against the served head; only a description opening `No user-facing change: <reason>` opts out. Any trusted pass proves it whatever it executed. `master create` plans; `master requirements` rewrites, lapsing evidence/review/authorization. Post-ship/production/host outcomes need `manual:post-deploy/NAME` or a per-clause observation; never merge-gating.
+Criterion: `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. `unit:`/`integration:`: producer-runnable on exact head; `manual:`: master attestation unless in `producerProofs`; `e2e:`: [runner](validation.md), and required on every item — chores, bugs and features owe a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` (a new case or an existing one), which the merge trial runs against the served head; no description opts out. Any trusted pass proves it whatever it executed. `master create` plans; `master requirements` rewrites, lapsing evidence/review/authorization. Post-ship/production/host outcomes need `manual:post-deploy/NAME` or a per-clause observation; never merge-gating.
 
-Sample several cases: a criterion whose proof pins one seed or one fixture can pass on a head tuned to that case, so create and `master requirements` flag it (`AC-1 checks one case; … name at least three, or say why one is enough`) and the reviewer tries one other case and requests changes when only the pinned case works. Example: Open City's campaign completed 20/20 missions on seed 42 and 7–11/20 on the others, and its one-hour soak was clean on 42 and jammed on seed 1.
+Sample several cases: a criterion whose proof pins one seed or one fixture can pass on a head tuned to that case, so create and `master requirements` flag it (`AC-1 checks one case; … name at least three, or say why one is enough`) and the reviewer inspects code and test coverage for other inputs, requesting changes when they do not establish the required generality. Paths under `e2e/cases/` bind proofs and are not sample inputs. Reviewers assess every criterion and post APPROVE or REQUEST_CHANGES without running builds, tests or servers; exact-head tests and E2E execution remain the automated merge trial gate, with no human step. Example: Open City's campaign completed 20/20 missions on seed 42 and 7–11/20 on the others, and its one-hour soak was clean on 42 and jammed on seed 1.
 
 ## Dispatch optimistically
 
@@ -15,9 +15,9 @@ A failed dispatch is retried next cycle, never blocked.
 
 ## Review gate: verdicts, not threads
 
-Exact-head approval lands; remote threads and reviews are never read or resolved. A `BLOCKING:` finding reworks the item once per submission, uncapped. A sensitive delta needs exact-head approval; a normal one merges, and its post-merge review files `BLOCKING:` bugs. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions, budget-test blockers.
+Exact-head approval lands; remote threads and reviews are never read or resolved. Pre-merge review judges implementation and bound E2E coverage before the merge trial: missing later trusted results do not block approval; missing or inadequate tests can. The writer must pass every required exact-head E2E proof before updating main; workers never submit trusted evidence. A `BLOCKING:` finding reworks the item once per submission, uncapped. A sensitive delta needs exact-head approval; a normal one merges, and its post-merge review files `BLOCKING:` bugs. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions, budget-test blockers.
 
-`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Mechanical findings hold approval until the round window or the loop's clear; the loop requests bot `rework`, one commit, only those files. `Rejected bot commit: SHA — reason` rejects it.
+`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Nits stay advisory: they never hold approval or trigger a bot round.
 
 ## Scope is a plan, not a lock
 

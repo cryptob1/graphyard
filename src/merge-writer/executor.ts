@@ -191,7 +191,7 @@ export const mergeRecordKey = (work: Pick<Work, 'id'> & { mergeLedger?: Pick<Mer
 export const keyReusedRefusal = (error: unknown) => /Idempotency key reused with different input/.test(error instanceof Error ? error.message : String(error));
 
 /** The refusal a failed trial records: the conflicting paths, the failing build step, the failing test files, or a bound E2E case that is missing or failed a step (AC-3). */
-export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> & Pick<MergeTrialRun, 'notReproduced'> | null }): string | null {
+export function trialFailureReason(trial: { conflict?: readonly string[]; run?: Pick<TrialRun, 'build' | 'tests' | 'failingCase' | 'timedOut' | 'e2e'> & Partial<Pick<TrialRun, 'logTail'>> & Pick<MergeTrialRun, 'notReproduced'> | null }): string | null {
   if (trial.conflict?.length) return `${trialFailurePrefix}: the merge conflicts in ${trial.conflict.slice(0, 20).join(', ')}`;
   const run = trial.run;
   if (!run) return `${trialFailurePrefix}: the trial reached no verdict`;
@@ -200,7 +200,11 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
   if (missing) return `${trialFailurePrefix}: ${missing.proof} has no case at e2e/cases/${missing.case}.json`;
   const failedCase = run.e2e?.find(entry => entry.failingStep);
   if (failedCase) return `${trialFailurePrefix}: e2e case ${failedCase.case}: ${failedCase.failingStep}`;
-  if (run.build === 'fail') return `${trialFailurePrefix}: build step npm run build`;
+  if (run.build === 'fail') {
+    const reason = `${trialFailurePrefix}: build step npm run build`;
+    const tail = run.logTail?.trim();
+    return tail ? `${reason}\n${tail.slice(-(2000 - reason.length - 1))}` : reason;
+  }
   if (run.tests.failed.length) {
     // GY-2960: a repository check names its failing files; timed-out-only failures say so, else the first case rides after the files.
     const files = run.tests.failed.slice(0, 20).join(', ');
@@ -328,6 +332,8 @@ export const baseMovedReason = (times: number) => `base moved ${times} times`;
 export const unmovedTipReason = (base: string, baseTip: string) => `push rejected though ${base} still stood at ${baseTip.slice(0, 12)}`;
 /** The refusal of an intent a crash left open whose merge commit the base does not hold: the head is queued again (AC-5). */
 export const unpushedIntentReason = (mergeSha: string, base: string) => `intent ${mergeSha.slice(0, 12)} was never pushed: ${base} does not hold it, so the head is queued again`;
+/** The refusal of an intent on a head the item has since resubmitted (GY-3039): the old head's merge settles nothing, whatever the base holds, and the current head is queued again without being delivered. */
+export const supersededIntentReason = (key: string, head: string, candidate: string | null) => `${key}'s intent for ${head.slice(0, 12)} is superseded by submitted head ${candidate ? candidate.slice(0, 12) : 'none'}: the old head is refused and the current head queued again`;
 
 // ---- The push --------------------------------------------------------------------------------------
 
@@ -811,8 +817,10 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
 export type ReconcileOutcome = { key: string; mergeSha: string; outcome: 'reconciled' | 'requeued' };
 /**
  * Before any new merge (AC-5): every intent with no `pushed` record, and every push no
- * reconciliation followed, is settled against the base branch as fetched now. A merge commit the
- * base's first-parent history holds was pushed: it is recorded pushed (when it was not) and
+ * reconciliation followed, is settled against the base branch as fetched now. An intent on a
+ * superseded head is refused first, even if the base holds its merge commit, without delivering
+ * the newer candidate. Otherwise a merge commit the base's first-parent history holds was pushed:
+ * it is recorded pushed (when it was not) and
  * reconciled, delivering the item without a second push. One the base does not hold was never
  * pushed: it is refused `unpushedIntentReason`, which leaves the head queued for a fresh merge.
  */
@@ -825,6 +833,17 @@ export async function reconcileIntents(ports: MergePorts, work: readonly Work[],
     const item = work.find(entry => entry.key === state.key);
     if (!item) continue;
     const mergeSha = state.mergeSha!;
+    // Ledger heads are lowercased at fold; normalize here too so a mixed-case row never skips the supersede branch and deadlocks the queue again.
+    const head = state.head!.toLowerCase();
+    const current = item.candidate?.sha.toLowerCase() ?? null;
+    // GY-3039: the item has a new head while this intent is still open. The old merge settles as
+    // refused whatever the base holds — reconciling it would deliver the newer head — so the queue
+    // unblocks and the current head is trialled fresh.
+    if (current !== head) {
+      await ports.record(item, { kind: 'refused', head, reason: supersededIntentReason(state.key, head, current) });
+      outcomes.push({ key: state.key, mergeSha, outcome: 'requeued' });
+      continue;
+    }
     if (await ports.holds(mergeSha)) {
       if (state.state === 'intent') await ports.record(item, { kind: 'pushed', mergeSha, pushedAt: new Date(ports.now()).toISOString() });
       await ports.record(item, { kind: 'reconciled', mergeSha, observedTip });
