@@ -32,7 +32,7 @@ test('unit:optimistic-merge-removed — a master.json carrying mergeQueue.optimi
       repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [],
       mergeQueue: { rerunFailedChecks: 2, parallelTips: 4, optimistic: true, optimisticExclude: ['**/package.json', 'tests/helpers/'] } }), { mode: 0o600 });
     const master = await loadMasterConfig(root);
-    assert.equal(master.mergeQueue?.rerunFailedChecks, 2, 'the config loads with its live merge-queue setting intact');
+    assert.deepEqual(master.mergeQueue, {}, 'the config loads and drops its retired queue settings');
   } finally {
     await rm(root, { recursive: true, force: true });
     await rm(credentials, { recursive: true, force: true });

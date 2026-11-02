@@ -24,17 +24,19 @@ Loop-owned items refuse ready/unblock. Owner-held items (`Owner hold:`, explicit
 
 ## Submit a commit
 
-`complete GY-N EPOCH --head SHA` submits without pushing and ends the lease. The writer allocates `candidate.pr`/`submission.pr` as change numbers; legacy epoch/pr bodies serve older changes. No endpoint sets lifecycle state.
+`complete GY-N EPOCH --head SHA` submits without pushing and ends the lease. The writer allocates `candidate.pr`/`submission.pr` as change numbers; pull request numbers are refused. No endpoint sets lifecycle state.
 
 Complete reruns cases named by the latest trial-test refusal. Each head retry and base run owns and removes a short directory under durable `/var/tmp`, outside the checkout, with fresh writable HOME/XDG directories and sticky scratch; it never writes to the operator’s home. Own-proof failure refuses with case/file/line. Other failures retry on head and base: retry passes record flakes; base failures are recorded; failing head with passing base refuses. An indeterminate rerun records its cause and last 20 lines and leaves judgment to the merge trial. Failed retro checks return 409.
 
 ## Reads
 
-`GET /healthz` is public. `/api/status` reports principal, integrations, jobs, writer and clock. `/api/work/ID|KEY` reads one item; `/api/work` lists full open work and summarized deliveries. `?pr=N` selects the legacy change number or returns `[]`. `/api/github/*` returns 404.
+`GET /healthz` is public. `/api/status` reports principal, integrations, jobs, writer and clock. `/api/work/ID|KEY` reads one item; `/api/work` lists full open work and summarized deliveries. `/api/github/*` returns 404.
 
 ## Leases, evidence, pipeline
 
 Claims last 120 seconds; renew at least every 30 seconds. Owner mutations need the current epoch. Register assigned host/path/branch before submitting. Stop immediately on lease loss.
+
+`complete GY-N EPOCH` submits the worktree's HEAD, as does a bare `--head`; `--head SHA` names another commit. Head observation happens before the submission transaction; that transaction checks lease expiry, including recorded renewal grace.
 
 ### Watch
 

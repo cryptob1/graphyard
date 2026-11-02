@@ -98,7 +98,7 @@ function dependencies(root: string, events: UpEvent[], w: UpWorld): UpDependenci
   };
 }
 
-const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null, merger: 'control-plane' });
+const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: false, master: 'claude' });
 
 /** A root whose up state records every step but the master loop done, so a run reaches that step alone. */
 async function resumedRoot(label: string) {
@@ -609,7 +609,7 @@ test('unit:up-validates-the-checkout-it-installs — the clean-checkout prefligh
   await mkdir(join(repository, '.graphyard'), { recursive: true });
   // master.json still records the obsolete checkout A; this run is CLI B.
   await writeFile(join(repository, '.graphyard', 'master.json'), JSON.stringify({ url: SERVER, cliPath: join(a, 'bin', 'graphyard.mjs') }));
-  const read = () => upDependencies(repository, join(b, 'bin', 'graphyard.mjs'), request(), () => {}, () => null, () => null).cliCheckout!();
+  const read = () => upDependencies(repository, join(b, 'bin', 'graphyard.mjs'), request(), () => {}).cliCheckout!();
 
   // Clean B, dirty obsolete A: the migration is not refused for A's work.
   await dirty(a);

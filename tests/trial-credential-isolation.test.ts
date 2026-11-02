@@ -74,7 +74,7 @@ exec sh -c "$1"
   const environment = { PATH: `${bin}:${process.env.PATH}`, HOME: host, GRAPHYARD_CONFIG_HOME: config };
   // git's own reads get an identity; every other child runs as the trial hands it over.
   const run: ChildRun = (command, args, options) => defaultChildRun(command, args, command === 'git' ? { ...options, env: { ...identity, ...(options?.env ?? process.env) } } : options);
-  const reads = mergeWriterReads(master, root, run, { base: await temporaryDirectory('trial-credential-trials', tmpdir()), record: async () => {}, merger: async () => 'control-plane', environment });
+  const reads = mergeWriterReads(master, root, run, { base: await temporaryDirectory('trial-credential-trials', tmpdir()), record: async () => {},  environment });
 
   const merged = await reads.merge(head, base);
   assert.ok('mergeSha' in merged, JSON.stringify(merged));

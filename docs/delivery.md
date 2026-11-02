@@ -5,6 +5,8 @@
 
 Exact-candidate gates allow merge. The merge writer alone pushes main; a separate deploy supervisor serves it. Done means merged, not live or verified. See [merge ownership](delivery-redesign.md).
 
+The control plane always merges passing heads; Delivery names it as the merge writer. There is no merger-mode or automatic-merging setting. `master init` refuses the retired `--auto-merge`/`--no-auto-merge` flags. `/api/auto-merge` and `POST /api/merge-queue` are removed; `GET /api/merger` remains for the E2E delivery probe. Old policy events remain in history; rewriting old master config drops `autoMerge` and `mergeQueue.rerunFailedChecks`.
+
 ## Continuous deployment
 
 `master init` installs loop and deploy user units; the loop restores a missing deploy unit. New names include the repository; legacy names are `graphyard-master.service` and `graphyard-deploy.service`.
@@ -17,7 +19,7 @@ Trials run [without credentials](master-agent-reference.md#merge-trial). Command
 
 `scripts/ci-tests.mjs` selects affected/proof tests. Otherwise use `delivery.mergeGate.preMerge`, falling back to npm test/typecheck. Missing checks are explicit in trial/status/doctor. Timeouts requeue. Head failures request rework; failures reproduced on base hold the head as `base failure` so repairs go first. Bug proofs must fail on base or the head refuses as `not reproduced`.
 
-Required live-case failures after the last verified commit can trigger a gated revert. The loop chooses the landing whose proof names the case, else the newest identifiable landing, and files one `Re-land GY-N` with original criteria and failed case. Further failures keep that culprit. A failing revert trial holds; an indeterminate trial waits the base-failure interval unless main moves.
+Required live-case failures after the last verified commit can trigger a gated revert. The loop chooses the landing whose proof names the case, else the newest identifiable landing, and files one `Re-land GY-N` with original criteria and failed case. Further failures keep that culprit. Production and serve-revert unit tests share the revert sequence; the loop persists and schedules its trial beside the cycle. A failing revert trial holds; an indeterminate trial waits the base-failure interval unless main moves.
 
 ### E2E record credential
 

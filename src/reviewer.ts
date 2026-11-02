@@ -121,6 +121,11 @@ const currentReviewRecordSchema = z.object({
     clientError: z.object({ error: z.string().min(1).max(500), count: z.number().int().min(1) }).strict().optional(), stoppedAt: z.string().min(1).max(40).optional() }).optional(),
   /** The launch prompt carried the criteria-only rule (GY-166): an approval must classify the listed threads, so one naming neither line vouches for none. */
   criteriaOnly: z.literal(true).optional(),
+  /** Authoritative task inputs carried by this launch, retained verbatim for its retry. */
+  reviewInputs: z.object({
+    criteria: z.array(z.object({ id: z.string(), text: z.string(), proofs: z.array(z.string()) })),
+    scenarioRequirements: z.array(z.object({ proof: z.string(), revision: z.number(), environment: z.string(), hash: z.string() })),
+  }).optional(),
   /** The review history the launch prompt was built from (GY-167, reviewHistory): the head last reviewed, and the changes-requested rounds before this one. */
   reviewRound: z.object({ previousHead: sha40.optional(), changesRequested: z.number().int().nonnegative(),
     /** The findings verbatim of the change request the prompt deltas from (GY-1988), when the item's observation — not the ledger, which keeps no body — holds that round: the re-review opens with one Earlier: line per finding. */
@@ -711,36 +716,56 @@ export function singleCaseReviewSection(criteria?: readonly ReviewCriterion[]) {
  * GY-2972: the finding classification and verdict rules moved to `guide review`; the brief names
  * that topic beside the criteria instead of restating them.
  */
-export function criteriaRuleSection(key: string, sha: string, criteria: { id: string; text: string }[] = []) {
+export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCriterion[] = [], scenarioRequirements: Work['scenarioRequirements'] = []) {
   // Each criterion verbatim: a condition cut from its tail would be judged FOLLOW-UP and silently
   // dropped, and collapsed whitespace changes an indented fragment or exact output it quotes.
   const listed = criteria.map(criterion => `[${criterion.id}] ${criterion.text}`).join(' ');
+  const proofs = criteria.map(criterion => {
+    const bindings = (criterion.proofs ?? []).map(proof => ({
+      proof,
+      ...(proof.startsWith('e2e:') ? { caseId: proof.slice(4), path: `e2e/cases/${proof.slice(4)}.json` } : {}),
+      ...(scenarioRequirements.find(pin => pin.proof === proof) ?? {}),
+    }));
+    return `[${criterion.id}] proofs: ${JSON.stringify(bindings)}`;
+  }).join(' ');
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
+    + (proofs ? `Launch snapshot proof bindings: ${proofs}. Unlisted scenario pins are absent from this snapshot; do not invent revisions. ` : '')
     + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. `;
 }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
+function reviewReadSection(cliPath: string, head: string) {
+  return `Read snapshot paths: git show ${head}:PATH; surrounding code: rg, cat. node ${cliPath} --help lists commands; node ${cliPath} guide review is supported and needs no worker or coordinator credential. No graphyard show command. `;
+}
+/** Recover exploratory mistakes without relaxing the read-only role or hiding real blockers. */
+function reviewRecoverySection() {
+  return `A mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker. Discover the correct path with rg --files or command with CLI --help, then retry the authorized read. Post a blocker only when a necessary input remains unavailable through authorized equivalent reads, or a genuine permission, identity, binding or runtime failure prevents judging it; name the necessary command and its error, then stop. Do not blanket-ignore errors, run builds/tests/servers, edit code, expand credentials, guess evidence or weaken a criterion. `;
+}
+function reviewAutonomySection() {
+  return `Decide and act on your own: finish judging the diff and post exactly one verdict, APPROVE or REQUEST_CHANGES. Never ask a human for confirmation or end waiting on input. `
+    + reviewRecoverySection()
+    + `Record a genuine blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:). After posting, stop; Graphyard closes the session.`;
+}
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, scenarioRequirements: Work['scenarioRequirements'] = []) {
   memory ??= projectMemory;
-  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification);
+  if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification, scenarioRequirements);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
   return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
     + reviewRoundSection(binding.sha, history)
-    + criteriaRuleSection(binding.key, binding.sha, criteria)
+    + criteriaRuleSection(binding.key, binding.sha, criteria, scenarioRequirements)
     + postDeployReviewSection(criteria)
     + singleCaseReviewSection(criteria)
+    + reviewReadSection(config.cliPath ?? launcherPath, binding.sha)
     + `Classify findings and post by node ${config.cliPath ?? launcherPath} guide review. `
     + simplicityParagraph
-    + blockingStandardSection
     + repetitionReviewSection(files)
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
-    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
+    + 'Read-only: no edits, Git mutations, work claims or evidence submissions; do not run the project\'s build, tests, or servers. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
     + `Posting that review is granted to this session's role, not a permission to request: post without asking for confirmation. `
-    + `GH_CONFIG_DIR holds a reviewer credential expiring within the hour: repository reads and reviews only. `
-    + `After posting, stop; Graphyard closes the session. `
-    + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
+    + `GH_CONFIG_DIR: reviewer credential, expires within the hour; repository reads and reviews only. `
+    + reviewAutonomySection();
 }
 
 /** Nits stay advisory and are kept for later workers. */
@@ -756,12 +781,12 @@ export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:L
  * request stays byte-identical whatever a session's history and memory hold; a self-review passes
  * none, and judges the diff by the shared standard alone.
  */
-export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], files?: readonly string[] | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
+export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], files?: readonly string[] | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string; scenarioRequirements?: Work['scenarioRequirements'] } | null) {
   return `Read the change with: git diff ${binding.base} ${binding.head} (both commits are in this session's object store; git show --stat ${binding.head} lists its files). `
     + (context?.memory ?? '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
     + (context?.round ?? '')
-    + criteriaRuleSection(binding.key, binding.head, criteria)
+    + criteriaRuleSection(binding.key, binding.head, criteria, context?.scenarioRequirements)
     + postDeployReviewSection(criteria)
     + singleCaseReviewSection(criteria)
     + controlPlaneFindingSection
@@ -793,11 +818,11 @@ function productReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + autonomousSession('post the verdict yourself, APPROVE, REQUEST_CHANGES or REJECT, as soon as you have judged the feature', 'record a blocker as a final line starting BLOCKED:');
 }
 /** The control-plane form of the request (GY-1525 AC-5): head and base named, read from the shared object store, `review post` without a pull-request number. `plane.baseTip` is the diff base the session judges — for a candidate review the head's merge base with the base branch (GY-2948), for a post-merge review the merge commit's first parent — and anchors the memory digest too: the digest's "changes since" window reaches past that base to the tip, so it names items merged between the two, which a reviewer judging against the merge base still wants in mind. */
-function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null) {
+function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'policyRevision'>, plane: ControlPlanePrompt, checkout?: SessionCheckout, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, scenarioRequirements: Work['scenarioRequirements'] = []) {
   if (plane.product) return productReviewPrompt(config, binding, plane, checkout);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: plane.baseTip });
   const subject = plane.postMerge
-    ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
+    ? `Review the delivered merge commit ${plane.head} of work item ${binding.key} against its first parent ${plane.baseTip} under policy revision ${binding.policyRevision}, after its merge: the control plane merged it as a normal-risk delta and owes it this one post-merge review. `
     : `Review head ${plane.head} against base ${plane.baseTip} — the head's merge base with the base branch — under policy revision ${binding.policyRevision}, for work item ${binding.key}: the control plane observed it from the shared object store, and there is no pull request. The delta to judge is head versus that base: a file the base branch gained after ${plane.baseTip} is not part of this delta, so its absence from the head is not a removal. `;
   // AC-2: the verdict itself names its scope — the body is carried verbatim, so the request has it
   // open with the head and base, and the server records the launch's base beside them.
@@ -807,7 +832,8 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     : '';
   return `You are the independent Graphyard reviewer for ${config.repository}. ${subject}`
     + scope
-    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, criteria, files, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history) })
+    + reviewStandard({ key: binding.key, head: plane.head, base: plane.baseTip }, criteria, files, verification, { memory: memorySection || '', round: reviewRoundSection(plane.head, history), scenarioRequirements })
+    + reviewReadSection(config.cliPath ?? launcherPath, plane.head)
     + `Classify findings by node ${config.cliPath ?? launcherPath} guide review. `
     + outcome
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${checkout.worktree} ${plane.head}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
@@ -817,7 +843,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. `
     + `review post sends the verdict to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR; it names no pull request and runs no gh. `
     + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
-    + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
+    + reviewAutonomySection();
 }
 
 /**
@@ -825,12 +851,14 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
  * it already judged — or, for a session that never took up its request (GY-93), the request
  * itself, from the launcher that sent it, so the message is complete whichever the case is.
  */
-export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'mode' | 'postMerge'>>, criteria?: ReviewCriterion[], cliPath = launcherPath) {
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'mode' | 'postMerge' | 'reviewInputs'>>, criteria?: ReviewCriterion[], cliPath = launcherPath, scenarioRequirements: Work['scenarioRequirements'] = []) {
+  criteria = record.reviewInputs?.criteria ?? criteria;
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now. `
     + reviewPostSection(cliPath, 'when the change is not acceptable')
-    + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If review post cannot post it, record that as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
+    + `Do not ask for confirmation. If you finished judging the diff, post that verdict without re-reading it; otherwise finish the authorized reads and judge it before posting. If review post cannot post it, record that as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
+    + reviewRecoverySection()
     // The request is repeated only with the item's criteria: the criteria-only rule without them would leave nothing to judge.
-    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, null, null, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null)}` : '');
+    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If your review is unfinished, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, null, null, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null, record.reviewInputs?.scenarioRequirements ?? scenarioRequirements)}` : '');
 }
 
 /** The CLI this checkout runs, for a prompt built without a master configuration. */
@@ -1088,7 +1116,7 @@ export async function launchReview(root: string, work: Work, profileName: string
     // re-review takes its earlier round from the item's own observation (GY-1988): its verdicts are
     // recorded there, never on the ledger by pull-request number, and only there do its findings live.
     const reviewRound = reviewHistory(ledger.reviews, binding, reviewerIdentity, plane && !postMerge ? earlierChangeRequest(work.observation, binding.sha) : null);
-    const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound,
+    const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound, reviewInputs: { criteria: work.criteria, scenarioRequirements: work.scenarioRequirements },
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
       ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}),
       // Only the token's hash is ever recorded (GY-1525); the token itself lives in the session's binding alone.
@@ -1177,7 +1205,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) } : null), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, reservation.record.reviewInputs!.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, plane ? { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) } : null, reservation.record.reviewInputs?.scenarioRequirements), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();
@@ -1485,7 +1513,7 @@ export async function reconcileReviews(root: string, config: MasterConfig, depen
           record.idleSince = now.toISOString(); changed++;
           if (agent && !record.repromptedAt) markReprompted(record, now.getTime());
           const item = dependencies.work?.find(entry => entry.key === record.key && entry.policyRevision === record.policyRevision);
-          try { await retry(record, reviewRetryPrompt(config.repository, record, item?.criteria, config.cliPath)); }
+          try { await retry(record, reviewRetryPrompt(config.repository, record, item?.criteria, config.cliPath, item?.scenarioRequirements)); }
           catch { /* the grace period records the session as failed when the prompt cannot reach it */ }
         }
         else if (now.getTime() - Date.parse(record.idleSince) >= (record.acknowledgedAt ? reviewVerdictReminderMs : reviewIdleGraceMs) && settlementDue(record, agent, { now: now.getTime(), ackMs })) failed = await settlementReason(record, agent, { now: now.getTime(), ackMs, screen }, agent?.agent_status === 'blocked'

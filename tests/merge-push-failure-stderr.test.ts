@@ -60,7 +60,6 @@ function reads(recorded: { key: string; event: any }[]) {
   return mergeWriterReads(config, ROOT, substitutedGit(), {
     base: 'main',
     record: async (target, event) => { recorded.push({ key: target.key, event }); return {}; },
-    merger: async () => 'control-plane',
     trial: async (mergeSha): Promise<MergeTrialRun> => ({ build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: {} }),
   });
 }

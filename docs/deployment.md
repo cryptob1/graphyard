@@ -31,7 +31,7 @@ There is no remote-side token variable: the merge writer uses the [deploy key](i
 
 ### Production deployment observation
 
-`master init --deployment-url …` sets the commit endpoint. Unserved merges after five minutes raise `delivery.deployment-incident`. `run.deploymentReuseMinutes` (15) permits reused observations. Self-upgrades [deploy](delivery.md) the tip before loop reload. The launcher runs the checkout's own code; every `up` removes stale `.graphyard/held-cli.json`, even when the loop is current.
+`master init --deployment-url …` sets the commit endpoint. Unserved merges after five minutes raise `delivery.deployment-incident`. `run.deploymentReuseMinutes` (15) permits reused observations. Self-upgrades [deploy](delivery.md) the tip before loop reload. The launcher resolves the install's published CLI artifact before loading dependencies; every `up` removes stale `.graphyard/held-cli.json`, even when the loop is current.
 
 ### Serving the managed repository's app
 
@@ -55,7 +55,9 @@ If `/healthz` reports an old commit, read `install --logs`, diagnose the failure
 
 Back up with `graphyard db backup`, verify with `db verify`, and fence before a move with `db fence`. Restore with `db migrate` then `db restore`.
 
-[Upgrade](install.md#upgrading-an-existing-installation) builds and restarts from the install's build worktree, checks the served SHA, then moves and pins the watched checkout. A failed deploy or health check restores the previous release when safe and leaves that checkout unchanged. Lease commands (`heartbeat`, `claim`, `complete`, `blocked`, `defer`) from a mismatched CLI commit warn and proceed; other commands refuse with the mismatch.
+[Upgrade](install.md#upgrading-an-existing-installation) installs dependencies in separate `deploy/build/.graphyard/cli-releases/<commit>` worktrees. The existing `install --plan`/apply flow builds and restarts the exact source. Only after `/healthz?strict` passes does an atomic symlink rename publish `deploy/build/.graphyard/cli-published`. Launchers resolve it before loading tsx; the watched checkout and legacy `deploy/build` retain their code and dependencies.
+
+Confined sessions keep the stable build tree and future releases read-only, with credentials hidden. Published artifacts remain for running processes and rollback. Dependency-install failure leaves the healthy CLI/server pair untouched; restart or health failure uses schema-aware rollback. Coordinator pin and installation gates stay unchanged. During server/CLI handover, launchers retry refused version checks three times, 500 ms apart, reloading the pointer. Persistent mismatch refuses before an API request. Lease commands (`heartbeat`, `claim`, `complete`, `blocked`, `defer`) retain warning-and-proceed behavior. Ordinary deployment needs no manual upgrade or trust change.
 
 ## Manual fallback
 

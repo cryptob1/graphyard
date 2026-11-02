@@ -146,6 +146,7 @@ export const workRoutes = defineRoutes('work', [
         }
       }
       const input = JSON.parse(raw.toString() || '{}');
+      demand(attempted !== 'submit' || input?.pr === undefined, 'A submission names a commit, never a pull request number: complete GY-N EPOCH --head [SHA]');
       try { return await engine.execute(actor, attempted as Command, id ?? null, input, context.idempotencyKey()); }
       catch (error) {
         // A renewal that failed server-side says what grace its recorded fault earned (GY-558), so the supervisor keeps retrying through it.

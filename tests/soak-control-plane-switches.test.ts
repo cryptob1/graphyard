@@ -63,7 +63,6 @@ class World {
     const world = this;
     return {
       baseBranch: 'main', retrials: 3, now: this.now,
-      merger: async () => { if (mergerUnreadable(world.cycle)) throw new Error('status: HTTP 503'); return 'control-plane'; },
       fetch: async () => world.main[0]!,
       merge: async (head, baseTip) => { const mergeSha = sha(`merge:${head}:${baseTip}`); world.merges.set(mergeSha, Number([...world.submitted.keys()].find(n => world.head(n) === head))); return { mergeSha, files: ['src/app.ts', 'src/other.ts'] }; },
       trial: async (mergeSha) => ({ build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),

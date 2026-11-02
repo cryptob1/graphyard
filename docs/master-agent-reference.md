@@ -9,15 +9,13 @@ Use `blocked GY-N EPOCH REASON` for a genuine blocker; it commits changes and en
 
 `master promote --admin-token-stdin` provisions the master's operator-agent identity. Workers never receive it.
 
-## GitHub administration through the browser
-
-Only the [deploy key](install.md#step-3-deploy-key) is needed. Legacy `master browser app-permissions|installation-accept|capture` commands refuse without their old credential. `master harness claude|codex --apply` denies remote merges/reviews, token minting and mutating `gh api`.
-
 ## Typed actions
 
 `nextAction` names dispatch, request-review, request-rework, resync, reclaim or merge. `master dispatch GY-N PROFILE` works through normal eligibility and lease checks, including on system-driven items. `master merge` reports that only the loop's writer merges; it performs no hand merge.
 
 ## Recovery
+
+`master browser` is removed. If an older control plane reports App permissions or held integration jobs, use `graphyard install --repo OWNER/NAME --plan`, then `--apply`, to replace the retired App integration with the merge writer’s deploy key. `master harness claude|codex --apply` denies remote merges/reviews, token minting and mutating `gh api`.
 
 See [operations](operations.md) and [session recovery](master-agent-sessions.md). Preserve expired attempts' work for redispatch.
 
