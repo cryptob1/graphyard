@@ -537,7 +537,7 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   masterStateDirectory?: string;
   /** The coordinator checkout to confine against, when the launcher's own cannot be derived from its entry — a launcher embedded outside the CLI passes it, so its sessions are confined too (GY-888). */
   coordinatorRoot?: string;
-  /** The session carries a GitHub credential of its own (a reviewer's) or must never read the operator's (every worker, minted credential or not), so the confinement gives it no route to the operator's keyring (GY-1039). */
+  /** The session must never read the operator's credentials, so the confinement gives it no route to the operator's keyring (GY-1039). */
   ownGitHubCredential?: boolean;
   /** An explicit null binds no keyring proxy for a session that carries no credential of its own: a worker launched while the control plane is the merge writer (GY-1523). */
   secretsBus?: null;

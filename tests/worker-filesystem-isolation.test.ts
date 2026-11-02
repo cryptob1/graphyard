@@ -230,10 +230,12 @@ test('integration:worker-host-filesystem-isolation — runTrialAttempt excludes 
   } }));
   writeFileSync(join(f.root, 'build.cjs'), `const assert = require('node:assert/strict'), fs = require('node:fs');
     assert.equal(require('fixture-dependency'), 'shared dependency');
-    fs.writeFileSync('built', 'built');`);
+    fs.writeFileSync('built', 'built');
+    fs.writeFileSync(require('node:path').join(process.env.HOME, 'trial-home'), 'allocated home');`);
   writeFileSync(join(f.root, 'test.cjs'), `
     const assert = require('node:assert/strict'), fs = require('node:fs');
     assert.equal(fs.readFileSync('built', 'utf8'), 'built');
+    assert.equal(fs.readFileSync(require('node:path').join(process.env.HOME, 'trial-home'), 'utf8'), 'allocated home');
     assert.throws(() => fs.readFileSync(${JSON.stringify(join(f.config, 'operator.token'))}), { code: 'ENOENT' });
     { ${deniedOperations.replace('const protectedVisible = true', 'const protectedVisible = false').replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
   `);
@@ -247,6 +249,7 @@ test('integration:worker-host-filesystem-isolation — runTrialAttempt excludes 
   assert.equal(verdict.build, 'pass', verdict.logTail);
   assert.deepEqual(verdict.tests.failed, [], verdict.logTail);
   assert.equal(verdict.tests.passed, 1, verdict.logTail);
+  assert.deepEqual(readdirSync(temporary), [], 'the short trial HOME and scratch allocations are reclaimed');
   assert.equal(readFileSync(join(f.home, 'sentinel'), 'utf8'), 'protected\n');
   assert.equal(readFileSync(join(f.unrelated, 'sentinel'), 'utf8'), 'protected\n');
 });
@@ -280,6 +283,7 @@ test('integration:worker-home-deletion-regression — cold-cache dashboard trial
   writeFileSync(join(f.root, 'browser.cjs'), `
     const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
     assert.equal(fs.readFileSync('built', 'utf8'), 'built');
+    assert.equal(fs.readFileSync(require('node:path').join(process.env.HOME, 'trial-home'), 'utf8'), 'allocated home');
     assert.equal(fs.readFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'utf8'), 'installed');
     assert.equal(fs.readFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'utf8'), 'cached');
     { ${deniedOperations.replace('const protectedVisible = true', 'const protectedVisible = false').replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }

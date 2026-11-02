@@ -781,7 +781,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // A fresh, empty temporary directory made for this trial alone, and a short one its checkout goes in on a durable root
   // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
-  let temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
+  let home: string | null = null, temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
   let env: Record<string, string>, wrapper: string[];
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
@@ -794,17 +794,17 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const root = trialTemporaryRoot(checkout.directory, roots);
     if (root !== checkout.directory) guarded = root;
     temporary = await mkdtemp(join(root, trialTemporaryPrefix)); await chmod(temporary, trialTemporaryMode); await writeTempOwner(temporary);
+    // HOME stays beside the short tempdir: nested tests derive socket paths from it.
+    home = await mkdtemp(join(root, 'gy-h')); await writeTempOwner(home);
     const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
-    const home = join(checkout.directory, 'home');
-    await mkdir(home);
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
     env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
-    wrapper = trialContainerWords([checkout.directory, place, temporary], trialContainerDependencies(input.root));
+    wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root));
   }
   catch (error) {
-    for (const made of [temporary, place]) if (made) await clear(made).catch(() => {});
+    for (const made of [temporary, home, place]) if (made) await clear(made).catch(() => {});
     await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {});
     if (typeof error === 'object' && error) attemptContext.set(error, { phase, phases: enter() });
     throw error;
@@ -969,7 +969,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         enter('tests');
         const ran = await containerTrialE2e({
           worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
-          networkWrapper: network => trialContainerWords([checkout.directory, place, temporary], trialContainerDependencies(input.root), undefined, network),
+          networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
           scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
         });
         // Bounded so the trial record the merge writer posts stays within its schema.
@@ -1091,7 +1091,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // The temporary directory goes with it: a failure to remove any is the cleanup's, naming the directory, and none stops the others.
   // The short checkout's files go first, so the session's removal prunes its registration in the repository.
   const failures: { directory: string; cause: unknown }[] = [];
-  for (const directory of [temporary, ...(place ? [place] : [])]) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
+  for (const directory of [temporary, home!, ...(place ? [place] : [])]) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
   await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(cause => { failures.push({ directory: checkout.directory, cause }); });
   const failure = failures[0];
   if (failure) {

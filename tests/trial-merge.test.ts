@@ -5,7 +5,7 @@ import { createServer } from 'node:net';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
-import { tmpdir } from 'node:os';
+import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { defaultChildRun } from '../src/child-runner.js';
 import { credentialTrialVariable, groupTestFiles, mergeSubject, runnerDiagnosticTailLength, runTrial, trialAuthor, trialEnvironment, trialMerge, trialNeedsLog, trialRef, lookupPoisoned, trialLookupEntries, trialCheckoutPrefix, trialCheckoutRoot, trialCheckoutRoots, trialExcludedRoots, reclaimTrialCheckouts, clearTrialCheckout, durableTemporaryRoot, trialTemporaryPrefix, trialTemporaryRoot, trialTemporaryRoots, trialTemporaryVariables, trialTestGroupSize, TrialCleanupError, TrialEnvironmentError, TrialRunnerError, TrialTimeoutError, withheldTrialVariables, type RunTrialInput } from '../src/merge-writer/trial.js';
@@ -268,6 +268,8 @@ test('unit:trial-run-credential-free — the trial child sees none of GH_CONFIG_
   for (const name of withheld.filter(name => !['TMPDIR', 'TMP', 'TEMP'].includes(name))) assert.ok(!seen.keys.includes(name), `the child saw ${name}`);
   assert.ok(seen.keys.includes('KEPT'));
   assert.deepEqual([seen.global, seen.nosystem], ['/dev/null', '1']);
+  assert.equal(dirname(seen.home), dirname(seen.tmpdir), 'the fresh home uses the short temporary root, keeping nested socket paths bounded');
+  assert.equal(existsSync(seen.home), false, 'the fresh home is removed with the trial');
   assert.notEqual(seen.home, '/home/me', 'the child\'s home is the trial\'s own fresh one (GY-2997)');
   assert.notEqual(seen.tmpdir, '/var/tmp', 'the host\'s TMPDIR is withheld (GY-1549); the trial\'s own replaces it (GY-1565)');
 });
@@ -681,7 +683,8 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
   git('init', '-q', '-b', 'main'); writeFileSync(join(repo, 'a.txt'), 'one\n'); git('add', '-A'); git('commit', '-q', '-m', 'base');
   const mergeSha = git('rev-parse', 'HEAD');
   const sessions = await temporaryDirectory('soak-trial-sessions', tmpdir()), clean = await temporaryDirectory('soak-trial-tmp', tmpdir());
-  const home = await temporaryDirectory('soak-trial-home', tmpdir());
+  // Shared temporary roots can hold a stray .git; the real trial checkout root lives in the home.
+  const home = await temporaryDirectory('soak-trial-home', homedir());
   const [trials] = trialCheckoutRoots(home);
   const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 1e12 });
   // The live owners: this process all day, and a child that dies at midday.
@@ -751,8 +754,6 @@ test('unit:trial-checkout-reclaim-soak — a simulated day of real trials: crash
 // GY-3008: deleting the dead base-break refresh must leave a failed trial's rework path intact —
 // the merge writer grounds and requests the rework; next-action waits on it, never on a base-break hold.
 test('unit:trial-merge — a failed trial grounds a rework for the candidate and next-action waits on the merge writer, never a base-break hold', () => {
-  assert.equal(existsSync(resolve(dirname(fileURLToPath(import.meta.url)), '../src/master/base-break-refresh.ts')), false,
-    'the base-break refresh module is gone');
   const now = new Date('2026-10-31T12:00:00.000Z');
   const head = 'c'.repeat(40), base = 'a'.repeat(40);
   const reason = `${trialFailurePrefix}: tests tests/policy.test.ts`;

@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID, generateKeyPairSync } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
-import { bindReviewer, launchReview, readReviewLedger, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, verdictIngestGraceMs, type DispatchEffects } from '../src/auto-dispatch.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -51,7 +51,7 @@ function item(instance: Instance, observedAt = new Date(Date.now() - verdictInge
   const candidate = { sha: instance.sha, baseSha: base, pr: instance.pr, branch: `graphyard/${instance.key.toLowerCase()}-1`, author: 'implementer' };
   const observation: Observation = { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [], at: observedAt,
     prState: 'open', draft: false, baseTip: base, baseTree: '7b'.padEnd(40, '0'), baseTipContained: true };
-  const work = { id: `work-${instance.key}`, key: instance.key, title: 'Instance', description: '', type: 'bug', priority: 0, dependencies: [], 
+  const work = { id: `work-${instance.key}`, key: instance.key, title: 'Instance', description: '', type: 'bug', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: instance.policyRevision,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: candidate.branch, epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: instance.pr }, reworkRequested: false,
@@ -69,16 +69,14 @@ async function reviewerMaster() {
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinator = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinator as typeof fetch);
-  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude', concurrency: 2 });
   const tabs: string[] = [];
   const run = (_command: string, args: string[]) => {
     if (args[0] === 'tab' && args[1] === 'create') { const pane = `pane-${tabs.length + 1}`; tabs.push(pane); return JSON.stringify({ result: { root_pane: { pane_id: pane, tab_id: `tab-${tabs.length}` } } }); }
     return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
-  const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
-  return { root, run, mint, tabs, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
+  const registerLaunch = async () => ({ launch: 'fixture-launch' });
+  return { root, run, registerLaunch, tabs, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
 
 /** The first session, settled by the loop the moment GitHub listed its verdict, `closedMsAgo` before the launch. */
@@ -128,7 +126,7 @@ for (const [index, instance] of instances.entries()) {
         snapshot: async () => ({ work: [work], now: new Date().toISOString() }), agents: () => [],
         credentials: async profiles => Object.fromEntries(profiles.map(profile => [profile.name, { available: true, reason: null }])),
         reconcileReviews: async () => ({ reviews: (await readReviewLedger(master.root)).reviews }), reconcileProducers: async () => ({ producers: [] }),
-        launchReview: (target, dispatch, profile, herdr, observedAt) => launchReview(master.root, target, profile.name, herdr, observedAt, { run: master.run, mint: master.mint, requestId: dispatch.id }),
+        launchReview: (target, dispatch, profile, herdr, observedAt) => launchReview(master.root, target, profile.name, herdr, observedAt, { run: master.run, registerLaunch: master.registerLaunch, requestId: dispatch.id }),
         launchProducer: async () => { throw new Error('no producer is under test'); }, persist: async () => {},
       } satisfies DispatchEffects);
       assert.deepEqual(tick.launched, [], 'the loop launched no second session');
@@ -136,7 +134,7 @@ for (const [index, instance] of instances.entries()) {
       assert.ok(tick.waiting.some(wait => wait.requestId === instance.requestId && /already answered with/.test(wait.reason)), JSON.stringify(tick.waiting));
 
       // And `master review`, the hand launcher, for the same request.
-      await assert.rejects(launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: request.id }), /one request yields one verdict/);
+      await assert.rejects(launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: request.id }), /one request yields one verdict/);
 
       assert.deepEqual(master.tabs, [], 'no second reviewer session was started');
       const ledger = await readReviewLedger(master.root);
@@ -153,13 +151,13 @@ test('manual:fault-class-review-convergence — GY-1083: a request whose answer 
     // A dismissed approval is no answer: reconciliation records it failed, and the request is relaunched.
     const dismissed: ReviewRecord = { ...answered(instance, 60_000), state: 'failed', verdict: { ...answered(instance, 60_000).verdict!, state: 'DISMISSED' } };
     await updateReviewLedger(master.root, ledger => { ledger.reviews = [dismissed]; });
-    await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: instance.requestId });
+    await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: instance.requestId });
     assert.equal(master.tabs.length, 1, 'the withdrawn answer is reviewed again');
     // The fresh request a conflict opens on the same head is a different request: it is launched.
     await updateReviewLedger(master.root, ledger => { ledger.reviews = [answered(instance, 60_000)]; });
     const fresh = 'f'.repeat(32);
     work.autoDispatch!.review = { ...work.autoDispatch!.review!, id: fresh };
-    await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: fresh });
+    await launchReview(master.root, work, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: fresh });
     assert.equal(master.tabs.length, 2, 'the fresh request is launched');
     // A verdict the control plane observed withdrawn after the loop settled it answers nothing either:
     // GitHub listed it dismissed, or recorded it in dismissedReviewIds, so the request is reviewed again.
@@ -170,7 +168,7 @@ test('manual:fault-class-review-convergence — GY-1083: a request whose answer 
     ]) {
       await updateReviewLedger(master.root, ledger => { ledger.reviews = [answered(instance, 60_000)]; });
       withdrawn.observation = { ...withdrawn.observation!, ...obs };
-      await launchReview(master.root, withdrawn, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: instance.requestId });
+      await launchReview(master.root, withdrawn, 'claude-reviewer', [], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: instance.requestId });
     }
     assert.equal(master.tabs.length, 4, 'each withdrawn answer is reviewed again');
   } finally { await master.cleanup(); }

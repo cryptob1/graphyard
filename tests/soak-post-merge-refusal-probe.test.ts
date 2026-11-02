@@ -7,7 +7,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import type { Work } from '../src/model.js';
 import { dispatchAttemptCeiling, dispatchCursorPath, dispatchCursorSchema, dispatchFailureLimit, emptyDispatchCursor, runDispatchTick, unknownParent, writeDispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { owedPostMergeReviews, postMergeRequestId, postMergeRefusalProbeMs } from '../src/model/post-merge-review.js';
-import { launchReview, readReviewLedger, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reviewerCredentialDirectory, saveReviewerProfile } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -58,7 +58,7 @@ const repository = 'owner/project';
 const durable = async (path: string) => ({ probed: path, volatile: null, freeBytes: 200e9 });
 
 test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests probed hourly for simulated days: one attempt per request per standstill hour and never one per tick, no session directory, checkout or ledger reservation left behind by any refused attempt, the cursor still persisting past the attempt clamp, and one launch per request once the cause is gone with none probed afterwards', { timeout: 900_000 }, async () => {
-  // The loop's own root: one reviewer profile and the bound reviewer identity, the managed worktree
+  // The loop's own root: one reviewer profile, the managed worktree
   // root and credential directory pointed at this run's directories, and the dispatch cursor
   // persisted by the production writer so the schema judges every tick's cursor.
   const root = await temporaryDirectory('soak-probe-master');
@@ -71,10 +71,10 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', concurrency: 4 });
   const file = join(root, '.graphyard/master.json');
   const storedConfig = JSON.parse(await readFile(file, 'utf8')) as Record<string, any>;
-  storedConfig.reviewer = { appId: 4242, installationId: 99, slug: 'graphyard-reviewer', credentialFile: join(credentialDirectory, 'reviewer.json'), boundAt: at() };
   storedConfig.run = { ...(storedConfig.run ?? {}), worktreeRoot: worktrees };
   await writeFile(file, JSON.stringify(storedConfig, null, 2));
   const config = await loadMasterConfig(root);
+  const sessions = join(reviewerCredentialDirectory(config), 'sessions');
   const cursor = emptyDispatchCursor(config);
 
   // The served control plane's refusal, standing until the recovery: the registration call every
@@ -109,7 +109,7 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   // What a refused launch must never leave behind, however many of them a day earns.
   const assertNothingAccumulates = async () => {
     assert.deepEqual((await readReviewLedger(root)).reviews, [], 'a refused launch leaves no ledger reservation behind');
-    assert.deepEqual(await readdir(join(credentialDirectory, 'sessions')).catch(() => [] as string[]), [], 'a refused launch leaves no session directory behind');
+    assert.deepEqual(await readdir(sessions).catch(() => [] as string[]), [], 'a refused launch leaves no session directory behind');
     assert.deepEqual(await readdir(worktrees).catch(() => [] as string[]), [], 'a refused launch leaves no checkout behind');
   };
   assert.deepEqual(owedPostMergeReviews(items).map(item => item.key).sort(), keys, 'the three delivered items each owe their post-merge review');
@@ -169,7 +169,7 @@ test('unit:soak-post-merge-refusal-probe — three stranded post-merge requests 
   // managed root; a session checkout is a managed `graphyard-<kind>-…` directory, and that is what is counted.
   const directories = (path: string, managed = false) => readdir(path, { withFileTypes: true }).catch(() => [] as { name: string; isDirectory(): boolean }[])
     .then(entries => entries.filter(entry => entry.isDirectory() && (!managed || /^graphyard-(proof|review|approval|trial)-/.test(entry.name))).length);
-  assert.equal(await directories(join(credentialDirectory, 'sessions')), keys.length, 'each recovery holds its own session directory');
+  assert.equal(await directories(sessions), keys.length, 'each recovery holds its own session directory');
   assert.equal(await directories(worktrees, true), keys.length, 'each recovery holds its own checkout');
   for (let guard = 0; guard < 48; guard++) await tick(hour);
   for (const key of keys) assert.equal(attemptsOf(key).length, stranded[key] + 1, `${key} is never probed again once its request launched`);

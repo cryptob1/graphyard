@@ -15,6 +15,8 @@ npm ci && npm run build && npm test
 
 Worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by file count and runs affected tests.
 
+`tests/architecture.test.ts` enforces the Git network module allowlist and the ban on GitHub API calls. Keep behavioral regressions with their module tests; deleted-file inventories, resolution tables and module line budgets do not belong in the suite.
+
 ### Verification maps
 
 `verification/AREA.md` maps (store, server, master): a `Paths:` line of globs plus `## Tests`, `## Drive`, `## Invariants`, `## Gotchas`, ≤250 words each (tests/verification-maps.test.ts). 

@@ -14,21 +14,7 @@ export const reviewerProfileSchema = z.object({
   timeoutSeconds: z.number().int().min(60).max(86_400).default(1800),
 }).strict();
 export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
-// Registered reviewer identities are numeric GitHub App/bot identities, not display names.
-export const reviewerAppSchema = z.object({
-  id: identifier, runtime: runtimeName,
-  appId: z.number().int().positive(), botUserId: z.number().int().positive(),
-  displayName: z.string().trim().min(1).max(100).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
-}).strict();
-export type ReviewerApp = z.infer<typeof reviewerAppSchema>;
 export const distinct = (values: unknown[]) => new Set(values.map(value => JSON.stringify(value))).size === values.length;
-export const reviewerAppsSchema = z.array(reviewerAppSchema).max(50)
-  .refine(apps => distinct(apps.map(app => app.id)), 'Reviewer App identifiers must be unique')
-  .refine(apps => distinct(apps.map(app => app.appId)), 'Reviewer GitHub App IDs must be unique')
-  .refine(apps => distinct(apps.map(app => app.botUserId)), 'Reviewer bot user IDs must be unique');
-export function parseReviewerApps(raw: string | undefined): ReviewerApp[] {
-  return reviewerAppsSchema.parse(JSON.parse(raw?.trim() || '[]'));
-}
 
 export interface ReviewRequest {
   commentId: number; sha: string; baseSha: string; policyRevision: number; body: string; createdAt: string;
@@ -65,18 +51,6 @@ export function reviewerProfileFor(work: Work): ReviewerProfile | null {
   if (reviewProviderOf(work.policy) !== 'agent') return null;
   const exhausted = new Set(exhaustedReviewerProfiles(work));
   return (work.policy.reviewerProfiles ?? []).find(profile => !exhausted.has(profile.name)) ?? null;
-}
-
-// Registration is the identity boundary: a policy may only name reviewer Apps whose
-// numeric GitHub identities the control plane already knows, and never its own App.
-export function assertReviewerProfiles(profiles: ReviewerProfile[] | undefined, registry: ReviewerApp[], controlPlaneAppId?: number) {
-  demand(profiles?.length, 'Agent review requires at least one reviewer profile');
-  for (const profile of profiles!) {
-    const app = registry.find(entry => entry.id === profile.reviewerApp);
-    demand(app, `Reviewer App ${profile.reviewerApp} is not registered in Graphyard`);
-    demand(app!.runtime === profile.runtime, `Reviewer profile ${profile.name} must name its registered runtime ${app!.runtime}`);
-    demand(!controlPlaneAppId || app!.appId !== controlPlaneAppId, 'The Graphyard control-plane App cannot act as a reviewer identity');
-  }
 }
 
 /**
