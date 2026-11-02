@@ -407,7 +407,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const cursorCalls: string[][] = [];
     await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), mint });
     const typedCursor = expandTypedCommand(cursorCalls[1][3]);
-    assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
+    assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} Independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
   } finally { await cleanup(); }
 });
 
@@ -415,10 +415,13 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/masters/c.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'h', masterAgentName: 'm' });
   const binding = { key: 'GY-69', id: 'work-69', pr: 69, sha: H, baseSha: B, policyRevision: 1, author: 'implementer', branch: 'graphyard/gy-69-1', group: 'unit' as const, proofs: ['unit:autonomous-session-prompts'], requestId: 'r' };
   const prompts = { reviewer: reviewPrompt(config, binding), producer: producerPrompt(config, binding, { principal: 'proof-runner' }), worker: workerPrompt(config, { key: 'GY-69', title: 'Resilience' }, { principal: 'graphyard-claude-1' }, 4) };
-  for (const [role, prompt] of Object.entries(prompts)) {
+  for (const [role, prompt] of Object.entries({ producer: prompts.producer, worker: prompts.worker })) {
     for (const fragment of ['Decide and act on your own', 'Never stop to ask a human for confirmation', 'never end your turn with a question', 'never offer a menu of options', 'naming the exact command that was blocked and its error', 'A session that ends waiting on input is recorded as failed']) assert.ok(prompt.includes(fragment), `the ${role} prompt states: ${fragment}`);
   }
-  assert.match(prompts.reviewer, /post the verdict yourself, APPROVE or REQUEST_CHANGES/); assert.match(prompts.reviewer, /record a blocker as one review posted with --event COMMENT/);
+  for (const fragment of ['Decide and act on your own', 'post exactly one verdict, APPROVE or REQUEST_CHANGES', 'Never ask a human for confirmation or end waiting on input', 'mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker', 'then retry the authorized read', 'necessary input remains unavailable through authorized equivalent reads', 'genuine permission, identity, binding or runtime failure prevents judging it', 'name the necessary command and its error, then stop', 'Do not blanket-ignore errors', 'Record a genuine blocker as one review posted with --event COMMENT', 'After posting, stop']) {
+    assert.ok(prompts.reviewer.includes(fragment), `the reviewer prompt states: ${fragment}`);
+  }
+  assert.doesNotMatch(prompts.reviewer, /If a command you need is refused or cannot succeed/);
   assert.match(prompts.producer, /submit pass or fail evidence for every proof of the group/); assert.match(prompts.producer, /submit that proof as result fail/);
   assert.match(prompts.worker, new RegExp(`record a blocker with node ${launcher.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} blocked GY-69 4 REASON`));
   assert.equal(autonomousSession('x', 'y').startsWith('Decide and act on your own: x.'), true);
