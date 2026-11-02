@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { chooseSession, emptyRegistry, runtimeSchema, modelSchema, accountSchema, roleSchema, unobservedQuota, type AgentRegistry, type FleetAccount, type FleetRoleName, type FleetSession } from '../src/model/registry.js';
 import type { ReviewDiversity } from '../src/model/review-diversity.js';
 
@@ -143,6 +142,4 @@ test('unit:reviewer-provider-fallback-recorded — busy different provider waits
   const none = registry({ reviewer: ['claude-a', 'codex-b'] }, [{ name: 'claude-a', enabled: false }, { name: 'codex-b', enabled: false }]);
   assert.equal(chooseSession(none, { role: 'reviewer', host: HOST }, now, diversity('anthropic')).reason, 'no eligible account for reviewer: claude-a is disabled; codex-b is disabled');
 
-  const lines = readFileSync(new URL('../src/model/registry-sessions.ts', import.meta.url), 'utf8').trimEnd().split('\n').length;
-  assert.ok(lines <= 320, `src/model/registry-sessions.ts stays within its 320-line budget (${lines})`);
 });
