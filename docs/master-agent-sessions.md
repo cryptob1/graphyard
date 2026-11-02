@@ -5,7 +5,7 @@ Add profiles with `master worker add FILE`, `master reviewer add FILE` or `maste
 
 ## Approval modes
 
-`approvals: auto` selects unattended flags: Claude `--permission-mode bypassPermissions`, Codex `--ask-for-approval never --sandbox workspace-write`, OpenCode `OPENCODE_PERMISSION`; Pi needs none. Prompt mode, refused kinds and runtimes without command-line requests cannot launch. Registry commands need `{request}`. OpenCode grants the repository tree, including sibling worktrees, denies outside paths, then overlays profile permissions.
+`approvals: auto` selects unattended flags: Claude `--permission-mode bypassPermissions`, Codex `--ask-for-approval never` (the native harness selects `workspace-write`; confined launches override it as [described below](#worker-sandbox)), OpenCode `OPENCODE_PERMISSION`; Pi needs none. Prompt mode, refused kinds and runtimes without command-line requests cannot launch. Registry commands need `{request}`. OpenCode grants the repository tree, including sibling worktrees, denies outside paths, then overlays profile permissions.
 
 ## The coordinator checkout is confined at the OS level
 

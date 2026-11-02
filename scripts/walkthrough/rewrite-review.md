@@ -1,8 +1,8 @@
 # GY-3048 documentation review
 
-Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `6025e9995fee`.
+Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `73ca5f5cb1aa`.
 
-The handwritten set went from **12,818 to 10,178 words (20.6% shorter)**, including the new rendering guide. This report is outside that guide count. These counts include the newer shipped documentation reconciled through epoch 11.
+The handwritten set went from **13,930 to 11,217 words (19.5% shorter)**, including the new rendering guide. This report is outside that guide count. These counts include the newer shipped documentation reconciled through epoch 12.
 
 | Reviewed file | Before | After |
 | --- | ---: | ---: |
@@ -11,12 +11,12 @@ The handwritten set went from **12,818 to 10,178 words (20.6% shorter)**, includ
 | `docs/delivery-redesign.md` | 334 | 193 |
 | `docs/delivery.md` | 820 | 674 |
 | `docs/deployment.md` | 886 | 650 |
-| `docs/development.md` | 733 | 640 |
+| `docs/development.md` | 775 | 682 |
 | `docs/glossary.md` | 542 | 510 |
 | `docs/how-graphyard-works.md` | 545 | 540 |
-| `docs/install.md` | 457 | 369 |
+| `docs/install.md` | 469 | 382 |
 | `docs/master-agent-reference.md` | 668 | 558 |
-| `docs/master-agent-sessions.md` | 2044 | 1021 |
+| `docs/master-agent-sessions.md` | 3102 | 2005 |
 | `docs/master-agent.md` | 1103 | 883 |
 | `docs/onboarding.md` | 641 | 448 |
 | `docs/operations.md` | 541 | 494 |
@@ -89,3 +89,12 @@ Epoch 11 rework:
 - Refreshed all handwritten file counts against the synced base. Build and `graphyard verify GY-3048` pass; the documentation check renders frames, exercises navigation/playback and fails against base as expected.
 - Fully decoded both committed assets: H.264 MP4 1200×838 and GIF 800×559, both 120.1 seconds. Visually inspected MP4 opening and 100-second failure handoff plus the GIF at 55 seconds: populated opening, distinct roles, readable captions and independent review. Rendering commands remain in the walkthrough guide.
 - Ran `review self GY-3048` and judged the synced diff. AC-1 met: explicit roles, independent ownership, concrete failed check, delivered master wakes and exactly three human decisions. AC-2 met: corrected storyboard and regenerated assets retain readable pacing, verified decoding and rendering commands. AC-3 met: concise handwritten guides preserve shipped operations, refreshed counts and generated links. No blocking finding remains.
+
+
+Epoch 12 rework:
+
+- Confirmed saved reconciliation `66634f17d184` is already an ancestor. Synced `73ca5f5cb1aa` in merge `98939999831f`. All three trial paths are reconciled: coordination already matched the shipped base; installation and session conflicts now preserve GY-3045's Docker merge trials, outer bubblewrap, Landlock socket boundary, Codex sandbox override, writable allocations and cleanup. No runtime behavior or requirement changed.
+- Reviewed the newly shipped text and shortened the trial/confinement explanation without dropping operational details. Clarified the native Codex harness versus the confined launch override. Refreshed all handwritten file counts against the synced base.
+- Build, docs checker and `graphyard verify GY-3048` passed. The documentation proof renders sample frames and exercises chapters, scrubbing and playback; its base exercise fails as expected.
+- Both committed assets fully decode: MP4 H.264 1200×838 and GIF 800×559, each 120.1 seconds. Visually inspected decoded MP4 frames at 0 and 100 seconds and GIF at 55 seconds: populated opening, distinct roles, readable captions, failed-check handoff and independent review. Rendering commands and media links remain valid.
+- Ran `review self GY-3048` and judged the synced diff. AC-1 met: roles, control-plane ownership, concrete failed check, delivered wakes and exactly three human decisions. AC-2 met: corrected storyboard and regenerated assets preserve pacing and readable frames, with decoding and repeatable rendering. AC-3 met: all handwritten guides reviewed, shipped operations retained, counts refreshed, generated links checked. No blocking finding remains.
