@@ -85,7 +85,14 @@ for (const signal of ['SIGTERM', 'SIGKILL'] as const) test(`integration:worker-h
   await assertWriterStopped(beat);
   if (!existsSync('/etc/graphyard-trial')) {
     const id = await readFile(join(allocation, 'container-id'), 'utf8');
-    await assert.rejects(defaultChildRun('docker', ['--host', 'unix:///var/run/docker.sock', 'inspect', id]), /no such/i);
+    const deadline = Date.now() + 10_000;
+    let removed = false;
+    while (Date.now() < deadline && !removed) {
+      try { await defaultChildRun('docker', ['--host', 'unix:///var/run/docker.sock', 'inspect', id]); }
+      catch (error) { assert.match(String(error), /no such/i); removed = true; }
+      if (!removed) await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.ok(removed, 'the supervisor removed its named container after launcher death');
   }
 });
 
