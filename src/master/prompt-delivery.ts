@@ -54,7 +54,7 @@ export function herdrErrorText(error: unknown) {
 export function nameRefusedByRuntime(error: unknown) {
   return /\b(?:agent|session) name\b|\binvalid (?:agent |session )?name\b/i.test(herdrErrorText(error));
 }
-export interface PromptDelivery { attempts?: number; acceptMs?: number; pauseMs?: number }
+export interface PromptDelivery { attempts?: number; acceptMs?: number; pauseMs?: number; beforeSubmit?: (text: string, attempt: number) => Promise<string> }
 export async function deliverPrompt(target: string, text: string, run?: ChildRun, options: PromptDelivery & { confirm?: 'inline' | 'follow' } = {}) {
   const attempts = options.attempts ?? promptAttempts, acceptMs = options.acceptMs ?? promptAcceptMs, pauseMs = options.pauseMs ?? promptRetryPauseMs;
   const accepted = ['--until', 'working', '--until', 'blocked', '--timeout', String(acceptMs)];
@@ -80,8 +80,9 @@ export async function deliverPrompt(target: string, text: string, run?: ChildRun
       }
       // Herdr takes options only after the prompt text; 'follow' submits it and then waits for the
       // agent to leave idle, which is the same confirmation for a caller whose text must come last.
-      if (options.confirm === 'follow') { await herdrJson(['agent', 'prompt', target, text], run); await herdrJson(['agent', 'wait', target, ...accepted], run); }
-      else await herdrJson(['agent', 'prompt', target, text, '--wait', ...accepted], run);
+      const submission = await options.beforeSubmit?.(text, attempt) ?? text;
+      if (options.confirm === 'follow') { await herdrJson(['agent', 'prompt', target, submission], run); await herdrJson(['agent', 'wait', target, ...accepted], run); }
+      else await herdrJson(['agent', 'prompt', target, submission, '--wait', ...accepted], run);
       return { attempts: attempt, accepted: true as const, ...(dismissed.length ? { dismissed } : {}) };
     } catch (error) {
       if (error instanceof PromptNotAcceptedError) throw error;
