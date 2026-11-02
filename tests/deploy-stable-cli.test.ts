@@ -5,6 +5,8 @@ import { cp, mkdir, readdir, readFile, realpath, symlink, writeFile } from 'node
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { join, resolve } from 'node:path';
+import { createInterface } from 'node:readline';
+import { credentialMaskFor, readOnlyMountWrapper } from '../src/master/confinement.js';
 import { createRequire } from 'node:module';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { watchPorts, deployHealth } from '../src/cli/upgrade.js';
@@ -12,7 +14,7 @@ import { deployOnce, deployRecordPath, readDeployRecord } from '../src/deploy-wa
 import { defaultChildRun } from '../src/child-runner.js';
 import { restartCause } from '../src/daemon/run.js';
 
-const cliReleasePath = (directory: string, commit: string) => join(directory, 'deploy', 'releases', commit);
+const cliReleasePath = (directory: string, commit: string) => join(directory, 'deploy', 'build', '.graphyard', 'cli-releases', commit);
 const activeCliRoot = (root: string) => realpath(join(root, '.graphyard', 'cli-current'));
 const source = fileURLToPath(new URL('../', import.meta.url));
 const modules = resolve(createRequire(import.meta.url).resolve('tsx'), '../../..');
@@ -27,6 +29,36 @@ async function dependencies(root: string) {
     if (name === 'tsx') await cp(join(modules, name), join(target, name), { recursive: true });
     else await symlink(join(modules, name), join(target, name));
   }
+}
+
+async function maskedSession(root: string, checkout: string, config: string, credential: string, legacy = false) {
+  const mask = credentialMaskFor({ cliPath: join(root, 'bin/graphyard.mjs') }, {}, config);
+  // Reproduce a session launched by the predecessor: it exposes only its original checkout.
+  if (legacy) mask.cli = [root];
+  const wrapper = readOnlyMountWrapper({ coordinatorRoot: checkout, sessionDirectory: checkout, credentialMask: mask, secretsBus: null });
+  const driver = `
+    const fs = require('node:fs'), { execFile } = require('node:child_process');
+    try { fs.readFileSync(process.argv[1]); console.log('CREDENTIAL-EXPOSED'); } catch { console.log('CREDENTIAL-HIDDEN'); }
+    try { fs.writeFileSync(process.argv[2] + '/write-probe', 'bad'); console.log('CLI-WRITABLE'); } catch { console.log('CLI-READ-ONLY'); }
+    require('node:readline').createInterface({ input: process.stdin }).on('line', line => {
+      execFile(process.execPath, [process.argv[2] + '/bin/graphyard.mjs', 'status'], { env: { ...process.env, GRAPHYARD_URL: line, GRAPHYARD_TOKEN: 'fixture-token' } },
+        (error, out, err) => console.log(JSON.stringify({ code: error ? error.code : 0, out, err })));
+    });`;
+  const child = spawn(wrapper[0]!, [...wrapper.slice(1), process.execPath, '-e', driver, credential, root], { cwd: root, stdio: ['pipe', 'pipe', 'pipe'] });
+  let stderr = '';
+  child.stderr.on('data', data => { stderr += data; });
+  const lines = createInterface({ input: child.stdout })[Symbol.asyncIterator]();
+  assert.equal((await lines.next()).value, 'CREDENTIAL-HIDDEN', stderr);
+  assert.equal((await lines.next()).value, 'CLI-READ-ONLY', stderr);
+  return {
+    async invoke(url: string) {
+      child.stdin.write(url + '\n');
+      const line = await lines.next();
+      assert.ok(!line.done, stderr);
+      return JSON.parse(line.value) as { code: number; out: string; err: string };
+    },
+    async close() { child.stdin.end(); await new Promise<void>(done => child.once('exit', () => done())); },
+  };
 }
 
 function invoke(root: string, url: string) {
@@ -76,6 +108,10 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
   let waitForBuild = Promise.resolve();
   const installs: string[] = [], restarts: string[] = [], previews: string[] = [];
   let pending: Promise<unknown> | undefined;
+  const secret = join(directory, 'coordinator.token'); await writeFile(secret, 'must-stay-hidden');
+  const sessions = new Map<string, Awaited<ReturnType<typeof maskedSession>>>();
+  sessions.set(legacy, await maskedSession(legacy, checkout, join(base, 'config'), secret, true));
+  const load = (root: string) => sessions.get(root)?.invoke(url) ?? invoke(root, url);
   try {
     const ports = await watchPorts({ cliRoot: checkout, repoRoot: checkout, repository: 'owner/project', url, run: async (command, args, options) => {
       // Recognize the predecessor's shell invocation too, so exercising the base fails
@@ -106,7 +142,7 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     assert.notEqual(typeof ports, 'string'); if (typeof ports === 'string') throw new Error(ports);
     ports.health = deployHealth(checkout, url, 1, 0);
     const file = deployRecordPath(checkout);
-    const check = async (root = legacy) => { const result = await invoke(root, url); assert.equal(result.code, 0, result.err); assert.equal(JSON.parse(result.out).commit, served); return result; };
+    const check = async (root = legacy) => { const result = await load(root); assert.equal(result.code, 0, result.err); assert.equal(JSON.parse(result.out).commit, served); return result; };
     const oldLoader = await readFile(join(legacy, 'node_modules/tsx/dist/loader.mjs'));
     const oldSource = await readFile(join(legacy, 'src/cli/context.ts'));
     await check();
@@ -129,6 +165,10 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     assert.match(restartCause({ credentialFile: join(base, 'token'), cliPath: join(legacy, 'bin/graphyard.mjs') }, checkout, a) ?? '', /deploy unit serves/);
     assert.equal(await ports.head(), b); assert.deepEqual(previews, [b]);
 
+    const release = cliReleasePath(directory, b);
+    sessions.set(release, await maskedSession(release, checkout, join(base, 'config'), secret));
+    await check(release);
+
     const c = await commit('C'); failInstall = true;
     const restartsBefore = restarts.length;
     assert.equal(await deployOnce(file, ports, () => {}), 'rolled-back');
@@ -147,17 +187,19 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
 
     // During server/CLI publication skew, only retries occur. They reload the pointer.
     const e = await commit('E'); await ports.fetch(); await ports.build(e); served = e; healthy = true;
-    const during = invoke(legacy, url);
+    const during = load(legacy);
     await new Promise(done => setTimeout(done, 900)); await ports.checkout(e);
+    await check(release);
     const handedOver = await during; assert.equal(handedOver.code, 0, handedOver.err); assert.match(handedOver.err, /release handover: retry/);
     const callsBefore = apiCalls; served = 'f'.repeat(40);
-    const mismatch = await invoke(legacy, url);
+    const mismatch = await load(legacy);
     assert.equal(mismatch.code, 1); assert.match(mismatch.err, /CLI commit .* and server commit .* differ/);
     assert.equal((mismatch.err.match(/release handover: retry/g) ?? []).length, 3);
     assert.equal(apiCalls, callsBefore, 'true mismatch never reaches the API');
   } finally {
     releaseInstall?.(); releaseBuild?.();
     await pending?.catch(() => {});
+    for (const session of sessions.values()) await session.close();
     server.closeAllConnections(); await new Promise<void>(done => server.close(() => done()));
     if (previousHome === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = previousHome;
   }

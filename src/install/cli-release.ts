@@ -2,11 +2,19 @@
 // Only current moves; neither the source tree nor node_modules of a published CLI is rebuilt.
 import { existsSync, realpathSync } from 'node:fs';
 import { copyFile, mkdir, rename, symlink, unlink, writeFile } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 
-export const cliReleasePath = (directory: string, commit: string) => join(directory, 'deploy', 'releases', commit);
-export const currentCliPath = (directory: string) => join(directory, 'deploy', 'current');
+// Keep publication inside the checkout already mounted in legacy masked sessions.
+const releaseStore = (directory: string) => join(directory, 'deploy', 'build', '.graphyard');
+export const cliReleasePath = (directory: string, commit: string) => join(releaseStore(directory), 'cli-releases', commit);
+export const currentCliPath = (directory: string) => join(releaseStore(directory), 'cli-published');
+
+/** Release launchers need the same stable, credential-free mount as the legacy launcher. */
+export function cliMountRoot(root: string): string {
+  return basename(dirname(root)) === 'cli-releases' && basename(resolve(root, '../..')) === '.graphyard'
+    ? resolve(root, '../../..') : root;
+}
 
 export function activeCliRoot(root: string): string {
   try { return realpathSync(join(root, '.graphyard', 'cli-current')); } catch { return root; }
