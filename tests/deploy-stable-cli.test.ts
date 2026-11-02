@@ -74,7 +74,8 @@ function invoke(root: string, url: string) {
 
 test('integration:deploy-stable-cli — real CLI loading survives delayed install, failed install, healthy handover and rollback; mismatches remain bounded refusals', async () => {
   const base = await temporaryDirectory('deploy-stable-cli');
-  const checkout = join(base, 'checkout'), directory = join(base, 'config', 'owner-project');
+  const configHome = join(base, "operator's config");
+  const checkout = join(base, 'checkout'), directory = join(configHome, 'owner-project');
   await mkdir(checkout); await mkdir(directory, { recursive: true });
   for (const name of ['src', 'bin']) await cp(join(source, name), join(checkout, name), { recursive: true });
   for (const name of ['package.json', 'package-lock.json']) await cp(join(source, name), join(checkout, name));
@@ -102,7 +103,7 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
   const url = `http://127.0.0.1:${(server.address() as { port: number }).port}`;
   await writeFile(join(directory, 'install.json'), JSON.stringify({ version: 1, installId: 'owner-project', repository: 'owner/project', provider: 'compose', baseBranch: 'main', createdAt: 'now', updatedAt: 'now' }));
   const previousHome = process.env.GRAPHYARD_CONFIG_HOME;
-  process.env.GRAPHYARD_CONFIG_HOME = join(base, 'config');
+  process.env.GRAPHYARD_CONFIG_HOME = configHome;
   let releaseInstall!: () => void, started!: () => void, releaseBuild!: () => void, buildStarted!: () => void;
   let waitForInstall = Promise.resolve(), installStarted = Promise.resolve(), failInstall = false, unhealthy: string | null = null;
   let waitForBuild = Promise.resolve();
@@ -110,7 +111,7 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
   let pending: Promise<unknown> | undefined;
   const secret = join(directory, 'coordinator.token'); await writeFile(secret, 'must-stay-hidden');
   const sessions = new Map<string, Awaited<ReturnType<typeof maskedSession>>>();
-  sessions.set(legacy, await maskedSession(legacy, checkout, join(base, 'config'), secret, true));
+  sessions.set(legacy, await maskedSession(legacy, checkout, configHome, secret, true));
   const load = (root: string) => sessions.get(root)?.invoke(url) ?? invoke(root, url);
   try {
     const ports = await watchPorts({ cliRoot: checkout, repoRoot: checkout, repository: 'owner/project', url, run: async (command, args, options) => {
@@ -131,7 +132,7 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
       }
       if (command === process.execPath && args.includes('install')) {
         const root = resolve(args[2]!, '../..'), sha = git(root, 'rev-parse', 'HEAD');
-        assert.ok(args.includes('--source-root') && args.includes(root), 'plan/apply builds the exact isolated source');
+        assert.equal(args[args.indexOf('--source-root') + 1], root, 'plan/apply receives the literal isolated source path, including spaces and apostrophes');
         if (args.includes('--plan')) previews.push(sha);
         else { buildStarted?.(); await waitForBuild; restarts.push(sha); served = sha; healthy = sha !== unhealthy; }
         return '';
@@ -166,7 +167,7 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     assert.equal(await ports.head(), b); assert.deepEqual(previews, [b]);
 
     const release = cliReleasePath(directory, b);
-    sessions.set(release, await maskedSession(release, checkout, join(base, 'config'), secret));
+    sessions.set(release, await maskedSession(release, checkout, configHome, secret));
     await check(release);
 
     const c = await commit('C'); failInstall = true;

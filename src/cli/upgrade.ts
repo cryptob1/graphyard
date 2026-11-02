@@ -431,7 +431,8 @@ export async function watchPorts(input: { cliRoot: string; repoRoot: string; rep
       const stamp = releaseOfCommit(cliRoot, commit);
       const build = buildFor(commit);
       const loader = createRequire(join(build, 'package.json')).resolve('tsx');
-      const args = redeployArguments(install, inputs.image!, build);
+      // redeployArguments quotes sourceRoot for shell commands; this invocation takes literal argv.
+      const args = [...redeployArguments(install, inputs.image!).slice(0, -1), '--source-root', build, '--apply'];
       const invoke = (flags: string[]) => run(process.execPath, ['--import', loader, join(build, 'src', 'cli.ts'), 'install', ...flags], repoRoot, { ...process.env, GRAPHYARD_VERSION: stamp.version, GRAPHYARD_BUILD_REVISION: stamp.revision });
       await invoke([...args.slice(0, -1), '--plan']);
       await invoke(args);
