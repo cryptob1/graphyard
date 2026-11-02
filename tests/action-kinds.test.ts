@@ -2,8 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { workerSlotWait } from '../src/model/action-kinds.js';
 
-// GY-1141's other cases tested the held follow-up filing GY-1249 removed; this one stands on its own.
-test('manual:review-followups-triaged GY-1141.3: workerSlotWait excludes terminated worker sessions from busy slot waits (finding 7)', () => {
+test('unit:worker-slot-wait — workerSlotWait excludes terminated worker sessions from busy slot waits', () => {
   // Terminated / killed sessions should return false so stall attention is not deferred 30 minutes
   const killedReason = 'no worker profile can take GY-999: claude-primary (Herdr agent graphyard-claude-1 is killed)';
   assert.equal(workerSlotWait(killedReason), false, 'killed worker session must not be counted as busy launch profile');

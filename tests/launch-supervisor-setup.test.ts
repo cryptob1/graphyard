@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { awaitRuntimeStart, observeStart, SessionStartError } from '../src/master.js';
-import { paneForeground } from '../src/master/launch.js';
+import { runsProgram, supervisorArgv, paneForeground } from '../src/master/launch.js';
 import { setupLine } from '../src/supervisor.js';
 import { workspaceCommands } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
@@ -107,3 +107,29 @@ test('unit:launch-supervisor-setup-is-starting — a launch whose supervisor is 
   assert.ok(never.elapsed() >= 60_000 && never.elapsed() < 61_000, `refused at ${never.elapsed()} ms`);
   assert.match(refusal.message, /never started within 60 s in pane w1V:pC1 \(command still echoing\)/);
 });
+
+{
+  test('unit:runtime-program-detection — only the word a -c wrapper runs is split, so an argument naming the program is not the runtime (Finding 1)', () => {
+    assert.equal(runsProgram(['vim', 'notes claude'], 'claude'), false);
+    assert.equal(runsProgram(['grep', 'run claude'], 'claude'), false);
+    assert.equal(runsProgram(['less', '/var/log/x claude'], 'claude'), false);
+    // A -c flag of a program that is not a shell is no wrapper: its argument is not split.
+    assert.equal(runsProgram(['grep', '-c', 'run claude', 'file'], 'claude'), false);
+    assert.equal(runsProgram(['wc', '-c', 'x claude'], 'claude'), false);
+    // A wrapper's -c string (or -lc) is still split, and a bare word still counts.
+    assert.ok(runsProgram(['/bin/sh', '-c', '/usr/lib/codex/bin/codex.mjs exec go'], 'codex'));
+    assert.ok(runsProgram(['/bin/bash', '-lc', 'exec claude --print'], 'claude'));
+    assert.ok(runsProgram(['/home/u/.local/bin/claude', '--print'], 'claude'));
+  });
+
+  test('unit:supervisor-command-detection — a supervisor is `watch` right after the graphyard CLI, not any bare watch (Finding 2)', () => {
+    assert.equal(supervisorArgv(['sudo', 'watch', '-n', '1', '--', 'ls']), false);
+    assert.equal(supervisorArgv(['env', 'watch', '-n', '1', '--', 'ls']), false);
+    assert.equal(supervisorArgv(['/bin/sh', '-c', 'sudo watch -n 1 -- ls']), false);
+    assert.equal(supervisorArgv(['grep', 'node /w/bin/graphyard.mjs watch GY-1 1 -- claude']), false);
+    assert.ok(supervisorArgv(['/usr/bin/node', '/w/bin/graphyard.mjs', 'watch', 'GY-1225', '1', '--', 'claude']));
+    assert.ok(supervisorArgv(['/usr/local/bin/graphyard', 'watch', 'GY-1225', '1', '--', 'claude']));
+    assert.ok(supervisorArgv(['/bin/sh', '-c', '/usr/bin/node /w/bin/graphyard.mjs watch GY-1225 1 -- claude go']));
+  });
+
+}

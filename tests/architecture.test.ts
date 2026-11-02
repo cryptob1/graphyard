@@ -250,7 +250,7 @@ const scanCheckout = async () => {
   return files;
 };
 
-test('unit:git-network-door — every file that spawns a git network subcommand is allowlisted, and every allowlist entry still spawns one', async () => {
+test('unit:architecture — every file that spawns a git network subcommand is allowlisted, and every allowlist entry still spawns one', async () => {
   const { refusals, detected } = audit(await scanCheckout());
   assert.deepEqual(refusals, []);
   for (const [path, entry] of Object.entries(allowlist)) {
@@ -367,4 +367,15 @@ test('unit:git-network-door-baseline — the allowlist is exactly the set that s
   assert.deepEqual(Object.keys(allowlist).sort(), [...baseline].sort(), 'the allowlist and the baseline are the same files: an entry the base did not spawn from must not join the door (move the calls behind the merge writer instead), and a file whose calls moved leaves both lists in the same commit');
   const { detected } = audit(await scanCheckout());
   assert.deepEqual([...detected.keys()].sort(), [...baseline].sort(), 'the checkout spawns from exactly the baseline files; a new spawner is a door opening, not an entry to add');
+});
+
+
+test('unit:architecture — source files never call the GitHub API or mint App installation tokens', async () => {
+  for (const [file, text] of await scanCheckout()) {
+    if (!file.startsWith('src/')) continue;
+    assert.doesNotMatch(text, /api\.github\.com/, `${file} must not call api.github.com`);
+    assert.doesNotMatch(text, /\/app\/installations\/[^/\s]+\/access_tokens/, `${file} must not request a GitHub App installation token`);
+    assert.doesNotMatch(text, /mintPushToken|installationToken\s*\(/, `${file} must not mint an App installation token`);
+    assert.doesNotMatch(text, /\[\s*['"]api['"]\s*,/, `${file} must not call GitHub's API through gh api`);
+  }
 });
