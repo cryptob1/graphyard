@@ -60,10 +60,8 @@ export const operatorAgentRouteGuard: Route = {
       || url.pathname === '/api/delegation' || url.pathname === '/api/intake' || /^\/api\/work(?:\/[^/]+(?:\/[a-z]+)?)?$/.test(url.pathname)
       // E2E case recording (GY-1614): the registry and its run route, only for a holder of e2e:record.
       || (/^\/api\/scenarios(?:\/[^/]+\/runs)?$/.test(url.pathname) && !!actor.capabilities?.includes('e2e:record'))
-      // A candidate's imported runs and hold (GY-1860): the promotion workflows read it, and seal a released one, as the release-filing identity; never import.
+      // The release-filing identity reads imported runs and seals a released candidate; never imports.
       || (req.method === 'GET' && /^\/api\/validation\/import\/[a-f0-9]{40}$/.test(url.pathname))
-      // GY-1882: whether the release-filing identity may seal, which the uat imports job checks before any seal.
-      || (req.method === 'GET' && url.pathname === '/api/validation/import/seal-authority')
       || (req.method === 'POST' && /^\/api\/validation\/import\/[a-f0-9]{40}\/seal$/.test(url.pathname)),
       'Route is not available to operator agents', 403);
     return Next;
@@ -211,8 +209,6 @@ export function assembleServices(engine: Engine, credentials: Credential[], arti
   const repository = engine.repository || process.env.GITHUB_REPOSITORY || '';
   // Mutations authorize against the same canonical binding as authentication; embedders may leave it to the process default.
   engine.repository = repository;
-  demand(!(engine.reviewerApps ?? []).some(app => app.appId === engine.controlPlaneAppId),
-    'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);

@@ -9,7 +9,7 @@ import type { Observation, Work } from '../src/model.js';
 import { liveReviewRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { bindReviewer, dismissalResolution, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile } from '../src/reviewer.js';
+import { dismissalResolution, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile } from '../src/reviewer.js';
 import { sessionRetry, sessionRetryBaseMs, sessionRetryLimit } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -32,7 +32,7 @@ function observation(candidate: { sha: string; baseSha: string }, at: string): O
 /** One submitted, observed candidate whose only proof is manual: the review request stands alone. */
 function work(overrides: Partial<Work> = {}, at = iso(0)): Work {
   const candidate = { sha: H, baseSha: B, pr: 84, branch: 'graphyard/gy-84-1', author: 'implementer' };
-  return { id: 'work-84', key: 'GY-84', title: 'Dismissed approval', description: '', type: 'bug', priority: 0, dependencies: [], 
+  return { id: 'work-84', key: 'GY-84', title: 'Dismissed approval', description: '', type: 'bug', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Relaunch', proofs: ['manual:dismissed-review'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 3, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-84', branch: 'graphyard/gy-84-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 84 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -47,7 +47,7 @@ function stubs(reviews: () => unknown[]) {
     if (args[0] === 'api') return JSON.stringify(reviews());
     return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
-  return { calls, run, mint: async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() }) };
+  return { calls, run, registerLaunch: async () => ({ launch: 'fixture-launch' }) };
 }
 
 async function reviewerRoot() {
@@ -55,8 +55,6 @@ async function reviewerRoot() {
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
-  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
   return { root, credentialDirectory, config: await loadMasterConfig(root), cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
@@ -78,12 +76,12 @@ function dispatchEffects(items: () => Work[], ledger: () => any[], log: string[]
 test('integration:dismissed-review-relaunches — a dismissed approval is recorded unanswered with its cause, and the next head is reviewed afresh without an operator', async () => {
   const { root, config, cleanup } = await reviewerRoot();
   try {
-    const { run, mint } = stubs(() => []);
+    const { run, registerLaunch } = stubs(() => []);
     // The candidate is observed, the control plane requests its review, and the reviewer session launches.
     const item = work({}, new Date().toISOString());
     reconcileAutoDispatch(item, [item], new Date());
     const first = item.autoDispatch!.review!;
-    const launched = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint, requestId: first.id });
+    const launched = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: first.id });
     assert.equal(launched.requestId, first.id);
     // The reviewer approves that head; the worker pushes a new one, and GitHub dismisses the approval with it.
     const moved = work({ candidate: { sha: H2, baseSha: B, pr: 84, branch: 'graphyard/gy-84-1', author: 'implementer' }, observation: observation({ sha: H2, baseSha: B }, new Date().toISOString()), autoDispatch: item.autoDispatch }, new Date().toISOString());
@@ -113,14 +111,14 @@ test('integration:dismissed-review-relaunches — a dismissed approval is record
 test('integration:master-review-forces-attempt — master review launches the open request\'s next attempt for a session that settled unanswered, keeping the first in the ledger', async () => {
   const { root, config, cleanup } = await reviewerRoot();
   try {
-    const { run, mint } = stubs(() => []);
+    const { run, registerLaunch } = stubs(() => []);
     const at = new Date().toISOString();
     const item = work({}, at);
     reconcileAutoDispatch(item, [item], new Date());
     const request = item.autoDispatch!.review!;
     // Every automatic attempt is spent: the request stands, and nothing will launch for it again.
     for (let attempt = 1; attempt <= sessionRetryLimit; attempt++) {
-      await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, mint, requestId: request.id });
+      await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run, registerLaunch, requestId: request.id });
       await reconcileReviews(root, config, { run, observe: () => ({ state: 'DISMISSED', reviewer, reviewId: 10 + attempt, submittedAt: iso(attempt * 1000) }), work: [item], now: () => new Date(clock + attempt * 1000) });
     }
     const spent = (await readReviewLedger(root)).reviews;
@@ -133,7 +131,7 @@ test('integration:master-review-forces-attempt — master review launches the op
     // `master review GY-84 claude-reviewer` answers that same request as its next attempt, rather
     // than recording a session the control plane's request knows nothing about.
     assert.equal(liveReviewRequest(item)!.id, request.id);
-    const forced = await reviewCommand(root, ['GY-84', 'claude-reviewer'], { work: [item], now: new Date().toISOString() }, [], { run, mint });
+    const forced = await reviewCommand(root, ['GY-84', 'claude-reviewer'], { work: [item], now: new Date().toISOString() }, [], { run, registerLaunch });
     assert.equal(forced.requestId, request.id);
     const ledger = (await readReviewLedger(root)).reviews;
     assert.equal(ledger.length, sessionRetryLimit + 1, 'every earlier session is retained in the ledger');

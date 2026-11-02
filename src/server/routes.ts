@@ -68,16 +68,6 @@ export interface RouteModule { name: string; routes: Route[] }
 // (routes/candidates.ts, registered below) calls it before this module finishes evaluating.
 export function defineRoutes(name: string, routes: Route[]): RouteModule { return { name, routes }; }
 
-/**
- * The resources this module registers into the authenticated `/api/` table (GY-1560): the exact
- * candidates (GY-1904) go ahead of the operator-agent guard, as they authorize their callers
- * themselves. index.ts assembles the table through this at startup, once every module is loaded,
- * so the registered module's binding is initialized when it is read.
- */
-export function registerApiRoutes(modules: readonly RouteModule[]): readonly RouteModule[] {
-  return modules;
-}
-
 /** Match one route against a request; `null` when it does not apply. */
 export function matchRoute(route: Route, method: string | undefined, pathname: string): string[] | null {
   if (route.method !== '*' && route.method !== method) return null;

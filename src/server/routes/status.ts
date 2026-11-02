@@ -11,7 +11,6 @@ import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { projectDelivery } from '../../project-applications.js';
-import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
 import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../production-environment.js';
 import { managedDeploy, repositoryToplevel, servingReport } from '../../deploy-watch.js';
@@ -62,7 +61,7 @@ export const statusRoutes = defineRoutes('status', [
       const servingRoot = process.env.GRAPHYARD_REPOSITORY_ROOT?.trim() ? resolve(process.env.GRAPHYARD_REPOSITORY_ROOT) : repositoryToplevel(process.cwd());
       const serving = await servingReport(servingRoot, repository ?? '', engine.baseBranch, runner ? async args => (await runner(args)).stdout.trim() : null);
       return { actor, humanOnly, delegation: delegationSnapshot(principals.map(p => p.actor), visibleWork, observedAt.getTime(), limits), repository: repository || null,
-        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', reviewerApps: engine.reviewerApps, heldJobs, starvedJobs, jobs, deploy, serving,
+        baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main', heldJobs, starvedJobs, jobs, deploy, serving,
         // The installation facts the master and doctor raise as attention: capacity variables
         // that no longer cover the roster, what production serves against the base branch, and
         // the build/protocol the CLI checks before brokering a merge. Production names work
@@ -198,16 +197,6 @@ export const statusRoutes = defineRoutes('status', [
       if (actor.role === 'operator-agent' && !wholeLedger) { demand(query.work, 'Operator-agent history reads require a scoped work item', 403); const item = await services.engine.store.workDocument(query.work!); demand(item && item.id === query.work && operatorVisible([item]).length, 'Work item is outside this operator-agent scope', 403); }
       const history = await readEventHistory(services.engine.store.pool, query);
       return query.view === 'rows' ? history.events : history;
-    },
-  },
-  {
-    // The ledger's growth over the last hour (or `minutes`, up to a day): rows, stored payload
-    // bytes and delta rows by kind, read through the created_at index.
-    method: 'GET', path: '/api/events/stats',
-    async handle({ actor, url, services }) {
-      demand(['admin', 'coordinator', 'reader'].includes(actor.role), 'An admin, coordinator or reader identity is required to read ledger growth', 403);
-      const minutes = z.coerce.number().int().min(1).max(1440).default(60).parse(url.searchParams.get('minutes') ?? undefined);
-      return eventStats(services.engine.store.pool, minutes);
     },
   },
 ]);

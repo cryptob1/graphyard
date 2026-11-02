@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync } from 'node:fs';
 import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { dependencyMap, listTestFiles, selectAffected, shardFiles } from '../scripts/ci-tests.mjs';
@@ -14,7 +13,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 // unit:ci-sharded, unit:affected-tests-selected, unit:ci-shards.
 
 test('unit:ci-sharded — shards balanced by file count, every file on exactly one (GY-2009: Actions ci.yml gate removed; merge writer trial shards tests)', async () => {
-  assert.ok(!existsSync(new URL('../.github/workflows/ci.yml', import.meta.url)), 'ci.yml is gone');
   const tests = listTestFiles();
   const shards = shardFiles(tests, 7);
   assert.equal(shards.length, 7);

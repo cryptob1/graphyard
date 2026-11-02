@@ -24,6 +24,8 @@ node "$GRAPHYARD_CLI" verify GY-N
 
 Install dependencies with `npm ci` only when needed; assigned worktrees may share the exact lockfile's install. Domain/API changes also require `npm test`. CI owns the full-suite gate; own-criterion failures always block. Tests use a temporary real Postgres database and `temporaryDirectory(label[, parent])` from `tests/helpers/temp-dirs.ts`. Worker hosts need [bubblewrap](install.md#preconditions).
 
+`tests/architecture.test.ts` enforces the Git network module allowlist and the ban on GitHub API calls. Keep behavioral regressions with their module tests; deleted-file inventories, resolution tables and module line budgets do not belong in the suite.
+
 ### Verification maps
 
 `verification/AREA.md` maps source globs in `Paths:` to `## Tests`, `## Drive`, `## Invariants` and `## Gotchas`. Keep each map at most 250 words. Read the relevant map before changing its area.

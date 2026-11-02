@@ -67,6 +67,8 @@ Claude records session ID, runtime, account and worktree in `.graphyard/dispatch
 
 ### Verdicts and registry slots
 
+Reviews launch under the profile’s agent identity through the control plane. `master reviewer add|remove` manages profiles; no reviewer App, installation or private key is configured.
+
 `review-binding.json` (0600 in `GH_CONFIG_DIR`) binds head/base/policy, verdictToken and previousHead. No binding means no launch. `review post --event …` posts once; moved heads refuse. Workers run `review self GY-N` before complete.
 
 Verdict, stage change or missing pane ends the ledger-linked registry slot. Completed reviews release on the first eligible pane miss after launch grace; other orphaned slots close after two consecutive misses, including after loop restart. See [session liveness](master-agent.md#session-liveness-is-reconciled-not-trusted).

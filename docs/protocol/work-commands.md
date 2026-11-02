@@ -56,4 +56,6 @@ Submit, park, blocked or expiry ends the attempt. Complete must be the last acti
 
 ## Other commands and routes
 
+Retired reads (`events/stats`, `actions`, attribution analytics and manifests, validation `seal-authority`, and registry `connect/hosts`) return 404 after authentication. The dashboard uses board, snapshot and detail routes.
+
 `graphyard help` lists commands. Exact API schemas live under `src/server/routes/` and `src/model/`.

@@ -63,7 +63,7 @@ test('review brief bindings also reach GitHub launches and legacy retries withou
     assert.ok(brief.includes('[AC-1] proofs: [{"proof":"integration:review-brief-proof-bindings"},{"proof":"e2e:review-brief-proof-bindings","caseId":"review-brief-proof-bindings","path":"e2e/cases/review-brief-proof-bindings.json","revision":3,"environment":"local","hash":"' + 'c'.repeat(64) + '"}]'));
     assert.ok(brief.includes(`git show ${head}:PATH`));
     assert.match(brief, /guide review is supported and needs no worker or coordinator credential/);
-    assert.match(brief, /repository reads and reviews only/);
+    assert.match(brief, /review binding and one-time verdict token/);
     assert.match(brief, /mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker/);
     assert.match(brief, /rg --files/);
     assert.match(brief, /CLI --help, then retry the authorized read/);

@@ -59,15 +59,7 @@ test('unit:install-no-github-gates — apply calls no /protection or /rulesets e
   } finally { await fixture.cleanup(); }
 });
 
-test('unit:github-gates-removed — protection scripts and CI gate workflows are gone; repository setup writes no workflow; trial secret-scan argv is pinned', async () => {
-  assert.ok(!existsSync('scripts/protect-github.mjs'));
-  assert.ok(!existsSync('scripts/verify-enforcement.mjs'));
-  assert.ok(!existsSync('.github/workflows/ci.yml'));
-  assert.ok(!existsSync('.github/workflows/acceptance.yml'));
-  assert.ok(!existsSync('.github/workflows/deploy-smoke.yml'));
-  assert.ok(!existsSync('.github/workflows/release.yml'));
-  assert.ok(!existsSync('.github/workflows/release-candidate.yml'));
-  assert.ok(!existsSync('.github/workflows/release-candidate-soak.yml'));
+test('unit:github-gates-removed — repository setup writes no workflow; trial secret-scan argv is pinned', async () => {
 
   const { temporaryRepository } = await import('./install-harness.js');
   const root = await temporaryRepository('owner/demo');

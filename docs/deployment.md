@@ -17,7 +17,6 @@ Preview with `--plan` first ([install](install.md)). Compose runs one stateless 
 | `HOST`, `PORT` | Listen address, default `0.0.0.0:4310`. |
 | `GITHUB_REPOSITORY`, `GITHUB_BASE_BRANCH` | Managed repository and base. |
 | `GRAPHYARD_PRINCIPALS` | Principal roster: role and sessionKind. Human admin uses `human`; AI never holds admin. |
-| `GRAPHYARD_REVIEWER_APPS` | Reviewer configuration. |
 | `GRAPHYARD_GENERATED_FILES` | Generated-file paths. |
 | `GRAPHYARD_REPOSITORY_POLICY` | Deployed repository policy. |
 | `GRAPHYARD_BUILD_SHA` | Control-plane build commit. |
@@ -65,4 +64,4 @@ Set the variables, register a read-write deploy key, then run `doctor`. For Comp
 
 `master setup --apply` sets derivable variables and appends `.graphyard/setup-audit.jsonl`. Agents run host-doable steps; park refuses those asks. Personal sign-in, enrolment and browser profiles remain human.
 
-Old `GRAPHYARD_REVERT_APPROVER_*` variables are unread; no main guard or revert approver remains.
+No main guard, revert approver or reviewer App remains. Old `GRAPHYARD_REVERT_APPROVER_*` and `GRAPHYARD_REVIEWER_APPS` variables are unread. Reviews use control-plane launch tokens.

@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, readdir, readFile, realpath, rm, utimes, writeFile } from 'node:fs/promises';
 import { homedir, tmpdir } from 'node:os';
@@ -19,7 +19,7 @@ import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
 import { grantWorkerPaths, verifyWorkerSandbox } from '../src/worker-sandbox.js';
 import { launchProducer, producerPrompt, readProducerLedger, reconcileProducers, producerIdleGraceMs, type ProducerBinding } from '../src/producer.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile } from '../src/reviewer.js';
 import { allocateSessionCheckout, dataDirectory, defaultWorktreeRoot, inspectWorktreeRoot, probeFilesystem, removeSessionCheckout, removeUnownedCheckouts, sessionCheckout, verifyWorktreeRoot, worktreeRoot, worktreeRootBudgetBytes, worktreeRootMinFreeBytes, type FilesystemProbe } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -31,7 +31,6 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 const coordinatorStatus = (async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }))) as typeof fetch;
 const H = 'a'.repeat(40), B = 'b'.repeat(40);
 const durable: FilesystemProbe = async path => ({ probed: path, volatile: null, freeBytes: 200e9 });
@@ -62,7 +61,6 @@ async function installation(run: Partial<MasterRun> = {}) {
   await writeFile(join(root, 'README.md'), 'managed worktree root\n');
   git('add', 'README.md'); git('-c', 'user.name=Graphyard', '-c', 'user.email=graphyard@example.test', 'commit', '-q', '-m', 'initial');
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace', run: { worktreeRoot: managed, ...run } }, coordinatorStatus, { probe: durable });
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   await saveReviewerProfile(root, { name: 'reviewer-a', agentName: 'review-a', kind: 'codex' });
   const credential = join(credentialDirectory, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
   const verify = (id: string) => async () => ({ actor: { id, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
@@ -76,7 +74,7 @@ function request(proofs = ['integration:managed-worktree-root']) {
 }
 function work(key: string, overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 88, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
-  return { id: `id-${key}`, key, title: 'Managed worktree root', description: '', type: 'bug', priority: 1, dependencies: [], 
+  return { id: `id-${key}`, key, title: 'Managed worktree root', description: '', type: 'bug', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:managed-worktree-root'] }], policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 2,
     createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 88 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     blocker: null, gates: [], violations: [], implementers: ['implementer'],
@@ -120,7 +118,7 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
     // A reviewer session: the same root, the same rule, and a harness that lets it check the head
     // out at that one path only.
     const reviewCalls: string[][] = [];
-    const reviewed = await launchReview(root, work('GY-89'), 'reviewer-a', [], new Date().toISOString(), { run: herdr(reviewCalls), mint: async () => ({ token: 'ghs_session_token_value', expiresAt: future(3_000_000) }), filesystem: durable });
+    const reviewed = await launchReview(root, work('GY-89'), 'reviewer-a', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable });
     assert.equal(dirname(reviewed.checkout), managed);
     assert.match(reviewed.checkout, /\/graphyard-review-gy-89-aaaaaaa-[0-9a-f]{8}$/);
     assert.equal((await readReviewLedger(root)).reviews[0].checkout, reviewed.checkout);
@@ -224,9 +222,9 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     assert.equal(await stateOf(expired.checkout), 'expired'); gone(expired.checkout);
 
     // Reviewer sessions, the same four ways.
-    const mint = async () => ({ token: 'ghs_session_token_value', expiresAt: future(3_000_000) });
+    const registerLaunch = async () => ({ launch: 'fixture-launch' });
     const review = async (key: string) => {
-      const launched = await launchReview(root, work(key), 'reviewer-a', [], new Date().toISOString(), { run: herdr(), mint, filesystem: durable });
+      const launched = await launchReview(root, work(key), 'reviewer-a', [], new Date().toISOString(), { run: herdr(), registerLaunch, filesystem: durable });
       await occupy(git, launched.checkout);
       return launched.checkout;
     };
@@ -248,7 +246,7 @@ test('integration:ephemeral-checkout-reclaim — every checkout is removed when 
     const broken = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') throw new Error('herdr pane run failed'); return herdr()(_command, args); };
     const unlucky = request();
     await assert.rejects(launchProducer(root, producing('GY-109', unlucky), unlucky, { ...config.producers[0], agentName: 'produce-gy-109' }, [], new Date().toISOString(), { run: broken, filesystem: durable }), /herdr pane run failed/);
-    await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, mint, filesystem: durable }), /herdr pane run failed/);
+    await assert.rejects(launchReview(root, work('GY-110'), 'reviewer-a', [], new Date().toISOString(), { run: broken, registerLaunch, filesystem: durable }), /herdr pane run failed/);
     assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'every resolved or failed launch is gone from the root; the host verification lock directory stays');
 
     // A pending session keeps its checkout, and only a Graphyard session directory is ever removed.
@@ -399,7 +397,7 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
       assert.match(error.message, new RegExp(`^Launching the GY-88 producer session \\(Command failed: herdr pane run\\) failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}: `));
       assert.ok(error.message.endsWith(reclaimAdvice)); return true;
     });
-    await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, mint: async () => ({ token: 'ghs_session_token_value', expiresAt: future(3_000_000) }), filesystem: durable }),
+    await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable }),
       new RegExp(`^Error: Launching the GY-88 reviewer session .* failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-review-gy-88-aaaaaaa-[0-9a-f]{8}: .*free space on the volume`));
     assert.deepEqual(await readdir(managed).catch(() => []), ['.verification-slots'], 'no checkout is left behind, only the host verification lock directory');
   } finally { await cleanup(); }

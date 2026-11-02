@@ -53,7 +53,7 @@ async function candidates(all: Work[], kinds?: readonly NextActionKind[]) {
   return (await store.pool.query(claimCandidatesSql, claimCandidatesParams(undefined, kinds))).rows.map(row => row.id as string);
 }
 /**
- * One claim as `Engine.claimNextAction` makes it: the SQL lists the candidate items, only those
+ * One claim through the model helpers: the SQL lists the candidate items, only those
  * documents are loaded and claimed from, and the claimed item and every item whose row stepped
  * aside are written back — so a row backing off elsewhere is invisible to the claim.
  */
