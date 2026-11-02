@@ -6,6 +6,9 @@ import { chmod, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/pr
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
+import { createElement } from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
+import { DeliveryDefaults } from '../web/components/delivery-slices.js';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server as controlPlane } from '../src/server.js';
@@ -266,8 +269,9 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   for (const text of [...actions, summary]) assert.doesNotMatch(text, /Main guard|main guard|GitHub (request )?budget|githubBudget/, `no Main guard or GitHub budget line: ${text.slice(0, 300)}`);
   const status = await request(coordinator, 'status');
   assert.equal(status.status, 200);
-  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
-  assert.equal(status.body.mergeWriter.merger, 'control-plane', 'and reports the merge writer');
+  for (const field of ['github', 'githubBudget', 'mainGuard', 'webhooks', 'appPermissions', 'mergeWriter']) assert.equal(field in status.body, false, `/api/status reports no ${field}`);
+  const delivery = renderToStaticMarkup(createElement(DeliveryDefaults, { status: status.body }));
+  assert.match(delivery, /<dt>Merge writer<\/dt><dd>The control plane \(GitHub only a mirror\)<\/dd>/, 'the delivery view identifies the fixed merge writer without a status switch');
   for (const path of ['src/cli/master-status.ts']) assert.doesNotMatch(await readFile(new URL(path, root), 'utf8'), /mainGuardAttention|githubBudgetAttention|github-budget-attention/, `${path} raises no Main guard or GitHub budget line`);
 });
 
