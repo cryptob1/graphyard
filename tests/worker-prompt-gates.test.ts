@@ -25,8 +25,8 @@ const root = fileURLToPath(new URL('..', import.meta.url));
 const cli = '/bin/graphyard.mjs';
 const gates = [...workerFastGates.tests, ...workerFastGates.scripts];
 const gatesIn = (text: string) => gates.filter(gate => text.includes(gate));
-const render = (fastGates?: boolean, dependencies?: Parameters<typeof workerPrompt>[4], maps?: Parameters<typeof workerPrompt>[8]) =>
-  workerPrompt({ cliPath: cli, ...(fastGates === undefined ? {} : { fastGates }) }, { key: 'GY-1', title: 'Fast gates' }, { principal: 'graphyard-test-1' }, 1, dependencies ?? null, null, null, null, maps ?? null);
+const render = (fastGates?: boolean, dependencies?: Parameters<typeof workerPrompt>[4], maps?: Parameters<typeof workerPrompt>[7]) =>
+  workerPrompt({ cliPath: cli, ...(fastGates === undefined ? {} : { fastGates }) }, { key: 'GY-1', title: 'Fast gates' }, { principal: 'graphyard-test-1' }, 1, dependencies ?? null, null, null, maps ?? null);
 const section = workerBeforePushSection(cli, 'GY-1'), sync = workerSyncSentence(cli, 'GY-1');
 
 test('unit:worker-request-names-fast-gates — the request names the fast mechanical gates and their one command line, after the sync instruction and before the complete instruction, and an input that adds nothing leaves the request byte-identical', () => {
