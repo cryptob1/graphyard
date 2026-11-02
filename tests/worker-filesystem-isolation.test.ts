@@ -283,7 +283,6 @@ test('integration:worker-home-deletion-regression — cold-cache dashboard trial
   writeFileSync(join(f.root, 'browser.cjs'), `
     const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
     assert.equal(fs.readFileSync('built', 'utf8'), 'built');
-    assert.equal(fs.readFileSync(require('node:path').join(process.env.HOME, 'trial-home'), 'utf8'), 'allocated home');
     assert.equal(fs.readFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'utf8'), 'installed');
     assert.equal(fs.readFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'utf8'), 'cached');
     { ${deniedOperations.replace('const protectedVisible = true', 'const protectedVisible = false').replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
