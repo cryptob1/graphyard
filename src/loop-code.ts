@@ -193,4 +193,3 @@ export async function readInstallLoopCode(root: string, options: {
   const cliPath = options.cliPath ?? fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
   return (options.local ?? ((at: string, path: string) => readLoopCode(at, { cliPath: path })))(root, cliPath);
 }
-

@@ -34,4 +34,3 @@ export function writeFailure(error: unknown, action: string, path?: string): Err
   if (!exhausted) return error instanceof Error ? error : new Error(String(error));
   return Object.assign(new Error(`${action} failed because ${exhausted}`), { code: (error as { code?: string } | null)?.code ?? 'ENOSPC', cause: error });
 }
-

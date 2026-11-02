@@ -41,4 +41,3 @@ export function parseEnvValue(raw: string): string | null {
   }
   return value.trimEnd();
 }
-

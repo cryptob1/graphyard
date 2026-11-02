@@ -38,4 +38,3 @@ export function outOfCreditsScreen(output: string): ExhaustionSignal | null {
   }
   return null;
 }
-

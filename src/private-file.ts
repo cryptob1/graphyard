@@ -59,4 +59,3 @@ export async function atomicPrivateText(file: string, value: string) {
   catch (error) { throw writeFailure(error, `Writing ${file}`); }
   await chmod(file, 0o600);
 }
-

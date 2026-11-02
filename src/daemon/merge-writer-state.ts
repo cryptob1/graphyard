@@ -80,4 +80,3 @@ export const mergeWriterStateSchema = z.object({
 }).strict();
 export type MergeWriterState = z.infer<typeof mergeWriterStateSchema>;
 export const emptyMergeWriterState = (): MergeWriterState => mergeWriterStateSchema.parse({});
-
