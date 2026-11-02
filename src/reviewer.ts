@@ -748,7 +748,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
   memory ??= projectMemory;
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification, scenarioRequirements);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
-  return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
+  return `Independent Graphyard reviewer for ${config.repository}: review #${binding.pr}, head ${binding.sha}, base ${binding.baseSha}, policy revision ${binding.policyRevision}, item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')
@@ -761,10 +761,10 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + simplicityParagraph
     + repetitionReviewSection(files)
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
-    + 'Read-only: no edits, Git mutations, builds/tests/servers, work claims or evidence submissions. '
+    + 'Read-only: no edits, Git mutations, work claims or evidence submissions; do not run the project\'s build, tests, or servers. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
     + `Posting that review is granted to this session's role, not a permission to request: post without asking for confirmation. `
-    + `GH_CONFIG_DIR holds a reviewer credential expiring within the hour: repository reads and reviews only. `
+    + `GH_CONFIG_DIR: reviewer credential, expires within the hour; repository reads and reviews only. `
     + reviewAutonomySection();
 }
 
