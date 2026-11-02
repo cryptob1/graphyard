@@ -47,10 +47,10 @@ function hotfixSha(): string {
   return '';
 }
 
-test('unit:control-plane-only-net-deletion — the GitHub merger modules and their tests are gone, the merger type admits only control-plane, and the hotfix deletes at least four lines per line added', async () => {
+test('unit:control-plane-only-net-deletion — the GitHub merger modules and their tests are gone, the merger mode and automatic-merging settings are removed, and the hotfix deletes at least four lines per line added', async () => {
   for (const path of removed) assert.equal(existsSync(join(root, path)), false, `${path} is removed`);
   const mode = await readFile(join(root, 'src/merger-mode.ts'), 'utf8');
-  assert.match(mode, /export type MergerMode = 'control-plane';/);
+  assert.doesNotMatch(mode, /MergerMode|AutoMergeSettings|mergeWriterStatus/);
   assert.doesNotMatch(mode, /policy\.merger\.set'/, 'no merger event kind is written or read');
   const sha = hotfixSha();
   if (!sha) return;

@@ -353,10 +353,6 @@ export const masterBrowserSchema = z.object({
 export type MasterBrowser = z.infer<typeof masterBrowserSchema>;
 
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
-// GY-516: default for mergeQueue.rerunFailedChecks (reruns failed check once on same sha; 0 disables).
-export const defaultRerunFailedChecks = 1;
-// The most reruns per sha and check master config and the control plane accept.
-export const maxRerunFailedChecks = 3;
 /**
  * Who reviews and merges (GY-1501). `autonomous`, the default every existing install keeps: the
  * reviewer App reviews and the master's operator-agent identity decides. `supervised`,
@@ -388,7 +384,7 @@ export const masterConfigSchema = forwardTolerant(z.object({
   // every herdr call the install makes carries its XDG_CONFIG_HOME and --session (master/herdr.ts).
   herdrInstance: z.object({ configHome: z.string().trim().min(1).max(500).refine(isAbsolute, 'must be absolute'), session: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/) }).strict().optional(),
   masterAgentName: sessionNameField,
-  autoMerge: z.boolean().default(true),
+  autoMerge: z.unknown().optional(), // Retired: every passing candidate merges.
   // Retired (GY-2874): no review round is capped; an existing master.json still loads.
   reviewRoundCap: z.unknown().optional(),
   mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
@@ -399,22 +395,15 @@ export const masterConfigSchema = forwardTolerant(z.object({
   // The agent environments profiles may launch on, discovered or created by master environments.
   environments: z.array(agentEnvironmentSchema).max(50).optional(),
   run: masterRunSchema.prefault({}),
-  // `mergeQueue.rerunFailedChecks` (GY-516): reruns of a failed required check per sha; the loop
-  // publishes it to the control plane on every change.
-  // Retired keys are still accepted so an existing master.json loads, but parsing drops them
-  // (GY-1264): nothing reads them, and every writer re-parses before it saves, so the next master
-  // init or profile change removes them from the file instead of leaving inert settings an operator
-  // would trust. `optimistic` and `optimisticExclude` retired with optimistic merge (GY-1233);
-  // `batchSize`, `parallelTips` and `ciConcurrency` with Graphyard's own merge queue (GY-1236):
-  // GitHub merges each passing candidate, so no speculative tip is batched or validated in parallel.
+  // Retired queue settings load for compatibility and drop on the next write.
   mergeQueue: z.object({
     batchSize: z.unknown().optional(),
     optimistic: z.unknown().optional(),
     parallelTips: z.unknown().optional(),
     ciConcurrency: z.unknown().optional(),
-    rerunFailedChecks: z.number().int().min(0).max(maxRerunFailedChecks).optional(),
+    rerunFailedChecks: z.unknown().optional(),
     optimisticExclude: z.unknown().optional(),
-  }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, batchSize: _batchSize, parallelTips: _parallelTips, ciConcurrency: _ciConcurrency, ...kept }) => kept).optional(),
+  }).strict().transform(({ optimistic: _optimistic, optimisticExclude: _optimisticExclude, batchSize: _batchSize, parallelTips: _parallelTips, ciConcurrency: _ciConcurrency, rerunFailedChecks: _reruns, ...kept }) => kept).optional(),
   // The operator's own authenticated browser profile, used only by master browser flows.
   browser: masterBrowserSchema.optional(),
   // The master's operator-agent identity, which applies every decision it makes. Paths only, never tokens.
@@ -436,7 +425,7 @@ export const masterConfigSchema = forwardTolerant(z.object({
   invariants: z.unknown().optional(),
 // GY-1960: master.json is forward-tolerant — fields a newer version wrote that this one does not
 // declare parse and are written back unchanged, so a rollback or a held-CLI snapshot opens the file.
-}).strict());
+}).strict()).transform(({ autoMerge: _autoMerge, ...kept }) => kept);
 export type MasterConfig = z.infer<typeof masterConfigSchema>;
 /** Sessions `run.reviewerProfile`'s profile runs at unset concurrency (GY-1072); other reviewer profiles keep one. */
 export const automaticReviewerConcurrency = 4;
@@ -467,10 +456,6 @@ export function withSupervision<T extends { supervision?: Supervision; reviewer?
   return kept as T;
 }
 export const withRoleDefaults = <T extends Pick<MasterConfig, 'reviewers' | 'producers' | 'run'> & { supervision?: Supervision; reviewer?: unknown; operatorAgent?: unknown }>(config: T): T => withSupervision(withProducerDefaults(withReviewerDefaults(config)));
-/** Reruns of a failed required check per sha under this master config: `mergeQueue.rerunFailedChecks`, or the product default of 1. */
-export function rerunFailedChecks(config: Pick<MasterConfig, 'mergeQueue'> | null | undefined): number {
-  return config?.mergeQueue?.rerunFailedChecks ?? defaultRerunFailedChecks;
-}
 
 /** The master config's githubAppId on an install that registered no GitHub App (GY-1413); since GY-2010 none binds one. */
 export const APP_PENDING = 0;
