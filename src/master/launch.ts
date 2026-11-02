@@ -18,6 +18,7 @@ import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 import { deliverPrompt, herdrErrorText, nameRefusedByRuntime, readSessionScreen, sessionWords, type PromptDelivery } from './prompt-delivery.js';
 import { keyringEndpointWarning, keyringProbeBackoff } from './launch-keyring.js';
+import { masterRecords } from './conversation.js';
 // Prompt delivery moved to prompt-delivery.ts (GY-1863) with the screen a stalled delivery is
 // judged by; the names below are the one address every existing import has always had.
 export { promptAttempts, promptAcceptMs, promptRetryPauseMs, noticeSettleMs, PromptNotAcceptedError, herdrErrorCode, herdrErrorText, nameRefusedByRuntime, deliverPrompt, readSessionScreen, sessionWords, type PromptDelivery } from './prompt-delivery.js';
@@ -191,7 +192,11 @@ export async function masterSessionConfinement(kind: string, root: string, probe
   const managed = join(resolve(root), '.graphyard');
   mkdirSync(managed, { recursive: true, mode: 0o700 });
   const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed, ...writable], environment });
-  const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', ...words];
+  const records = masterRecords(root);
+  mkdirSync(records, { recursive: true, mode: 0o700 });
+  // Mount options precede the socket-confinement command inside bubblewrap.
+  const command = words.indexOf('--');
+  const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', ...words.slice(0, command), '--ro-bind', records, records, ...words.slice(command)];
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session in a bubblewrap namespace whose /proc shows only its own processes and whose host systemd and bus sockets are hidden; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs, nor any host process it could ask to start, can patch the checkout's tracked files` };
 }

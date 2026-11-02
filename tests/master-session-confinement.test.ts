@@ -7,6 +7,7 @@ import { masterConfinementVariable, masterSessionConfinement, startAgentSession 
 import { dirtyCheckoutPaths, hostProcessLaunchTargets, readCoordinatorCheckout, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { loopRestartRequestPath } from '../src/daemon/run.js';
 import { confinedMaster } from '../src/cli/master/operations.js';
+import { masterRecords } from '../src/master/conversation.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1658: the loop-launched master session ran with the coordinator checkout writable (it opted
@@ -56,6 +57,12 @@ test('integration:master-session-checkout-readonly — the master session cannot
     assert.notEqual(inside(script).status, 0, `the master session cannot run: ${script}`);
   assert.equal(readFileSync(join(root, 'src', 'loop.ts'), 'utf8'), 'export const loop = 1;\n', 'the tracked file is unchanged');
   assert.deepEqual(dirtyCheckoutPaths(await readCoordinatorCheckout(root)), [], 'the checkout stays clean');
+  // The loop owns conversation evidence even though its parent managed state is writable.
+  const record = join(masterRecords(root), 'conversation.jsonl');
+  writeFileSync(record, 'original\n');
+  assert.notEqual(inside(`echo forged > ${record}`).status, 0, 'conversation records stay read-only');
+  assert.notEqual(inside(`rm ${record}`).status, 0, 'conversation records cannot be deleted');
+  assert.equal(readFileSync(record, 'utf8'), 'original\n');
   // Its managed .graphyard state, the state beside its credential, a dispatch's worktree and the
   // host's processes (the loop's pid its commands judge) all stay reachable.
   const managed = inside(`mkdir -p .graphyard/master-actions && echo '{}' > .graphyard/master-actions/record.json && echo '{}' > ${outside}/coordinator.daemon.json`);

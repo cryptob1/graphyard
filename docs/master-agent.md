@@ -19,6 +19,8 @@ Items carry an optional `owner`, a principal with `sessionKind: "human"`, separa
 4. **merge writer**: trial and merge each submitted head in order ([delivery](delivery.md)).
 5. **persist**: the loop cursor.
 
+A worker launch refused only because live registry sessions fill its role concurrency stays queued, with the capacity reason visible in status. Each cycle retries it; a freed slot launches it without a lease claimed while waiting, a failed-launch cooldown or an incident wake. Real launch and registry failures still wake the master; open-work heartbeats continue.
+
 The loop follows the master's live Herdr pane after a move. A weekly limit, session limit or exhausted usage credits holds its account, closes that pane and launches the next account in the same cycle. `master status` names the live pane and reports `screen unreadable` when it cannot read it; missing runtime status reads `unknown`.
 
 `master restart` restarts `graphyard-master.service`; from the confined master session it files a request the loop serves. The loop restarts itself when [graphyard-deploy.service](delivery.md) serves a commit it did not load.
