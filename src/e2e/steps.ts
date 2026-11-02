@@ -98,8 +98,8 @@ export interface ConfinedSession { run: ProcessRunner; close(): Promise<void> }
  * each invocation (the leg's invocations share one `--session`), and `close` ends the namespace
  * with everything in it. A host that cannot start or that ended answers every waiting invocation
  * with that fact, and the next one starts a fresh host. The host is the namespace's first process,
- * so every child can read its `/proc/1/environ`: it carries `hostEnvironment` — the trial's own
- * credential-free environment — never this process's.
+ * whose `/proc/1/environ`, when readable under the socket policy, carries `hostEnvironment` —
+ * the trial's own credential-free environment — never this process's.
  */
 export const confinedSession = (wrapper: readonly string[] = [], hostEnvironment: NodeJS.ProcessEnv = { PATH: process.env.PATH ?? '' }, base: ProcessRunner = runProcess): ConfinedSession => {
   if (!wrapper.length) return { run: base, close: async () => {} };

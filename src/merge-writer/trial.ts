@@ -9,12 +9,14 @@ import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionChe
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
 import { readTempOwner, tempOwnerGone, tempOwnerMarker, writeTempOwner } from '../tmp-reclaim.js';
 import { runSecretScan, secretScanArgv, secretScanCacheDirectory, type SecretScanInput, type SecretScanResult } from './secret-scan.js';
-import { runTrialE2eCases, type TrialE2eCase } from './e2e-trial.js';
+import type { TrialE2eCase } from './e2e-trial.js';
 import { underTestRunner } from '../supervisor.js';
 import type { HostMemoryReading } from '../master/host-memory.js';
 import { parseFailedTests } from '../model/base-failure.js';
-import { bwrapOnPath, credentialMaskWords } from '../master/confinement.js';
+import { assertIsolatableHostControlEndpoints, bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';
+import { socketConfinementWords } from '../master/socket-confinement.js';
 import { configHome } from '../install/secrets.js';
+import { containerTrialE2e, trialContainerDependencies, trialContainerWords } from './trial-container.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
 export type TrialGit = (args: string[], env?: Record<string, string>) => Promise<string>;
@@ -114,7 +116,7 @@ export async function trialMerge(git: TrialGit, input: { head: string; baseTip: 
  * temporary-directory overrides (GY-1549: the loop's systemd unit inherits TMPDIR=/var/tmp from
  * environment.d). runTrial sets its own in their place (`trialTemporaryRoot`).
  */
-export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'TMPDIR', 'TMP', 'TEMP'] as const;
+export const withheldTrialVariables = ['GH_CONFIG_DIR', 'GH_TOKEN', 'GITHUB_TOKEN', 'SSH_AUTH_SOCK', 'GIT_SSH_COMMAND', 'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'TMPDIR', 'TMP', 'TEMP'] as const;
 /**
  * Whether a variable name is credential-bearing and must not reach the trial child (GY-1548): the
  * named helpers above, plus any name carrying a token, secret, password, private key, API key,
@@ -133,13 +135,12 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
- * GY-2997: the trial child's home — a fresh, empty directory of the trial as HOME and every XDG base
- * directory (as `previewEnvironment` gives a preview), so nothing the merge brings in finds a
- * coordinator credential through HOME or XDG. Only the host's npm cache and Playwright browsers are
- * still found where the host keeps them, along with mise's toolchain directories.
+ * GY-2997: the trial child's home and caches belong to its allocation. Preserve
+ * explicit host mise resolution for launcher tooling; candidate commands use the
+ * private container's toolchain without mounting the host home.
  */
 export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const shared: Record<string, string> = host.HOME ? { npm_config_cache: host.npm_config_cache ?? join(host.HOME, '.npm'), PLAYWRIGHT_BROWSERS_PATH: host.PLAYWRIGHT_BROWSERS_PATH ?? join(host.HOME, '.cache', 'ms-playwright') } : {};
+  const shared: Record<string, string> = {};
   for (const [kind, base, fallback] of [
     ['CONFIG', 'XDG_CONFIG_HOME', '.config'], ['CACHE', 'XDG_CACHE_HOME', '.cache'],
     ['DATA', 'XDG_DATA_HOME', '.local/share'], ['STATE', 'XDG_STATE_HOME', '.local/state'],
@@ -149,24 +150,30 @@ export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = proce
     if (host[name] !== undefined) shared[name] = host[name];
     else if (directory) shared[name] = join(directory, 'mise');
   }
-  return { ...shared, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
+  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
 export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
   [...new Set([configHome(environment.GRAPHYARD_CONFIG_HOME), deployKeyFile, environment.XDG_RUNTIME_DIR, uid === undefined ? undefined : `/run/user/${uid}`].filter((path): path is string => !!path && isAbsolute(path)))];
 /**
- * GY-2997: the bubblewrap words a trial child runs under: the host as it is, with each hidden path's
- * directory replaced by an empty tmpfs (`credentialMaskWords`), and the trial's own directories that
- * lie under a mask bound back on top so the child still reaches its checkout. The child sees only
+ * The bubblewrap words every trial child runs under: a read-only host, private devices and
+ * scratch, host launch sockets hidden, credential masks, then only the trial's allocated
+ * directories bound writable. The child sees only
  * its own processes and dies with the runner, so a killed trial leaves nothing behind.
  */
-export function trialConfinement(hidden: readonly string[], reexposed: readonly (string | null)[], bwrap = bwrapOnPath() ?? 'bwrap'): string[] {
+export function trialConfinement(hidden: readonly string[], reexposed: readonly (string | null)[], bwrap = bwrapOnPath() ?? 'bwrap', readable: readonly string[] = [], environment: NodeJS.ProcessEnv = process.env): string[] {
   const masks = credentialMaskWords({ configHome: '', extraPaths: hidden, own: [], cli: [] }, []);
-  const masked = masks.filter((_, index) => masks[index - 1] === '--tmpfs');
-  const inside = (path: string, directory: string) => { const from = relative(directory, path); return from !== '' && !from.startsWith('..') && !isAbsolute(from); };
-  const binds = [...new Set(reexposed.filter((path): path is string => !!path && existsSync(path)).map(path => realpathSync(path)))].filter(path => masked.some(directory => inside(path, directory)));
+  const binds = [...new Set(reexposed.filter((path): path is string => !!path && existsSync(path)).map(path => realpathSync(path)))];
   // Its own PID namespace and a fresh /proc, so no host process's /proc/<pid>/root leads back past the masks.
-  return [bwrap, '--die-with-parent', '--unshare-pid', '--dev-bind', '/', '/', ...masks, '--proc', '/proc', ...binds.flatMap(path => ['--bind', path, path]), '--'];
+  const scratch = binds.at(-1);
+  if (!scratch) throw new Error('A trial sandbox requires an allocated writable directory');
+  // Keep the short allocated temporary path in the child: nested trials and cleanup
+  // must refer to their own allocation, including through the namespace aliases.
+  return [bwrap, '--die-with-parent', ...hostFilesystemWords(scratch, environment, binds),
+    ...masks, ...readable.filter(existsSync).map(path => realpathSync(path)).flatMap(path => ['--ro-bind', path, path]),
+    ...binds.flatMap(path => ['--bind', path, path]),
+    ...processLaunchMaskWords({ ...hostProcessLaunchTargets(undefined, environment), secretsBus: null }, []), '--',
+    ...socketConfinementWords(binds)];
 }
 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */
@@ -775,6 +782,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // with room outside every temporary root (else the session directory's checkout), each removed with the session and marked as this process's.
   const roots = input.temporaryRoots ?? trialTemporaryRoots();
   let home: string | null = null, temporary: string | null = null, place: string | null = null, worktree = checkout.worktree, guarded: string | null = null;
+  let env: Record<string, string>, wrapper: string[];
   const clear = async (directory: string) => {
     if (directory === place) return clearTrialCheckout(directory);
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
@@ -790,6 +798,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     home = await mkdtemp(join(root, 'gy-h')); await writeTempOwner(home);
     const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
+    const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
+    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
+    assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
+    wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root));
   }
   catch (error) {
     for (const made of [temporary, home, place]) if (made) await clear(made).catch(() => {});
@@ -797,9 +809,6 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (typeof error === 'object' && error) attemptContext.set(error, { phase, phases: enter() });
     throw error;
   }
-  const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
-  const env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home!, input.environment) };
-  const wrapper = input.hidden?.length ? trialConfinement(input.hidden, [input.root, checkout.directory, place, temporary, home]) : undefined;
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
   const e2e: TrialE2eCase[] = [];
@@ -942,8 +951,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
-        // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.
-        // Chromium installs into the host's shared Playwright cache (a no-op once present); an install that fails is the host's, retried, never the merge's.
+        // GY-2092: a change to the dashboard installs Chromium in the allocated trial home and runs the Playwright suite; a failing browser test refuses the merge like any failing test.
+        // An install that fails is the host's, retried, never the merge's.
         if (hasBrowserTestCheck(packageScripts) && touchesDashboard(input.changedFiles)) {
           enter('tests');
           enterStep('tests: test:browser');
@@ -958,9 +967,10 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
       if (input.e2eProofs?.length) {
         enter('tests');
-        const ran = await runTrialE2eCases({
+        const ran = await containerTrialE2e({
           worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
-          scratch: temporary ?? checkout.directory, budgetMs: remaining(), holds, log: line => log.push(line),
+          networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
+          scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
         });
         // Bounded so the trial record the merge writer posts stays within its schema.
         e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));

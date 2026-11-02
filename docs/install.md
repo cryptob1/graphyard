@@ -13,7 +13,7 @@ Node 24, an OWNER/REPO checkout, exported `GRAPHYARD_CLI`, and repository-admin 
 
 ### Providers
 
-`compose` needs Docker and Compose. `local` uses embedded Postgres. `up --local` also chooses [supervised mode](onboarding.md#supervised-mode-up---local).
+`compose` needs Docker and Compose. `local` runs the control plane on the host with embedded Postgres; Docker runs its private-root merge trials. `up --local` also chooses [supervised mode](onboarding.md#supervised-mode-up---local).
 
 ## Step 1: plan and approve
 

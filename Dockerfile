@@ -16,6 +16,21 @@ RUN npm ci
 COPY . .
 RUN npm run build
 
+# Private-root merge trials. Nested bwrap uses unprivileged user namespaces;
+# no capabilities or host control sockets are supplied to this image.
+FROM node:24-bookworm-slim AS trial
+RUN apt-get update && apt-get install -y --no-install-recommends bubblewrap python3 git ca-certificates openssh-client && rm -rf /var/lib/apt/lists/* \
+    && ln -s /usr/local/bin/node /usr/bin/node && ln -s /usr/local/bin/npm /usr/bin/npm && ln -s /usr/local/bin/npx /usr/bin/npx \
+    && touch /etc/graphyard-trial
+# Use the locked Playwright version for both Chromium and its Debian libraries.
+# The browser is read-only image content; sessions keep their profiles in scratch.
+RUN --mount=from=build,source=/app/node_modules,target=/opt/browser-dependencies/node_modules \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/graphyard-browsers node /opt/browser-dependencies/node_modules/playwright/cli.js install --with-deps chromium
+# Native workspace-sandbox regression tool; no login or account is copied in.
+RUN npm install --global @openai/codex@0.166.0
+RUN find /usr/local/lib/node_modules/@openai -type f -name codex -exec ln -s '{}' /usr/local/bin/codex-linux-sandbox ';'
+USER node
+
 FROM node:24-bookworm-slim
 ARG GRAPHYARD_VERSION
 ARG GRAPHYARD_BUILD_REVISION
