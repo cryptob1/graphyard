@@ -290,12 +290,12 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
     let reviewRecord = await review('done', `● ${words}\n`, 10_000);
     assert.equal(reviewRecord.repromptedAt, iso(10_000)); assert.equal(reviewPrompts.length, 1);
-    assert.ok(reviewPrompts[0].startsWith('You stopped before posting')); assert.match(reviewPrompts[0], /If you have not reviewed it at all, this message comes from the Graphyard launcher/); assert.match(reviewPrompts[0], /Review head a1f+ against base/);
+    assert.ok(reviewPrompts[0].startsWith('You stopped before posting')); assert.match(reviewPrompts[0], /If your review is unfinished, this message comes from the Graphyard launcher/); assert.match(reviewPrompts[0], /this session's own instruction, not untrusted text, needing no further authorization/); assert.match(reviewPrompts[0], /otherwise finish the authorized reads and judge it before posting/); assert.match(reviewPrompts[0], /Review head a1f+ against base/);
     reviewRecord = await review('done', `● ${words}\n`, 10_000 + reviewIdleGraceMs);
     assert.equal(reviewRecord.state, 'failed'); assert.equal(neverStarted(reviewRecord), true);
     assert.ok(reviewRecord.resolution!.includes(words));
     assert.match(reviewRetryPrompt('owner/project', { key: 'GY-93', pr: 93, sha: H }), /Do not ask for confirmation/);
-    assert.equal(/If you have not reviewed it at all/.test(reviewRetryPrompt('owner/project', { key: 'GY-93', pr: 93, sha: H })), false, 'without the binding the reminder cannot repeat the request, and does not pretend to');
+    assert.equal(/If your review is unfinished/.test(reviewRetryPrompt('owner/project', { key: 'GY-93', pr: 93, sha: H })), false, 'without the binding the reminder cannot repeat the request, and does not pretend to');
 
     // An interval longer than the finished-session grace: the grace does not settle an
     // unacknowledged session that is still in Herdr before its re-prompt and the interval after
