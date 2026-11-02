@@ -22,14 +22,15 @@ async function fixture() {
   return { root, master, file: daemonStatePath(master), dispose };
 }
 
-test('unit:daemon-state-ignores-unknown-keys keeps undeclared keys across read and write (GY-1960), still rejects malformed declared ones', async () => {
+test('unit:retired-fields-migrated — daemon cursors carrying retired keys load and strip them across read and write, still rejecting malformed active fields', async () => {
   const { root, master, file, dispose } = await fixture();
   try {
-    const base = { ...emptyDaemonState(master), cycle: 7 };
+    const base = { ...emptyDaemonState(master), cycle: 7, scope: { pending: true }, promotion: {}, orphans: [], deployment: {}, lane: 'old', metrics: [{ cycle: 6, at: '2026-11-01T00:00:00Z', open: 1, actions: 0, durationMs: 10, scope: {} }] };
     await writeFile(file, JSON.stringify({ ...base, undeclaredByAnyVersion: { at: 'x' } }));
     const loaded = await readDaemonState(root, master);
     assert.equal(loaded.cycle, 7);
-    assert.deepEqual((loaded as any).undeclaredByAnyVersion, { at: 'x' }, 'a field a newer loop wrote parses and is kept, not dropped');
+    for (const field of ['scope', 'promotion', 'orphans', 'deployment', 'lane', 'undeclaredByAnyVersion']) assert.ok(!(field in loaded), `${field} is stripped`);
+    assert.deepEqual(loaded.metrics, [{ cycle: 6, at: '2026-11-01T00:00:00Z', open: 1, actions: 0 }]);
 
     await writeFile(file, JSON.stringify({ ...base, undeclaredByAnyVersion: {}, cycle: 'seven' }));
     await assert.rejects(readDaemonState(root, master));
@@ -39,9 +40,9 @@ test('unit:daemon-state-ignores-unknown-keys keeps undeclared keys across read a
 
     await writeFile(file, JSON.stringify({ ...base, undeclaredByAnyVersion: { at: 'x' } }));
     await writeDaemonState(master, await readDaemonState(root, master));
-    assert.deepEqual(JSON.parse(await readFile(file, 'utf8')).undeclaredByAnyVersion, { at: 'x' }, 'the kept field is written back unchanged');
+    assert.ok(!('undeclaredByAnyVersion' in JSON.parse(await readFile(file, 'utf8'))), 'the stripped field is absent on write');
     const again = await readDaemonState(root, master);
     assert.equal(again.cycle, 7);
-    assert.deepEqual((again as any).undeclaredByAnyVersion, { at: 'x' });
+    assert.ok(!('undeclaredByAnyVersion' in again));
   } finally { await dispose(); }
 });

@@ -316,7 +316,7 @@ test('the cursor stays bounded without discarding an unresolved action, and stat
   const state = emptyDaemonState(masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project' }));
   for (let index = 0; index < retainedActions + 50; index++) state.actions[`done:${index}`] = { kind: 'review', work: `GY-${index}`, principal: null, epoch: null, state: 'done', detail: 'recorded', attempts: 1, cycle: index, at: iso(index) };
   state.actions.stuck = { kind: 'proof', work: 'GY-9', principal: null, epoch: null, state: 'indeterminate', detail: 'interrupted', attempts: 1, cycle: 0, at: iso(-hour) };
-  for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), durationMs: 1, open: 1, actions: 0 });
+  for (let index = 0; index < 150; index++) state.metrics.push({ cycle: index, at: iso(index), open: 1, actions: 0 });
   pruneDaemonState(state);
   assert.equal(Object.keys(state.actions).length, retainedActions + 1);
   assert.ok(state.actions.stuck, 'an unresolved action is never pruned away');

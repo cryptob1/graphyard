@@ -45,3 +45,8 @@ A repository whose main declares `.graphyard/serve.json` gets its merged main bu
 Set the variables table, register a read-write deploy key ([step 3](install.md#step-3-deploy-key)), then `doctor`. Compose: `cp .env.example .env`, `docker compose --profile full up -d`.
 - `graphyard master setup` plans variables saved credentials derive; `--apply` sets them, audited in `.graphyard/setup-audit.jsonl`. `park` refuses host-doable asks (repository, derived variable, held credential, Confirm-access capture, coordinator checkout or unit record, agent identity); a person's sign-in, enrolment or browser profile stays human.
 - No main guard or revert approver remains; leftover `GRAPHYARD_REVERT_APPROVER_*` are unread and may be deleted.
+
+Startup migrates retired work-item fields once (GY-3013), including queue, planned-file scope,
+escalation, research and lane fields, and clears standing `Scope request refused` blockers.
+The migration preserves stages and event history; evaluations and status reads no longer strip fields.
+Daemon cursor reads strip undeclared top-level and metric keys while validating active fields.

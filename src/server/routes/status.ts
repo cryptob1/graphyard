@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { demand, dropRetiredScopeFields, type Work } from '../../model.js';
+import { demand, type Work } from '../../model.js';
 import type { IntegrationJob } from '../../coordination.js';
 import { parseEventHistoryQuery, readEventHistory } from '../../events-history.js';
 import { delegationSnapshot } from '../../delegation.js';
@@ -185,8 +185,7 @@ export const statusRoutes = defineRoutes('status', [
     async handle({ services, operatorVisible }, [id]) {
       const work = await workDocument(services.engine.store.pool, decodeURIComponent(id));
       demand(work && operatorVisible([work]).length, 'Work item not found', 404);
-      // A document no evaluation has rewritten since GY-1992 reads without the retired scope fields.
-      return dropRetiredScopeFields({ ...work! });
+      return work!;
     },
   },
   {

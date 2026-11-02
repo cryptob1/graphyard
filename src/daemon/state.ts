@@ -35,21 +35,12 @@ export const daemonActionSchema = z.object({
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
-/** A field a release retired: an older cursor's value still parses. */
-const retired = z.unknown().optional();
 export const cycleMetricsSchema = z.object({
   cycle: z.number().int().min(0), at: z.string(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
-  /** Retired (GY-2877): what the cycle could act on. */
-  actionable: retired,
   /** The steps the cycle ran, in order: snapshot, close, dispatch, merge writer, persist. A cursor written before recorded step costs here, which read as absent. */
   steps: z.preprocess(steps => Array.isArray(steps) && steps.every(step => typeof step === 'string') ? steps : undefined, z.array(z.string().max(40)).max(10).optional()),
-  /** Retired (GY-2876): the cycle's durations and call timings, and the stage, lead-time and post-deploy measurements; a cursor written before still parses. */
-  durationMs: retired, childWaitMs: retired, workMs: retired, planeWaitMs: retired, timings: retired,
-  stages: retired, lead: retired, production: retired, postDeploy: retired, postDeployFailures: retired,
-  /** Retired (GY-1992): the scope-request latency and the idle reading; nothing writes them, and a cursor written before keeps parsing. */
-  idleMs: retired, scope: retired, scopeOpenMs: retired,
-}).strict();
+}).strip();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 
 /**
@@ -163,31 +154,13 @@ export const daemonStateSchema = z.object({
   actions: z.record(z.string(), daemonActionSchema).default({}),
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
-  /** Retired (GY-2877): the deployment observation and the in-loop deploy's release reading; graphyard-deploy.service records what it serves in .graphyard/deploy.json. */
-  deployment: retired, promotion: retired,
-  /** Retired: the main watch (GY-1519) is gone; a cursor written before still carries its state, which nothing reads. */
-  mainWatch: z.unknown().optional(),
   mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
-  /** Retired (GY-2877): the between-cycles self-upgrade. */
-  upgrade: retired,
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
-  /** Retired (GY-2876): resource reclaim, host memory holds and the latency clocks; a cursor written before parses, and its next write drops them. */
-  reclaim: retired, memory: retired, clocks: retired, latency: retired,
-  /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and a cursor written before keeps parsing. */
-  silence: z.unknown().optional(),
-  /** Retired (GY-1992): the scope requests this loop decided; a cursor written before keeps parsing. */
-  scope: z.unknown().optional(),
-  /** Retired (GY-2874): orphaned supervisors, approver watches, absent sessions and deferred decisions; a cursor written before keeps parsing. */
-  orphans: z.unknown().optional(), approvals: z.unknown().optional(), absences: z.unknown().optional(), decisionsDeferred: z.unknown().optional(),
-  /** Retired (GY-2875): docs-sync sessions and the conflicts the loop routed; a cursor written before keeps parsing. */
-  docsSyncs: z.unknown().optional(), conflicts: z.unknown().optional(),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
-  /** Retired (GY-2877): base failures and the system invariants. */
-  baseFailures: retired, invariants: retired,
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
   personalMasters: z.record(z.string(), masterSessionSchema).default({}),
@@ -195,7 +168,7 @@ export const daemonStateSchema = z.object({
   controlPlane: z.object({ unreachableSince: z.string(), error: z.string().max(1000), restartedAt: z.string().nullable(), restart: z.string().max(1000).nullable(), exitReason: z.string().max(1000).nullable(), freeDisk: z.string().max(500).nullable() }).strict().nullable().default(null),
   /** Shared project memory (GY-1125): recent decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
-}).strict();
+}).strip();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 /**
