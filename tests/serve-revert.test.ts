@@ -257,7 +257,7 @@ test('unit:revert-only-the-failing-item — a failing case no item names reverts
   }
 });
 
-test('unit:revert-only-the-failing-item — the loop step drives the production path: the served commit fails the case one item names, the writer pushes the revert and files one re-land', async t => {
+test('unit:serve-revert — the loop step drives the production path: the served commit fails the case one item names, the writer pushes the revert and files one re-land', async t => {
   const { base, origin, coordinator, verified, served, work } = await fixture('serve-revert-loop');
   t.after(() => rm(base, { recursive: true, force: true }));
   const start = Date.parse('2030-06-01T00:00:00Z');
@@ -318,7 +318,10 @@ test('unit:revert-only-the-failing-item — the loop step drives the production 
   assert.deepEqual(filed[0]!.criteria.map(criterion => criterion.id), ['AC-1', 'AC-2']);
   assert.deepEqual(filed[0]!.dependencies, [work[1]!.id]);
 
-  // One serve reverts once: the next cycle pushes and files nothing more.
+  // A second failure on the same serve cannot revert another item.
+  await servedFixture(coordinator, served, 'case-alpha');
+  await mergeWriterStep(cycle());
+  await mergeWriterIdle(state);
   await mergeWriterStep(cycle());
   assert.equal(tipOf(origin), revertSha);
   assert.equal(filed.length, 1);
