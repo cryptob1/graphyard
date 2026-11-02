@@ -19,6 +19,8 @@ Optional item `owner` names a human, separate from the worker lease. Set with cr
 4. **Merge writer:** trial and merge submitted heads in order ([delivery](delivery.md)).
 5. **Persist:** save the loop cursor.
 
+The loop follows the master's live Herdr pane after a move. Weekly/session limits or exhausted credits hold that account, close its pane and launch the next account in the same cycle. Status names the live pane, reports `screen unreadable` on read failure and `unknown` for missing runtime status.
+
 `master restart` restarts the install's loop unit; confined masters record a request. The loop reloads newly served code. [Unit names](delivery.md#continuous-deployment) are per install, with legacy aliases.
 
 ### Master wake and delivery progress
@@ -35,9 +37,9 @@ The same handoff includes unresolved worker blockers, failed launch/review/proof
 
 Items default to `systemDriven: true`. `master dispatch GY-N PROFILE` still uses normal eligibility, ownership and lease checks. Use typed actions without bypassing gates; attest required manual proofs for the exact head/base/policy.
 
-### File user-facing items with an e2e: proof by default
+### File every item with an e2e: proof
 
-Create and requirements enforce the [E2E rule and opt-out](validation.md#every-user-facing-item-carries-an-e2e-proof).
+Every item needs an `e2e:NAME` criterion bound to a new or existing `e2e/cases/NAME.json`; there is no chore exemption or opt-out. Create and requirements enforce the [E2E rule](validation.md#every-item-carries-an-e2e-proof). Loop repairs name `e2e:create-work-item`; follow-ups reuse delivered cases (legacy items: `create-work-item`); onboarding names the repository's first case.
 
 ### Session liveness is reconciled, not trusted
 

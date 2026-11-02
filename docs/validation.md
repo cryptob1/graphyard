@@ -1,9 +1,11 @@
 <!-- page: Build integrations | 2 | bind cases and run checks -->
 # E2E validation
 
-## Every user-facing item carries an e2e: proof
+## Every item carries an e2e: proof
 
-Features and bugs need an `e2e:NAME` criterion bound to `e2e/cases/NAME.json` on the head. Create/requirements enforce it; invisible changes opt out with `No user-facing change: <reason>`. Ready checks apply to open unheld work, not retroactively to claimed/submitted items. Missing/failing cases refuse the trial. New cases register after merge/sync; trusted trial runs populate Tests history.
+Every item — chore, bug or feature — needs an `e2e:NAME` criterion bound to a new or existing `e2e/cases/NAME.json` on the head. No description opts out. Cases creating work must bind those items too; manual/unit proofs alone do not suffice. Create/requirements enforce this; missing/failing cases refuse the trial. Ready checks apply to open unheld work, not retroactively to claimed/submitted items. New cases register after merge/sync; trusted trial runs populate Tests history.
+
+`init --scan --apply` writes `e2e/cases/served-head.json` if no case exists and `e2e.serve` if no previewable app serves a head. Replace the fallback Node server (which serves graphyard.json) with the application's server. `graphyard up` publishes these files; onboarding names the first case.
 
 Declare `e2e.serve` in graphyard.json:
 
@@ -46,6 +48,8 @@ setfacl -d -m g:graphyard-boundary:rx /srv/graphyard/attempts
 Container writes; attestor/collector read. Never add the runner account. `runner collect collector.json` uses proof-scoped credentials to verify signature, inventory and teardown and upload artifacts. Observations bracket the run within maxGapMs.
 
 ## E2E case repository
+
+`delivery-pipeline` uses `scripts/e2e-serve.mjs` with temporary local bare origin, checkout and separate worker/coordinator credentials. It creates/claims work, submits an exact head, posts independent review, runs the real build/test trial and leased push, then checks delivery and bare origin's main. Initialization and refreshes use the writer's transport ports. The scratch item binds unit and `e2e:scratch-delivery` proofs; its trial serves submitted code on a temporary port and checks HTTP before pushing. No network or install credential is needed. `tests/graphyard-e2e-serve.test.ts` also runs the case with `--unwritable`, removing bare-repository write permission: the trial passes, push fails and the case fails with work undelivered.
 
 Code-reviewed cases have id/title, optional description/tags, target (`uat`/`any`), required (false), timeoutSeconds (600), secrets and ordered steps:
 

@@ -13,19 +13,28 @@ export const onboardingBranch = 'graphyard/onboarding';
 export const onboardingWorkTitle = 'Add Graphyard onboarding';
 /** The proof the item's one criterion names, answered as a closed question about the changed files. */
 export const onboardingProof = 'unit:onboarding-files';
+/**
+ * GY-3037: every item owes an e2e proof, so onboarding leaves every repository able to carry one:
+ * the first case `init --scan --apply` writes when the repository has none (e2e.serve it writes
+ * beside it, when no application serves a head, lives in the applied graphyard.json). The item
+ * names the repository's first case, this one when it was just written.
+ */
+export const onboardingCaseId = 'served-head';
+export const onboardingCasePath = `e2e/cases/${onboardingCaseId}.json`;
 
 /**
  * The work item that carries the onboarding commit on `graphyard/onboarding` through the normal
- * gates: a chore (no documentation obligation) that requires independent review and CHECKS (the
- * repository's own, else the control plane's default), so once the loop runs its reviewer reviews
- * the head and the control plane merges it.
+ * gates: a chore that requires independent review and CHECKS (the repository's own, else the
+ * control plane's default), so once the loop runs its reviewer reviews the head and the control
+ * plane merges it. Its e2e proof names `caseId` — the repository's first case, the one this commit
+ * wrote or an existing one — which the merge trial runs against the served head (GY-3037).
  */
-export function onboardingWorkRequest(commit: string, checks: string[] | null) {
+export function onboardingWorkRequest(commit: string, checks: string[] | null, caseId: string | null) {
   return {
     title: onboardingWorkTitle, type: 'chore' as const, priority: 0,
-    description: `${commit.slice(0, 12)} on ${onboardingBranch}\n\nThe commit graphyard up published with the files it wrote while onboarding this repository: coordination instructions (AGENTS.md), configuration (graphyard.json) and Graphyard's delivery workflows. It changes nothing else. Filed by graphyard up so the loop reviews and merges it under the normal gates (GY-1478).`,
-    criteria: [{ id: 'AC-1', text: 'The change adds only Graphyard\'s onboarding files (AGENTS.md, .gitignore and graphyard.json); no .github/workflows file is written.', proofs: [onboardingProof] }],
-    closedQuestions: [{ criterion: 'AC-1', proof: onboardingProof, question: 'Does this change touch only AGENTS.md, .gitignore and graphyard.json?', criteria: ['yes', 'no'], pass: 'yes', state: [{ kind: 'changed-files' as const }] }],
+    description: `${commit.slice(0, 12)} on ${onboardingBranch}\n\nThe commit graphyard up published with the files it wrote while onboarding this repository: coordination instructions (AGENTS.md), configuration (graphyard.json) and, when the repository had no E2E case, the first one (${onboardingCasePath}). It changes nothing else. Filed by graphyard up so the loop reviews and merges it under the normal gates (GY-1478).`,
+    criteria: [{ id: 'AC-1', text: `The change adds only Graphyard's onboarding files (AGENTS.md, .gitignore, graphyard.json and, when written, ${onboardingCasePath}); no .github/workflows file is written.`, proofs: [onboardingProof, ...(caseId ? [`e2e:${caseId}`] : [])] }],
+    closedQuestions: [{ criterion: 'AC-1', proof: onboardingProof, question: `Does this change touch only AGENTS.md, .gitignore, graphyard.json and, when it adds one, ${onboardingCasePath}?`, criteria: ['yes', 'no'], pass: 'yes', state: [{ kind: 'changed-files' as const }] }],
     policy: { checks: checks?.length ? checks : ['test', 'typecheck'], review: true },
   };
 }

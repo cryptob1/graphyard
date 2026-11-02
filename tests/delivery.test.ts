@@ -13,6 +13,10 @@ import type { Principal, Work, Observation } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * D3 acceptance checks of the turnkey delivery roadmap, one test per check, named
  * "D3-N". Every test runs against a disposable real Postgres database; nothing here talks
@@ -59,7 +63,7 @@ async function events(kind: string, workId?: string) { return (await store.event
 
 /** Delivered work the way production reaches it: an authorized, verified, independently observed merge. */
 async function delivered(mergeSha = 'e'.repeat(40)) {
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Delivered change ${++serial}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety', 'e2e:fixture'] }] }, id());
   w = await engine.execute(operator, 'ready', w.id, {}, id()); w = await engine.execute(worker, 'claim', w.id, {}, id());
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/delivery-${serial}`, branch: `graphyard/delivery-${serial}` }, id());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: serial }, id());
@@ -224,7 +228,7 @@ test('D3-4 workers and observers cannot define or select releases; generation fe
   // Membership must cite the merge GitHub reported for delivered work.
   const done = await delivered();
   await assert.rejects(delivery.createRelease(operator, { ...definition, id: `forged-${f.n}`, members: [{ workId: done.id, mergeSha: 'c'.repeat(40), included: true }] }, id()), /independently observed merge/);
-  const open = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Open work', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, id());
+  const open = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Open work', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety', 'e2e:fixture'] }] }, id());
   await assert.rejects(delivery.createRelease(operator, { ...definition, id: `forged-${f.n}`, members: [{ workId: open.id, mergeSha: 'e'.repeat(40), included: true }] }, id()), /delivered work/);
 });
 

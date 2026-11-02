@@ -3,7 +3,7 @@
 
 ## Write observable criteria
 
-Use `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. Unit/integration proofs name exact-head runnable checks; E2E proofs bind [repository cases](validation.md). Control-plane acceptance requires trial cases executed with none failing. Sensitive changes also need required manual attestations; producer evidence cannot replace trial counts.
+Use `{"id":"AC-1","text":"OUTCOME","proofs":["integration:NAME"]}`. Unit/integration proofs name exact-head runnable checks. Every item, including chores, also needs an `e2e:NAME` proof bound to a new or existing [repository case](validation.md#every-item-carries-an-e2e-proof); no description opts out. Control-plane acceptance requires trial cases executed with none failing. Sensitive changes also need required manual attestations; producer evidence cannot replace trial counts.
 
 Post-ship outcomes use `manual:post-deploy/NAME` or per-clause observations, not pre-merge requirements. `master requirements` invalidates old evidence/review/authorization. Never weaken requirements to pass implementation.
 

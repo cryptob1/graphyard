@@ -25,7 +25,7 @@
             "id": "AC-1",
             "text": "The detail page shows this criterion",
             "proofs": [
-              "manual:e2e-case-detail"
+              "manual:e2e-case-detail", "e2e:create-work-item"
             ]
           }
         ],
@@ -59,7 +59,7 @@
             "id": "AC-1",
             "text": "The detail page shows this criterion",
             "proofs": [
-              "manual:e2e-case-detail"
+              "manual:e2e-case-detail", "e2e:create-work-item"
             ]
           }
         },

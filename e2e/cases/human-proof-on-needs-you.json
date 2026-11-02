@@ -17,7 +17,7 @@
       "path": "/api/work",
       "body": {
         "title": "E2E case {{case}} run {{run}}",
-        "description": "No user-facing change: created by the human-proof-on-needs-you E2E case to carry a real-world check.",
+        "description": "Created by the human-proof-on-needs-you E2E case to carry a real-world check.",
         "type": "chore",
         "priority": 3,
         "criteria": [
@@ -25,7 +25,8 @@
             "id": "AC-1",
             "text": "A receipt prints on the shop printer",
             "proofs": [
-              "human:receipt-prints"
+              "human:receipt-prints",
+              "e2e:every-item-owes-e2e"
             ]
           }
         ],

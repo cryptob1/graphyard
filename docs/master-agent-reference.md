@@ -21,12 +21,18 @@ Only the [deploy key](install.md#step-3-deploy-key) is needed. Legacy `master br
 
 See [operations](operations.md) and [session recovery](master-agent-sessions.md). Preserve expired attempts' work for redispatch.
 
+A worker stopped on a provider limit notice also keeps its local work before redispatch to another account: uncommitted changes become a WIP commit on its attempt branch, and the next worker's prompt names that commit (or the existing HEAD for a clean tree) to read and bring forward.
+
 ### Producer-runtime faults
 
 Unanswered requests try another profile. Never substitute worker evidence for trusted proof.
 
 ## Merge trial
 
+Workers check implementation and bound E2E cases before submitting. Independent review judges coverage without waiting for later trusted results. Sensitive changes need approval before the writer serves the merge commit and records required E2E results, then updates main. Earlier-head results cannot satisfy that gate; workers never submit trusted evidence.
+
 A failed candidate trial grounds rework through the merge writer; next-action does not hold it for a base-break refresh.
 
 See [trial checks](delivery.md#merge-trials). Trials use a separate checkout/TMPDIR, fresh HOME and bubblewrap masks hiding coordinator credentials and deploy key. Builds, previews and E2E steps share confinement; case steps share a namespace for persistent browsers. Only the push child holds the key. Trials stop after 20 minutes and remove their checkout. Missing test checks are explicit in `master status` and `doctor` (`trialTests`).
+
+The fresh home preserves npm cache and host mise config/data/state/cache directories; explicit `MISE_*_DIR` values win over host XDG/HOME defaults. Credential masks still apply. During install/build, known mise shim startup errors (untrusted config or no Node version) and missing exact node/npm/npx executables use host-failure retry/hold, including bubblewrap `execvp` errors without a spawn cause or signal. Project mise task errors and missing build dependencies such as node-gyp still ground rework. Build refusals include the output tail within the 2,000-character limit.

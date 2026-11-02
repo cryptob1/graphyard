@@ -10,6 +10,10 @@ import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1992 AC-2: an item stored while the scope-request machinery ran still reads. Its document
 // carries the retired scope fields and a standing scope-refusal blocker, and its history carries the
 // scope events and requirements payloads of that time; every reader of either answers, the gates name
@@ -41,7 +45,7 @@ const get = async (path: string, actor: Principal = coordinator) => {
 };
 
 test('unit:old-scope-history-loads — a document and history carrying scopeRequest, carriedScopeRequest, scopeDecision, scopeWithdrawn and a scope-refusal blocker load and evaluate; the gates name no scope and the blocker clears', async () => {
-  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Stored before GY-1992', criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Stored before GY-1992', criteria: [{ id: 'AC-1', text: 'It works', proofs: ['unit:works', 'e2e:fixture'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   const at = new Date(Date.now() - 3_600_000).toISOString();
   const request = { epoch: 1, paths: ['src/b.ts'], reason: 'needs b', requestedBy: worker.id, at };

@@ -26,7 +26,7 @@ Loop-owned items refuse ready/unblock. Owner-held items (`Owner hold:`, explicit
 
 `complete GY-N EPOCH --head SHA` submits without pushing and ends the lease. The writer allocates `candidate.pr`/`submission.pr` as change numbers; legacy epoch/pr bodies serve older changes. No endpoint sets lifecycle state.
 
-Complete reruns cases named by the latest trial-test refusal. Own-proof failure refuses with case/file/line. Other failures retry on head and base: retry passes record flakes; base failures are recorded; failing head with passing base refuses. An indeterminate rerun records its cause and last 20 lines and leaves judgment to the merge trial. Failed retro checks return 409.
+Complete reruns cases named by the latest trial-test refusal. Each head retry and base run owns and removes a short directory under durable `/var/tmp`, outside the checkout, with fresh writable HOME/XDG directories and sticky scratch; it never writes to the operator’s home. Own-proof failure refuses with case/file/line. Other failures retry on head and base: retry passes record flakes; base failures are recorded; failing head with passing base refuses. An indeterminate rerun records its cause and last 20 lines and leaves judgment to the merge trial. Failed retro checks return 409.
 
 ## Reads
 

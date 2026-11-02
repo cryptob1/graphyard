@@ -44,7 +44,7 @@ export function plainReason(reason: string, gate: string, now = Date.now(), work
     [/^Dependency (\S+) is unfinished$/, m => `Waiting for ${m[1]} to ship first`],
     [/^Split into child items: (\S+) is not delivered$/, m => `Split into smaller items; waiting for ${m[1]} to ship first`],
     // GY-2981: the filing rules the ready gate applies to an item an upgrade predates.
-    [/^(?:a feature|a bug) item a user can see owes an end-to-end proof/, () => 'The change owes an end-to-end proof that it works; the master agent adds it to the requirements', true],
+    [/^(?:a feature|a bug|a chore) item owes an end-to-end proof/, () => 'The change owes an end-to-end proof that it works; the master agent adds it to the requirements', true],
     [/ has no way to serve a head/, () => 'Its end-to-end proof needs a served head, and the repository does not say how to serve one yet', true],
     [/^Worker has not submitted implementation for this attempt$/, () => 'The work has not been handed in yet'],
     [/^Pull request has not been independently observed$/, () => 'Graphyard has not seen the pull request on GitHub yet'],
