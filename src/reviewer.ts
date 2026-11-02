@@ -24,7 +24,6 @@ import { behindBaseHold, liveReviewRequest } from './model/dispatch.js';
 import { sessionLiveness, type RuntimeSession, type SessionHandle } from './model/sessions.js';
 import { repeatingPaths as loopRepeatingPaths, touchesRepeatingPath } from './model/repeating-paths.js';
 import { paneAlreadyGone, sessionReported, withPaneGone } from './request-settlement.js';
-import { freshReadFor, freshReadRecordSchema, freshReadSection, mechanicalFixRecordSchema, mechanicalFixRequests, type FreshReadRecord } from './mechanical-findings.js';
 import { projectMemoryDigest, type ProjectMemory } from './model/project-memory.js';
 import { readVerificationMaps, verificationMapDigest, type VerificationMap } from './verification-maps.js';
 import { namedPaths } from './model/documentation-glob.js';
@@ -91,10 +90,6 @@ export const reviewRecordSchema = z.object({
     /** The findings verbatim of the change request the prompt deltas from (GY-1988), when the item's observation — not the ledger, which keeps no body — holds that round: the re-review opens with one Earlier: line per finding. */
     earlierFindings: z.array(z.string().min(1).max(300)).max(10).optional(),
   }).strip().optional(),
-  /** This approval's mechanical-fix plan (GY-971, mechanical-findings.ts): read once, while its head is the candidate. */
-  mechanicalFix: mechanicalFixRecordSchema.optional(),
-  /** This session is the fresh read of a bot round's head: what it was shown, and how its verdict judged the bot commit. */
-  freshRead: freshReadRecordSchema.optional(),
   /** Control-plane mode (GY-1525): the verdict posts to the API, bound by a one-time token whose sha256 alone is kept here, under the launch the control plane registered. */
   mode: z.literal('control-plane').optional(),
   verdictTokenHash: z.string().regex(/^[0-9a-f]{64}$/).optional(),
@@ -554,7 +549,6 @@ export function cliUnreachableRefusal(config: Partial<Pick<MasterConfig, 'cliPat
   return null;
 }
 
-/** `fresh` is the fresh read of a mechanical-fix bot round's head (GY-971): the bot commit the reviewer checks and may reject, and the findings it judges again. */
 /**
  * Control-plane mode (GY-1525): the prompt names the head and base SHAs and reads them from the
  * shared object store the session's checkout is anchored to; nothing names a pull request, and the
@@ -610,7 +604,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: { id: st
   return `Review against the acceptance criteria of ${key}${listed ? `: ${listed}` : ''}. `
     + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. `;
 }
-export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _legacy?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
+export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _legacy?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
   memory ??= projectMemory;
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
@@ -625,7 +619,6 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + `Classify findings and post by node ${config.cliPath ?? launcherPath} guide review. `
     + simplicityParagraph
     + blockingStandardSection
-    + (fresh ? freshReadSection(fresh, binding.sha) : '')
     + repetitionReviewSection(files)
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
     + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
@@ -636,11 +629,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
 }
 
-/**
- * The finding rule of a control-plane review: the same `Nit:` line as GitHub mode, without its
- * mechanical class — no worker bot patches a control-plane head (reconcileReviews keeps these
- * records out of the mechanical rounds), so a nit here is advisory and kept for later workers.
- */
+/** Nits stay advisory and are kept for later workers. */
 export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:LINE — FINDING" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. ';
 /**
  * The judging part of a control-plane review request (GY-1987): what the diff is read with, the
@@ -722,12 +711,12 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
  * it already judged — or, for a session that never took up its request (GY-93), the request
  * itself, from the launcher that sent it, so the message is complete whichever the case is.
  */
-export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'freshRead' | 'mode' | 'postMerge'>>, criteria?: ReviewCriterion[], cliPath = launcherPath) {
+export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord, 'key' | 'pr' | 'sha'> & Partial<Pick<ReviewRecord, 'baseSha' | 'policyRevision' | 'checkout' | 'reviewRound' | 'mode' | 'postMerge'>>, criteria?: ReviewCriterion[], cliPath = launcherPath) {
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now. `
     + reviewPostSection(cliPath, 'when the change is not acceptable')
     + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If review post cannot post it, record that as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
     // The request is repeated only with the item's criteria: the criteria-only rule without them would leave nothing to judge.
-    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, null, null, record.freshRead, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null)}` : '');
+    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, null, null, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null)}` : '');
 }
 
 /** The CLI this checkout runs, for a prompt built without a master configuration. */
@@ -865,8 +854,6 @@ export async function launchReview(root: string, work: Work, profileName: string
   start?: StartBounds;
   /** How the managed worktree root's volume is read; the kernel's own answer by default. */
   filesystem?: FilesystemProbe;
-  /** How a bot round's head is read to verify it as the bot commit (GY-971): none by default, since GitHub commits are no longer read (GY-2010). */
-  observeCommit?: (sha: string) => Promise<{ parents: string[]; files: string[]; at: string }>;
   /** How the runtime's sandbox probe runs before the session starts (GY-1507); on the host by default. */
   sandbox?: SessionSandboxProbe;
   /** Reads the base's verification maps (GY-1495); readVerificationMaps from the coordinator checkout by default. */
@@ -916,13 +903,6 @@ export async function launchReview(root: string, work: Work, profileName: string
   // head are closed, the launch is refused when the request or the candidate already has a pending
   // record or a Herdr session, and otherwise a pending record is reserved for this session before
   // anything is started, so a second launcher — in this process or another — finds it and stands down.
-  // A head that follows an approval's planned mechanical fix is read as that round's bot commit and
-  // verified (GY-971); a relaunch of the same head is shown what its first session was.
-  const observeCommit = dependencies.observeCommit;
-  const known = (await readReviewLedger(root)).reviews;
-  const submitter = submittingPrincipal(work);
-  const freshRead = known.find(entry => entry.key === work.key && entry.sha === binding.sha && entry.freshRead)?.freshRead
-    ?? (observeCommit ? (await freshReadFor(mechanicalFixRequests(known), work.key, binding.sha, { principal: submitter ?? 'unknown', role: submitter && config.workers.some(worker => worker.principal === submitter) ? 'worker' : 'unregistered' }, reviewerIdentity, observeCommit))?.fresh : undefined);
   const id = randomUUID();
   const sessionDirectory = resolve(reviewerCredentialDirectory(config), 'sessions', id);
   const reservation = await updateReviewLedger(root, async ledger => {
@@ -968,7 +948,7 @@ export async function launchReview(root: string, work: Work, profileName: string
     const reviewRound = reviewHistory(ledger.reviews, binding, reviewerIdentity, !postMerge ? earlierChangeRequest(work.observation, binding.sha) : null);
     const record: ReviewRecord = reviewRecordSchema.parse({ id, key: binding.key, pr: binding.pr, sha: binding.sha, baseSha: binding.baseSha, policyRevision: binding.policyRevision, reviewRound,
       profile: profile.name, agentName, pane: null, sessionDirectory, requestedAt, tokenExpiresAt: new Date(Date.parse(requestedAt) + 3_600_000).toISOString(), state: 'pending', launching: true,
-      ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}), ...(freshRead ? { freshRead: { ...freshRead, judged: undefined } } : {}),
+      ...(dependencies.requestId ? { requestId: dependencies.requestId, attempt } : {}),
       // Only the token's hash is ever recorded (GY-1525); the token itself lives in the session's binding alone.
       mode: 'control-plane', verdictTokenHash, ...(postMerge ? { postMerge: true } : {}) });
     ledger.reviews.push(record);
@@ -1045,7 +1025,7 @@ export async function launchReview(root: string, work: Work, profileName: string
         const maps = await (dependencies.verificationMaps ?? readVerificationMaps)(root, config.baseBranch).catch(() => []);
         // The request is the session's own first message, on the runtime's command line (GY-93), read
         // from the request file in the session's checkout so the typed line stays short (GY-121).
-        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, reservation.record.freshRead, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) }), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask }));
+        ({ delivery, consent } = await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args], reviewPrompt(config, binding, checkout, undefined, work.criteria, reservation.record.reviewRound, work.observation?.candidate.sha === binding.sha ? work.observation.files : null, null, memory, { maps, paths: [...new Set([work.description, ...work.criteria.map(criterion => criterion.text)].flatMap(namedPaths))] }, { head: binding.sha, baseTip: binding.baseSha, ...(postMerge ? { postMerge: { mergeSha: postMerge.mergeSha } } : {}), ...(product ? { product: true, ...(work.preview?.state === 'running' ? { previewUrl: `${config.url}${work.preview.path}/` } : {}) } : {}) }), dependencies.run, { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask }));
       } catch (error) {
         // A launch that never became a session leaves no checkout behind.
         await discard();

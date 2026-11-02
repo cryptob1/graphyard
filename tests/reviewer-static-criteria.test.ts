@@ -28,7 +28,7 @@ test('unit:reviewer-static-criteria — generated GitHub, control-plane and post
     reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, criteria),
     ...[undefined, { mergeSha: head }].map(postMerge => reviewPrompt(
       { repository: 'owner/project' }, binding, undefined, undefined, criteria,
-      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined,
       { head, baseTip: base, postMerge },
     )),
   ];

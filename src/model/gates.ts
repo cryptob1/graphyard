@@ -3,7 +3,6 @@ import type { MergeLedgerState } from './merge-ledger.js';
 import { leadHoldRefusal } from './delegation.js';
 import { exactApproval, exhaustedReviewerProfiles, reviewProviderOf, reviewerProfileFor } from './review.js';
 import { carriedApproval } from './carry.js';
-import { mechanicalReviewHold } from '../mechanical-findings.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
 import { isDelivered } from './closure.js';
 import { reviewedBeforeMerge, riskOf } from './risk-class.js';
@@ -96,8 +95,6 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
       ? `Every configured reviewer profile is exhausted for this candidate (${exhaustedReviewerProfiles(work).join(', ') || 'none configured'}); add reviewer capacity or select another review provider`
       : agentReview?.reason ?? `Verified approval from reviewer profile ${selectedProfile.name} is required for the current commit`
     : work.formalReviewResetRequired ? 'A new independent approval after the requirement-review baseline is required' : 'Independent approval of the current commit is required';
-  // An approval naming mechanical nits waits for its worker-bot round before the merge writer may merge (GY-971).
-  const mechanicalHold = reviewPassed ? mechanicalReviewHold(work, now.getTime()) : null;
   // The one merge rule (GY-1525): a head the merge writer observed is judged by the class of its
   // merge delta (model/risk-class.ts). A sensitive delta needs the exact-head approval before it
   // merges; any other passes here and owes one post-merge review (model/post-merge-review.ts), which
@@ -115,7 +112,7 @@ export function evaluate(work: Work, all: Work[], now: Date): { stage: Stage; ga
   // non-UI delta) lets it pass; a change request reworks; a reject never merges.
   const productHold = productReviewRefusal(work);
   // A `human:` proof holds the head here until a person passes it on this commit (GY-2986).
-  add('review', [...riskRefusal, ...changeRequestHold, ...(mechanicalHold ? [mechanicalHold] : []), ...(productHold ? [productHold] : []), ...humanProofHolds(work, now)]);
+  add('review', [...riskRefusal, ...changeRequestHold, ...(productHold ? [productHold] : []), ...humanProofHolds(work, now)]);
   // GY-2010: gates never read GitHub. The merge writer's ledger stands for the test and merge
   // gates for every observed candidate — including a document that still carries pull-request-era
   // checks, PR numbers and mergeability. Those fields load; they do not refuse progression.

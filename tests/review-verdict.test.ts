@@ -12,10 +12,11 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
 import { evaluate } from '../src/model/gates.js';
+import { neededRework } from '../src/daemon/rework.js';
 import { sensitiveReviewRefusal, postMergeReviewMark } from '../src/model/post-merge-review.js';
 import { postReview, readReviewBinding, reviewBindingFile, reviewBindingSchema, ReviewPostRefusal, screenshotUploads, writeReviewBinding, type ReviewPostBinding } from '../src/review-post.js';
 import { independenceRefusal, headRefusal, reviewLaunchBodySchema, secondVerdictRefusal, tokenRefusal, tokenRegistered } from '../src/server/review-verdict.js';
-import { assertReviewCandidate, launchReview, readReviewLedger, reviewPrompt, reviewStandard, saveReviewerProfile, staleReviewReason } from '../src/reviewer.js';
+import { assertReviewCandidate, launchReview, readReviewLedger, reviewRecordSchema, reviewPrompt, reviewStandard, saveReviewerProfile, staleReviewReason } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -93,11 +94,28 @@ test('unit:review-gate-github-snapshot — a GitHub-observed item keeps the revi
 test('unit:review-verdict — a reviewer verdict recorded on the exact head passes the review gate; a verdict on any other head approves nothing', () => {
   const sensitive = item('GY-2998', { observation: planeObservation({ sha: H, baseSha: B, pr: 7, branch: 'b', author: 'graphyard-claude-1' }, ['src/store/pools.ts']) });
   assert.equal(reviewGate(sensitive).passed, false);
-  sensitive.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'APPROVED', id: 21, submittedAt: now(), source: 'control-plane' } as never);
+  sensitive.observation!.reviews.push({ reviewer: 'review-claude-1', sha: H, state: 'APPROVED', id: 21, submittedAt: now(), source: 'control-plane', mechanical: 2, body: 'Nit: src/store/pools.ts:1 — spelling (mechanical: typo)\nNit: src/store/pools.ts:2 — naming (mechanical: naming)' } as never);
   assert.equal(reviewGate(sensitive).passed, true, 'the verdict recorded on the exact head lands the review gate');
+  assert.deepEqual(reviewGate(sensitive).reasons, [], 'non-blocking findings add no hold');
+  // Legacy plans and counts cannot revive the retired bot round on either review provider.
+  for (const source of ['control-plane', undefined]) {
+    const legacy = { ...structuredClone(sensitive), mechanicalPlan: { reviewId: 21, head: H, at: now() }, mechanicalAnswered: null };
+    legacy.observation!.source = source as 'control-plane' | undefined;
+    assert.equal(reviewGate(legacy).passed, true);
+    assert.deepEqual(reviewGate(legacy).reasons, []);
+    assert.equal(neededRework(legacy), null, 'nits request no rework');
+  }
   const elsewhere = item('GY-2998b', { observation: planeObservation({ sha: H, baseSha: B, pr: 7, branch: 'b', author: 'graphyard-claude-1' }, ['src/store/pools.ts']) });
   elsewhere.observation!.reviews.push({ reviewer: 'review-claude-1', sha: M, state: 'APPROVED', id: 22, submittedAt: now(), source: 'control-plane' } as never);
   assert.equal(reviewGate(elsewhere).passed, false, 'a verdict on another head is not an approval of this one');
+});
+
+test('unit:review-verdict-retired-ledger — stored bot plans and fresh reads load and are dropped', () => {
+  const record = { id: randomUUID(), key: 'GY-3016', pr: 7, sha: H, baseSha: B, policyRevision: 1, requestedAt: now(), state: 'pending', profile: 'reviewer', agentName: 'reviewer', pane: null, sessionDirectory: '/review-session', tokenExpiresAt: now(), mechanicalFix: { state: 'planned' }, freshRead: { approvedHead: B } };
+  const parsed = reviewRecordSchema.parse(record);
+  assert.equal('mechanicalFix' in parsed, false);
+  assert.equal('freshRead' in parsed, false);
+  assert.equal(parsed.sha, H);
 });
 
 // ——— AC-1: the binding, and review post in both modes. ———
@@ -188,7 +206,7 @@ test('unit:review-post-github-snapshot — a pull-request-era github binding sti
 test('unit:review-prompt-control-plane — the control-plane prompt names head and base SHAs, reads the head from the shared object store, and prints the review post command without a pull-request number; the github prompt is unchanged', () => {
   const config = { repository: 'owner/project', cliPath: '/opt/graphyard/bin/graphyard.mjs' };
   const binding = { key: 'GY-7', pr: 7, sha: H, baseSha: B, policyRevision: 1 };
-  const plane = reviewPrompt(config, binding, { directory: '/managed/review/GY-7', worktree: '/managed/review/GY-7/checkout' }, undefined, [{ id: 'AC-1', text: 'Works' }], undefined, undefined, null, null, null, null, { head: H, baseTip: B });
+  const plane = reviewPrompt(config, binding, { directory: '/managed/review/GY-7', worktree: '/managed/review/GY-7/checkout' }, undefined, [{ id: 'AC-1', text: 'Works' }], undefined, undefined, null, null, null, { head: H, baseTip: B });
   assert.match(plane, new RegExp(`Review head ${H} against base ${B} — the head's merge base with the base branch — under policy revision 1, for work item GY-7`));
   assert.match(plane, new RegExp(`The delta to judge is head versus that base: a file the base branch gained after ${B} is not part of this delta, so its absence from the head is not a removal`));
   assert.match(plane, /Open the review body by naming the head and the base you judged against, so the verdict itself records which commits were in scope/);
@@ -197,12 +215,12 @@ test('unit:review-prompt-control-plane — the control-plane prompt names head a
   assert.match(plane, /node \/opt\/graphyard\/bin\/graphyard\.mjs review post --event APPROVE <<'EOF'/);
   assert.doesNotMatch(plane, /pull request #|gh pr diff|git fetch|reviewer credential that expires/);
   assert.match(plane, /names no pull request and runs no gh/);
-  const postMerge = reviewPrompt(config, binding, undefined, undefined, [], undefined, undefined, null, null, null, null, { head: M, baseTip: B, postMerge: { mergeSha: M } });
+  const postMerge = reviewPrompt(config, binding, undefined, undefined, [], undefined, undefined, null, null, null, { head: M, baseTip: B, postMerge: { mergeSha: M } });
   assert.match(postMerge, new RegExp(`Review the delivered merge commit ${M} of work item GY-7 against its first parent ${B}, after its merge`));
   assert.match(postMerge, /files one follow-up item per BLOCKING line, planned on that file, keeps every other finding in project memory, and never reopens the delivered item/);
   const github = reviewPrompt(config, binding);
   assert.match(github, new RegExp(`Review pull request #7 at head ${H} against base ${B} under policy revision 1, for work item GY-7. Read the change with: gh pr diff 7 --repo owner/project.`));
-  assert.equal(github, reviewPrompt(config, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, null, null), 'a null plane argument changes nothing');
+  assert.equal(github, reviewPrompt(config, binding, undefined, undefined, undefined, undefined, undefined, null, null, null, null), 'a null plane argument changes nothing');
 });
 
 // ——— GY-2948: a control-plane review diffs the head against its merge base with the base branch. ———
@@ -257,7 +275,7 @@ test('unit:review-request-names-merge-base — the reviewer request, the session
   try {
     const binding = assertReviewCandidate(movedBaseItem('GY-2948', repo), now());
     // The request names the merge base and reads the diff from it — never from the base tip.
-    const prompt = reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, [{ id: 'AC-1', text: 'Works' }], undefined, null, null, null, null, null, { head: binding.sha, baseTip: binding.baseSha });
+    const prompt = reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, [{ id: 'AC-1', text: 'Works' }], undefined, null, null, null, null, { head: binding.sha, baseTip: binding.baseSha });
     assert.match(prompt, new RegExp(`Review head ${repo.head} against base ${repo.mergeBase}`));
     assert.match(prompt, new RegExp(`git diff ${repo.mergeBase} ${repo.head}`));
     assert.doesNotMatch(prompt, new RegExp(repo.tip), 'the base tip is in no command the request judges the diff with');
@@ -482,13 +500,13 @@ const controlPlaneRequestThroughReviewStandard = "You are the independent Graphy
 const controlPlaneRequestThroughReviewStandardWithPostDeploy = "You are the independent Graphyard reviewer for owner/repo. Review head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa against base bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb — the head's merge base with the base branch — under policy revision 1, for work item GY-9: the control plane observed it from the shared object store, and there is no pull request. The delta to judge is head versus that base: a file the base branch gained after bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb is not part of this delta, so its absence from the head is not a removal. Open the review body by naming the head and the base you judged against, so the verdict itself records which commits were in scope. Read the change with: git diff bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa (both commits are in this session's object store; git show --stat aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa lists its files). Verification maps for the areas this item plans to change: verification/master.md: Invariants: A failed launch releases its claim. Gotchas: src/master.ts only re-exports. Review against the acceptance criteria of GY-9: [AC-1] The change works at its head [AC-2] The restarted loop serves the change. Judge every criterion met or unmet at head aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. AC-2 is a declared post-deploy verification: the live install can only show its outcome after this change is merged and deployed. Judge each on this head's pre-merge evidence — the change that should produce the outcome, and what the head shows before merge — and never request changes or hold the merge because the live install or deployed release has not shown it yet; it is read on the serving release after delivery, and a failure is a follow-up naming the delivered item. Name each nit on its own \"Nit: PATH:LINE — FINDING\" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. A BLOCKING finding must name a real defect a user or operator would hit with this change, a criterion that is not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. This change touches src/master/dispatch.ts, which run on every loop cycle: ask what it does when repeated across many cycles, heads and items: one follow-up per approval becomes 170 for 40 parents, one refresh per merge becomes one per merge for every open candidate, one session per decision stays open unless something closes it. Ask whether that repeated behaviour stays bounded; never require new soak-suite coverage of it — lacking tests/soak-*.test.ts coverage is at most a Nit. Classify findings by node /srv/graphyard/bin/graphyard.mjs guide review. This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project's build, tests, or servers, do not claim Graphyard work, and do not submit evidence. Post exactly one verdict, only through Graphyard, with the review body on standard input: node /srv/graphyard/bin/graphyard.mjs review post --event APPROVE <<'EOF' … EOF (use --event REQUEST_CHANGES instead only when a BLOCKING finding stands). It binds the verdict to the launched head and checks it before posting; when it refuses, it prints why and a correct invocation: do what the reason says. Never post a review any other way. Judge whether this diff meets what GY-9 requires by that rule; never weaken a requirement to let it pass, and never hold a change that meets its criteria over a FOLLOW-UP. Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. review post sends the verdict to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR; it names no pull request and runs no gh. Once it has posted, stop; Graphyard closes this session once it observes your verdict. Decide and act on your own: post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff. Never stop to ask a human for confirmation, never end your turn with a question, and never offer a menu of options to choose from; choose what the criteria and these instructions support and carry it out. If a command you need is refused or cannot succeed, record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:), naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.";
 
 test('unit:review-standard-shared-with-reviewer — the control-plane request keeps its exact text as of the GY-2972 factoring and carries reviewStandard\'s output verbatim', () => {
-  const prompt = reviewPrompt({ repository: 'owner/repo', cliPath: '/srv/graphyard/bin/graphyard.mjs' }, { key: 'GY-9', pr: 7, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, standardCriteria, undefined, standardFiles, null, null, null, standardVerification, { head: H, baseTip: B });
+  const prompt = reviewPrompt({ repository: 'owner/repo', cliPath: '/srv/graphyard/bin/graphyard.mjs' }, { key: 'GY-9', pr: 7, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, standardCriteria, undefined, standardFiles, null, null, standardVerification, { head: H, baseTip: B });
   assert.equal(prompt, controlPlaneRequestThroughReviewStandard, 'the request changed when the judging text moved into reviewStandard');
   const standard = reviewStandard({ key: 'GY-9', head: H, base: B }, standardCriteria, standardFiles, standardVerification);
   assert.ok(prompt.includes(standard), 'the request contains reviewStandard verbatim, so review self reads what the reviewer reads');
   // The same fixed inputs with a declared post-deploy criterion: byte-identical to the
   // pre-factoring request too, with the post-deploy rule inside the shared standard.
-  const declared = reviewPrompt({ repository: 'owner/repo', cliPath: '/srv/graphyard/bin/graphyard.mjs' }, { key: 'GY-9', pr: 7, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, standardPostDeployCriteria, undefined, standardFiles, null, null, null, standardVerification, { head: H, baseTip: B });
+  const declared = reviewPrompt({ repository: 'owner/repo', cliPath: '/srv/graphyard/bin/graphyard.mjs' }, { key: 'GY-9', pr: 7, sha: H, baseSha: B, policyRevision: 1 }, undefined, undefined, standardPostDeployCriteria, undefined, standardFiles, null, null, standardVerification, { head: H, baseTip: B });
   assert.equal(declared, controlPlaneRequestThroughReviewStandardWithPostDeploy, 'the request with a declared post-deploy criterion changed when the judging text moved into reviewStandard');
   const declaredStandard = reviewStandard({ key: 'GY-9', head: H, base: B }, standardPostDeployCriteria, standardFiles, standardVerification);
   assert.ok(declared.includes(declaredStandard), 'the request contains reviewStandard verbatim for post-deploy criteria too');

@@ -249,18 +249,3 @@ test('unit:reconcile-due-evidence-expiry — an evidence record expiring before 
   copy.evidence = [...copy.evidence, { proof: 'unit:reconcile-due-evidence-expiry', trusted: false, expiresAt } as unknown as Work['evidence'][number]];
   assert.equal(engine.evaluate(copy, all, at), Date.parse(expiresAt), 'the evidence expiry is the earliest instant the outcome can change');
 });
-
-test('unit:reconcile-due-held-gates — a mechanical review hold lapsing at its round window is the instant the evaluation records, since the review gate moves then with no write', { timeout: 120_000 }, async () => {
-  const { mechanicalRoundStartMs } = await import('../src/mechanical-findings.js');
-  const work = await engine.execute(operator, 'create', null,
-    { type: 'chore',  title: 'Due holds', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-held-gates', 'e2e:fixture'] }] }, randomUUID());
-  const at = new Date(await nowMs()), all = await store.list(), base = all.find(entry => entry.id === work.id)!;
-  const without = engine.evaluate(structuredClone(base), all, at);
-  assert.ok(without === null || without > at.getTime() + 1_000, `no other bound of the fixture falls within the second: ${without}`);
-  // An approval naming mechanical findings, submitted a second short of its round window.
-  const head = 'b'.repeat(40), submittedAt = new Date(at.getTime() - mechanicalRoundStartMs + 1_000).toISOString();
-  const candidate = { sha: head, baseSha: 'c'.repeat(40), pr: 9001, branch: 'graphyard/due-holds', author: 'implementer' };
-  const held = { ...structuredClone(base), stage: 'review', candidate, submission: { epoch: base.epoch, pr: 9001 }, policy: { ...base.policy, review: true, reviewProvider: 'github' },
-    observation: { candidate, reviews: [{ reviewer: 'reviewer[bot]', sha: head, state: 'APPROVED', id: 77, submittedAt, mechanical: 1 }], checks: [], merged: false, prState: 'open', draft: false, at: submittedAt } } as unknown as Work;
-  assert.equal(engine.evaluate(held, all, at), Date.parse(submittedAt) + mechanicalRoundStartMs, 'the mechanical hold\'s round window is the earliest instant the outcome can change');
-});
