@@ -150,8 +150,8 @@ test('integration:worker-self-verifies — graphyard verify runs exactly the aut
     assert.equal(verified.output.head, execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository.root, encoding: 'utf8' }).trim());
 
     // complete submits and reports what verify ran on HEAD, with each outcome.
-    const completed = await cli(repository.root, control.url, 'complete', 'GY-7', '1', '42');
-    assert.equal(completed.code, 0); assert.deepEqual(control.submitted, [{ epoch: 1, pr: 42 }]);
+    const completed = await cli(repository.root, control.url, 'complete', 'GY-7', '1');
+    assert.equal(completed.code, 0); assert.deepEqual(control.submitted, [{ epoch: 1, head: verified.output.head }]);
     const report = completed.output.selfVerification;
     assert.equal(report.state, 'failing'); assert.match(report.reason, /integration:vbr-flow did not pass on HEAD/);
     assert.deepEqual(report.ran.map((entry: any) => [entry.proof, entry.result, entry.executed]), [['unit:vbr-parse', 'pass', 2], ['integration:vbr-flow', 'fail', 1]]);
@@ -160,12 +160,12 @@ test('integration:worker-self-verifies — graphyard verify runs exactly the aut
     // Fixed and re-verified, the report passes; a commit after verification is reported as stale.
     await repository.commit({ 'tests/item.test.ts': suite(passing('unit:vbr-parse — parses one'), passing('integration:vbr-flow — flows'), failing('manual:vbr-docs — never run here')) }, 'fix');
     assert.equal((await cli(repository.root, control.url, 'verify', 'GY-7')).code, 0);
-    assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1', '42')).output.selfVerification.state, 'passing');
+    assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification.state, 'passing');
     await repository.commit({ 'README.md': 'later\n' }, 'after verification');
-    const stale = (await cli(repository.root, control.url, 'complete', 'GY-7', '1', '42')).output.selfVerification;
+    const stale = (await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification;
     assert.equal(stale.state, 'stale'); assert.match(stale.reason, /run graphyard verify GY-7 again/);
     // Nothing was verified in a fresh worktree: complete says so rather than staying silent.
     await rm(join(repository.root, '.graphyard'), { recursive: true });
-    assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1', '42')).output.selfVerification.state, 'not-run');
+    assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification.state, 'not-run');
   } finally { await control.close(); await rm(repository.root, { recursive: true, force: true }); }
 });

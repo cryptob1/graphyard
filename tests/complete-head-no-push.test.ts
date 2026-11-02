@@ -2,17 +2,14 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
-import { chmod, readFile, writeFile } from 'node:fs/promises';
+import { chmod, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { CliContext } from '../src/cli/context.js';
 
-// GY-1925: `complete GY-N EPOCH --head SHA` submits while the control plane is the merge writer and
-// the shared object store already holds the commit, so it attempts no git push — a worker sandbox
-// that cannot push (OpenSSH refuses its user namespace's /etc/ssh) still completes. The
-// pull-request form keeps its push of the graphyard/ (or adopted) branch first and its refusal when
-// that push fails. A pre-push hook that records every attempt and then fails makes "a push would
-// fail" deterministic and "no push was attempted" observable.
+// GY-1925: explicit --head submission attempts no git push, so a worker sandbox that cannot
+// push still completes. A pre-push hook records and fails every attempt, making the no-push
+// assertion observable. GY-2999 default-head and PR-refusal regressions live in complete-default-head.
 
 const git = (cwd: string, ...args: string[]) => {
   const result = spawnSync('git', ['-C', cwd, '-c', 'user.name=t', '-c', 'user.email=t@t', ...args], { encoding: 'utf8' });
@@ -37,7 +34,7 @@ async function repository(branch: string) {
   return { attempts, head: git(work, 'rev-parse', 'HEAD'), work };
 }
 
-test('unit:complete-head-no-push — complete GY-N EPOCH --head SHA attempts no git push and submits the head even though every push would fail', async () => {
+test('unit:complete-explicit-head-no-push — complete GY-N EPOCH --head SHA attempts no git push and submits the head even though every push would fail', async () => {
   const { completeCommand } = await import('../src/cli/complete.js');
   const { attempts, head, work } = await repository('graphyard/gy-1-1');
   const calls: { path: string; body: unknown }[] = [], printed: any[] = [];
