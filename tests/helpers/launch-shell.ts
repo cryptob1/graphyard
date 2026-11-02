@@ -29,7 +29,11 @@ export function expandTypedCommand(command: string): TypedLaunch {
   }
   // A supervised worker: `node CLI watch KEY EPOCH -- KIND ARGS…`; otherwise the runtime leads.
   const separator = words.indexOf('--');
-  const runtime = separator >= 0 ? words.slice(separator + 1) : words;
+  let runtime = separator >= 0 ? words.slice(separator + 1) : words;
+  // The socket policy helper execs the runtime after bubblewrap establishes the mounts.
+  if (runtime[0] === '/usr/bin/python3' && runtime[1] === '-I' && runtime[2] === '-S' && runtime[3] === '-c') {
+    runtime = runtime.slice(runtime.indexOf('--') + 1);
+  }
   // Herdr reports the runtime by kind, not by the command that started it: Cursor's is `agent` (GY-976).
   return { stem, words, kind: runtime[0] === 'agent' ? 'cursor' : runtime[0], args: runtime.slice(1) };
 }

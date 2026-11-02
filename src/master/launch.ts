@@ -3,6 +3,8 @@ import { createHash } from 'node:crypto';
 import { chmodSync, closeSync, existsSync, mkdirSync, openSync, realpathSync, statSync, writeFileSync } from 'node:fs';
 import { basename, isAbsolute, join, resolve } from 'node:path';
 import { setTimeout as sleep } from 'node:timers/promises';
+import { slotsDirectoryVariable } from './verification-slots.js';
+import { confinedRuntimeArgs } from '../worker-sandbox.js';
 import { type ChildRun, childRunner, defaultChildRun } from '../child-runner.js';
 import { assertSessionName, SessionNameRefusedError } from '../session-name.js';
 import { requestPlaceholder, type RegisteredLaunch, assertLaunchable, LaunchRefusedError, nonInteractiveLaunch } from '../harness.js';
@@ -10,7 +12,8 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, screenDialog, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './profiles.js';
+import { assertIsolatableHostControlEndpoints } from './confinement.js';
+import { bwrapOnPath, runtimeLoginHomes, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrCall, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 import { deliverPrompt, herdrErrorText, nameRefusedByRuntime, readSessionScreen, sessionWords, type PromptDelivery } from './prompt-delivery.js';
@@ -180,7 +183,7 @@ export interface MasterConfinementProbe { bwrap?: string | null; platform?: stri
  * proxy stands in for the session bus), and GRAPHYARD_CONFINEMENT=master set. A host that cannot
  * build it refuses the launch with the named reason: the master is never started unconfined.
  */
-export async function masterSessionConfinement(kind: string, root: string, probe: MasterConfinementProbe = {}): Promise<CoordinatorConfinement> {
+export async function masterSessionConfinement(kind: string, root: string, probe: MasterConfinementProbe = {}, writable: readonly string[] = [], environment?: NodeJS.ProcessEnv): Promise<CoordinatorConfinement> {
   const refusal = await coordinatorConfinementRefusal({ kind, args: [], coordinatorRoot: root, sessionDirectory: root, ...probe });
   if (refusal) throw new Error(`${refusal} The master session is refused rather than started with the checkout writable (GY-1658).`);
   prepareConfinedGitPaths(root);
@@ -188,23 +191,31 @@ export async function masterSessionConfinement(kind: string, root: string, probe
   if (existsSync(checkoutGitDirectory(root))) mkdirSync(join(checkoutGitDirectory(root), 'worktrees'), { recursive: true });
   const managed = join(resolve(root), '.graphyard');
   mkdirSync(managed, { recursive: true, mode: 0o700 });
-  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed] });
+  const [bwrap, ...words] = readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: root, bwrap: probe.bwrap ?? undefined, writable: [managed, ...writable], environment });
   const records = masterRecords(root);
   mkdirSync(records, { recursive: true, mode: 0o700 });
-  const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', ...words.slice(0, -1), '--ro-bind', records, records, '--'];
+  // Mount options precede the socket-confinement command inside bubblewrap.
+  const command = words.indexOf('--');
+  const wrapper = [bwrap, '--setenv', masterConfinementVariable, 'master', ...words.slice(0, command), '--ro-bind', records, records, ...words.slice(command)];
   const reexposed = wrapper.filter((word, index) => index > 0 && wrapper[index - 1] === '--bind');
   return { mechanism: 'read-only-mount', wrapper, detail: `the coordinator checkout at ${resolve(root)} is bind-mounted read-only for the master session in a bubblewrap namespace whose /proc shows only its own processes and whose host systemd and bus sockets are hidden; only ${reexposed.join(', ')} are re-exposed writable, so no command it runs, nor any host process it could ask to start, can patch the checkout's tracked files` };
 }
 /** The master launch's confinement against the launcher's own checkout (or `coordinatorRoot`), derived as every other role's is: null only where nothing is confined (the test runner, a non-CLI launcher), the named refusal when the launcher's checkout cannot be derived. */
-async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe'>): Promise<CoordinatorConfinement | null> {
+async function masterLaunchConfinement(kind: string, options: Pick<SessionStart, 'coordinatorRoot' | 'directory' | 'confinementProbe' | 'environment' | 'masterStateDirectory' | 'contract'>): Promise<CoordinatorConfinement | null> {
   const root = options.coordinatorRoot !== undefined ? options.coordinatorRoot : launcherCoordinatorRoot();
-  if (root) return masterSessionConfinement(kind, root, options.confinementProbe);
+  if (root) {
+    return masterSessionConfinement(kind, root, options.confinementProbe, [
+      ...runtimeLoginHomes(options.environment, options.contract?.homeVariable),
+      ...(options.masterStateDirectory ? [options.masterStateDirectory] : []),
+    ], options.environment);
+  }
   const undetermined = launcherRootUndetermined();
   if (undetermined) throw new Error(confinementRefusalText(kind, options.directory, { undetermined }));
   return null;
 }
 /** The confinement the launch of `kind` carries, or null when nothing needs confining; throws the named refusal when the kind can carry none, or when the launcher's own checkout cannot be derived while running as the launcher. `coordinatorRoot` overrides the derived one, for a launcher embedded outside the CLI. The sandbox-claim check models the runtime's workspace root as its working directory (`cwd` when the pane starts elsewhere, GY-888); the read-only mount re-exposes the allocated `directory` separately, so a terminal reviewer or producer that starts from the coordinator root still gets its own checkout writable while the root stays read-only (GY-888, review finding). The `credentialMask` hides the install's credential locations from the session (GY-1856). */
-export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string; ownGitHubCredential?: boolean; secretsBus?: null; credentialMask?: CredentialMask }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
+export async function sessionConfinement(kind: string, args: readonly string[], options: { cwd?: string; directory: string; environment?: Record<string, string>; writable?: readonly string[]; ownGitHubCredential?: boolean; secretsBus?: null; credentialMask?: CredentialMask }, coordinatorRoot: string | null | undefined = undefined): Promise<CoordinatorConfinement | null> {
+  assertIsolatableHostControlEndpoints({ ...process.env, ...options.environment });
   const root = coordinatorRoot !== undefined ? coordinatorRoot : launcherCoordinatorRoot();
   if (!root) {
     const undetermined = launcherRootUndetermined();
@@ -212,7 +223,7 @@ export async function sessionConfinement(kind: string, args: readonly string[], 
     return null;
   }
   const workspaceRoot = resolve(options.cwd ?? options.directory), allocated = resolve(options.directory);
-  const input: ConfinementInput = { kind, args, coordinatorRoot: root, sessionDirectory: workspaceRoot, ...(allocated === workspaceRoot ? {} : { allocatedDirectory: allocated }), ...(options.ownGitHubCredential ? { ownGitHubCredential: true } : {}), ...(options.secretsBus === null ? { secretsBus: null } : {}), ...(options.credentialMask ? { credentialMask: options.credentialMask } : {}) };
+  const input: ConfinementInput = { kind, args, environment: options.environment, coordinatorRoot: root, writable: [...(options.writable ?? []), ...(options.environment?.[slotsDirectoryVariable] ? [options.environment[slotsDirectoryVariable]] : [])], sessionDirectory: workspaceRoot, ...(allocated === workspaceRoot ? {} : { allocatedDirectory: allocated }), ...(options.ownGitHubCredential ? { ownGitHubCredential: true } : {}), ...(options.secretsBus === null ? { secretsBus: null } : {}), ...(options.credentialMask ? { credentialMask: options.credentialMask } : {}) };
   const refusal = await coordinatorConfinementRefusal(input);
   if (refusal) throw new Error(refusal);
   prepareConfinedGitPaths(root);
@@ -226,7 +237,7 @@ export async function sessionConfinement(kind: string, args: readonly string[], 
  * The spawner that applies these words is src/runner/roles.ts confiningSpawn, which hands them to
  * the runner's own spawn.
  */
-export function headlessConfinementWrapper(root: string, cwd: string | undefined, bwrap: string | null = bwrapOnPath(), credentialMask?: CredentialMask): readonly string[] {
+export function headlessConfinementWrapper(root: string, cwd: string | undefined, bwrap: string | null = bwrapOnPath(), credentialMask?: CredentialMask, environment?: NodeJS.ProcessEnv): readonly string[] {
   const head = `A headless session cannot be started with the coordinator checkout at ${root} unwritable at the OS level`;
   if (cwd === undefined) throw new Error(`${head}: the run has no working directory to confine around. Graphyard never starts a session unconfined.`);
   if (!bwrap) throw new Error(`${head}: bubblewrap (bwrap) is not installed. Graphyard never starts a session unconfined; install bubblewrap (e.g. apt install bubblewrap).`);
@@ -234,12 +245,13 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
   const gitProblem = checkoutGitProblem(root);
   if (gitProblem) throw new Error(`${head}: the Git directory it writes through cannot be resolved — ${gitProblem}. Graphyard never starts a session unconfined.`);
   prepareConfinedGitPaths(root);
-  return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap, ...(credentialMask ? { credentialMask } : {}) });
+  return readOnlyMountWrapper({ coordinatorRoot: root, sessionDirectory: resolve(cwd), bwrap, environment, ...(credentialMask ? { credentialMask } : {}) });
 }
 /** The command that starts a runtime of `kind`: its recipe's `program` (Cursor's `agent`, GY-976), otherwise the kind's own name. */
 export const launchProgram = (kind: string) => nonInteractiveLaunch[kind]?.program ?? kind;
 /** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime, its arguments and the file references. */
 export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = []) {
+  if (wrap.length) args = confinedRuntimeArgs(kind, args);
   const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
   const own = launchRequestContracts[kind];
   const request = files.request && own ? own(requestReference) : undefined;
@@ -521,6 +533,8 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   /** `'master'`: the master session's own confinement (masterSessionConfinement, GY-1658), judged with `confinementProbe`. `false` is a test seam for launches whose runner is faked: no production launch passes it (GY-1658). */
   confinement?: false | 'master';
   confinementProbe?: MasterConfinementProbe;
+  /** The master's private coordinator state beside its credential, granted explicitly by its launcher. */
+  masterStateDirectory?: string;
   /** The coordinator checkout to confine against, when the launcher's own cannot be derived from its entry — a launcher embedded outside the CLI passes it, so its sessions are confined too (GY-888). */
   coordinatorRoot?: string;
   /** The session must never read the operator's credentials, so the confinement gives it no route to the operator's keyring (GY-1039). */
@@ -534,6 +548,7 @@ export interface SessionStart extends PromptDelivery, StartBounds { directory: s
   /** Called once the command line is in the pane: from then on a supervisor may be running there (GY-273). */ onRun?: () => void;
   /** The pane's working directory, where the runtime starts (`directory` unless the tab opened elsewhere), and the environment its tab carries: what the runtime's `trust` step records the folder in. */ cwd?: string; environment?: Record<string, string> }
 export async function startAgentSession(name: string, kind: string, pane: string, args: string[], text: string, run: ChildRun | undefined, options: SessionStart) {
+  assertIsolatableHostControlEndpoints({ ...process.env, ...options.environment });
   assertSessionName(name, options.retry);
   // A runtime Graphyard cannot start without its own approval prompts is refused here, before
   // anything is typed, rather than launched into a session that waits for a keypress (GY-184).

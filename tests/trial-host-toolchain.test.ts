@@ -30,10 +30,11 @@ test('unit:trial-finds-host-toolchain — mise directories follow host HOME/XDG 
   }
   assert.equal(defaults.HOME, '/fresh');
   assert.equal(defaults.XDG_CONFIG_HOME, '/fresh/.config');
-  assert.equal(defaults.npm_config_cache, '/host/.npm');
+  assert.equal(defaults.npm_config_cache, '/fresh/.npm');
+  assert.equal(defaults.PLAYWRIGHT_BROWSERS_PATH, '/fresh/.cache/ms-playwright');
 });
 
-test('unit:trial-finds-host-toolchain — npm and node shims build under fresh HOME with all credential masks intact', async () => {
+test('unit:trial-finds-host-toolchain — private container toolchain builds with host shims and credentials absent', async () => {
   const host = await temporaryDirectory('toolchain-host');
   const config = join(host, '.config', 'graphyard'), key = join(host, 'key', 'deploy-key'), runtime = join(host, 'runtime');
   for (const directory of [config, join(host, 'key'), runtime]) mkdirSync(directory, { recursive: true });
@@ -41,10 +42,11 @@ test('unit:trial-finds-host-toolchain — npm and node shims build under fresh H
   for (const file of secrets) writeFileSync(file, 'private');
   const input = await fixture(`const fs = require('node:fs');
 if (process.env.HOME === ${JSON.stringify(host)}) throw Error('host HOME leaked');
+if (fs.existsSync(${JSON.stringify(host)})) throw Error('host toolchain directory mounted');
 for (const file of ${JSON.stringify(secrets)}) { let readable = false; try { fs.readFileSync(file); readable = true; } catch {} if (readable) throw Error('credential readable: ' + file); }
 console.log('confined build passed');`);
   const shims = join(host, 'shims'); mkdirSync(shims);
-  // Stand-ins for mise's shims: they must find the host config/state before starting npm or node.
+  // Host shims must not be mounted into the private root; its own toolchain runs instead.
   const npm = realpathSync(execFileSync('which', ['npm'], { encoding: 'utf8' }).trim());
   for (const [name, target] of [['npm', `${JSON.stringify(process.execPath)} ${JSON.stringify(npm)}`], ['node', JSON.stringify(process.execPath)]]) {
     writeFileSync(join(shims, name), `#!/bin/sh
@@ -67,7 +69,6 @@ exec ${target} "$@"
 });
 
 for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failure-names-cause — ${phase} startup errors retry as host failures without refusing an item`, async () => {
-  const emptyPath = await temporaryDirectory('toolchain-empty-path');
   const hidden = await temporaryDirectory('toolchain-hidden');
   const input = { ...await fixture(undefined, phase === 'install'), hidden: [hidden] };
   const work = { id: 'work', key: 'GY-3044', candidate: { sha: input.mergeSha }, submission: {}, criteria: [], risk: 'normal' } as unknown as Work;
@@ -75,6 +76,7 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
     'mise ERROR Config files in /host/.config/mise/config.toml are not trusted',
     'mise ERROR No version is set for tool node',
     '/usr/bin/env: ‘node’: No such file or directory',
+    "/usr/bin/env: 'npm': No such file or directory",
     '/bin/sh: 1: npm: not found',
     '/bin/bash: line 1: npx: command not found',
     'bwrap: execvp npm: No such file or directory',
@@ -84,21 +86,21 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
     const run: ChildRun = async (command, args, options) => {
       if (command === 'npm') {
         invocations.push(args);
-        if (diagnostic.startsWith('bwrap:')) {
-          // Spawn the real confinement wrapper successfully, then fail its toolchain exec.
+        if (diagnostic === "/usr/bin/env: 'npm': No such file or directory") {
+          // The private-root backend starts, then its entrypoint cannot find npm.
           assert.ok(options?.wrapper?.length);
           try {
-            await defaultChildRun(command, args, { ...options, env: { ...options?.env, PATH: emptyPath } });
+            await defaultChildRun('/usr/bin/env', ['LC_ALL=C', 'PATH=/missing-toolchain', command, ...args], options);
           } catch (error) {
             assert.ok(error instanceof ChildProcessError);
-            assert.equal(error.cause, undefined, 'bubblewrap itself must have started');
+            assert.equal(error.cause, undefined);
             assert.equal(error.signal, null);
             assert.equal(error.timedOut, false);
             assert.ok(error.status !== null && error.status > 0);
-            assert.equal(error.stderr.trim(), diagnostic);
+            assert.match(error.stderr, /(?:env:.*npm.*No such file or directory|bwrap: execvp npm: No such file or directory)/);
             throw error;
           }
-          assert.fail('bubblewrap must fail to exec missing npm');
+          assert.fail('the real trial wrapper must fail to exec missing npm');
         }
         throw Object.assign(new Error('cannot start'), { status: diagnostic.includes('mise ERROR') ? 1 : 127, stderr: diagnostic });
       }
@@ -114,10 +116,10 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
     await assert.rejects(mergeOne(ports, work), (error: unknown) => {
       assert.ok(error instanceof TrialRunnerError);
       assert.equal(error.phase, phase);
-      assert.ok(error.outputTail.includes(diagnostic), error.outputTail);
+      assert.ok(error.outputTail.replace(/[‘’]/g, "'").includes(diagnostic.replace(/[‘’]/g, "'")), error.outputTail);
       assert.deepEqual(trialAttempts(error).map(attempt => attempt.outcome), ['host-failure', 'host-failure']);
       return true;
-    });
+    }, diagnostic);
     assert.equal(invocations.length, 2);
     assert.ok(invocations.every(args => phase === 'install' ? args[0] === 'ci' : args.join(' ') === 'run build'));
     assert.deepEqual(events.map(event => event.kind), ['intent', 'trial']);

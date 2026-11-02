@@ -20,7 +20,7 @@ Node 24, an `OWNER/REPO` checkout, `GRAPHYARD_CLI` exported, `gh` scope `repo` a
 ### Providers
 
 - `compose`: `curl -fsSL https://get.docker.com | sh`.
-- `local` (`graphyard up --local`): no Docker; embedded Postgres.
+- `local` (`graphyard up --local`): embedded Postgres; Docker runs private-root merge trials, while the control plane runs directly on the host.
 
 ## Step 1: plan and approve
 

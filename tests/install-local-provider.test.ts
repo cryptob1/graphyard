@@ -15,7 +15,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 /**
  * GY-1500: `graphyard install --provider local` (and `graphyard up --local`) runs the control plane
  * on this machine against an embedded Postgres cluster under ~/.config/graphyard/INSTALL/postgres,
- * supervised by a systemd user unit, with no Docker. Each test is named for the proof it produces.
+ * supervised by a systemd user unit. Docker is reserved for merge trials. Each test is named for the proof it produces.
  */
 // Loaded inside each test, so a tree without them fails as a test case, not at load.
 const local = () => import('../src/install/local.js');
@@ -87,7 +87,7 @@ async function snapshot(directory: string, skip: (path: string) => boolean = () 
   return out;
 }
 
-test('unit:local-provider-plan — install --provider local --plan lists Node 24, resolvable embedded-postgres binaries and a free loopback port, plans the cluster and the unit, never needs Docker, and creates nothing', async () => {
+test('unit:local-provider-plan — install --provider local --plan lists embedded Postgres and the Docker trial image, plans the cluster and the unit, and creates nothing', async () => {
   const { localUnit, runtimeCommand } = await local();
   const unitDirectory = await temporaryDirectory('local-units');
   const port = await freePort();
@@ -99,11 +99,12 @@ test('unit:local-provider-plan — install --provider local --plan lists Node 24
     assert.match(preflight['Node.js'].detail, /^Node (2[4-9]|[3-9]\d)\./);
     assert.match(preflight['Embedded Postgres'].detail, /@embedded-postgres\/.* provides .*postgres; no Docker is needed/);
     assert.match(preflight['Loopback port'].detail, new RegExp(`server 127\\.0\\.0\\.1:${port}; Postgres 127\\.0\\.0\\.1:\\d+`));
-    assert.ok(!plan.preflight.some(item => /docker/i.test(item.name)), 'no Docker preflight');
-    assert.ok(!fixture.allCommandLines().some(line => /^docker\b/.test(line)), 'no docker command ran');
+    assert.equal(preflight['Docker Engine for merge trials']?.ok, true);
+    assert.ok(!fixture.allCommandLines().some(line => /^docker build\b/.test(line)), 'a plan builds no image');
 
     const directory = join(fixture.configHome, INSTALL);
     const action = (id: string) => plan.actions.find(entry => entry.id === id)!;
+    assert.match(action('provider.trial-image').command!, /--target.*trial.*--tag.*graphyard-trial:local/);
     assert.equal(action('provider.provision.database').state, 'create');
     assert.match(action('provider.provision.database').title, new RegExp(`under ${join(directory, 'postgres').replace(/[.*+?^${}()|[\]\\/]/g, '\\$&')} \\(directory 0700, password file 0600\\)`));
     assert.equal(action('provider.provision.app').command, `systemctl --user enable --now ${localUnit(INSTALL)}`);
