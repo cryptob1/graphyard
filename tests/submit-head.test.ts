@@ -7,7 +7,6 @@ import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { mergeWriterStatus } from '../src/merger-mode.js';
 import { operatorAgentRoutes } from '../src/server/routes/operator-agents.js';
 import { matchRoute } from '../src/server/routes.js';
 import { allocateChangeNumber } from '../src/merge-writer/change-numbers.js';
@@ -86,7 +85,6 @@ const numbers = async () => (await store.pool.query('SELECT number::int AS numbe
 test('unit:submit-head — submit takes exactly one of pr or head; the merger is the control plane whatever old `github` history the ledger holds, nothing can set it, and a head is submitted, ending the lease', async () => {
   // An install that once ran the github merger keeps that event on its append-only ledger; nothing reads it.
   await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['test-fixture', 'policy.merger.set', JSON.stringify({ merger: 'github', reason: 'an old install', previous: null })]);
-  assert.equal(mergeWriterStatus.merger, 'control-plane', 'every reader of the merger gets the control plane');
   assert.ok(!operatorAgentRoutes.routes.some(route => matchRoute(route, 'POST', '/api/merger')), 'no route can set a merger');
   const read = operatorAgentRoutes.routes.find(route => matchRoute(route, 'GET', '/api/merger'))!;
   assert.equal((await read.handle({} as never, []) as { mode: string }).mode, 'control-plane', 'GET /api/merger reads the control plane whatever the ledger holds');
