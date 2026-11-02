@@ -19,6 +19,7 @@ import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type Dispat
 import { neededRework, standingVerdict } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { hostMemoryVariable } from '../src/master/host-memory.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -237,6 +238,9 @@ const producer: Principal = { id: 'ci-runner', role: 'producer', proofs: ['unit:
 const proven = (item: Work) => engine.execute(producer, 'evidence', item.id, { proof: 'unit:x', sha: item.candidate!.sha, baseSha: item.candidate!.baseSha, policyRevision: item.policyRevision, result: 'pass', executed: 3, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scopeFiles: ['src/a.ts'] }, randomUUID());
 let database: EmbeddedPostgres, store: Store, engine: Engine;
 before(async () => {
+  // verify runs this file directly, without the suite runner's host isolation.
+  process.env[hostMemoryVariable] = 'unreadable';
+  process.env.GRAPHYARD_DATA_HOME = await temporaryDirectory('gy124-data');
   const port = Number(process.env.GRAPHYARD_ONE_REVIEWER_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 81);
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('gy124-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('graphyard_test');
