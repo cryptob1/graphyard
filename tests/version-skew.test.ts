@@ -72,7 +72,7 @@ test('unit:version-skew — a CLI whose release differs from the server refuses 
   try {
     const failure = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env: { ...process.env, GRAPHYARD_VERSION: '1.4.2', GRAPHYARD_TOKEN: 'test-only', GRAPHYARD_URL: origin(server) } }).then(() => null, (error: any) => error);
     assert.match(failure?.stderr, /CLI 1\.4\.2 and server 2\.0\.0 differ: run graphyard upgrade/);
-    assert.deepEqual(requests, ['/healthz'], 'the skewed invocation is refused before its first API request');
+    assert.deepEqual(requests, Array(4).fill('/healthz'), 'the initial probe and three bounded retries send no API request');
   } finally { await close(server); }
 });
 
@@ -112,7 +112,7 @@ test('unit:version-skew — an unreleased build compares commits: another commit
   try {
     const behind = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env }).then(() => null, (error: any) => error);
     assert.match(behind?.stderr, new RegExp(`CLI commit ${head} and server commit ${servingCommit} differ: run graphyard upgrade`));
-    assert.deepEqual(requests, ['/healthz']);
+    assert.deepEqual(requests, Array(4).fill('/healthz'), 'three handover retries still refuse the mismatch before any API request');
     requests.length = 0;
     servingCommit = head;
     const current = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env }).then(() => null, (error: any) => error);
@@ -151,7 +151,7 @@ test('unit:version-skew — an unstamped CLI on a dated checkout takes its relea
     servingVersion = '2026.10.18';
     const behind = await exec(process.execPath, [launcher, 'status', 'GY-1'], { cwd, env }).then(() => null, (error: any) => error);
     assert.match(behind?.stderr, /CLI 2026\.10\.17 and server 2026\.10\.18 differ: run graphyard upgrade/);
-    assert.deepEqual(requests, ['/healthz'], 'the skewed invocation is refused before its first API request');
+    assert.deepEqual(requests, Array(4).fill('/healthz'), 'the initial probe and three bounded retries send no API request');
   } finally { await close(server); }
 });
 
@@ -201,15 +201,15 @@ test('unit:state-files-forward-tolerant — master.json reads and writes an unkn
   await writeFile(file, JSON.stringify({ ...masterConfig(coordinatorToken), futureField, browser: { profile: 'Default', futureBrowser }, run: { futureRun: true } }), { mode: 0o600 });
   const loaded = await loadStoredMasterConfig(root);
   assert.deepEqual((loaded as any).futureField, futureField, 'the unknown top-level field parses');
-  assert.deepEqual((loaded.browser as any).futureBrowser, futureBrowser, 'the unknown nested field parses');
+  assert.deepEqual((loaded as any).browser, { profile: 'Default', futureBrowser }, 'the retired browser field (GY-3003) parses, kept unknown');
   assert.equal((loaded.run as any).futureRun, true, 'an unknown field under a prefaulted record (run) parses');
   // Writers parse before they save; the unknown fields ride the parse back into the file.
   await writeFile(file, JSON.stringify(masterConfigSchema.parse(loaded), null, 2), { mode: 0o600 });
   const reread = await loadStoredMasterConfig(root);
   assert.deepEqual((reread as any).futureField, futureField);
-  assert.deepEqual((reread.browser as any).futureBrowser, futureBrowser, 'the unknown nested field survives the round-trip');
+  assert.deepEqual((reread as any).browser, { profile: 'Default', futureBrowser }, 'the retired browser field survives the round-trip');
   // Declared fields still validate: a malformed one refuses the load as before.
-  await writeFile(file, JSON.stringify({ ...masterConfig(coordinatorToken), browser: { profile: 42 } }), { mode: 0o600 });
+  await writeFile(file, JSON.stringify({ ...masterConfig(coordinatorToken), run: { intervalSeconds: 'nine' } }), { mode: 0o600 });
   await assert.rejects(loadStoredMasterConfig(root));
 });
 

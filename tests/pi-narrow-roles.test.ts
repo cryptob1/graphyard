@@ -1,3 +1,4 @@
+import { masterRunSchema } from '../src/master/profiles.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -89,7 +90,7 @@ async function installation(runtimes?: { producer?: 'herdr' | 'pi' }) {
 function work(key: string, group: string, proofs: string[], overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 169, branch: `graphyard/${key.toLowerCase()}-1`, author: 'implementer' };
   const request = { id: `request-${key}-${group}`, kind: 'producer', sha: H, baseSha: B, policyRevision: 4, pr: 169, group, proofs, state: 'requested', requestedAt: new Date().toISOString(), reason: 'r' };
-  return { id: `id-${key}`, key, title: 'Narrow roles', description: '', type: 'feature', priority: 1, dependencies: [], 
+  return { id: `id-${key}`, key, title: 'Narrow roles', description: '', type: 'feature', priority: 1, dependencies: [],
     criteria: [{ id: 'AC-2', text: 'Typed tools', proofs: ['unit:pi-graphyard-tools'] }, { id: 'AC-5', text: 'Guard', proofs: ['unit:pi-destructive-guard'] }, { id: 'AC-3', text: 'Roles', proofs: ['integration:pi-narrow-roles'] }],
     policy: { checks: ['test'], review: true }, stage: 'review', revision: 3, policyRevision: 4, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [], candidate,
     submission: { epoch: 1, pr: 169 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['implementer'],
@@ -113,9 +114,9 @@ test('integration:pi-narrow-roles the master config selects each narrow role\'s 
   assert.equal(narrowRoleRuntime({}, 'producer', 'unit'), 'herdr');
   assert.equal(narrowRoleRuntime({ runtimes: { producer: 'pi' } }, 'producer', 'unit'), 'pi');
   assert.equal(narrowRoleRuntime({ runtimes: { producer: 'pi' } }, 'producer', 'integration'), 'herdr', 'only the unit proof producer runs on Pi');
-  assert.throws(() => masterConfigSchema.shape.run.parse({ runtimes: { producer: 'opencode' } }), 'an unknown runtime is refused at load');
-  assert.deepEqual(masterConfigSchema.shape.run.parse({ runtimes: { approver: 'pi' }, pi: { approverTimeoutMinutes: 10 } }).runtimes, {}, 'the retired approver settings still load and are dropped');
-  assert.throws(() => masterConfigSchema.shape.run.parse({ runtimes: { reviewer: 'pi' } }), 'only the narrow roles are selectable');
+  assert.throws(() => masterRunSchema.parse({ runtimes: { producer: 'opencode' } }), 'an unknown runtime is refused at load');
+  assert.deepEqual(masterRunSchema.parse({ runtimes: { approver: 'pi' }, pi: { approverTimeoutMinutes: 10 } }).runtimes, {}, 'the retired approver settings still load and are dropped');
+  assert.throws(() => masterRunSchema.parse({ runtimes: { reviewer: 'pi' } }), 'only the narrow roles are selectable');
   assert.deepEqual(piRuntimeSchema.parse({}), { command: 'pi', model: 'zai/glm-5.3-flash' });
 });
 

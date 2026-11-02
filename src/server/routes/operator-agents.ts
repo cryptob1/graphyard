@@ -1,5 +1,4 @@
 import { demand } from '../../model.js';
-import { mergeWriterStatus } from '../../merger-mode.js';
 import { CoordinatorRecovery } from '../../coordinator-recovery.js';
 import { defineRoutes, parseJson, type Services } from '../routes.js';
 import { humanSignIn } from '../auth.js';
@@ -30,7 +29,8 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
     },
   },
   // The merger (merger-mode.ts): always the control plane; read-only, so nothing can set another.
-  { method: 'GET', path: '/api/merger', handle: async () => ({ ...mergeWriterStatus, mode: mergeWriterStatus.merger }) },
+  // The end-to-end runner probes delivery support through this read-only route.
+  { method: 'GET', path: '/api/merger', handle: async () => ({ merger: 'control-plane', mode: 'control-plane', line: 'The control plane is the merge writer' }) },
   // GY-1529: the known-good coordinator's recovery, recorded with an admin credential only.
   { method: 'POST', path: '/api/coordinator/recovered', handle: async context => new CoordinatorRecovery(context.services.engine.store).record(context.actor, await parseJson(context), context.idempotencyKey()) },
   // The operator's own sign-in link (GY-738): only their configured admin credential asks for one.

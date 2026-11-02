@@ -42,7 +42,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 69, branch: 'graphyard/gy-69-1', author: 'implementer' };
-  return { id: 'work-69', key: 'GY-69', title: 'Master loop resilience', description: '', type: 'bug', priority: 0, dependencies: [], 
+  return { id: 'work-69', key: 'GY-69', title: 'Master loop resilience', description: '', type: 'bug', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Retry', proofs: ['integration:producer-session-retry', 'unit:autonomous-session-prompts'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1,
     lease: null, workspaces: [{ host: 'h', path: '/w/gy-69', branch: 'graphyard/gy-69-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 69 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -183,7 +183,7 @@ test('integration:producer-session-retry — a failed or expired producer sessio
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-test('integration:master-config-reload — a running loop adopts master.json changes to profiles, workspace, run settings and autoMerge without a restart, and refuses a change to what it is bound to by name', async () => {
+test('integration:master-config-reload — a running loop adopts master.json changes to profiles, workspace, run settings without a restart, and refuses a change to what it is bound to by name', async () => {
   const { root, token, cleanup } = await installed();
   try {
     const initial = await loadMasterConfig(root);
@@ -195,40 +195,39 @@ test('integration:master-config-reload — a running loop adopts master.json cha
     await write(config => { config.producers = [{ name: 'producer-b', principal: 'proof-runner-b', agentName: 'produce-b', kind: 'claude', credentialFile: credential }]; config.herdrWorkspace = 'wF'; config.autoMerge = false; config.run.dispatchIntervalSeconds = 20; config.run.reviewerProfile = 'claude-reviewer'; });
     const adopted = await live.reload();
     assert.equal(adopted.refused, null);
-    assert.deepEqual(adopted.changed, ['autoMerge', 'herdrWorkspace', 'producers', 'run.dispatchIntervalSeconds', 'run.reviewerProfile']);
-    assert.deepEqual([live.current.producers.map(profile => profile.name), live.current.herdrWorkspace, live.current.autoMerge, live.current.run.dispatchIntervalSeconds], [['producer-b'], 'wF', false, 20]);
+    assert.deepEqual(adopted.changed, ['herdrWorkspace', 'producers', 'run.dispatchIntervalSeconds', 'run.reviewerProfile']);
+    assert.deepEqual([live.current.producers.map(profile => profile.name), live.current.herdrWorkspace, live.current.run.dispatchIntervalSeconds], [['producer-b'], 'wF', 20]);
     // A change to what the loop is bound to is refused by name; every other change in the same write waits with it.
     await write(config => { config.url = 'https://elsewhere.example'; config.baseBranch = 'release'; config.autoMerge = true; });
     const refused = await live.reload();
     assert.match(refused.refused!, /master\.json changes baseBranch, url, which a running master loop is bound to; restart master run to adopt them/);
-    assert.equal(live.current.autoMerge, false); assert.equal(live.current.url, 'https://graphyard.example');
+    assert.equal(live.current.url, 'https://graphyard.example');
     await writeFile(file, '{ not json', { mode: 0o600 });
     assert.match((await live.reload()).refused!, /could not be reloaded .*keeps the settings it last loaded/);
     assert.deepEqual(masterConfigChanges(initial, { ...initial, run: { ...initial.run, intervalSeconds: 30 } }), { changed: ['run.intervalSeconds'], bound: [] });
   } finally { await cleanup(); }
 
-  // The coordination loop adopts autoMerge between cycles and records a refusal once, as an escalation naming the setting.
+  // The coordination loop adopts configuration between cycles and records a standing refusal once.
   const directory = await temporaryDirectory('resilience-daemon');
   try {
     const coordinator = join(directory, 'coordinator.token'); await writeFile(coordinator, coordinatorToken, { mode: 0o600 });
-    const manual = masterConfig(coordinator, { autoMerge: false }), automatic = masterConfig(coordinator, { autoMerge: true });
+    const manual = masterConfig(coordinator, {}), automatic = masterConfig(coordinator, { herdrWorkspace: 'wF' });
     const mergeable = work({ stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
     const log: string[] = [];
     let cycles = 0;
     const reloads = [
       { config: manual, changed: [], refused: null, at: iso(0) },
-      { config: automatic, changed: ['autoMerge'], refused: null, at: iso(1000) },
+      { config: automatic, changed: ['herdrWorkspace'], refused: null, at: iso(1000) },
       { config: automatic, changed: [], refused: '.graphyard/master.json changes url, which a running master loop is bound to; restart master run to adopt it', at: iso(2000) },
       { config: automatic, changed: [], refused: '.graphyard/master.json changes url, which a running master loop is bound to; restart master run to adopt it', at: iso(3000) },
     ];
     const state = emptyDaemonState(manual);
-    // Cycles are counted at the reload that opens each one, not per snapshot read. GitHub merges
-    // (GY-1235): autoMerge changes no loop step, but the reload still adopts it as a recorded change.
+    // Cycles are counted at the reload that opens each one, not per snapshot read.
     const effects = daemonEffects({ snapshot: async () => { if (cycles >= 4) process.emit('SIGUSR2' as NodeJS.Signals); return { work: [mergeable], now: iso(0) }; } }, log);
     const result = await runDaemon(manual, state, effects, { intervalMs: 5, identity: { pid: process.pid, host: 'machine-a' }, signals: ['SIGUSR2'], log: () => {}, reload: async () => reloads[Math.min(cycles++, reloads.length - 1)] });
     assert.equal(result.cycles.length, 4);
     const actions = Object.values(state.actions);
-    assert.ok(actions.some(action => action.kind === 'config' && /Adopted .*autoMerge/.test(action.detail)));
+    assert.ok(actions.some(action => action.kind === 'config' && /Adopted .*herdrWorkspace/.test(action.detail)));
     assert.equal(actions.filter(action => action.kind === 'config' && action.state === 'failed' && /bound to; restart master run/.test(action.detail)).length, 1, 'a standing refusal is recorded once');
     assert.equal(state.config!.refused, reloads[3].refused);
     const noted = await noteConfigReload(emptyDaemonState(manual), reloads[2], async () => {});
@@ -415,10 +414,13 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/masters/c.token', cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'h', masterAgentName: 'm' });
   const binding = { key: 'GY-69', id: 'work-69', pr: 69, sha: H, baseSha: B, policyRevision: 1, author: 'implementer', branch: 'graphyard/gy-69-1', group: 'unit' as const, proofs: ['unit:autonomous-session-prompts'], requestId: 'r' };
   const prompts = { reviewer: reviewPrompt(config, binding), producer: producerPrompt(config, binding, { principal: 'proof-runner' }), worker: workerPrompt(config, { key: 'GY-69', title: 'Resilience' }, { principal: 'graphyard-claude-1' }, 4) };
-  for (const [role, prompt] of Object.entries(prompts)) {
+  for (const [role, prompt] of Object.entries({ producer: prompts.producer, worker: prompts.worker })) {
     for (const fragment of ['Decide and act on your own', 'Never stop to ask a human for confirmation', 'never end your turn with a question', 'never offer a menu of options', 'naming the exact command that was blocked and its error', 'A session that ends waiting on input is recorded as failed']) assert.ok(prompt.includes(fragment), `the ${role} prompt states: ${fragment}`);
   }
-  assert.match(prompts.reviewer, /post the verdict yourself, APPROVE or REQUEST_CHANGES/); assert.match(prompts.reviewer, /record a blocker as one review posted with --event COMMENT/);
+  for (const fragment of ['Decide and act on your own', 'post exactly one verdict, APPROVE or REQUEST_CHANGES', 'Never ask a human for confirmation or end waiting on input', 'mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker', 'then retry the authorized read', 'necessary input remains unavailable through authorized equivalent reads', 'genuine permission, identity, binding or runtime failure prevents judging it', 'name the necessary command and its error, then stop', 'Do not blanket-ignore errors', 'Record a genuine blocker as one review posted with --event COMMENT', 'After posting, stop']) {
+    assert.ok(prompts.reviewer.includes(fragment), `the reviewer prompt states: ${fragment}`);
+  }
+  assert.doesNotMatch(prompts.reviewer, /If a command you need is refused or cannot succeed/);
   assert.match(prompts.producer, /submit pass or fail evidence for every proof of the group/); assert.match(prompts.producer, /submit that proof as result fail/);
   assert.match(prompts.worker, new RegExp(`record a blocker with node ${launcher.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} blocked GY-69 4 REASON`));
   assert.equal(autonomousSession('x', 'y').startsWith('Decide and act on your own: x.'), true);

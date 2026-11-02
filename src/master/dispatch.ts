@@ -17,7 +17,6 @@ import type { MasterConfig, WorkerProfile } from './profiles.js';
 import { runtimeLoginHomes } from './profiles.js';
 import { atomicPrivateWrite, loadMasterConfig, readCredentialFile, readWorkerCredential } from './config.js';
 import { credentialMaskFor } from './confinement.js';
-import type { MergerMode } from '../merger-mode.js';
 import { accountLaunch, agentLaunchPlan, type EnvironmentProbe, NoHealthyAccountError, onSelectedSession, selectAccount, sharedGitDirectory } from './environments.js';
 import { simplicityParagraph } from '../reviewer.js';
 import { closeFailedLaunch, launcherCoordinatorRoot, launchStartMs, prepareConfinedGitPaths, sessionConfinement, type PromptDelivery, PromptNotAcceptedError, type RequestDelivery, SessionStartError, startAgentSession, type StartBounds, withLaunchClose } from './launch.js';
@@ -144,7 +143,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   assertDispatchable(work, allWork, observedAt);
   const config = await loadMasterConfig(root);
   // GY-1523: a worker is launched with no push credential and no keyring proxy: the control plane is the only merge writer.
-  const mergeWriter: MergerMode = 'control-plane';
+  const mergeWriter: 'control-plane' = 'control-plane';
   let rework: AppliedRework | null;
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
@@ -360,7 +359,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: 'control-plane' = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null) {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
