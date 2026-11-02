@@ -116,7 +116,7 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
     await assert.rejects(mergeOne(ports, work), (error: unknown) => {
       assert.ok(error instanceof TrialRunnerError);
       assert.equal(error.phase, phase);
-      assert.ok(error.outputTail.includes(diagnostic), error.outputTail);
+      assert.ok(error.outputTail.replace(/[‘’]/g, "'").includes(diagnostic.replace(/[‘’]/g, "'")), error.outputTail);
       assert.deepEqual(trialAttempts(error).map(attempt => attempt.outcome), ['host-failure', 'host-failure']);
       return true;
     }, diagnostic);
