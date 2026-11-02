@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { writeFile } from 'node:fs/promises';
 import { emptyDaemonState, runCycle, daemonStateSchema, daemonStatePath, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
+import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { dispatchCauses, deploymentCauses } from '../src/daemon/master-stalled-delivery.js';
 import { baseFailureReason } from '../src/merge-writer/executor.js';
@@ -124,7 +125,7 @@ test('integration:master-stalled-delivery-wake — master status distinguishes l
   await writeFile(daemonStatePath(f.config), JSON.stringify(f.state));
   const root = await temporaryDirectory('master-stalled-status');
   execFileSync('git', ['init', '-q', root]);
-  const report = (work: Work[]) => masterStatusReport(root, f.config, async () => ({ work, now: at }), async () => `${base}\n`);
+  const report = (work: Work[]) => masterStatusReport(root, f.config, async () => ({ work, now: at }), async (command, args) => isHerdrCommand(command) ? (herdrSubcommand(args)[1] === 'list' ? JSON.stringify({ agents: [{ name: 'master', pane_id: 'pM', agent_status: 'working' }] }) : 'Coordinating work.') : `${base}\n`);
   const stalled = await report([held()]);
   assert.equal(stalled.masterSession.state, 'working');
   assert.equal(stalled.delivery.state, 'stalled');

@@ -11,6 +11,8 @@ import { generatedFilesAssignment } from './install/generated-files.js';
 import { autonomyContract } from './autonomy.js';
 import { parseRepositoryConfig, repositoryConfigFile, type RepositoryConfig } from './model/documentation.js';
 import { deliveryPolicySchema, generatedWorkflowFiles, requiredPullRequestChecks, type DeliveryMode, type DeliveryPolicy } from './model/delivery-policy.js';
+import { onboardingCaseId, onboardingCasePath } from './model/onboarding-work.js';
+import { effectiveDelivery } from './project-applications.js';
 import { readInstallUnits, systemdCommandLineWords, unitCheckout, userUnitDirectory, type InstallUnits } from './install/units.js';
 import { coordinatorCheckoutRoot, forwardTolerant } from './master/profiles.js';
 import { containedInstall, npmCiEnvironment } from './cli/test-isolation.js';
@@ -438,7 +440,7 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
     ? `${dependencies.writeCredentials ? 'each worker credential is at its profile credentialFile path' : 'place each worker credential at its profile credentialFile path'}, then claim work`
     : 'no agent runtime was detected on this machine, so the proposal declared no worker profile and no worker principal was registered; install an agent CLI and rerun init --scan --apply to add one';
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null,
-    delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows } : null,
+    delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows, serve: delivery.wroteServe, firstCase: delivery.firstCase } : null,
     workerPrincipals,
     principalsFile: dependencies.installed ? null : principalsPath,
     next: dependencies.installed
@@ -454,6 +456,11 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
  * the committed policy plus the operator's explicit choices, so writing it is how a confirmed split
  * or opt-out lands. Under per-PR no workflow is written, and generated ones left from the candidate
  * model are named for removal rather than deleted; under local they are removed.
+ *
+ * GY-3037: every item owes an e2e proof, so onboarding leaves every repository able to carry one —
+ * a serve declaration (`e2e.serve`) when no previewable application serves a head, and a first case
+ * (`e2e/cases/served-head.json`) when the repository has none. Each writes once; a rerun reports
+ * both unchanged, and a repository that declares its own serve keeps it.
  */
 export async function applyDelivery(root: string, policyInput: DeliveryPolicy, stack: SetupProposal['stack']['name'], options: { base?: string; cli?: string } = {}) {
   const policy = deliveryPolicySchema.parse(policyInput);
@@ -463,10 +470,29 @@ export async function applyDelivery(root: string, policyInput: DeliveryPolicy, s
   let text: string | null = null;
   try { text = await readFile(configFile, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   const config: Partial<RepositoryConfig> = text === null ? {} : parseRepositoryConfig(text);
-  if (config.delivery && canonicalJson(config.delivery) === canonicalJson(policy)) unchanged.push(`${repositoryConfigFile} delivery policy`);
-  else {
-    await atomicWrite(configFile, `${JSON.stringify({ ...config, delivery: policy }, null, 2)}\n`, 0o644);
-    applied.push(`${repositoryConfigFile} delivery policy (${policy.mode}: pre-merge ${policy.mergeGate.preMerge.map(entry => entry.check).join(', ') || 'none'})`);
+  const declared = config as Record<string, unknown>;
+  const declaredE2e = (declared.e2e ?? null) as { serve?: unknown } | null;
+  const delivery = effectiveDelivery(policy as Record<string, unknown>);
+  const writeServe = !(delivery.previews !== 'off' && delivery.applications.length > 0) && !declaredE2e?.serve;
+  const caseDirectory = resolve(root, 'e2e/cases');
+  const cases = (await readdir(caseDirectory).catch((error: any) => { if (error.code === 'ENOENT') return []; throw error; })).filter(name => name.endsWith('.json'));
+  const firstCase = cases.length ? null : onboardingCasePath;
+  if (firstCase && !declaredE2e?.serve && !writeServe && delivery.applications.length > 1)
+    policy.cases = { ...policy.cases, [onboardingCaseId]: delivery.applications[0]!.id };
+  const next: Record<string, unknown> = { ...declared, delivery: policy, ...(writeServe ? { e2e: { ...declaredE2e, serve: onboardingServe } } : {}) };
+  const wrote: string[] = [];
+  if (!config.delivery || canonicalJson(config.delivery) !== canonicalJson(policy))
+    wrote.push(`${repositoryConfigFile} delivery policy (${policy.mode}: pre-merge ${policy.mergeGate.preMerge.map(entry => entry.check).join(', ') || 'none'})`);
+  if (writeServe) wrote.push(`${repositoryConfigFile} e2e serve declaration (no previewable application serves a head)`);
+  if (wrote.length) {
+    await atomicWrite(configFile, `${JSON.stringify(next, null, 2)}\n`, 0o644);
+    applied.push(...wrote);
+  } else unchanged.push(`${repositoryConfigFile} delivery policy`);
+  // The first case, when the repository has none: the smoke check every later case stands beside.
+  if (firstCase) {
+    await mkdir(caseDirectory, { recursive: true });
+    await atomicWrite(resolve(root, onboardingCasePath), `${JSON.stringify(onboardingFirstCase(), null, 2)}\n`, 0o644);
+    applied.push(`first case ${onboardingCasePath} (${onboardingCaseId})`);
   }
   // GY-2009: never write .github/workflows; remove leftover generated candidate/promotion workflows.
   for (const path of generatedWorkflowFiles) {
@@ -476,8 +502,35 @@ export async function applyDelivery(root: string, policyInput: DeliveryPolicy, s
     if (current.split('\n', 3).includes('# Generated by graphyard init from the delivery policy in graphyard.json (docs/onboarding.md).')) { await rm(resolve(root, path)); applied.push(`removed ${path}: repository setup writes no GitHub Actions workflows`); }
     else drift.push(`${path} is not one init generated; delete it so no Actions gate remains`);
   }
-  return { policy, requiredChecks: requiredPullRequestChecks(policy), workflows: [], applied, unchanged, drift };
+  return { policy, requiredChecks: requiredPullRequestChecks(policy), workflows: [], applied, unchanged, drift, wroteServe: writeServe, firstCase };
 }
+
+/**
+ * The serve declaration onboarding writes when nothing previewable serves a head: a server that
+ * needs nothing but Node answering on a loopback port, so a trial can serve any checkout and run
+ * its cases against it. A repository with a real application replaces it with the declaration that
+ * serves that application (docs/validation.md).
+ */
+export const onboardingServe = {
+  command: `node -e "require('http').createServer((request,response)=>{response.setHeader('content-type','application/json');response.end(require('fs').readFileSync('graphyard.json'))}).listen(43911,'127.0.0.1')"`,
+  url: 'http://127.0.0.1:43911/',
+  readySeconds: 60,
+};
+
+/** The first case onboarding writes (e2e/cases/served-head.json): the served head answers. */
+const onboardingFirstCase = () => ({
+  id: onboardingCaseId,
+  title: 'The head serves and answers',
+  description: `The served head answers a request: the check every end-to-end case shares. Graphyard's onboarding wrote it as this repository's first case (${onboardingCasePath}); give the application its own cases beside it.`,
+  tags: ['onboarding'],
+  target: 'any' as const,
+  required: false,
+  secrets: [] as string[],
+  steps: [{
+    kind: 'http' as const, name: 'the served head answers successfully',
+    method: 'GET' as const, path: '/', status: 200,
+  }],
+});
 
 // GY-1859: a running unit is not proof the install runs the right code. The loop serving a
 // repository may be a process an earlier checkout left behind: it answers, the setup checklist

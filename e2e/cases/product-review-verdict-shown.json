@@ -17,7 +17,7 @@
       "path": "/api/work",
       "body": {
         "title": "E2E case {{case}} run {{run}}",
-        "description": "No user-facing change: created by the product-review-verdict-shown E2E case to carry a recorded verdict.",
+        "description": "Created by the product-review-verdict-shown E2E case to carry a recorded verdict.",
         "type": "feature",
         "priority": 3,
         "criteria": [
@@ -25,7 +25,8 @@
             "id": "AC-1",
             "text": "The feature is product-reviewed before it merges",
             "proofs": [
-              "manual:product-review-recorded"
+              "manual:product-review-recorded",
+              "e2e:create-work-item"
             ]
           }
         ],

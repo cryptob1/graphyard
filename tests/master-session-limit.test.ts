@@ -4,6 +4,10 @@ import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { daemonSummary } from '../src/daemon/run.js';
 import { masterSummary } from '../src/daemon/state.js';
+import { writeFile } from 'node:fs/promises';
+import { daemonStatePath } from '../src/master-daemon.js';
+import { masterStatusReport } from '../src/cli/master-status.js';
+import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
 import { masterProfile } from '../src/master/master-session.js';
 import { recordObservedExhaustion, heldAwareProbe } from '../src/master/environments.js';
 import { selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
@@ -116,7 +120,7 @@ test('unit:master-session-limit-fails-over — a master pane showing its provide
   assert.equal(state.master.session, 'session-codex');
   assert.equal(state.master.limitedUntil, null, 'the replacement session clears the hold');
   assert.equal(state.master.lastEnd, null, 'the replacement session starts fresh');
-  assert.equal(masterSummary(state.master, clock).state, 'working');
+  assert.equal(masterSummary(state.master, clock, { agent_status: 'working' }).state, 'working');
   const failover = state.actions['master:failover'];
   assert.equal(failover?.state, 'done');
   assert.match(failover!.detail, /treated as absent/);
@@ -135,7 +139,7 @@ test('unit:master-session-limit-fails-over — a pane with ordinary output is ad
   assert.deepEqual(observed.launched, [], 'no second master is launched');
   assert.equal(state.master.adopted, true, 'the live session is adopted as today');
   assert.equal(state.master.pane, 'pM');
-  assert.equal(masterSummary(state.master, clock).state, 'working');
+  assert.equal(masterSummary(state.master, clock, { agent_status: 'working' }).state, 'working');
 });
 
 test('unit:master-status-shows-master-session-state — master status reads the session limited until the hold\'s instant while it stands, and absent once the pane is closed and the hold has lapsed', async () => {
@@ -159,4 +163,62 @@ test('unit:master-status-shows-master-session-state — master status reads the 
   // Once the hold has lapsed with the pane still closed, the session reads absent.
   assert.equal(daemonSummary(state, Date.parse(resetsAt) + 60_000, 60_000, HOST).master.state, 'absent');
   assert.equal(masterSummary(state.master, Date.parse(resetsAt) + 60_000).state, 'absent');
+});
+
+for (const [name, screen] of [
+  ['weekly limit', "You've hit your weekly limit · resets Oct 25, 10pm (America/Los_Angeles)"],
+  ['session limit', limitScreen],
+  ['out of usage credits', "You're out of usage credits. Run /usage-credits to keep using Fable 5.1 or /model to switch models."],
+]) for (const status of ['working', 'done']) test(`integration:master-limit-failover — moved ${status} master showing ${name} holds its account, closes its live pane and launches the next account in one cycle`, async () => {
+  const master = await config(), registry = registryFixture(), observed = fixture();
+  observed.screen = screen;
+  const agents = [{ name: MASTER, pane_id: 'live-pane', agent_status: status }];
+  const state = emptyDaemonState(master);
+  state.master = { ...state.master, agentName: MASTER, pane: 'gone-pane', runtime: 'claude', account: 'claude-c', session: 'session-claude-c' };
+  await runCycle(master, state, await effectsFor(master, agents, observed, registry), () => clock);
+  assert.equal(observed.exhausted.length, 1);
+  assert.equal(observed.exhausted[0].account, 'claude-c');
+  assert.deepEqual(observed.closed, ['live-pane']);
+  assert.equal(observed.launched.length, 1);
+  assert.deepEqual(registry.live(), ['codex']);
+  assert.equal(state.master.account, 'codex');
+});
+
+test('unit:master-status-reads-live-pane — a moved master refreshes its persisted pane within one cycle; unreadable screens and ended runtimes never read working', async () => {
+  const master = await config(), registry = registryFixture(), observed = fixture();
+  observed.screen = 'Continuing coordination.';
+  const agents = [{ name: MASTER, pane_id: 'live-pane', agent_status: 'working' }];
+  const state = emptyDaemonState(master);
+  state.master = { ...state.master, agentName: MASTER, pane: 'gone-pane' };
+  await runCycle(master, state, await effectsFor(master, agents, observed, registry), () => clock);
+  assert.equal(state.master.pane, 'live-pane');
+  assert.equal(observed.persisted?.master.pane, 'live-pane');
+  assert.deepEqual(observed.closed, []);
+  assert.deepEqual(observed.launched, []);
+  // Exercise the actual status reader with a stale cursor too: the Herdr handle wins.
+  state.master.pane = 'gone-pane';
+  await writeFile(daemonStatePath(master), JSON.stringify(state));
+  let readable = true, status = 'working', visible = true;
+  const reads: string[] = [];
+  const report = () => masterStatusReport('.', master, async () => ({ work: [], now: iso(clock) }), async (command, args) => {
+    if (!isHerdrCommand(command)) return 'a'.repeat(40);
+    const call = herdrSubcommand(args);
+    if (call[0] === 'agent' && call[1] === 'list') return JSON.stringify({ agents: visible ? [{ ...agents[0], agent_status: status }] : [] });
+    assert.equal(call[1], 'read');
+    reads.push(call[2]);
+    if (!readable) throw new Error('agent_not_found');
+    return observed.screen!;
+  });
+  assert.equal((await report()).masterSession.state, 'working');
+  assert.equal((await report()).masterSession.pane, 'live-pane');
+  assert.deepEqual(reads, ['live-pane', 'live-pane']);
+  readable = false;
+  assert.equal((await report()).masterSession.state, 'screen unreadable');
+  readable = true;
+  status = 'done';
+  assert.equal((await report()).masterSession.state, 'done');
+  status = 'idle';
+  assert.equal((await report()).masterSession.state, 'idle');
+  visible = false;
+  assert.equal((await report()).masterSession.state, 'unknown');
 });
