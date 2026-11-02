@@ -42,4 +42,6 @@ Claims last 120s, renewed every ≤30s; owner mutations carry epoch. Register br
 
 ## Other commands and routes
 
+Retired reads (`events/stats`, `actions`, attribution analytics and manifests, validation `seal-authority`, and registry `connect/hosts`) return 404 after authentication. The dashboard uses the surviving board, snapshot and detail routes.
+
 `graphyard help` lists commands. Routes: `/api/assignments/claim`, `/api/agent-registry[/apply|select|observe|document|history|connect]`, `/api/validation/[analytics|capacity|definitions|artifacts|replay|reuse|collection-authority|cancel|settle|retry]`, `/api/delivery/[observations|select|sweep]`, `/api/human-requests`, `/api/intake`, `/api/operator-agents`, `/api/principals`, `/api/production-environment`, `/api/scenarios`, and pattern routes under `/api/work/ID` and `/api/agent-registry`.

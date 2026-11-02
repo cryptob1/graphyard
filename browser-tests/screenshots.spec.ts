@@ -15,12 +15,24 @@ const out = 'test-results/screenshots/after';
 const slug = (text: string) => text.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
 async function open(page: Page) {
+  const retiredReads: string[] = [];
   await page.clock.setFixedTime(new Date(NOW));
-  await page.route('**/api/**', route => { const url = new URL(route.request().url()); return route.fulfill({ json: boardApi(url.pathname.slice(1) + url.search) }); });
+  await page.route('**/api/**', route => {
+    const url = new URL(route.request().url());
+    const retired = ['/api/events/stats', '/api/actions', '/api/analytics/attribution', '/api/analytics/attribution/drilldown',
+      '/api/validation/import/seal-authority', '/api/agent-registry/connect/hosts'].includes(url.pathname)
+      || url.pathname.startsWith('/api/attribution/');
+    if (route.request().method() === 'GET' && retired) {
+      retiredReads.push(url.pathname);
+      return route.fulfill({ status: 404, json: { error: 'Not found' } });
+    }
+    return route.fulfill({ json: boardApi(url.pathname.slice(1) + url.search) });
+  });
   await page.goto('/');
   await page.getByLabel('Access token').fill('fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   await expect(page.getByRole('heading', { name: 'Work', level: 1 })).toBeVisible();
+  return retiredReads;
 }
 async function nav(page: Page, entry: string, phone: boolean) {
   if (phone) await page.getByRole('button', { name: 'Menu' }).click();
@@ -31,7 +43,7 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
   test.setTimeout(120_000);
   mkdirSync(out, { recursive: true });
   await page.setViewportSize({ width: viewport.width, height: viewport.height });
-  await open(page);
+  const retiredReads = await open(page);
   const phone = viewport.name === 'phone';
   const shot = async (name: string) => {
     await page.waitForTimeout(250);
@@ -82,6 +94,7 @@ for (const viewport of viewports) test(`every page is captured at ${viewport.nam
   if (phone) await page.getByRole('button', { name: 'Menu' }).click();
   await page.getByRole('button', { name: 'Help' }).click();
   await shot('guide');
+  expect(retiredReads, 'every dashboard page uses only surviving HTTP reads').toEqual([]);
 });
 
 // GY-198: the sign-in page in its token-form, verifying and unreachable states, at 1280 px and 375 px wide.
