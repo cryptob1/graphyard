@@ -22,7 +22,7 @@ import { verificationEnvironment, verificationSlotsDirectory } from './verificat
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
  * tuning its own configuration through the CLI's owned fields (`master config` — a direct edit of
- * master.json would reach autoMerge and the credential and identity paths onboarding owns, so it
+ * master.json would reach the credential and identity paths onboarding owns, so it
  * is not granted), restarting and reading the durable loop's exact unit, administering the
  * deployment it verifies, and re-running CI for a candidate. None of these reaches a merge, a
  * verdict, evidence, or a credential; the enforced boundaries are unchanged.
@@ -490,9 +490,9 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
  * worker's own harness, so the rework the control plane authorizes is carried out by the attempt it
  * dispatches, with no human shell.
  */
-export function branchRestoration(input: { cliPath: string; key: string; epoch: number; pr: number; reviewedHead: string }) {
+export function branchRestoration(input: { cliPath: string; key: string; epoch: number; reviewedHead: string }) {
   const cli = `node ${input.cliPath}`;
-  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} ${input.pr}`];
+  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} --head`];
 }
 /**
  * The shell commands a blocker names: each backtick-quoted command line, or, in a blocker that

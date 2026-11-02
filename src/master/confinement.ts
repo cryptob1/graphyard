@@ -3,6 +3,7 @@ import { existsSync, realpathSync, statSync } from 'node:fs';
 import { delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { defaultChildRun } from '../child-runner.js';
 import { runtimeSandboxes } from '../worker-sandbox.js';
+import { cliMountRoot } from '../install/cli-release.js';
 import { configHome } from '../install/secrets.js';
 import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, gitPointerAdminDirectory } from './checkout-git.js';
 
@@ -217,8 +218,9 @@ export function credentialMaskFor(
     own: [own.credentialFile ?? null, ...(own.runtimeHomes ?? [])].filter((path): path is string => !!path && isAbsolute(path)),
     // GY-2995: a self-deployed install runs its CLI from a checkout under the config home
     // (`<install>/deploy/build`, the launcher at `bin/graphyard.mjs` running code from its
-    // checkout root). The mask keeps that checkout — code, never a credential — readable.
-    cli: launcher !== undefined && withinCheckout(launcher, operatorHome) ? [dirname(dirname(launcher))] : [],
+    // checkout root). Releases live beneath it, so new sessions keep that same stable
+    // mount across later publications. Only code and dependencies live there.
+    cli: launcher !== undefined && withinCheckout(launcher, operatorHome) ? [cliMountRoot(dirname(dirname(launcher)))] : [],
   };
 }
 

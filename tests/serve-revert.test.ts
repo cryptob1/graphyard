@@ -280,7 +280,6 @@ test('unit:serve-revert — the loop step drives the production path: the served
     },
     holds: async () => false,
     record: async () => {},
-    merger: async () => 'control-plane',
     serveRecord: async () => { const record = readServeRecord(servedFile); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
     createWork: async input => { filed.push(input); return { key: 'GY-3003' }; },
   };
@@ -344,7 +343,6 @@ function loopReads(coordinator: string, origin: string, servedFile: string, stat
     },
     holds: async () => false,
     record: async () => {},
-    merger: async () => 'control-plane',
     serveRecord: async () => { const record = readServeRecord(servedFile); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
     createWork: async input => { filed.push(input); return { key: 'GY-3003' }; },
   };

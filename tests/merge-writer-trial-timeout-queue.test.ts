@@ -80,7 +80,7 @@ function harness(work: Work[], slowKeys: readonly string[]): Harness {
       return {};
     },
   };
-  const reads: MergeWriterReads = { ...ports, merger: async () => 'control-plane' };
+  const reads: MergeWriterReads = { ...ports};
   const effects = { mergeWriter: reads, persist: async () => {}, rework: async (picked: Work, reason: string) => { made.reworked.push({ key: picked.key, reason }); } };
   let clock = start;
   made.step = async () => {

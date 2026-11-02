@@ -55,7 +55,7 @@ export const masterCommands = defineCommands([
       '  master dispatch GY-N PROFILE  Invite a worker to claim ready work in a visible tab',
       '  master merge                  Say that GitHub merges; Graphyard runs no merge of its own',
       '  master config FIELD=VALUE…   Tune owned run settings and profile accounts',
-      '                                (accounts:PROFILE=a,b); autoMerge and credential paths stay operator-only',
+      '                                (accounts:PROFILE=a,b); credential paths stay operator-only',
       '  master run [--once] [--interval SECONDS]',
       '                                The durable coordination loop: snapshot, close, dispatch,',
       '                                merge writer, persist',

@@ -41,7 +41,6 @@ after(async () => { if (database) await database.stop(); });
 function engineOn(store: Store, leaseSeconds = 120) {
   const engine = new Engine(store, leaseSeconds, 'owner/project');
   engine.principals = [operator, engineer, rival];
-  engine.submissionObserver = null;
   return engine;
 }
 async function ready(engine: Engine, title: string, criteria = [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }]) {
@@ -108,9 +107,13 @@ test('unit:lease-pool-isolated — renewal, claim, complete, blocked and defer o
       assert.deepEqual([deferred.value.body.lease, deferred.value.body.blocker, deferred.value.body.observationWindow?.basis], [null, null, 'worker-reading'], 'defer ended the attempt and holds the window');
       const claim = await timed(() => http.post(rival, `work/${open.id}/claim`, {}));
       assert.equal(claim.value.status, 200, JSON.stringify(claim.value.body)); assert.ok(claim.ms < 2000, `claim completed in ${Math.round(claim.ms)} ms`);
-      const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 }));
+      const head = 'a'.repeat(40);
+      const number = await http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 });
+      assert.match(number.body.error, /never a pull request number[^]*--head/, 'the HTTP route refuses a pull request number');
+      engine.gitRunner = async args => ({ status: 0, stdout: args[0] === 'diff' ? '' : head, stderr: '' });
+      const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, head }));
       assert.equal(complete.value.status, 200, JSON.stringify(complete.value.body)); assert.ok(complete.ms < 2000, `complete completed in ${Math.round(complete.ms)} ms`);
-      assert.equal(complete.value.body.submission.pr, 558);
+      assert.equal(complete.value.body.candidate.sha, head);
     } finally { for (const client of held) client.release(); }
     // The other way round: with every lease connection held, status and reconciliation still run,
     // because neither ever takes a lease connection.

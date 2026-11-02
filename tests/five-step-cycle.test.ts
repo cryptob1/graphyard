@@ -50,7 +50,7 @@ function mergePorts() {
     holds: async () => false,
     record: async (target: Pick<Work, 'key'>, event: MergeRecordEvent) => { events.push({ key: target.key, kind: event.kind }); },
   };
-  return { reads: { ...ports, merger: async () => 'control-plane' as const } as MergeWriterReads, events };
+  return { reads: { ...ports} as MergeWriterReads, events };
 }
 
 test('unit:five-step-cycle — one cycle records exactly snapshot, close, dispatch, merge writer and persist in that order: the claimable item is dispatched, the submitted head trialled and merged, the Done item\'s session closed, the cursor persisted, and a bounded master heartbeat is recorded within dispatch', async () => {
@@ -111,7 +111,7 @@ test('unit:five-step-cycle — merging a head runs exactly one trial for it and 
     record: async (_target, event) => { events.push(event); },
   };
   // Count the retired advisory read too, so restoring it makes this regression fail.
-  const reads = { ...ports, merger: async () => 'control-plane' as const, advisory: async () => { trials += 1; return { build: 'pass' as const, failed: [] }; } } as unknown as MergeWriterReads;
+  const reads = { ...ports,  advisory: async () => { trials += 1; return { build: 'pass' as const, failed: [] }; } } as unknown as MergeWriterReads;
   const effects: DaemonEffects = {
     snapshot: async () => ({ work, now: iso(now) }),
     agents: () => [], herdr: () => ({ agents: [], available: true }),
