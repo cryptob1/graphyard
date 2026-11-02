@@ -1,0 +1,13 @@
+{
+  "id": "master-continues-after-failover",
+  "title": "A failed-over master continues the authoritative conversation",
+  "description": "Ends and relaunches real credential-free native runtime fixture processes through the daemon and master launcher: another Claude account, another runtime, A-to-B-to-A supersession, partial responses, tool results, recorded automated inputs and explicit no unanswered message. Successors read full transcripts inside their read-only record mount with other login homes masked.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "confined master continuity",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/master-conversation-e2e.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
