@@ -19,7 +19,7 @@ Exact-head approval lands; remote threads and reviews are never read or resolved
 
 Reviewer and spec-check launch bearers authenticate from committed launch records, including delivered items, so unexpired unused tokens survive server restarts. Recovery grants only the launch's reader identity; verdicts retain their token, head, requirements revision and independence checks. Recording, refusing, replacing or clearing a launch revokes its token; expiry needs no process-local cleanup. Session reconciliation can release an unusable session without supplying an approval.
 
-`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Mechanical findings hold approval until the round window or the loop's clear; the loop requests bot `rework`, one commit, only those files. `Rejected bot commit: SHA — reason` rejects it.
+`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Nits stay advisory: they never hold approval or trigger a bot round.
 
 ## Scope is a plan, not a lock
 

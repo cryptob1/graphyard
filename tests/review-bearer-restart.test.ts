@@ -28,7 +28,7 @@ function item(key: string): Work {
 }
 
 test('integration:review-bearer-restart — original launch bearers survive a real server process restart and retain only their original authority', async () => {
-  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 3055;
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 195;
   const pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('review-bearer-restart-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   let store: Store | undefined, child: ChildProcess | undefined, url = '';
   const database = `postgres://graphyard:testing-only@127.0.0.1:${port}/review_restart`;

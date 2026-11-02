@@ -157,7 +157,7 @@ test('unit:post-deploy-criteria — the reviewer judges a declared criterion on 
   assert.ok(!plain.includes('post-deploy verification'));
   assert.ok(reviewPrompt(config, binding, undefined, undefined, declared).includes(section));
   const plane = { head: binding.sha, baseTip: binding.baseSha };
-  assert.ok(reviewPrompt(config, binding, undefined, undefined, declared, undefined, undefined, null, null, null, null, plane).includes(section));
+  assert.ok(reviewPrompt(config, binding, undefined, undefined, declared, undefined, undefined, null, null, null, plane).includes(section));
 });
 
 const mergeSha = 'd'.repeat(40);

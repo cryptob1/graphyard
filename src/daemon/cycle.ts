@@ -7,6 +7,7 @@ import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
 import { dispatchSort, inFlight } from '../coordination.js';
+import { capacityRefusal } from '../fleet.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
 import type { CoordinationRounds } from '../server/work-view.js';
@@ -586,6 +587,11 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
     clearProfileFailure(state, profile);
     sink.push(await entry('done', `Dispatched ${item.key} to ${profile.name}; the worker launcher claimed under ${profile.principal}`));
   } catch (error) {
+    const full = capacityRefusal(error);
+    if (full) {
+      sink.push(await entry('waiting', `Dispatch of ${item.key} waits for a worker slot, retried on the first cycle one frees: ${full}`));
+      return;
+    }
     recordProfileFailure(state, profile, message(error), now());
     sink.push(await entry('failed', `Dispatch of ${item.key} to ${profile.name} failed: ${message(error)}; it is retried next cycle`));
   }
@@ -614,6 +620,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
     return;
   }
   if (!master.agentName) state.master = { ...master, agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: cycle.snapshot.now, adopted: true };
+  if (handle.pane_id) state.master.pane = handle.pane_id;
   if (!state.master.startedAt) state.master.startedAt = cycle.snapshot.now;
   if (await masterPaneFailover(cycle, handle, open)) return;
   const changed = causes.filter(cause => state.master.subjects[cause.key] !== cause.digest);
@@ -668,14 +675,12 @@ async function masterPaneFailover(cycle: Cycle, handle: HerdrAgent, open: Work[]
   if (cycle.launcher.busy(cycle.config.forPerson ? `${masterLaunchKey}:${cycle.config.forPerson}` : masterLaunchKey)) return;
   const exited = endedRuntimeStates.includes(handle.agent_status ?? '');
   let notice: ExhaustionSignal | null = null;
-  if (!exited) {
-    const pane = master.pane ?? handle.pane_id ?? null;
-    if (!pane) return;
+  const pane = handle.pane_id ?? master.pane ?? null;
+  if (pane) {
     const screen = await Promise.resolve(effects.sessionScreen?.({ pane, agentName: master.agentName })).catch(() => null) ?? null;
-    if (screen === null) return;
-    notice = detectRuntimeExhaustion(screen, master.runtime, clock);
-    if (!notice) return;
+    if (screen !== null) notice = detectRuntimeExhaustion(screen, master.runtime, clock);
   }
+  if (!notice && !exited) return;
   const reason = notice ? `its pane showed its provider's limit notice: ${notice.reason}` : `its pane's runtime reports ${handle.agent_status}, so the session is gone`;
   const key = cycle.config.forPerson ? `master:failover:${cycle.config.forPerson}` : 'master:failover';
   try {

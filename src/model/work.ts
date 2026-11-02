@@ -134,7 +134,7 @@ export interface Observation {
   prState?: 'open' | 'closed'; draft?: boolean; prCreatedAt?: string;
   /** Pull-request-era check runs; the control plane records none (`checks: []`) and no gate reads them. */
   candidate: Candidate; checks: { name: string; result: string; appId: number; id?: number; attempt?: number; source?: 'status' }[];
-  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; mechanical?: number; source?: string; baseSha?: string }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); mechanical: an approval's nits classified mechanical, which hold the review gate for their bot round (GY-971); baseSha: the base a control-plane verdict judged against, its launch's baseTip (GY-2948 AC-2)
+  reviews: { reviewer: string; sha: string; state: string; id?: number; submittedAt?: string; body?: string; blocking?: string[]; source?: string; baseSha?: string }[]; // body: a change request's text, read past the review-round cap; blocking: its BLOCKING: findings, read from the whole body (GY-1118); baseSha: the base a control-plane verdict judged against, its launch's baseTip (GY-2948 AC-2)
   merged: boolean; mergeSha: string | null; mergedAt?: string | null; mergeable: boolean;
   /** A pull-request-era conflict reading; the control plane's own test merge decides conflicts (model/base-refresh.ts). */
   conflicting?: boolean;
@@ -168,10 +168,6 @@ export interface Work extends Create {
   warnings?: string[];
   retiredCriterionIds?: string[];
   formalReviewResetRequired?: boolean;
-  /** The planned mechanical-fix round the review ledger holds for the current candidate (GY-1764): the only ground that holds an approved head for its bot round. `at` is the instant the control plane accepted the loop's last report of it, so a hold never outlives a ledger the loop can still confirm. */
-  mechanicalPlan?: { reviewId: number; head: string; at: string } | null;
-  /** The approval the loop's last clear of `mechanicalPlan` answered (GY-1814): a clear releases the review gate's hold over that approval only, never over a later approval of a later head. */
-  mechanicalAnswered?: { reviewId: number; head: string } | null;
   formalReviewBaseline?: { pr: number; policyRevision: number; reviewIds: number[] };
   // Append-only identities that have held an assignment. Trusted proof producers
   // must stay independent of every one of them, not only the latest assignment.

@@ -16,7 +16,7 @@ test('integration:reviewer-stage-order — GY-3044 briefs allow approval before 
   const prompts = [
     reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, criteria),
     reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, criteria,
-      undefined, undefined, undefined, undefined, undefined, undefined, { head, baseTip: base }),
+      undefined, undefined, undefined, undefined, undefined, { head, baseTip: base }),
     reviewStandard({ key: binding.key, head, base }, criteria),
   ];
   for (const prompt of prompts) {
