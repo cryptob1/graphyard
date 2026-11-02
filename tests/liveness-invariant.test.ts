@@ -10,6 +10,10 @@ import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction
 import { nextAction } from '../src/model/next-action.js';
 import { livenessCarry, livenessOf, livenessRetryLimit, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): t0 (2026-09-20) drives a virtual clock (now = () => new Date(clock)) handed to settleDelivered and the retry rows; the Postgres half stamps and judges everything with the real clock.
 
 /**
@@ -35,7 +39,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('liveness'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('liveness_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/liveness_test`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 120, repository);
   engine.principals = [operator, worker, coordinator, producer];
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
@@ -55,7 +59,7 @@ const observation = (work: Work, extra: Partial<Observation> = {}): Observation 
 
 const released = async () => {
   const n = ++serial;
-  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Liveness ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
+  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Liveness ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF, 'e2e:fixture'] }] }, id());
   return engine.execute(operator, 'ready', created.id, {}, id());
 };
 const claimed = async () => engine.execute(worker, 'claim', (await released()).id, {}, id());
@@ -91,7 +95,7 @@ test('unit:liveness-violations-detected — every open item holds exactly one ob
   const building = await judge(await claimed());
   assert.equal(building.violation, null);
   assert.equal(building.obligation!.kind, 'session', 'the leased worker owns the build');
-  const backlog = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Backlog', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF] }] }, id());
+  const backlog = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Backlog', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: [PROOF, 'e2e:fixture'] }] }, id());
   assert.deepEqual(await judge(backlog), { work: backlog.id, key: backlog.key, obligation: null, violation: null }, 'backlog is not open work');
 
   // A candidate passing every gate but the merge writer's owes nobody a step (GY-2010): the writer

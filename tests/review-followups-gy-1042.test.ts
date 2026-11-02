@@ -10,6 +10,10 @@ import { boundLockedCache, isStandIn, lockedRows, lockedWork, rememberSaved, sav
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-1042: the follow-ups from the approved reviews of GY-1027 (PR #533). The first case records how
  * each listed finding was answered; the others prove the ones answered in code.
@@ -80,7 +84,7 @@ before(async () => {
 });
 after(async () => { boundLockedCache(); if (store) await store.close(); if (database) await database.stop(); });
 
-const create = (title: string, plannedFiles: string[]) => engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }] }, randomUUID());
+const create = (title: string, plannedFiles: string[]) => engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x', 'e2e:fixture'] }] }, randomUUID());
 /** `db` with every query's text recorded. */
 const recorded = (db: Queryable, texts: string[]): Queryable => ({ query: (text, values) => { texts.push(text); return db.query(text, values); } });
 const projects = (texts: string[]) => texts.filter(text => /CROSS JOIN LATERAL/.test(text)).length;
@@ -172,16 +176,4 @@ test('unit:projection-contract — an open item\'s projection leaves out its per
   assert.ok(!isStandIn(whole));
   assert.deepEqual(whole.observation?.scopeFiles, scopeFiles, 'read whole, the peer carries its scope for the landing check');
 
-  // The submit-time observation hands the provider that whole peer.
-  let focus = await create('Submitting', ['src/submitting/']);
-  focus = await engine.execute(operator, 'ready', focus.id, {}, randomUUID());
-  focus = await engine.execute(worker, 'claim', focus.id, {}, randomUUID());
-  focus = await engine.execute(worker, 'workspace', focus.id, { epoch: focus.epoch, host: 'host-a', path: `/tmp/followups/${focus.id}`, branch: `graphyard/${focus.key.toLowerCase()}-${focus.epoch}` }, randomUUID());
-  let peers: Work[] = [];
-  const stop = new Error('observed');
-  engine.submissionObserver = async (_probe, all) => { peers = all ?? []; throw stop; };
-  try {
-    await assert.rejects(engine.execute(worker, 'submit', focus.id, { epoch: focus.epoch, pr: 7002 }, randomUUID()), error => error === stop);
-  } finally { engine.submissionObserver = null; }
-  assert.deepEqual(peers.find(item => item.id === peer.id)?.observation?.scopeFiles, scopeFiles, 'the landing check saw the peer\'s scope files');
 });

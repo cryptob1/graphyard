@@ -12,6 +12,10 @@ import { masterStatusReport } from '../src/cli/master-status.js';
 import { defaultAttemptBoundMinutes, defaultAttemptCeilingMinutes } from '../src/master/attempt-bound.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+
+// Every filed fixture owes an E2E proof and the serve declaration its trial needs.
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-2961: an attempt still making progress is not cut off at the fixed no-submission bound. The
 // loop reads the attempt's worktree every cycle and records what changed there on the session
@@ -45,7 +49,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 
 /** The item claimed so its lease is live across the whole fixture clock, with its session running. */
 const item = async (key: string, title: string) => {
-  const filed = await ok(operator, 'POST', 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:attempt-bound-extends-while-progressing'] }] }) as Work;
+  const filed = await ok(operator, 'POST', 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:attempt-bound-extends-while-progressing', 'e2e:fixture'] }] }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});
   const claimed = await ok(worker, 'POST', `work/${filed.id}/claim`, {}) as Work;
   await ok(worker, 'POST', `work/${filed.id}/workspace`, { epoch: claimed.epoch, host: 'loop-host', path: `/srv/worktrees/${key.toLowerCase()}-1`, branch: `graphyard/${key.toLowerCase()}-1` });
@@ -64,7 +68,7 @@ before(async () => {
   await store.init();
   // An 11-hour lease keeps every fixture lease live under the clock, which runs nine hours ahead.
   engine = new Engine(store, 40_000, repository);
-  engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
+ engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

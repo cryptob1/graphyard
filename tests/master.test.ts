@@ -47,7 +47,7 @@ test('master init verifies a coordinator and repository before writing private l
   const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials');
   try {
     const result = await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
-    assert.equal(result.autoMerge, true); assert.equal(result.role, 'coordinator');
+    assert.equal(result.role, 'coordinator');
     assert.deepEqual(result.attention, []); assert.match(result.next, /^Run graphyard master reviewer setup .* then graphyard master start/);
     // A permission the installed App lacks is announced with the migration path, and never blocks setup.
     const shortfall = 'App graphyard-owner-project lacks Contents: write (installed with read), which branch refresh needs to push base refreshes and main-guard revert branches onto the managed repository; accept the pending permission request at https://github.com/settings/installations/4242';
@@ -290,7 +290,7 @@ test('master start creates a visible non-focused coordinator session with no cre
     assert.equal(master.kind, 'codex'); assert.equal(master.stem, join(root, '.graphyard/launch', (await loadMasterConfig(root)).masterAgentName)); assert.match(master.args.at(-1)!, /dedicated Graphyard master agent/); assert.equal(result.delivery, 'request');
     assert.equal(calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), false, 'nothing is pasted into the master session');
     assert.equal(JSON.stringify(calls).includes(coordinatorToken), false);
-    await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, autoMerge: false }, coordinatorStatus as typeof fetch);
+    await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);
     const manualCalls: string[][] = [];
     await startMaster(root, 'codex', [], [], (_command, args) => { manualCalls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { pane_id: 'manual-master' } : {} }); });
     assert.doesNotMatch(expandTypedCommand(manualCalls[1][3]).args.at(-1)!, /Automatic merging is disabled/, 'autoMerge off asks for no merge approval: GitHub merges');
@@ -313,12 +313,12 @@ test('launch profiles verify a private worker credential and match its principal
   const root = await repository(); const credentialDirectory = await temporaryDirectory('master-credentials'); const credential = join(credentialDirectory, 'worker.token'); const siblingParent = await temporaryDirectory('sibling'); const sibling = join(siblingParent, 'worktree');
   try {
     await writeFile(credential, workerToken, { mode: 0o600 });
-    await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, hostId: 'stable-host', autoMerge: false, mergeMethod: 'squash' }, coordinatorStatus as typeof fetch);
+    await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory, hostId: 'stable-host', mergeMethod: 'squash' }, coordinatorStatus as typeof fetch);
     const result = await saveWorkerProfile(root, { name: 'launch', principal: 'worker-a', agentName: 'eng-a', mode: 'launch', kind: 'codex', credentialFile: credential }, async token => ({ actor: { id: token === workerToken ? 'worker-a' : 'wrong', role: 'worker' } }));
     assert.equal(result.workers, 1); assert.equal((await loadMasterConfig(root)).workers[0].credentialFile, credential);
     const before = await loadMasterConfig(root); await rm(before.credentialFile);
     await setupMaster(root, { url: 'https://graphyard.example', token: `${coordinatorToken}-replacement`, cliPath: launcher, credentialDirectory }, coordinatorStatus as typeof fetch);
-    const recovered = await loadMasterConfig(root); assert.equal(recovered.workers.length, 1); assert.equal(recovered.hostId, 'stable-host'); assert.equal(recovered.autoMerge, false); assert.equal(recovered.mergeMethod, 'squash');
+    const recovered = await loadMasterConfig(root); assert.equal(recovered.workers.length, 1); assert.equal(recovered.hostId, 'stable-host'); assert.equal(recovered.mergeMethod, 'squash');
     await rm(credential);
     assert.equal((await loadMasterConfig(root)).workers.length, 1, 'one unavailable worker must not disable coordinator commands');
     const health = await inspectWorkerCredentials(root, recovered.workers); assert.equal(health.launch.available, false); assert.match(health.launch.reason!, /worker\.token|ENOENT/);

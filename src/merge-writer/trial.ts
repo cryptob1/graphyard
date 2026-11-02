@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readdir, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises';
 import { availableParallelism, constants, homedir, tmpdir } from 'node:os';
-import { dirname, join, relative, isAbsolute } from 'node:path';
+import { delimiter, dirname, join, relative, isAbsolute } from 'node:path';
 import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { allocateSessionCheckout, defaultWorktreeRootMinFreeGb, removeSessionCheckout, verifyWorktreeRoot, type FilesystemProbe } from '../install/worktree-root.js';
 import { isolatedTestEnvironment, npmCiArgs, npmCiEnvironment } from '../cli/test-isolation.js';
@@ -127,17 +127,28 @@ export const credentialTrialVariable = (name: string) =>
 /** The trial child's environment: the isolated test one, with every credential and Graphyard control removed and git's global configuration off. */
 export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !credentialTrialVariable(name)));
-  return { ...kept, GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  // Use the running Node installation before host version-manager shims: the trial's empty
+  // home intentionally cannot supply the host's mise trust/configuration to those shims.
+  return { ...kept, PATH: [dirname(process.execPath), kept.PATH].filter(Boolean).join(delimiter), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 }
 
 /**
  * GY-2997: the trial child's home — a fresh, empty directory of the trial as HOME and every XDG base
  * directory (as `previewEnvironment` gives a preview), so nothing the merge brings in finds a
  * coordinator credential through HOME or XDG. Only the host's npm cache and Playwright browsers are
- * still found where the host keeps them.
+ * still found where the host keeps them, along with mise's toolchain directories.
  */
 export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
   const shared: Record<string, string> = host.HOME ? { npm_config_cache: host.npm_config_cache ?? join(host.HOME, '.npm'), PLAYWRIGHT_BROWSERS_PATH: host.PLAYWRIGHT_BROWSERS_PATH ?? join(host.HOME, '.cache', 'ms-playwright') } : {};
+  for (const [kind, base, fallback] of [
+    ['CONFIG', 'XDG_CONFIG_HOME', '.config'], ['CACHE', 'XDG_CACHE_HOME', '.cache'],
+    ['DATA', 'XDG_DATA_HOME', '.local/share'], ['STATE', 'XDG_STATE_HOME', '.local/state'],
+  ] as const) {
+    const name = `MISE_${kind}_DIR`;
+    const directory = host[base] ?? (host.HOME ? join(host.HOME, fallback) : undefined);
+    if (host[name] !== undefined) shared[name] = host[name];
+    else if (directory) shared[name] = join(directory, 'mise');
+  }
   return { ...shared, HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
@@ -192,8 +203,8 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
  * suite builds under it has a length bound. A root clean when chosen is checked again once the
  * trial ends (`TrialEnvironmentError`): no point-in-time check keeps a shared folder clean.
  */
-export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots()) =>
-  roots.find(root => existsSync(root) && !lookupPoisoned(root)) ?? sessionDirectory;
+export const trialTemporaryRoot = (sessionDirectory: string, roots: readonly string[] = trialTemporaryRoots(), exists: (path: string) => boolean = existsSync) =>
+  roots.find(root => exists(root) && !lookupPoisoned(root, exists)) ?? sessionDirectory;
 /**
  * Where a trial's short checkout may go (GY-2020): a short folder on disk in the coordinator's home,
  * made on demand. Never /tmp, /var/tmp or the tmpdir: the suite treats a checkout under any of them
@@ -843,6 +854,15 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   };
   // A child a signal ended, or one the host could not start or capture, says nothing about the merge.
   const hostEnded = (ended: Ended) => !ended.ok && (ended.signal !== null || ended.cause !== undefined);
+  // Bubblewrap can start successfully but fail to exec npm: a plain nonzero exit without a
+  // spawn cause or signal. Its diagnostic still means the host toolchain never started.
+  const wrapperExecFailed = /^bwrap: execvp (?:node|npm|npx): No such file or directory\s*$/m;
+  // Only known mise shim startup diagnostics belong to the host; project mise task errors remain build failures.
+  const toolchainStartFailed = (ended: Ended) => {
+    if (ended.ok) return false;
+    const diagnostic = ended.out.replace(ansiEscape, '');
+    return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR (?:Config files in .+ are not trusted|No version is set for tool (?:node|npm|npx))\s*$|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
+  };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
     new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
@@ -909,7 +929,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
         if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
         else if (await holds('package-lock.json')) {
           const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
-          if (hostEnded(installed)) throw runnerFailure('install', installed);
+          if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
           if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
         const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
@@ -919,7 +939,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           enter('build');
           enterStep('build');
           const built = await child('build', 'npm', ['run', 'build']);
-          if (hostEnded(built)) throw runnerFailure('build', built);
+          if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
         // GY-2092: a change to the dashboard runs the Playwright suite against the host's one Chromium install; a failing browser test refuses the merge like any failing test.

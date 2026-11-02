@@ -13,6 +13,10 @@ import { assertDispatchable, masterConfigSchema, observedExhaustions, recordObse
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-2943: a worker that stopped on its provider's rate limit sat at its prompt for over half an
 // hour while the supervisor kept renewing its lease, so the item idled in build and eleven
 // dependants waited on it. The loop's close step now re-prompts a session Herdr reports idle with
@@ -47,7 +51,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 
 /** The item the fixture session runs, claimed so its lease is live across the whole fixture clock. */
 const item = async (key: string, title: string) => {
-  const filed = await ok(operator, 'POST', 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:idle-session-after-reprompt-is-ended'] }] }) as Work;
+  const filed = await ok(operator, 'POST', 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:idle-session-after-reprompt-is-ended', 'e2e:fixture'] }] }) as Work;
   await ok(operator, 'POST', `work/${filed.id}/ready`, {});
   const claimed = await ok(workerA, 'POST', `work/${filed.id}/claim`, {}) as Work;
   return { filed: claimed, session: { id: `worker-a:1`, kind: 'implementation' as const, principal: workerA.id, epoch: claimed.epoch, runtime: 'pi', host: 'loop-host', pane: `pane-${key.toLowerCase()}`, agentName: `agent-${key.toLowerCase()}`, subject: `${key}: ${title}`, state: 'running' as const } };
@@ -64,7 +68,7 @@ before(async () => {
   await store.init();
   // A two-hour lease keeps every fixture lease live under the clock, which runs 30 minutes ahead.
   engine = new Engine(store, 7200, repository);
-  engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
+ engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

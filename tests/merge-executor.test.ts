@@ -9,8 +9,8 @@ import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { daemonEffects } from '../src/daemon/effects.js';
-import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { attributeFailures, baseFailureReason, baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstFailingAssertion, crashedProcessLine, firstParentHolds, mergeOne, mergeQueue, nextToMerge, parseBaseFailureReason, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
+import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, replayUnconfirmed, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
+import { attributeFailures, baseFailureReason, baseMovedReason, countProofCases, criterionProofs, deployKeySshCommand, firstFailingAssertion, crashedProcessLine, firstParentHolds, mergeOne, mergeQueue, nextToMerge, parseBaseFailureReason, proofTestFiles, pushArgs, pushEnvironment, pushInheritedVariables, reconcileIntents, runMergeTrial, staleLeaseRejection, supersededIntentReason, trialFailureReason, unmovedTipReason, unpushedIntentReason, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../src/merge-writer/executor.js';
 import { defaultDeployKeyFile, defaultMergeWriterRetrials, mergeWriterSettings, mergeWriterSettingsSchema } from '../src/master/merge-writer-settings.js';
 import { deliveredReason, otherHeadRefusal, unheldShaRefusal, unintendedShaRefusal } from '../src/server/merge-record.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
@@ -24,6 +24,10 @@ import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { completionBody } from '../src/cli/complete.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1524: the control-plane merge executor — one serial queue, intent before push, the trial on the
 // exact merged tree, the deploy-key push leased on the tested tip, and the reconcile of what a crash left open.
@@ -222,7 +226,7 @@ test('unit:executor-push-leased-deploy-key-only — the push is `git push origin
     if (args.includes('rev-parse')) return `${tip}\n`;
     return '';
   });
-  const reads = mergeWriterReads(config, '/coordinator', git.run, { base: '/worktrees', record: async () => {}, merger: async () => 'control-plane', environment });
+  const reads = mergeWriterReads(config, '/coordinator', git.run, { base: '/worktrees', record: async () => {},  environment });
   assert.equal(await reads.push(mergeSha, tip), 'pushed');
   const push = git.calls.find(call => call.args.includes('push'))!;
   assert.deepEqual([push.command, push.args], ['git', ['-C', '/coordinator', 'push', 'origin', `--force-with-lease=refs/heads/main:${tip}`, `${mergeSha}:refs/heads/main`]]);
@@ -270,7 +274,7 @@ test('unit:executor-trial-runs-criterion-tests — the trial\'s selection is the
     }
     return '';
   });
-  const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', run: runner.run, remove: async () => {}, cores: 2 });
+  const verdict = await runMergeTrial({ root: '/coordinator', base, mergeSha, changedFiles: ['src/app.ts'], proofs: ['unit:alpha-works', 'integration:beta-holds', 'unit:never-ran'], proofFiles: ['tests/a.test.ts', 'tests/proof.test.ts'], timeoutMs: 60_000, key: 'GY-1', temporaryRoots: [await temporaryDirectory('executor-trial')], checkoutRoots: [], run: runner.run, remove: async () => {}, cores: 2 });
   assert.deepEqual(listed, ['tests/a.test.ts', 'tests/proof.test.ts'], 'the affected file once, plus the proof file the selection lacked');
   assert.deepEqual(runnerArgs.slice(runnerArgs.indexOf('tests/helpers/run-tests.ts') + 1, runnerArgs.indexOf('--files-from')), ['--test-reporter=tap', '--test-reporter-destination=stdout'], 'the run is read as TAP');
   assert.deepEqual(verdict.proofs, { 'unit:alpha-works': { executed: 2, failed: 0 }, 'integration:beta-holds': { executed: 1, failed: 1 }, 'unit:never-ran': { executed: 0, failed: 0 } }, 'cases are attributed by title prefix, a proof whose name is a prefix of another counts only its own');
@@ -348,10 +352,8 @@ function effectsFor(world: { work: () => Work[] | Promise<Work[]>; now: () => nu
     github: githubDouble, merge: githubDouble, mergeWriter: world.mergeWriter, ...(world.rework ? { rework: world.rework } : {}),
   } as unknown as DaemonEffects;
 }
-/** Reads over fake ports, switched by `merger`. */
-const fakeReads = (ports: MergePorts, merger: () => Promise<'control-plane'>): MergeWriterReads => ({ ...ports, merger });
 
-test('unit:merge-writer-step-off-in-github-mode — the step runs right after the merge step and does nothing without its reads; under control-plane it reconciles open intents, reports the queue and merges one head beside the cycle, then requests the rework a failed trial grounds; the merger is read afresh before every merge decision, so a switch to github stops the next merge', async () => {
+test('unit:merge-executor — the step runs right after the merge step and does nothing without its reads; under control-plane it reconciles open intents, reports the queue and merges one head beside the cycle, then requests the rework a failed trial grounds', async () => {
   const work = [submitted(2, 5), submitted(1, 30)], now = () => start;
   const bare = emptyDaemonState(config);
   await runCycle(config, bare, effectsFor({ work: () => work, now, mergeWriter: null }), now);
@@ -359,7 +361,7 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   // Under control-plane: the queue is reported oldest first, the oldest head is merged beside the cycle, and the next cycle records it.
   const on = fakePorts();
   const live = emptyDaemonState(config);
-  const effects = effectsFor({ work: () => on.world(work), now, mergeWriter: fakeReads(on.ports, async () => 'control-plane') });
+  const effects = effectsFor({ work: () => on.world(work), now, mergeWriter: on.ports });
   await runCycle(config, live, effects, now);
   assert.deepEqual(live.mergeWriter.queue.map(entry => entry.key), ['GY-1', 'GY-2']);
   assert.equal(inFlightKey(live), 'GY-1');
@@ -380,7 +382,7 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   const crashed = fakePorts({ holds: () => true });
   const reconcile = emptyDaemonState(config);
   const withIntent = [{ ...work[1]!, mergeLedger: ledgerState('GY-1', 1, 'intent') } as Work, work[0]!];
-  const settled = await runCycle(config, reconcile, effectsFor({ work: () => withIntent, now, mergeWriter: fakeReads(crashed.ports, async () => 'control-plane') }), now);
+  const settled = await runCycle(config, reconcile, effectsFor({ work: () => withIntent, now, mergeWriter: crashed.ports }), now);
   assert.deepEqual(crashed.events.map(event => event.kind), ['pushed', 'reconciled'], 'the held intent is recorded pushed and reconciled, without a push');
   assert.equal(reconcile.mergeWriter.inFlight, null, 'no new merge starts in the cycle that reconciled');
   assert.ok(settled.actions.some(action => /^Reconciled an open intent of GY-1/.test(action.detail)));
@@ -389,7 +391,7 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   const failing = fakePorts({ failTrial: true });
   const decided: { key: string; reason: string }[] = [];
   const reworked = emptyDaemonState(config);
-  const failingEffects = effectsFor({ work: () => work, now, mergeWriter: fakeReads(failing.ports, async () => 'control-plane'), rework: async (target, reason) => { decided.push({ key: target.key, reason }); } });
+  const failingEffects = effectsFor({ work: () => work, now, mergeWriter: failing.ports, rework: async (target, reason) => { decided.push({ key: target.key, reason }); } });
   await runCycle(config, reworked, failingEffects, now); await mergeWriterIdle(reworked);
   const refusedCycle = await runCycle(config, reworked, failingEffects, now);
   assert.deepEqual(reworked.mergeWriter.refusals.map(entry => [entry.key, entry.reason]), [['GY-1', `${trialFailurePrefix}: tests tests/item.test.ts`]]);
@@ -400,7 +402,7 @@ test('unit:merge-writer-step-off-in-github-mode — the step runs right after th
   // A base that moved past the bound leaves the head queued and asks for no rework.
   const moved = fakePorts({ pushes: ['rejected'], tips: [tip, newerTip, sha('tip3'), sha('tip4'), sha('tip5')] });
   const requeued = emptyDaemonState(config); decided.length = 0;
-  const movedEffects = effectsFor({ work: () => work, now, mergeWriter: fakeReads(moved.ports, async () => 'control-plane'), rework: async (target, reason) => { decided.push({ key: target.key, reason }); } });
+  const movedEffects = effectsFor({ work: () => work, now, mergeWriter: moved.ports, rework: async (target, reason) => { decided.push({ key: target.key, reason }); } });
   await runCycle(config, requeued, movedEffects, now); await mergeWriterIdle(requeued); await runCycle(config, requeued, movedEffects, now);
   assert.deepEqual([decided, requeued.mergeWriter.refusals[0]?.reason], [[], baseMovedReason(4)]);
 });
@@ -414,7 +416,7 @@ test('integration:executor-trial-failure-rework-no-approver — a rework the pla
     // The applied rework shows on the snapshot the next cycle reads: the item is returned to a worker.
     const applied = work.find(entry => entry.key === target.key); if (applied) (applied as { reworkRequested?: boolean }).reworkRequested = true; };
   const state = emptyDaemonState(config);
-  const effects = effectsFor({ work: () => failing.world(work), now, mergeWriter: fakeReads(failing.ports, async () => 'control-plane'), rework });
+  const effects = effectsFor({ work: () => failing.world(work), now, mergeWriter: failing.ports, rework });
   await runCycle(config, state, effects, now); await mergeWriterIdle(state);
   const first = await runCycle(config, state, effects, now);
   assert.deepEqual(decided, [], 'the first request failed');
@@ -440,14 +442,14 @@ test('integration:executor-trial-failure-rework-no-approver — a rework the pla
   const lost = emptyDaemonState(config);
   lost.mergeWriter.reworks = [{ key: 'GY-1', id: 'w1', head: sha('head1'), reason: `${trialFailurePrefix}: tests tests/item.test.ts`, refusedAt: iso(start), attempts: 3, lastError: 'route down' }, { key: 'GY-2', id: 'w2', head: sha('head2'), reason: `${trialFailurePrefix}: tests tests/item.test.ts`, refusedAt: iso(start), attempts: 1, lastError: null }];
   const applied = [{ ...work[0]!, reworkRequested: true } as Work, { ...work[1]!, candidate: { ...work[1]!.candidate!, sha: sha('head2-next') } } as Work];
-  const settled = await runCycle(config, lost, effectsFor({ work: () => applied, now, mergeWriter: fakeReads(fakePorts().ports, async () => 'control-plane'), rework }), now);
+  const settled = await runCycle(config, lost, effectsFor({ work: () => applied, now, mergeWriter: fakePorts().ports, rework }), now);
   assert.deepEqual([lost.mergeWriter.reworks, decided.length], [[], 1], 'both are settled without a request');
   assert.ok(settled.actions.some(action => /grounds is applied: the snapshot shows the item returned to a worker/.test(action.detail)) && settled.actions.some(action => /the snapshot shows the item on a new head/.test(action.detail)), JSON.stringify(settled.actions.map(action => action.detail)));
   // Without the master identity the record waits, naming the command the operator runs. A fresh
   // snapshot: the item above was returned to a worker when its request was confirmed.
   const waiting = emptyDaemonState(config);
   waiting.mergeWriter.reworks = [{ key: 'GY-1', id: 'w1', head: sha('head1'), reason: `${trialFailurePrefix}: tests tests/item.test.ts`, refusedAt: iso(start), attempts: 0, lastError: null }];
-  const waited = await runCycle(config, waiting, effectsFor({ work: () => [submitted(1, 30)], now, mergeWriter: fakeReads(fakePorts().ports, async () => 'control-plane') }), now);
+  const waited = await runCycle(config, waiting, effectsFor({ work: () => [submitted(1, 30)], now, mergeWriter: fakePorts().ports }), now);
   assert.equal(waiting.mergeWriter.reworks[0]?.lastError, 'this loop runs without the master identity');
   assert.ok(waited.actions.some(action => action.state === 'failed' && /graphyard master rework GY-1 REASON/.test(action.detail)), JSON.stringify(waited.actions.map(action => action.detail)));
 });
@@ -471,7 +473,6 @@ test('unit:merge-writer-status — master status and the daemon summary show mer
   await writeFile(credentialFile, `${'c'.repeat(48)}\n`, { mode: 0o600 });
   const wired = daemonEffects('/coordinator', { ...config, credentialFile }, { snapshot: async () => ({ work: [], now: iso(start) }), mutate: async (path, data, key) => { posted.push({ path, data, key }); return {}; }, run: git.run, fetcher: (async () => { throw new Error('the merger is never read from the plane'); }) as typeof fetch });
   assert.ok(wired.mergeWriter, 'the loop wires the merge writer reads');
-  assert.equal(await wired.mergeWriter!.merger(), 'control-plane', 'the control plane is the only merge writer');
   const event: MergeRecordEvent = { kind: 'pushed', mergeSha: sha('merge1'), pushedAt: iso(start) };
   await wired.mergeWriter!.record(item({ id: 'w1', key: 'GY-1' }), event);
   assert.deepEqual(posted, [{ path: 'work/w1/merge-record', data: event, key: mergeRecordKey({ id: 'w1' }, event) }]);
@@ -518,7 +519,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('merge-executor-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('merge_executor_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/merge_executor_test`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
@@ -532,7 +533,7 @@ async function request(credential: string, path: string, body?: unknown, key: st
 }
 /** An item the worker claimed, registered on its branch and submitted with `complete --head`, as GY-1523 submits it. */
 async function submittedItem(n: number) {
-  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
+  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(admin, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
@@ -555,7 +556,7 @@ function fixtureReads(options: { record?: MergePorts['record']; trial?: (input: 
   const run: ChildRun = (command, args, runOptions) => { if (command === 'git' && args.includes('push')) pushes.push({ args, env: runOptions?.env }); return defaultChildRun(command, args, runOptions); };
   const trial = options.trial ?? (async (given: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => { const input = { ...given, proofFiles: [...given.proofFiles, ...(await given.discoverProofFiles?.({}) ?? [])] }; trials.push(input); return { build: 'pass', tests: { passed: input.proofFiles.length, failed: [], files: input.proofFiles.length }, durationMs: 5, logTail: 'ok', files: [...input.proofFiles], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) }; });
   const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
-  const reads = mergeWriterReads(fixtureConfig, checkout, run, { base: worktreeBase, record: options.record ?? record, merger: async () => 'control-plane', trial });
+  const reads = mergeWriterReads(fixtureConfig, checkout, run, { base: worktreeBase, record: options.record ?? record,  trial });
   return { reads, pushes, trials };
 }
 const firstParents = () => git(origin, 'rev-list', '--first-parent', 'main').split('\n');
@@ -651,6 +652,107 @@ test('integration:executor-reconcile-after-crash — killed between the push and
   assert.equal(nextToMerge([w4doc], snapshotLedger([w4doc]), start)?.key, w4.key, 're-queued');
   assert.equal(trialFailedGround(w4doc), null, 'and not reworked');
   assert.deepEqual(w4doc.gates.find(gate => gate.name === 'test')!.reasons, [trialRefusal(heads[4]!, third.delivery!.mergeSha)], 'the refusal reopens the test gate');
+});
+
+test('unit:superseded-intent-settles — an item resubmitted with a new head while its intent on the old head is open settles through the real merge-record route: the next cycle records the old intent refused, the queue unblocks, another head merges, and the new head is trialled; a superseded intent the base holds settles refused without delivering; a 409 is adopted at once, not replayed', async () => {
+  // Fresh branches (8, 9, 10): the fixture's own 1-7 are reserved by the earlier tests.
+  const branchHead = async (n: number, file: string) => {
+    const worktree = join(checkout, '.graphyard', 'worktrees', `GY-${n}-1`);
+    git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${n}-1`, worktree, baseTip);
+    git(worktree, 'config', 'user.email', 't@example.com'); git(worktree, 'config', 'user.name', 'T');
+    return commit(worktree, file, `export const value${n} = ${n};\n`, `change ${n}`);
+  };
+  /** A submission on a fresh branch, mirroring submittedItem. */
+  const submitBranchHead = async (n: number, head: string) => {
+    let item = await engine.execute(admin, 'create', null, { type: 'chore', title: `Superseded fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works', 'e2e:fixture'] }] }, randomUUID());
+    item = await engine.execute(admin, 'ready', item.id, {}, randomUUID());
+    const pulled = await engine.pullAssignment(worker, { work: item.id }, randomUUID());
+    assert.ok(pulled.assigned, JSON.stringify(pulled.refused)); item = pulled.assigned!;
+    await engine.execute(worker, 'workspace', item.id, { epoch: 1, host: 'test', path: `/tmp/exec-${n}`, branch: `graphyard/gy-${n}-1` }, randomUUID());
+    return engine.execute(worker, 'submit', item.id, { epoch: 1, head }, randomUUID());
+  };
+  /** A genuine resubmission: rework, a new claim, a fresh commit on the branch, submit. */
+  const resubmit = async (item: Work, n: number) => {
+    await engine.execute(admin, 'rework', item.id, { reason: `${item.key} tries a new head`, previousWorkerStopped: true }, randomUUID());
+    const pulled = await engine.pullAssignment(worker, { work: item.id }, randomUUID());
+    assert.ok(pulled.assigned, `rework of ${item.key} is claimable again: ${JSON.stringify(pulled.refused)}`);
+    const epoch = pulled.assigned!.lease!.epoch;
+    await engine.execute(worker, 'workspace', item.id, { epoch, host: 'test', path: `/tmp/exec-resub-${n}`, branch: `graphyard/gy-${n}-1` }, randomUUID());
+    const head = await commit(join(checkout, '.graphyard', 'worktrees', `GY-${n}-1`), `src/resub-${n}.ts`, `export const resub${n} = ${epoch};\n`, `resubmission of GY-${n}`);
+    return engine.execute(worker, 'submit', item.id, { epoch, head }, randomUUID());
+  };
+  // The other item is filed first, so it leads the queue once the block lifts.
+  const head8 = await branchHead(8, 'src/eight.ts');
+  const other = await submitBranchHead(8, head8);
+  const head9 = await branchHead(9, 'src/nine.ts');
+  const w = await submitBranchHead(9, head9);
+  const { reads, trials } = fixtureReads();
+  // AC-1: an open intent on the old head while the item already has a new one.
+  const tipA = await reads.fetch();
+  const mergedA = await reads.merge(head9, tipA);
+  assert.ok('mergeSha' in mergedA);
+  const mergeA = (mergedA as { mergeSha: string }).mergeSha;
+  await record(w, { kind: 'intent', head: head9, baseTip: tipA, mergeSha: mergeA, risk: 'normal', at: iso(start) });
+  const resubmitted = await resubmit(w, 9);
+  const newHead = resubmitted.candidate!.sha;
+  assert.notEqual(newHead, head9);
+  let docA = await document(w.id);
+  assert.equal(docA.mergeLedger?.state, 'intent', 'the old intent is still open');
+  assert.deepEqual(mergeQueue([docA, await document(other.id)], snapshotLedger([docA, await document(other.id)]), start).blockedBy, docA.key, 'the open intent blocks the queue');
+  // The next cycle records the old intent refused through the real route.
+  const settled = await reconcileIntents(reads, [docA, await document(other.id)], snapshotLedger([docA, await document(other.id)]));
+  assert.deepEqual(settled, [{ key: w.key, mergeSha: mergeA, outcome: 'requeued' }]);
+  docA = await document(w.id);
+  assert.deepEqual([docA.mergeLedger?.state, docA.mergeLedger?.head], ['refused', head9]);
+  assert.equal(docA.mergeLedger?.refusal?.reason, supersededIntentReason(w.key, head9, newHead));
+  assert.equal(docA.stage === 'done', false, 'refusing the old head delivers nothing');
+  // The queue is no longer blocked: the older head merges, then the new head is trialled.
+  const after = mergeQueue([docA, await document(other.id)], snapshotLedger([docA, await document(other.id)]), start);
+  assert.deepEqual([after.blockedBy, after.next?.key], [null, other.key]);
+  const mergedOther = await mergeOne(reads, await document(other.id));
+  assert.equal(mergedOther.outcome, 'merged', "another item's head merges once the block lifts");
+  const mergedNew = await mergeOne(reads, await document(w.id));
+  assert.equal(mergedNew.outcome, 'merged');
+  assert.ok(trials.some(input => input.mergeSha === (mergedNew as { mergeSha: string }).mergeSha && input.mergeSha !== mergeA), 'the new head was trialled on its own merge commit');
+  const doneA = await document(w.id);
+  assert.deepEqual([doneA.stage, doneA.delivery?.mergeSha], ['done', (mergedNew as { mergeSha: string }).mergeSha]);
+  // AC-2: a superseded intent whose merge commit the base holds settles refused, never delivered.
+  const head10 = await branchHead(10, 'src/ten.ts');
+  const wC = await submitBranchHead(10, head10);
+  const tipC = await reads.fetch();
+  const mergedC = await reads.merge(head10, tipC);
+  assert.ok('mergeSha' in mergedC);
+  const mergeC = (mergedC as { mergeSha: string }).mergeSha;
+  await record(wC, { kind: 'intent', head: head10, baseTip: tipC, mergeSha: mergeC, risk: 'normal', at: iso(start) });
+  assert.equal(await reads.push(mergeC, tipC), 'pushed');
+  await record(wC, { kind: 'pushed', mergeSha: mergeC, pushedAt: iso(start) });
+  const resubmittedC = await resubmit(wC, 10);
+  assert.ok(firstParents().includes(mergeC), 'the base holds the superseded merge commit');
+  const settledC = await reconcileIntents(reads, [await document(wC.id)], snapshotLedger([await document(wC.id)]));
+  assert.deepEqual(settledC, [{ key: wC.key, mergeSha: mergeC, outcome: 'requeued' }]);
+  const docC = await document(wC.id);
+  assert.deepEqual([docC.mergeLedger?.state, docC.delivery ?? null], ['refused', null], 'settled without marking the newer head delivered');
+  assert.notEqual(docC.stage, 'done');
+  assert.equal(docC.mergeLedger?.refusal?.reason, supersededIntentReason(wC.key, head10, resubmittedC.candidate!.sha));
+  assert.equal(mergeQueue([docC], snapshotLedger([docC]), start).blockedBy, null, 'the queue is unblocked');
+  // A 409 on a merge record is adopted at once, not replayed: the loop's mutation path reports it
+  // as a bare Error with only confirmedRefusal, no numeric status (cli/master/session.ts).
+  const state = emptyDaemonState(config);
+  state.mergeWriter.unconfirmed = [{ key: docC.key, id: wC.id, attempt: 'a9', write: 0,
+    event: { kind: 'refused', head: head10, reason: 'a stale write of the superseded head' }, sentAt: iso(start), replays: 0, lastError: 'socket hang up' }];
+  let sends = 0;
+  const productionShapedRecord: MergePorts['record'] = async (item, event) => {
+    sends++;
+    const answer = await request(token(coordinator), `work/${item.id}/merge-record`, event, mergeRecordKey(item, event));
+    if (answer.status !== 200) throw Object.assign(new Error(JSON.stringify(answer.body)), { confirmedRefusal: true });
+    return answer.body;
+  };
+  const performed: { detail: string }[] = [];
+  const replayed = await replayUnconfirmed({ state, now: () => start, snapshot: { work: [await document(wC.id)] }, performed } as unknown as Parameters<typeof replayUnconfirmed>[0], productionShapedRecord);
+  assert.equal(replayed, true);
+  assert.equal(sends, 1, 'the refused write is sent once, never replayed');
+  assert.equal(state.mergeWriter.unconfirmed, undefined, 'a 409 answer leaves nothing owed');
+  assert.ok(performed.some(action => /was refused/.test(action.detail) && /never sent again/.test(action.detail)), JSON.stringify(performed.map(action => action.detail)));
 });
 
 test('integration:merge-record-delivers-in-one-transaction — POST /api/work/:id/merge-record is the coordinator\'s alone; intent and pushed re-fold the ledger onto the item and move its gates, and reconciled sets stage done and the delivery, settles the delivered item, deletes its jobs row and saves as merge-writer.delivered, in one transaction, replaying under its key', async () => {

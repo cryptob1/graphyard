@@ -89,7 +89,7 @@ class World {
   ports(batch?: number): MergeWriterReads {
     const world = this;
     return {
-      baseBranch: 'main', retrials: 3, now: this.now, merger: async () => 'control-plane', ...(batch ? { batch } : {}),
+      baseBranch: 'main', retrials: 3, now: this.now,  ...(batch ? { batch } : {}),
       fetch: async () => world.tip(),
       merge: async (head, baseTip) => {
         const mergeSha = sha(`merge:${head}:${baseTip}`);

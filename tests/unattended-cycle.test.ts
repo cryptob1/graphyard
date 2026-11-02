@@ -30,7 +30,7 @@ const minute = 60_000;
 function config(overrides: Partial<Omit<MasterConfig, 'run'>> & { run?: Partial<MasterRun> } = {}): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: launcher,
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
-    autoMerge: true, mergeMethod: 'merge', operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/coordinator-operator.token' }, ...overrides,
+    mergeMethod: 'merge', operatorAgent: { id: 'graphyard-master-operator', credentialFile: '/outside/coordinator-operator.token' }, ...overrides,
     run: { proofWorkflow: 'acceptance.yml', ...overrides.run } });
 }
 const profile = (name: string, overrides: Partial<WorkerProfile> = {}): WorkerProfile =>
@@ -56,7 +56,7 @@ function plane(scripts: Script[], options: { hostId?: string; delivered?: number
   const work: Work[] = scripts.map((script, index) => ({
     id: `id-${script.key}`, key: script.key, title: `Deliver ${script.key}`, description: '', type: 'feature', priority: 2,
     dependencies: [], criteria: [{ id: 'AC-1', text: 'Proven end to end', proofs: ['integration:loop'] }],
-    policy: { checks: ['test'], review: true }, 
+    policy: { checks: ['test'], review: true },
     stage: 'ready', revision: 1, policyRevision: 1, createdAt: iso(now - 30 * minute), updatedAt: iso(), stageEnteredAt: iso(now - minute),
     ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false,
     scenarioRequirements: [], evidence: [], observation: null, blocker: null, violations: [],
@@ -317,7 +317,7 @@ test('integration:loop-liveness — an absent or stalled loop is the top attenti
 });
 
 test('a rework the server refuses is applied again on a later cycle, and automatic merging off asks for no merge', async () => {
-  const master = config({ workers: [profile('claude-a')], autoMerge: false });
+  const master = config({ workers: [profile('claude-a')] });
   const simulation = plane([{ key: 'GY-701', rounds: ['changes', 'pass'] }]);
   const state = emptyDaemonState(master), effects = simulation.effects(), item = simulation.work[0];
   while (!standingVerdict(item)) await cycle(state, master, simulation, effects);

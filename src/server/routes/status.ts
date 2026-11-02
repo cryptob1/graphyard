@@ -10,8 +10,6 @@ import { humanOnlySubjects } from '../waits.js';
 import { defineRoutes, parseJson } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
-import { directMergeStatus } from '../../direct-merge.js';
-import { autoMergeStatus, mergeWriterStatus } from '../../merger-mode.js';
 import { projectDelivery } from '../../project-applications.js';
 import { eventStats } from '../../store/snapshot-delta.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
@@ -74,12 +72,6 @@ export const statusRoutes = defineRoutes('status', [
         // quota and reset time. `?host=` (or the executor-host header) judges placement for that
         // executor. It names hosts and login homes, so implementers and producers do not read it.
         fleet: ['admin', 'coordinator', 'reader', 'slice-lead'].includes(actor.role) ? await services.agentRegistry.snapshot(executorHost(url, req)) : null,
-        // Direct-merge mode (direct-merge.ts): the open windows and the one line master status shows while any is.
-        directMerge: await directMergeStatus(engine.store.pool, engine.directMergeEnvironment, observedAt),
-        // The merge writer (merger-mode.ts): always the control plane.
-        mergeWriter: mergeWriterStatus,
-        // Automatic merging (GY-1927): off, a gate-passing candidate is held until a merge decision releases it.
-        autoMerge: await autoMergeStatus(engine.store.pool),
         // Delivery defaults, applications and case bindings (GY-1901).
         project: projectDelivery(),
         // The first-run facts the Setup page and `graphyard up` read beside the App and the fleet (GY-1419):
@@ -174,16 +166,11 @@ export const statusRoutes = defineRoutes('status', [
   },
   {
     // The work list is the bounded fleet read (GY-1778): every open item whole and each settled
-    // delivery as the work index's stored summary (store.fleet, GY-1376). `?pr=N` narrows it to
-    // the item whose candidate or submission names pull request N, which is all the CI plan step
-    // needs. store.list() served every document whole here:
-    // 134 MB on a 1,777-item ledger, past the plan's abort on every acceptance run.
+    // delivery as the work index's stored summary (store.fleet, GY-1376). store.list() served every
+    // document whole here: 134 MB on a 1,777-item ledger, past the plan's abort on every acceptance run.
     method: 'GET', path: '/api/work',
-    async handle({ url, services, operatorVisible }) {
-      const requested = url.searchParams.get('pr');
-      if (requested === null) return operatorVisible(await services.engine.store.fleet());
-      demand(/^[1-9]\d{0,14}$/.test(requested), 'pr must be a pull request number', 400);
-      return operatorVisible(await services.engine.store.workForPullRequest(Number(requested)));
+    async handle({ services, operatorVisible }) {
+      return operatorVisible(await services.engine.store.fleet());
     },
   },
   {

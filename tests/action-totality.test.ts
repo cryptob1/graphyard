@@ -17,6 +17,10 @@ import type { Dashboard } from '../web/pages/dashboard.js';
 import OverviewPage from '../web/pages/overview.js';
 import { boardFromStatus } from '../src/model/board.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2026-09-21 `now` is handed explicitly to nextAction and actionAccount over fixtures built from it; new Date() serves the engine tests and stamps observations.
 
 /**
@@ -57,7 +61,7 @@ after(async () => { if (store) await store.close(); if (database) await database
 
 let sequence = 0;
 async function submitted() {
-  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Totality ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF] }] }, randomUUID());
+  let item = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Totality ${++sequence}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: [PROOF, 'e2e:fixture'] }] }, randomUUID());
   item = await engine.execute(operator, 'ready', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'claim', item.id, {}, randomUUID());
   item = await engine.execute(worker, 'workspace', item.id, { epoch: item.epoch, host: 'machine-a', path: `/tmp/totality/${item.id}`, branch: `graphyard/${item.key.toLowerCase()}` }, randomUUID());
@@ -192,7 +196,6 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
     { name: 'no approval', work: { ...unproven, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'requirement-review baseline', work: { ...unproven, formalReviewResetRequired: true, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'changes requested', work: { ...unproven, observation: { ...unproven.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'CHANGES_REQUESTED' }] } } as Work },
-    { name: 'approval naming mechanical nits', work: { ...unproven, mechanicalPlan: { reviewId: 901, head, at: now.toISOString() }, observation: { ...unproven.observation!, reviews: [{ reviewer: 'reviewer', sha: head, state: 'APPROVED', id: 901, submittedAt: now.toISOString(), mechanical: 2 }] } } as Work },
     { name: 'codex provider', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'codex' }, observation: { ...unproven.observation!, reviews: [] } } as Work },
     { name: 'codex reason of its own', work: { ...unproven, policy: { ...unproven.policy, reviewProvider: 'codex' },
       observation: { ...unproven.observation!, reviews: [], agentReview: { provider: 'codex', sha: head, approved: false, reason: 'Pull request is draft; mark it ready to request code review' } } } as Work },

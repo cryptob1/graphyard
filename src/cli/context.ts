@@ -120,7 +120,7 @@ export async function createContext(command: string, id: string | undefined, arg
     const skew = releaseSkew(ownRelease, await (releaseProbe ??= readServerRelease(base)));
     if (skew) {
       if (leaseCommands.has(command)) console.error(`${skew}; the ${command} proceeds`);
-      else throw new Error(skew);
+      else throw Object.assign(new Error(skew), { releaseHandover: true });
     }
   })();
   const individualToken = async () => {

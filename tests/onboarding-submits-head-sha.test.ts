@@ -53,7 +53,6 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/onboarding_head_test`); await store.init();
   // The control plane is the merge writer: it observes submitted heads from this checkout's own object store.
   engine = new Engine(store, 120, repository);
-  engine.submissionObserver = null; engine.directMergeEnvironment = null;
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
   engine.principals = [operator];
   http = server(engine, [{ ...operator, token }]);
@@ -73,7 +72,7 @@ const run = (program: string, args: string[], env?: Record<string, string>): str
   if (program === 'gh') { ghCalls.push(args); if (args[0] === 'repo' && args[1] === 'view') return 'main'; throw new Error(`gh ${args.join(' ')} ran`); }
   return execFileSync(program, args, { cwd: checkout, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'], ...(env ? { env: { ...process.env, ...env } } : {}) });
 };
-const filing = (commit: string, requestId: string) => ({ server: url, token, commit, checks: null, host: 'test-host', path: join(checkout, '.graphyard', 'onboarding'), requestId });
+const filing = (commit: string, requestId: string) => ({ server: url, token, commit, checks: null, caseId: 'served-head', host: 'test-host', path: join(checkout, '.graphyard', 'onboarding'), requestId });
 
 test('unit:onboarding-submits-head-sha — the onboarding apply publishes one commit on graphyard/onboarding, opens no pull request, and its item is submitted with that head and epoch, so the build gate reads the head as its candidate', async () => {
   // The publish commits the onboarding files above the base tip and pushes the branch; it opens no

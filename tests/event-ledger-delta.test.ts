@@ -9,6 +9,10 @@ import { readEventHistory, parseEventHistoryQuery } from '../src/events-history.
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * Every save of every kind is stored as a delta on the item's last full snapshot when the
  * change is small (store/snapshot-delta.ts). These check that any such row reconstructs the
@@ -26,7 +30,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('event-ledger-delta'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('event_ledger_delta_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/event_ledger_delta_test`); await store.init();
-  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/project');
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 
@@ -137,7 +141,7 @@ test('unit:delta-chain-bounded — a full snapshot recurs at least every snapsho
 
 test('integration:delta-readers — events history, store.events and the timeline replay read deltas as the documents they stand for', async () => {
   const n = ++serial;
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Readers ${n}`, criteria: [1, 2, 3, 4].map(n => ({ id: `AC-${n}`, text: `Behaves ${randomBytes(900).toString('hex')}`, proofs: ['integration:x'] })) }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Readers ${n}`, criteria: [1, 2, 3, 4].map(n => ({ id: `AC-${n}`, text: `Behaves ${randomBytes(900).toString('hex')}`, proofs: ['integration:x', 'e2e:fixture'] })) }, randomUUID());
   const records: Work[] = [plain(w)];
   const run = async (actor: Principal, command: Parameters<Engine["execute"]>[1], data: Record<string, unknown>) => { w = await engine.execute(actor, command, w.id, data, randomUUID()); records.push(plain(w)); };
   await run(operator, 'ready', {}); await run(worker, 'claim', {});

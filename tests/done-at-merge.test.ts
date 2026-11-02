@@ -15,6 +15,10 @@ import { Engine } from '../src/engine.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1981: done = merged. An item reaches stage done in the transaction that records its merge, and
 // nothing per-item follows it any more: no awaiting-deployment or awaiting-smoke state, no
 // verify-deployment action, no deployment command. Production health is one release-level reading.
@@ -81,7 +85,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('done-at-merge'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('done_at_merge_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/done_at_merge_test`); await store.init();
-  engine = new Engine(store, 120, 'owner/done-at-merge'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/done-at-merge');
   engine.principals = [operator, coordinator];
 });
 after(async () => { await store?.close(); await database?.stop(); });
@@ -90,7 +94,7 @@ test('unit:verify-deployment-removed-history-loads — the kind, deployment comm
   assert.ok(!(nextActionKinds as readonly string[]).includes('verify-deployment'), 'no verify-deployment action kind');
   assert.equal(await operationsCommand({ id: 'verify-deployment', args: ['GY-1'] } as unknown as MasterSession), unhandled, 'master verify-deployment is no subcommand');
 
-  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Delivered before GY-1981', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:verify-deployment-removed-history-loads'] }] }, randomUUID()) as Work;
+  const created = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Delivered before GY-1981', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:verify-deployment-removed-history-loads', 'e2e:fixture'] }] }, randomUUID()) as Work;
   const dbNow = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
   const legacy = { ...created, stage: 'done', stageEnteredAt: iso(dbNow - day), updatedAt: iso(dbNow - day), ready: true, epoch: 1, lease: null, candidate: null, sessions: [], observation: null, violations: [], gates: [], policy: smokePolicy,
     delivery: { mergeSha, mergedAt: iso(dbNow - day), authorizationRevision: 1, deployment: { ...recorded, observedAt: iso(dbNow - day + 60_000), at: iso(dbNow - day + 61_000) } } } as Work;

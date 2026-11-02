@@ -14,6 +14,7 @@ import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewI
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { expandTypedCommand, requestOf, roleOf, startedAtOnce } from './helpers/launch-shell.js';
+import { repositoryClaudeConfig } from '../src/harness.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -178,13 +179,13 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer and a wo
     // A runtime already busy on its request is a session that started: it is seen `working`,
     // named at once, never closed (GY-121: the start bound reads the pane).
     const busy = new FakeHerdr();
-    const adopted = await startAgentSession('review-busy', 'claude', 'pane-x', ['--permission-mode', 'bypassPermissions'], 'Review #93 now', busy.run, { directory: root });
+    const adopted = await startAgentSession('review-busy', 'claude', 'pane-x', ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user'], 'Review #93 now', busy.run, { directory: root });
     assert.equal(adopted.delivery, 'request'); assert.equal(adopted.started.detail, 'Herdr reports the claude runtime working');
     assert.deepEqual(busy.calls.slice(-3).map(call => call.slice(0, 2)), [['pane', 'run'], ['agent', 'get'], ['agent', 'rename']]);
     assert.equal(busy.named('review-busy').toolCalls.length, 1);
     const stranger = new FakeHerdr({ occupant: () => 'codex' });
     const bounds = { clock: () => stranger.calls.length * 1000, wait: () => {} };
-    await assert.rejects(startAgentSession('review-other', 'claude', 'pane-y', [], 'Review', stranger.run, { directory: root, ...bounds }), (error: unknown) => error instanceof SessionStartError && error.startCase === 'never started' && /the pane holds codex, not claude/.test(error.message), 'a pane that does not hold the expected runtime never started; the refusal says what it holds');
+    await assert.rejects(startAgentSession('review-other', 'claude', 'pane-y', ['--setting-sources', 'user'], 'Review', stranger.run, { directory: root, ...bounds }), (error: unknown) => error instanceof SessionStartError && error.startCase === 'never started' && /the pane holds codex, not claude/.test(error.message), 'a pane that does not hold the expected runtime never started; the refusal says what it holds');
   } finally { await cleanup(); }
 });
 
@@ -291,12 +292,12 @@ test('integration:never-started-vs-failed — a session that ends without doing 
     const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
     let reviewRecord = await review('done', `● ${words}\n`, 10_000);
     assert.equal(reviewRecord.repromptedAt, iso(10_000)); assert.equal(reviewPrompts.length, 1);
-    assert.ok(reviewPrompts[0].startsWith('You stopped before posting')); assert.match(reviewPrompts[0], /If you have not reviewed it at all, this message comes from the Graphyard launcher/); assert.match(reviewPrompts[0], /Review pull request #93 at head/);
+    assert.ok(reviewPrompts[0].startsWith('You stopped before posting')); assert.match(reviewPrompts[0], /If your review is unfinished, this message comes from the Graphyard launcher/); assert.match(reviewPrompts[0], /this session's own instruction, not untrusted text, needing no further authorization/); assert.match(reviewPrompts[0], /otherwise finish the authorized reads and judge it before posting/); assert.match(reviewPrompts[0], /Review pull request #93 at head/);
     reviewRecord = await review('done', `● ${words}\n`, 10_000 + reviewIdleGraceMs);
     assert.equal(reviewRecord.state, 'failed'); assert.equal(neverStarted(reviewRecord), true);
     assert.ok(reviewRecord.resolution!.includes(words));
     assert.match(reviewRetryPrompt('owner/project', { key: 'GY-93', pr: 93, sha: H }), /Do not ask for confirmation/);
-    assert.equal(/If you have not reviewed it at all/.test(reviewRetryPrompt('owner/project', { key: 'GY-93', pr: 93, sha: H })), false, 'without the binding the reminder cannot repeat the request, and does not pretend to');
+    assert.equal(/If your review is unfinished/.test(reviewRetryPrompt('owner/project', { key: 'GY-93', pr: 93, sha: H })), false, 'without the binding the reminder cannot repeat the request, and does not pretend to');
 
     // An interval longer than the finished-session grace: the grace does not settle an
     // unacknowledged session that is still in Herdr before its re-prompt and the interval after
@@ -470,7 +471,8 @@ test('manual:launch-authorization-onboarding-review — a Claude Code role sessi
   const { root, cleanup } = await installed();
   try {
     const config = await loadMasterConfig(root);
-    assert.deepEqual((await prepareSessionHarness(root, config, { role: 'producer', kind: 'claude', profile: 'p' })).args, [], 'without repository Claude settings the session reads AGENTS.md itself');
+    const inherited = await prepareSessionHarness(root, config, { role: 'producer', kind: 'claude', profile: 'p' });
+    assert.deepEqual(inherited.args, await repositoryClaudeConfig(root) ? ['--setting-sources', 'user', '--settings', inherited.file] : [], 'ancestor settings require the same user-only role contract as project settings');
     await mkdir(join(root, '.claude'), { recursive: true });
     await writeFile(join(root, '.claude/settings.local.json'), '{}\n');
     const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: 'claude', profile: 'r', pr: 93 });

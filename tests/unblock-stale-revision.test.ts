@@ -13,6 +13,10 @@ import { masterConfigSchema, runAutonomyCommand, type AutonomyDependencies, type
 import { unblockAttempts } from '../src/master/unblock.js';
 import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+
+// Every filed fixture owes an E2E proof and the serve declaration its trial needs.
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1103: `graphyard master unblock` read the item, then wrote with the revision it read; an
 // observation or heartbeat landing in between refused the write with 'Task revision changed'
@@ -42,7 +46,7 @@ const unblocks = async (work: Work) => (await store.pool.query(`SELECT actor FRO
 
 /** A released, claimed item its worker has reported blocked. */
 async function blocked(title: string, reason = 'Waiting on an external decision', keepLease = false) {
-  let work = await api(master.token, 'work', { title, type: 'chore', description: `Why ${title}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal' }) as Work;
+  let work = await api(master.token, 'work', { title, type: 'chore', description: `Why ${title}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], reason: 'Operator goal' }) as Work;
   work = await engine.execute(operator, 'ready', work.id, { reason: 'Next by priority' }, randomUUID());
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   const lease = work.lease!;
@@ -69,7 +73,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('unblock-retry'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('unblock_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/unblock_test`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

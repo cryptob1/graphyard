@@ -86,7 +86,7 @@ async function configure(root: string, change: (config: any) => void) {
 function work(overrides: Partial<Work> = {}) {
   const candidate = { sha: 'a'.repeat(40), baseSha: 'b'.repeat(40), pr: 68, branch: 'graphyard/gy-68-1', author: 'worker' };
   return { id: 'work-68', key: 'GY-68', title: 'Agent environments', description: '', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:agent-env-discovery'] }], policy: { checks: ['test'], review: true }, 
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:agent-env-discovery'] }], policy: { checks: ['test'], review: true },
     stage: 'review', revision: 9, policyRevision: 2, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 1, lease: null, workspaces: [],
     candidate, submission: { epoch: 1, pr: 68 }, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [],
     observation: { at: new Date().toISOString(), candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: [], scopeFiles: [], prState: 'open', draft: false },
@@ -451,7 +451,7 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     assert.deepEqual(tuned.changed, ['intervalSeconds', 'deploymentUrl', 'quotaCeilingPercent', 'accounts:review-oc']);
     assert.equal(after.run.intervalSeconds, 25); assert.equal(after.run.quotaCeilingPercent, 90);
     assert.equal(after.run.deploymentUrl, 'https://graphyard.example/api/health');
-    assert.equal(after.autoMerge, false, 'an autoMerge flip never rides the owned fields');
+    assert.equal('autoMerge' in after, false, 'the retired setting is dropped');
     assert.equal(after.credentialFile, before.credentialFile, 'credential paths never move through the owned fields');
     assert.deepEqual(after.reviewers.find(profile => profile.name === 'review-oc')!.accounts, ['opencode-a']);
     await assert.rejects(saveMasterSettings(root, { intervalSeconds: null }), /can only be set, never cleared/);
@@ -461,14 +461,6 @@ test('integration:max-autonomy-permissions — every launched agent gets its run
     const cleared = await saveMasterSettings(root, masterSettingsFromArgs(['deploymentUrl=', 'accounts:review-oc=']));
     assert.equal(cleared.run.deploymentUrl, undefined, 'an optional owned field can be cleared');
     assert.equal((await loadMasterConfig(root)).reviewers.find(profile => profile.name === 'review-oc')!.accounts, undefined, 'an empty account list clears the pinned order');
-    // The reviewer launch's bot-review wait is the master's to turn off or restore to its default;
-    // whose reviews it waits for (and whose threads ground a scope widening) stays the operator's.
-    const noWait = await saveMasterSettings(root, masterSettingsFromArgs(['awaitReviewersMinutes=0']));
-    assert.deepEqual(noWait.changed, ['awaitReviewersMinutes']);
-    assert.equal((await loadMasterConfig(root)).run.awaitReviewersMinutes, 0, 'master config awaitReviewersMinutes=0 turns the wait off');
-    await assert.rejects(saveMasterSettings(root, { awaitReviewersMinutes: 61 }), /60/, 'the schema bound still applies');
-    assert.equal((await saveMasterSettings(root, masterSettingsFromArgs(['awaitReviewersMinutes=']))).run.awaitReviewersMinutes, undefined, 'an empty value restores the default wait');
-    assert.throws(() => masterSettingsFromArgs(['awaitReviewers=someone[bot]']), /changes only what the master owns/, 'the awaited logins are the operator\'s');
   } finally { await cleanup(); await rm(directory, { recursive: true, force: true }); }
 });
 

@@ -19,6 +19,10 @@ import { workspaceCommands } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 import type { Principal, Work } from '../src/model.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Each test is named for the proof it produces (GY-860): unit:stale-worktree-releases-branch
 // (AC-1) and unit:workspace-failure-spares-profile (AC-2). AC-1: an earlier attempt's worktree
 // that still holds the branch — checked out, or stopped inside a rebase, merge or cherry-pick —
@@ -187,7 +191,7 @@ test('unit:workspace-failure-spares-profile — the engine keeps the preserved-a
   const operator: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
   const worker: Principal = { id: 'engineer-a', role: 'worker', sessionKind: 'ai' };
   const id = () => randomUUID();
-  const input = (title: string) => ({ title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] });
+  const input = (title: string) => ({ title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] });
   const claimed = async (actor: Principal = worker) => {
     let work = await engine.execute(operator, 'create', null, input(randomUUID()), id());
     work = await engine.execute(operator, 'ready', work.id, {}, id());
@@ -335,7 +339,6 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
-  engine.submissionObserver = null;
   engine.principals = [{ id: 'human-operator', role: 'admin', sessionKind: 'human' as const }, { id: 'engineer-a', role: 'worker', sessionKind: 'ai' as const }];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });

@@ -22,26 +22,6 @@ async function repository(branch: string) {
 }
 const remoteHeads = (origin: string) => spawnSync('git', ['-C', origin, 'branch', '--list'], { encoding: 'utf8' }).stdout;
 
-test('unit:complete-pushes-graphyard-branch — a graphyard/ branch is pushed with upstream, any other pushes nothing', async () => {
-  const { pushGraphyardBranch } = await import('../src/cli/complete.js');
-  const { origin, work } = await repository('graphyard/gy-1-1');
-  assert.deepEqual(pushGraphyardBranch(work), { pushed: 'graphyard/gy-1-1' });
-  assert.match(remoteHeads(origin), /graphyard\/gy-1-1/);
-  assert.equal(git(work, 'rev-parse', '--abbrev-ref', 'graphyard/gy-1-1@{upstream}'), 'origin/graphyard/gy-1-1');
-  const other = await repository('feature/x');
-  assert.deepEqual(pushGraphyardBranch(other.work), { pushed: null });
-  assert.equal(remoteHeads(other.origin).trim(), '');
-});
-
-test('unit:complete-pushes-graphyard-branch — a failed push is reported, not thrown', async () => {
-  const { pushGraphyardBranch } = await import('../src/cli/complete.js');
-  const { work } = await repository('graphyard/gy-2-1');
-  git(work, 'remote', 'set-url', 'origin', join(work, 'missing.git'));
-  const result = pushGraphyardBranch(work);
-  assert.equal(result.pushed, null);
-  assert.ok(result.failure);
-});
-
 test('unit:worktree-starts-from-registered-head — the rework start resolves the registered local head with no fetch and no push; nothing registered or missing from the store refuses', async () => {
   const { registeredReworkHead } = await import('../src/master/worktrees.js');
   const { origin, work } = await repository('graphyard/gy-3-1');
@@ -65,14 +45,4 @@ test('unit:worktree-starts-from-registered-head — the rework start resolves th
   // An interrupted attempt's commits past the registered head are partial work, never the start: the registered head still resolves.
   git(work, 'commit', '--allow-empty', '-m', 'WIP: partial');
   assert.equal(await registeredReworkHead(work, 'graphyard/gy-3-1', second, run), second);
-});
-
-test('unit:complete-refuses-failed-push — complete refuses to submit when the graphyard/ branch push fails', async () => {
-  const { completeCommand } = await import('../src/cli/complete.js');
-  const { work } = await repository('graphyard/gy-4-1');
-  git(work, 'remote', 'set-url', 'origin', join(work, 'missing.git'));
-  const calls: string[] = [];
-  const context = { args: ['1', 'PR'], repositoryRoot: () => work, api: async (path: string) => { calls.push(path); return {}; }, print: () => undefined } as never;
-  await assert.rejects(completeCommand.run(context, { id: 'x', key: 'GY-4' } as never), /pushing the graphyard\/ branch failed/);
-  assert.deepEqual(calls, []);
 });

@@ -11,6 +11,10 @@ import { server } from '../src/server.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import type { Principal } from '../src/model.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-975: the production server's heap climbed to its 4 GB limit every ten to fifteen minutes. These
 // tests drive the requests every client polls — status, item reads, action claims and the
 // agent registry — and assert what the process retains after a full collection stays under a fixed
@@ -37,7 +41,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: join(scratch, 'pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('heap_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/heap_test`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 120, repository);
   http = server(engine, credentials, null);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -53,7 +57,7 @@ async function call(principal: Principal, method: 'GET' | 'POST', path: string, 
 
 /** A released item, so the item read and the claim have something to return. */
 async function released() {
-  const work = await engine.execute(operator, 'create', null, { type: 'chore', title: 'heap', description: 'Why heap matters', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal' }, randomUUID());
+  const work = await engine.execute(operator, 'create', null, { type: 'chore', title: 'heap', description: 'Why heap matters', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }, { id: 'AC-2', text: 'Audited', proofs: ['manual:audit'] }], reason: 'Operator goal' }, randomUUID());
   return engine.execute(operator, 'ready', work.id, { reason: 'Priority one' }, randomUUID());
 }
 

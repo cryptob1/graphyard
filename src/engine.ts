@@ -2,7 +2,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
-import { Store, save, rewriteDocument, lockItem, wakeJob, documentBefore, eventWorkSql } from './store.js';
+import { Store, save, rewriteDocument, lockItem, wakeJob, eventWorkSql } from './store.js';
 import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileRereadSql, reconcileRowLockSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
@@ -15,7 +15,6 @@ import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
 import { implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
 import { onto } from './model/base-refresh.js';
-import { reconciliationRefusalPrefix, unauthorizedMergeViolation } from './model/merge-authorization.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { buildIdentity } from './protocol-version.js';
@@ -26,7 +25,7 @@ import { actionAccount, nextActionKinds, sameAction } from './model/next-action.
 import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
-import { filingRefusal, userFacingProofRefusal } from './model/user-facing.js';
+import { filingRefusal, e2eProofRefusal } from './model/user-facing.js';
 import { physicalCheckRefusal } from './model/human-proof.js';
 import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
@@ -42,16 +41,14 @@ import { credentialBlockedReason, credentialFailure } from './worker-credential.
 import { beginAttempt, endAttempt, endLapsedAttempt, pipelineTimeline, recordAssignmentStart, recordIntervention, recordRework, recordSubmission } from './pipeline-speed.js';
 import { loopOwnedRefusal, ownerHoldRefusal } from './model/loop-owned.js';
 import { loopObservationProofs } from './model/loop-observation.js';
-import { coveringWindow, directMergeAuthorization, directMergeFromEnv, directMergeWindows, sweepDirectMerges, type DirectMergeWindow } from './direct-merge.js';
-import { mechanicalHoldUntil } from './mechanical-findings.js';
-import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, withWhole, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
+import { isSettledSummary, isStandIn, lockedRows, lockedWork, rememberSaved, savedVersions, warmLockedReads, workIdByRef, type Queryable, type SavedVersion } from './store/locked-read.js';
 
 const epoch = z.number().int().positive();
 const sha = z.string().regex(/^[a-f0-9]{40}$/);
-// GY-2965: the requirements an item of type feature or bug carries at create (AC-1), and the
-// serve declaration an e2e: proof needs in the repository it is created in (AC-3). Both refuse at
-// parse time, before any scenario is resolved; the same validation is `filingRefusal` (model/user-facing.ts).
-const userFacingCreateRefusal = filingRefusal;
+// GY-3037: the e2e proof every item carries at create, and the serve declaration an e2e: proof
+// needs in the repository it is created in. Both refuse at parse time, before any scenario is
+// resolved; the same validation is `filingRefusal` (model/user-facing.ts).
+const filingCreateRefusal = filingRefusal;
 const publicArtifactUrl = z.url().max(2000).refine(value => {
   const parsed = new URL(value);
   return ['http:', 'https:'].includes(parsed.protocol) && !parsed.username && !parsed.password;
@@ -68,14 +65,12 @@ const retiredField = z.unknown().transform(() => undefined).optional();
 const rerunCase = z.object({ case: z.string().trim().min(1).max(500), file: z.string().trim().min(1).max(500).nullable(), line: z.number().int().positive().nullable(), durationMs: z.number().int().min(0).nullable() }).strict();
 const commands = {
   create: createSchema.extend({ reason: z.string().trim().min(1).max(2000).optional(), plannedFiles: retiredField })
-    .superRefine((data, ctx) => { const refusal = userFacingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
+    .superRefine((data, ctx) => { const refusal = filingCreateRefusal(data) ?? physicalCheckRefusal(data.criteria); if (refusal) ctx.addIssue({ code: 'custom', message: refusal }); }),
   ready: z.object({ expectedRevision: z.number().int().positive().optional(), reason: z.string().trim().min(1).max(2000).optional() }).strict(),
   requirements: z.object({ owner: createSchema.shape.owner, expectedPolicyRevision: z.number().int().positive(), reason: z.string().trim().min(1).max(2000), criteria: criteriaSchema(50), dependencies: z.array(z.string().uuid()).max(50), plannedFiles: retiredField, answers: retiredField, rule: retiredField, exclusiveResources: resourcesSchema, producerProofs: createSchema.shape.producerProofs }).strict(),
   unblock: z.object({ reason: z.string().trim().min(1).max(2000), expectedRevision: z.number().int().positive().optional() }).strict(),
   rework: z.object({ reason: z.string().min(1).max(2000), previousWorkerStopped: z.literal(true), binding: z.string().min(1).max(500).optional() }).strict(),
   claim: z.object({}).strict(),
-  // GY-1764: the loop reports the review ledger's planned mechanical-fix round for the item (or its absence), the one ground the review gate's hold reads.
-  mechanicalplan: z.object({ reviewId: z.number().int().positive(), head: sha, planned: z.boolean() }).strict(),
   heartbeat: z.object({ epoch }).strict(),
   // GY-860 AC-2: `failure` releases a claim whose worktree the host could not create. The attempt
   // is undone — the epoch returns, the untouched reservation and timeline entry go, the lease is
@@ -211,10 +206,6 @@ function endedBySubmission(work: Work, epoch: number) {
     demand(false, `Implementation lease for epoch ${epoch} ended when ${work.key} was submitted; stop heartbeating after complete`);
 }
 
-/** The violation an observed merge records when its gates had not passed on the merged head. */
-export { unauthorizedMergeViolation };
-/**
-}
 /**
  * Whether two readings of one item differ only in action-queue bookkeeping (GY-607). Claiming,
  * renewing, completing or failing a row moves the item's rows, its revision and its `updatedAt`,
@@ -256,39 +247,6 @@ async function revisionAt(db: { query: (text: string, values: unknown[]) => Prom
   return read && read.revision === revision ? read : null;
 }
 
-/**
- * Why the record as it stood before the merge cutoff does not deliver the observed merge, or
- * nothing when it does (GY-1235). GitHub merges; a merge is the delivery when the record showed the
- * merged head as its candidate on the merged pull request with every gate passed — build, review,
- * required checks — and no violation standing. GitHub's merge answers its own mergeability, so a
- * merge gate held only on GitHub computing or refusing mergeability does not refuse it. No merge
- * authorization, execution or observation age is read. Read for a delivery and for a reconciliation.
- */
-export function historicalAuthorizationRefusals(past: Work, _all: Work[], observation: Observation, _cutoff: number, _mergedTime: number, options: { reconciling?: boolean } = {}): string[] {
-  const refusals: string[] = [];
-  if (past.candidate?.sha !== observation.candidate.sha)
-    refusals.push(`the record named candidate ${past.candidate?.sha.slice(0, 12) ?? 'none'}, not the merged head ${observation.candidate.sha.slice(0, 12)}`);
-  if (past.submission?.pr !== observation.candidate.pr) refusals.push(`the record named pull request #${past.submission?.pr ?? 'none'}, not #${observation.candidate.pr}`);
-  // A reconciliation judges the merge that happened, so nothing that merge itself wrote can refuse
-  // it (GY-94): the unauthorized-merge violation it exists to clear, and a refusal of an earlier
-  // decision.
-  const circular = (violation: string) => options.reconciling && (violation === unauthorizedMergeViolation || violation.startsWith(reconciliationRefusalPrefix));
-  const githubAnswers = (reason: string) => reason === 'Pull request is not mergeable against the current base';
-  for (const gate of past.gates) {
-    const reasons = gate.name === 'merge' ? gate.reasons.filter(reason => !githubAnswers(reason)) : gate.reasons;
-    if (!gate.passed && reasons.length) refusals.push(`gate ${gate.name} had not passed: ${reasons.join('; ')}`);
-  }
-  for (const violation of past.violations.filter(violation => !circular(violation))) refusals.push(`violation stood: ${violation}`);
-  return refusals;
-}
-/** How a merge inside a direct-merge window (direct-merge.ts) was recorded as operator-authorized: `unmet` is what the record lacked. */
-export interface OperatorAuthorizedDelivery {
-  /** Who set the direct-merge window the merge fell inside, and why. */
-  operator: string; reason: string; unmet: string[];
-  cutoff: string; snapshotRevision: number; judgement: string; violation: string;
-  /** Always null: the statement that no merge execution authorized this merge. */
-  execution: null;
-}
 /** The ledger kind of a lease renewal that failed server-side (GY-558). */
 export const renewalFaultEvent = 'lease.renewal-failed';
 /** A lease carrying the server-side renewal fault that extended it (GY-558); cleared by the next renewal. */
@@ -450,7 +408,6 @@ function reconcileDueAt(work: Work, all: Work[], now: Date, account: ActionAccou
   // Accepted evidence stops counting once its expiry passes (currentEvidence), so a gate can fail by the clock alone.
   for (const evidence of work.evidence ?? []) considerIso(evidence.expiresAt);
   // The review gate's mechanical hold lapses at its round window, and dispatch's wait on a running split at its limit and grace.
-  consider(mechanicalHoldUntil(work, nowMs));
   for (const lift of stalledActionLifts(work)) consider(lift);
   return due;
 }
@@ -584,8 +541,6 @@ async function adoptFollowUpWindow(db: Queryable, work: Work) {
 }
 export class Engine {
   operatorAuthorizer?: (db: any, now: Date, actor: Principal) => Promise<Principal>;
-  /** The direct-merge window the deployment environment declares (direct-merge.ts), read once at construction. */
-  directMergeEnvironment: DirectMergeWindow | null = directMergeFromEnv();
   // The configured credential registry, used to report which required proof names
   // currently have an authorized producer. Authority itself lives in the grant store.
   principals: Principal[] = [];
@@ -593,21 +548,11 @@ export class Engine {
   reviewerApps: ReviewerApp[] = [];
   controlPlaneAppId?: number;
   /**
-  }
-  /**
-   * Observes the pull request a worker submits before the submission is recorded, so a candidate
-   * that reverts shipped code outside its planned files is refused at `complete` instead of after
-   * review. Left undefined, the deployment's GitHub App (from the environment) observes; null
-   * disables the pre-check, and every later observation still re-derives the refusal.
-   */
-  submissionObserver: ((work: Work, peers?: Work[]) => Promise<Observation>) | null | undefined = undefined;
-  /**
    * Reads a submitted head from the control plane's checkout (GY-1523) while the control plane is
    * the merge writer. Left undefined, `git -C` GRAPHYARD_REPOSITORY_ROOT (else the working
    * directory); null means no checkout, and every head submission is refused as unreadable.
    */
   gitRunner: GitRunner | null | undefined = undefined;
-  /**
   /** The base branch a submitted head is observed against (GY-1523): the deployment's GITHUB_BASE_BRANCH, else `main`. */
   baseBranch = process.env.GITHUB_BASE_BRANCH ?? 'main';
   // Auto-dispatch transitions the last evaluation of a document produced, written to the ledger
@@ -617,27 +562,9 @@ export class Engine {
   constructor(public store: Store, public leaseSeconds = 120, public repository = process.env.GITHUB_REPOSITORY ?? '') {}
   /** The commit this process first recorded itself serving (recordPlaneLiveness); undefined until its first tick named one (GY-2177). */
   private servedCommit: string | null | undefined;
-  private async observeSubmission(actor: Principal, id: string | null, data: { epoch: number; pr?: number; head?: string }, key: string): Promise<Observation | null> {
-    if (data.head !== undefined) return this.observeSubmittedHead(actor, id, { epoch: data.epoch, head: data.head }, key);
-    if (this.submissionObserver === undefined) this.submissionObserver = null;
-    if (!this.submissionObserver || !id) return null;
-    // A replayed submission returns its receipt; it must not depend on the provider again.
-    // `complete` is a lease command (GY-558): its reads take the lease pool, like its transaction.
-    if ((await this.store.leasePool.query('SELECT 1 FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rowCount) return null;
-    // Without a GitHub App there is nothing to read, and the transaction refuses the pull request.
-    // The landing check reads each open submitted peer's observation scope, which a projection leaves
-    // out (GY-1042): those peers are read whole. This read holds no coordination lock.
-    const all = await withWhole(this.store.leasePool, await lockedWork(this.store.leasePool, [id]), peer => peer.stage !== 'done' && !!peer.submission && !!peer.candidate);
-    const work = all.find(w => w.id === id || w.key === id);
-    if (!work || work.stage === 'done' || !work.workspaces.some(w => w.epoch === data.epoch)) return null;
-    // Every item goes with it: the landing check reads other items' unlanded candidates (GY-97).
-    const observation = await this.submissionObserver({ ...work, submission: { epoch: data.epoch, pr: data.pr! } }, all);
-    await this.reconcileLanded(observation, all);
-    return observation;
-  }
   /**
    * GY-1523: the control plane's own observation of a head submitted with `complete --head`, read
-   * from the shared object store before the transaction, as GitHub is read for a pull request.
+   * from the shared object store before the transaction.
    * Receipt first, so a replayed `complete` runs no git. The candidate's change number is
    * allocated inside the transaction, which binds it to this observation.
    */
@@ -650,6 +577,9 @@ export class Engine {
     // GY-2010: an item a stored adoption (GY-1849) still names completes as a head like any other:
     // its replacement commit is read from the shared object store, never from the pull request.
     if (!work || work.stage === 'done' || !workspace) return null;
+    // A superseded owner reaches the transaction's lease refusal before observation. Leave
+    // expiry to that transaction: a recorded renewal fault may still keep this lease live.
+    if (!work.lease || work.lease.owner !== actor.id || work.lease.epoch !== data.epoch) return null;
     if (this.gitRunner === undefined) this.gitRunner = gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());
     demand(this.gitRunner, 'The control plane has no checkout to read a submitted head from; a head submission needs the merge writer checkout', 503);
     return observeLocalHead(this.gitRunner, { head: data.head, base: this.baseBranch, branch: workspace.branch, author: actor.id });
@@ -680,38 +610,6 @@ export class Engine {
       if (delta.status === 0) observation.headDelta = delta.stdout.split('\n').map(line => line.trim()).filter(Boolean);
     }
     return observation;
-  }
-  /**
-   * GY-744. Reconcile at once the merge of every peer an observation's landing check found already
-   * on the base branch tip while its item still records it unlanded: the peer's pull request is
-   * observed and that observation saved, so the ordinary delivery path records it merged, with its
-   * merge commit, now rather than whenever its own observation comes round — and the stale state
-   * that named it unlanded does not recur. A failure is logged and left to that later observation.
-   *
-   * GY-756. The peer is re-read before it is observed, so several observations in one round that
-   * name the same peer do not each observe it from their own stale snapshot: once one has saved, the
-   * rest find it delivered, or already observed at this head against this base tip, and skip it.
-   * A peer that is not merged (its commits reached the branch while its pull request closed
-   * unmerged) has that observation saved all the same, so it is not re-observed on every cycle
-   * until the base branch moves.
-   */
-  async reconcileLanded(observation: Observation | null, all: Work[], observer = this.submissionObserver) {
-    const reconciled: Work[] = [];
-    if (!observer) return reconciled;
-    for (const entry of observation?.landing?.landed ?? []) {
-      const known = all.find(item => item.key === entry.key);
-      if (!known) continue;
-      try {
-        const peer: Work | undefined = (await this.store.pool.query('SELECT document FROM work_items WHERE id=$1', [known.id])).rows[0]?.document;
-        if (!peer || peer.stage === 'done' || peer.submission?.pr !== entry.pr) continue;
-        if (peer.observation && peer.observation.candidate.sha === entry.head && observation!.baseTip && peer.observation.baseTip === observation!.baseTip) continue;
-        const seen = await observer(peer, all);
-        reconciled.push(await this.observe(peer.id, peer.revision, seen));
-      } catch (error) {
-        console.error(`[landing] reconciling ${entry.key}'s landed pull request #${entry.pr} failed: ${(error as Error).message}`);
-      }
-    }
-    return reconciled;
   }
   /**
    * Bootstrap deferral is an operator act. It requires the explicit policy:bootstrap capability,
@@ -891,7 +789,7 @@ export class Engine {
       await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(compactHeartbeatReceipt(work))]);
       return work;
     }, { lane: 'lease', fleetLock: false, itemLock: id });
-    const observation = command === 'submit' ? context.observation ?? await this.observeSubmission(actor, id, data, key) : null;
+    const observation = command === 'submit' ? context.observation ?? (data.head !== undefined ? await this.observeSubmittedHead(actor, id, data, key) : null) : null;
     // GY-1735: a claim the observation window refuses rolls its transaction back, so the window a legacy follow-up
     // derives is recorded first, on its own: coordination then holds the item instead of dispatching refused claims.
     // Only a claim the main transaction would judge writes it: a caller without claim authority, or a key that
@@ -992,14 +890,6 @@ export class Engine {
           && (data.state === 'finished' || handle.state === 'running' && data.observed !== undefined && ['coordinator', 'admin'].includes(actor.role)));
       preserveAssignment(work);
       if (command !== 'create' && !postDeployment && !deliveredSessionClosure) demand(work.stage !== 'done', 'Delivered work is immutable; create a follow-up task');
-      if (command === 'mechanicalplan') {
-        demand(['coordinator', 'admin'].includes(actor.role), 'Coordinator permission required', 403);
-        // `at` is the control plane's own instant of the report: the review gate holds only while the loop
-        // confirmed the plan this recently, so a report whose write or ledger read keeps failing cannot
-        // keep holding a head the ledger no longer plans a round for (GY-1764).
-        work.mechanicalPlan = data.planned ? { reviewId: data.reviewId, head: data.head, at: now.toISOString() } : null;
-        work.mechanicalAnswered = data.planned ? null : { reviewId: data.reviewId, head: data.head };
-      }
       if (command === 'requirements') await this.reviseRequirements(db, actor, work, all, data, now);
       if (command === 'ready') { if (actor.role !== 'operator-agent') admin(actor); work.ready = true; await adoptFollowUpWindow(db, work); }
       if (command === 'unblock') { if (actor.role !== 'operator-agent') admin(actor); work.blocker = null; await adoptFollowUpWindow(db, work); }
@@ -1226,9 +1116,8 @@ export class Engine {
         const workspace = work.workspaces.find(w => w.epoch === data.epoch);
         demand(workspace, 'Register the assignment workspace first');
         // GY-1523: the control plane is the only merge writer, so a submission is a head it observed
-        // (`complete --head`). A pull request (an attempt launched before the cutover) is still
-        // recorded; the observation job then reads its head from the shared object store, which
-        // hands it to the merge writer.
+        // (`complete --head`). The HTTP route refuses a bare number (GY-2999); it is a test seam here,
+        // standing for a head without a git checkout.
         let observed = observation, number: number;
         if (data.head !== undefined) {
           demand(observation?.source === 'control-plane' && observation.candidate.sha === data.head, `${data.head.slice(0, 12)} was not observed by the control plane; complete ${work.key} ${data.epoch} --head again`, 409);
@@ -1365,9 +1254,9 @@ export class Engine {
     demand(!work.lease || Date.parse(work.lease.expiresAt) <= now.getTime(), 'Stop and release the active worker before revising requirements');
     demand(new Set(data.criteria.map((ac: { id: string }) => ac.id)).size === data.criteria.length, 'Criterion IDs must be unique');
     demand(data.criteria.every((ac: { id: string }) => !work!.retiredCriterionIds?.includes(ac.id)), 'Retired criterion IDs cannot be reused');
-    // GY-2965: a user-facing item keeps its e2e proof through a revision; the opt-out sentence still excuses one.
-    const userFacing = userFacingProofRefusal({ type: work!.type, description: work!.description, criteria: data.criteria });
-    demand(!userFacing, userFacing!);
+    // GY-3037: an item keeps its e2e proof through a revision; no description excuses one.
+    const e2e = e2eProofRefusal({ type: work!.type, description: work!.description, criteria: data.criteria });
+    demand(!e2e, e2e!);
     const unphysical = physicalCheckRefusal(data.criteria);
     demand(!unphysical, unphysical!);
     demand(new Set(data.dependencies).size === data.dependencies.length && data.dependencies.every((dep: string) => all.some(w => w.id === dep)), 'Unknown or duplicate dependency');
@@ -1881,7 +1770,7 @@ export class Engine {
    * again, under the lock as their compact stand-ins from the in-process cache (`lockedRows`,
    * GY-1027: an open item's coordination projection, a settled delivery's work-index summary), so
    * the lock hold grows with neither the history nor the open items' histories. The first pass of
-   * a process reads every live document once. The opening also sweeps direct merges.
+   * a process reads every live document once.
    *
    * The pass then evaluates the items whose own row moved, plus those whose inputs elsewhere
    * did: a fleet face any writer moved (anything beyond a lease renewal: stage, queue,
@@ -2077,19 +1966,6 @@ export class Engine {
               fleet.set(document.id, { number, work: document, version: row.version, settled, face, due: null });
             }
             view();
-            // Items held for a merge inside a direct-merge window are delivered before anything else reads them.
-            const swept = await sweepDirectMerges(db, all, await directMergeWindows(db, this.directMergeEnvironment), now);
-            if (swept.length) {
-              const after = await versionsOf(db);
-              for (const work of swept) {
-                const entry = fleet.get(work.id);
-                if (!entry) continue;
-                const face = fleetFace(work), fields = faceFields(entry.face, face);
-                this.noteFaceMove({ id: work.id, key: work.key, fields: fields.length ? fields : ['swept'] }, entry.face, work);
-                Object.assign(entry, { work, version: after.get(work.id) ?? '', face, due: null });
-              }
-              view();
-            }
             opened = true;
             return false;
           }
@@ -2369,39 +2245,6 @@ export class Engine {
       // GY-1523: a candidate the control plane observed itself carries a change number, not a pull
       // request number; a GitHub reading of the pull request that happens to bear it is not this candidate.
       if (work.observation?.source === 'control-plane' && observation.source === undefined) return work;
-      let authorizedSnapshot: Work | null = null; let authorizationRevision: number | null = null;
-      // The instant the delivery was judged at: the last instant before the merge cutoff.
-      let evidenceAsOf: string | null = null;
-      let operatorAuthorization: OperatorAuthorizedDelivery | null = null;
-      if (observation.merged && observation.mergedAt && Number.isFinite(Date.parse(observation.mergedAt))) {
-        const providerMergedTime = Date.parse(observation.mergedAt);
-        // GitHub merges (GY-1235): no execution or clock offset is issued, so the merge instant is
-        // GitHub's own and the cutoff the first instant after it.
-        const mergedTime = providerMergedTime;
-        const cutoff = providerMergedTime + (/\.\d+Z$/.test(observation.mergedAt) ? 1 : 1000);
-        evidenceAsOf = new Date(cutoff - 1).toISOString();
-        // The record as it stood immediately before the merge: what the delivery judgement reads,
-        // and what a direct-merge window delivers. A snapshot whose own observation
-        // already reports this pull request merged was written after the merge, whatever its
-        // timestamp, and carries the merge's consequences, so it is never read (GY-94).
-        // A row stored as a delta (store/snapshot-delta.ts) is read as the document it stands for.
-        const past = await documentBefore(db, id, new Date(cutoff),
-          record => !(record.observation?.merged && record.observation.candidate?.pr === observation.candidate.pr));
-        const historical = past ? historicalAuthorizationRefusals(past, all, observation, cutoff, mergedTime) : ['No record of the item precedes the merge cutoff'];
-        // GitHub's merge of a head whose every gate passed on that head is the delivery.
-        if (past && !historical.length) { authorizedSnapshot = past; authorizationRevision = past.revision; }
-        // An observed merge of a head whose gates had not passed is a recorded violation that every
-        // later observation re-derives from immutable history. Inside a direct-merge window the
-        // operator owns every merge into the base branch: it is delivered as operator-authorized,
-        // naming the setting and who set it (direct-merge.ts).
-        const directMerge = !authorizedSnapshot && observation.mergeSha ? coveringWindow(await directMergeWindows(db, this.directMergeEnvironment), providerMergedTime) : null;
-        if (directMerge) {
-          const snapshot = past ?? structuredClone(work);
-          authorizedSnapshot = snapshot; authorizationRevision = snapshot.revision;
-          operatorAuthorization = directMergeAuthorization(directMerge, { sha: observation.mergeSha!, at: observation.mergedAt }, snapshot.revision, new Date(cutoff).toISOString(), historical);
-        }
-      }
-      const previousObservation = work.observation;
       // When this pull request's head was first observed (GY-1460): the worker bound reads a push from it, never a poll.
       observeHead(work, observation.candidate, observation.at);
       work.candidate = observation.candidate;
@@ -2410,7 +2253,7 @@ export class Engine {
       observeBaseHold(work, observation.at);
       // A newer approval of the head a base refresh was built from replaces the carried binding
       // (GY-831), so the binding names a review the pull request still holds.
-      const refreshed = observation.merged ? null : refreshedCarriedApproval(work);
+      const refreshed = refreshedCarriedApproval(work);
       const carrying = refreshed ? currentCarry(work) : null;
       if (refreshed && carrying) {
         const replaced = carrying.approval as CarriedApproval;
@@ -2419,26 +2262,6 @@ export class Engine {
           JSON.stringify({ details: { reviewer: refreshed.reviewer, reviewId: refreshed.reviewId, sha: refreshed.originalSha, replaced: { reviewId: replaced.reviewId ?? null, sha: replaced.originalSha }, candidate: work.candidate!.sha } })]);
       }
       this.evaluate(work, all, now);
-      if (observation.merged) {
-        const violation = unauthorizedMergeViolation;
-        if (authorizedSnapshot && observation.mergeSha) {
-          // An operator-authorized delivery is judged by the operator, not the gates: what the
-          // record lacked is on the delivery, and the violation it owns leaves the record the same way.
-          if (operatorAuthorization) work.violations = work.violations.filter(entry => entry !== violation && !entry.startsWith(reconciliationRefusalPrefix));
-          else if (work.gates.some(g => !g.passed)) work.violations.push('Post-merge checks differ from the recorded authorization; follow-up required');
-          work.stage = 'done'; work.stageEnteredAt = now.toISOString();
-          const delivery: Work['delivery'] = { mergedAt: observation.mergedAt!, mergeSha: observation.mergeSha, authorizationRevision: authorizationRevision!, ...(evidenceAsOf ? { evidenceAsOf } : {}) };
-          work.delivery = operatorAuthorization ? Object.assign(delivery, { operatorAuthorization }) : delivery;
-          if (operatorAuthorization) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work.id, operatorAuthorization.operator, 'merge.operator-authorized',
-            JSON.stringify({ details: { ...operatorAuthorization, mergeSha: observation.mergeSha, mergedAt: observation.mergedAt, authorizationRevision, evidenceAsOf, gatesNow: work.gates.filter(gate => !gate.passed).map(gate => ({ name: gate.name, reasons: gate.reasons })), at: now.toISOString() } })]);
-          await db.query('DELETE FROM jobs WHERE work_id=$1', [work.id]);
-          // Delivered in this transaction: what it still owes is recomputed now and its leftover rows
-          // retired, so nothing retries against the delivery (GY-185).
-          settleDelivered(work, all, now);
-        } else {
-          if (!work.violations.includes(violation)) work.violations.push(violation);
-        }
-      }
       await this.recordDispatch(db, work, now);
       await save(db, work, 'github', 'github.observed', now);
       return work;

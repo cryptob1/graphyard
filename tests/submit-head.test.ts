@@ -6,8 +6,7 @@ import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
-import { Engine } from '../src/engine.js';
-import { mergeWriterStatus } from '../src/merger-mode.js';
+import { Engine, renewalFaultEvent } from '../src/engine.js';
 import { operatorAgentRoutes } from '../src/server/routes/operator-agents.js';
 import { matchRoute } from '../src/server/routes.js';
 import { allocateChangeNumber } from '../src/merge-writer/change-numbers.js';
@@ -17,6 +16,10 @@ import { completeCommand, completionBody } from '../src/cli/complete.js';
 import { syncWork } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Time-bomb allowance (GY-1694): the 2026-10-08 observation at and the 12:30 evaluate now are past and handed explicitly to observeHead/evaluate; new Date() only stamps a GitHub observation of a live DB item.
 
 /**
@@ -64,14 +67,14 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('submit-head-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('submit_head_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/submit_head_test`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
 /** An item claimed by the worker with its workspace registered on `branch`, ready to submit. */
 async function assigned(n: number, branch = `graphyard/gy-${n}-1`) {
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Head submission ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Head submission ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['integration:claim-safety', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
@@ -82,7 +85,6 @@ const numbers = async () => (await store.pool.query('SELECT number::int AS numbe
 test('unit:submit-head — submit takes exactly one of pr or head; the merger is the control plane whatever old `github` history the ledger holds, nothing can set it, and a head is submitted, ending the lease', async () => {
   // An install that once ran the github merger keeps that event on its append-only ledger; nothing reads it.
   await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', ['test-fixture', 'policy.merger.set', JSON.stringify({ merger: 'github', reason: 'an old install', previous: null })]);
-  assert.equal(mergeWriterStatus.merger, 'control-plane', 'every reader of the merger gets the control plane');
   assert.ok(!operatorAgentRoutes.routes.some(route => matchRoute(route, 'POST', '/api/merger')), 'no route can set a merger');
   const read = operatorAgentRoutes.routes.find(route => matchRoute(route, 'GET', '/api/merger'))!;
   assert.equal((await read.handle({} as never, []) as { mode: string }).mode, 'control-plane', 'GET /api/merger reads the control plane whatever the ledger holds');
@@ -94,6 +96,23 @@ test('unit:submit-head — submit takes exactly one of pr or head; the merger is
   assert.deepEqual(submitted.submission, { epoch: 1, pr: (await numbers())[0].number });
   assert.equal(submitted.observation?.source, 'control-plane');
   assert.equal(submitted.lease, null, 'the head submission ends the lease');
+});
+
+test('unit:submit-head — a recorded renewal fault lets complete observe and submit the head during lease grace; an expired lease without a fault is refused', async () => {
+  for (const graced of [true, false]) {
+    const w = await assigned(graced ? 91 : 92);
+    const expiresAt = new Date(Date.now() - 1000).toISOString();
+    await store.pool.query(`UPDATE work_items SET document=jsonb_set(document, '{lease,expiresAt}', to_jsonb($2::text)) WHERE id=$1`, [w.id, expiresAt]);
+    if (graced) await store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)',
+      [w.id, worker.id, renewalFaultEvent, JSON.stringify({ owner: worker.id, epoch: 1, at: new Date(Date.parse(expiresAt) - 1000).toISOString(), error: 'connection terminated' })]);
+    const submit = () => engine.execute(worker, 'submit', w.id, { epoch: 1, head }, randomUUID());
+    if (graced) {
+      const submitted = await submit();
+      assert.equal(submitted.candidate?.sha, head);
+      assert.equal(submitted.observation?.source, 'control-plane');
+      assert.equal(submitted.lease, null);
+    } else await assert.rejects(submit(), /Lease missing, expired, or superseded/);
+  }
 });
 
 test('integration:change-number-allocated-once — a head submission allocates one change number per (work, head), sets candidate and submission from it, ends the lease in the same transaction, replays from its receipt and refuses a head the object store lacks naming the branch ref', async () => {
@@ -233,14 +252,13 @@ test('unit:gates-github-snapshot — with source undefined a pull-request-era ob
   assert.deepEqual(reasonsOf(submittedWork(undefined, undefined, { mergeable: false, checks: [{ name: 'test', result: 'failure', appId: 15368 }] })), snapshot);
 });
 
-test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, head} with the SHA defaulting to the worktree HEAD, complete GY-N EPOCH PR sends the body it always did, and the command still reports self-verification beside the control plane\'s answer', async () => {
+test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, head} with the SHA defaulting to the worktree HEAD, and the command still reports self-verification beside the control plane\'s answer', async () => {
   const headOf = () => head;
-  assert.deepEqual(completionBody(['2', '123'], headOf), { epoch: 2, pr: 123 });
-  assert.deepEqual(JSON.stringify(completionBody(['2', '123'], headOf)), JSON.stringify({ epoch: 2, pr: 123 }), 'the PR body is byte-identical');
+  assert.deepEqual(completionBody(['2'], headOf), { epoch: 2, head });
   assert.deepEqual(completionBody(['2', '--head'], headOf), { epoch: 2, head });
   assert.deepEqual(completionBody(['2', '--head', staleHead], headOf), { epoch: 2, head: staleHead });
   assert.deepEqual(completionBody(['2', `--head=${staleHead}`], headOf), { epoch: 2, head: staleHead });
-  assert.throws(() => completionBody(['2', '123', '--head'], headOf), /either a PR number or --head \[SHA\], not both/);
+  assert.throws(() => completionBody(['2', '123', '--head'], headOf), /never a pull request number[^]*--head/);
   assert.throws(() => completionBody(['2', '--head', 'abc'], headOf), /40-hex commit/);
   assert.throws(() => completionBody(['2', '123', '--bogus'], headOf), /bogus/);
   // The command: the worktree's HEAD is read from the repository root, the body is posted to submit, and the answer carries selfVerification.
@@ -250,10 +268,6 @@ test('unit:complete-head-cli — complete GY-N EPOCH --head [SHA] sends {epoch, 
   await completeCommand.run(context, { id: 'id-1', key: 'GY-1' } as any);
   assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, head } }]);
   assert.equal(printed[0].submission.pr, 5); assert.equal(printed[0].selfVerification.state, 'not-run');
-  // The PR form through the same command.
-  calls.length = 0;
-  await completeCommand.run({ ...context, args: ['1', '77'] } as CliContext, { id: 'id-1', key: 'GY-1' } as any);
-  assert.deepEqual(calls, [{ path: 'work/id-1/submit', body: { epoch: 1, pr: 77 } }]);
 });
 
 test('unit:sync-control-plane-no-fetch — sync reads mergeWriter from /api/status: under control-plane it fetches nothing and merges the shared refs/remotes/origin/BASE, judging only the merge (a file outside plannedFiles reports ok), for a clean tree as much as a changed one; under github or an older server without the field it fetches', async () => {

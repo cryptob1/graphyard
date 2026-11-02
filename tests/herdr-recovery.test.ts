@@ -10,6 +10,10 @@ import { server } from '../src/server.js';
 import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // Cross-machine lease recovery, exercised inline against the real HTTP server and Postgres
 // (GY-3001: the trusted-contract scripts are deleted; the exercise lives here, in the suite).
 // Two machines are modelled exactly as the fleet guide requires: distinct worker principals,
@@ -60,12 +64,13 @@ async function exercise(url: string, principals: unknown[], inventory = createIn
     assert.equal(response.status, status, `Unexpected status for ${path}`); return response.json();
   }
   async function create(title: string) {
-    const work = await request('work', operator, { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'A replacement machine recovers expired work', proofs: ['integration:herdr-recovery'] }] });
+    const work = await request('work', operator, { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'A replacement machine recovers expired work', proofs: ['integration:herdr-recovery', 'e2e:fixture'] }] });
     return request(`work/${work.id}/ready`, operator, {});
   }
   const worktree = (machine: (typeof machines)[number], work: any, epoch: number) => ({ epoch, host: machine.host, path: `/srv/graphyard/${machine.host}/${work.key.toLowerCase()}-${epoch}`, branch: `graphyard/${work.key.toLowerCase()}-${epoch}` });
+  // submit names a head: the HTTP route refuses a pull-request number before the lease fence runs.
   const staleBody = (command: string, work: any, machine: (typeof machines)[number]) => ({ heartbeat: { epoch: 1 }, release: { epoch: 1 }, blocked: { epoch: 1, reason: 'Stale owner note' },
-    workspace: worktree(machine, work, 1), submit: { epoch: 1, pr: 1 } } as Record<string, unknown>)[command];
+    workspace: worktree(machine, work, 1), submit: { epoch: 1, head: 'a'.repeat(40) } } as Record<string, unknown>)[command];
   const candidateNow = async () => Date.parse((await request('status', operator)).now);
   // A fence created between two candidate clock reads runs for at most `deadline - before`, so this
   // refuses any default shorter than the requirement while granting no more slack than that window.

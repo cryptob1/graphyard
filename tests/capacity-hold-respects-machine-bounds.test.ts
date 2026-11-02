@@ -15,6 +15,10 @@ import {
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Fixture filings obey the same E2E contract as real work.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1708 AC-2: mid-attempt exhaustion hold never launches a second session on the spent account,
 // never double-counts the attempt, and keeps role bound counters truthful through the redispatch.
 
@@ -53,7 +57,7 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/capacity_bounds`);
   await store.init();
   engine = new Engine(store, 300, repository);
-  engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
+ engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -104,7 +108,7 @@ test('unit:capacity-hold-respects-machine-bounds — a held account is not re-se
   const finished: HerdrAgent = { name: profile.agentName, pane_id: 'pane-1', agent_status: 'done' };
   const filed = await ok(operator, 'POST', 'work', {
     title: 'bounds', type: 'chore',
-    criteria: [{ id: 'AC-1', text: 'bounds', proofs: ['unit:capacity-hold-respects-machine-bounds'] }],
+    criteria: [{ id: 'AC-1', text: 'bounds', proofs: ['unit:capacity-hold-respects-machine-bounds', 'e2e:fixture'] }],
   }) as Work;
   const ready = await ok(operator, 'POST', `work/${filed.id}/ready`, {}) as Work;
   const claimed = await ok(workerA, 'POST', `work/${ready.id}/claim`, {}) as Work;

@@ -6,7 +6,7 @@ import { dirname, resolve, basename } from 'node:path';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
 import { nameForLaunch } from '../session-name.js';
 import { launchAuthorization } from '../repository-setup.js';
-import { type HarnessPlan, type HarnessRule, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
+import { type HarnessPlan, type HarnessRule, repositoryClaudeConfig, writeHarnessPermissions, masterHarnessPlan, harnessDecision, claudeRuleProblem, bashRuleMatches } from '../harness.js';
 import { foreignUnitText, initialiseUnitsCommand, userUnitDirectory, installUnitsFile, type InstallUnits, LegacyUnitRefusal, legacyLoopUnit, perInstallUnits, proposedInstallUnits, readInstallUnits, recordInstallUnits, resolveInstallUnits, unitCheckout } from '../install/units.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';
@@ -22,7 +22,7 @@ import { verificationEnvironment, verificationSlotsDirectory } from './verificat
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
  * tuning its own configuration through the CLI's owned fields (`master config` — a direct edit of
- * master.json would reach autoMerge and the credential and identity paths onboarding owns, so it
+ * master.json would reach the credential and identity paths onboarding owns, so it
  * is not granted), restarting and reading the durable loop's exact unit, administering the
  * deployment it verifies, and re-running CI for a candidate. None of these reaches a merge, a
  * verdict, evidence, or a credential; the enforced boundaries are unchanged.
@@ -175,12 +175,14 @@ async function repositoryCarriesClaudeSettings(root: string) {
   for (const name of ['settings.json', 'settings.local.json']) {
     try { await lstat(resolve(root, '.claude', name)); return true; } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
   }
-  return false;
+  // Folder trust checks ancestors too. An isolated HOME can put durable scratch below a
+  // different account's settings; exclude those project sources rather than trusting them.
+  return !!await repositoryClaudeConfig(root);
 }
 /**
  * Writes the role file and returns the runtime arguments that load it instead of the repository's
- * settings. A Claude session under a repository that carries no project settings inherits nothing
- * and is launched with its profile arguments unchanged. Loading only the user settings also leaves
+ * settings. A Claude session whose repository and ancestors carry no project settings inherits
+ * nothing and is launched with its profile arguments unchanged. Loading only the user settings also leaves
  * out the repository's AGENTS.md, so such a session carries the launch authorization written there
  * (repository-setup.ts launchAuthorization) as its role text, loaded from the session's role file.
  */
@@ -485,9 +487,9 @@ export function workerHarnessPlan(input: { cliPath: string; branch: string; base
  * worker's own harness, so the rework the control plane authorizes is carried out by the attempt it
  * dispatches, with no human shell.
  */
-export function branchRestoration(input: { cliPath: string; key: string; epoch: number; pr: number; reviewedHead: string }) {
+export function branchRestoration(input: { cliPath: string; key: string; epoch: number; reviewedHead: string }) {
   const cli = `node ${input.cliPath}`;
-  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} ${input.pr}`];
+  return ['git fetch origin', `git reset --hard ${input.reviewedHead}`, `${cli} sync ${input.key}`, `${cli} restore-branch ${input.key} ${input.epoch}`, `${cli} complete ${input.key} ${input.epoch} --head`];
 }
 /**
  * The shell commands a blocker names: each backtick-quoted command line, or, in a blocker that

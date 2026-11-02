@@ -3,8 +3,8 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { parseArgs } from 'node:util';
-import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { chmod, mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises';
+import { delimiter, dirname, join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { type CliCommand } from './registry.js';
 import { changeBase, selfVerification } from './verify.js';
@@ -12,6 +12,7 @@ import { defaultChildRun, type ChildRun } from '../child-runner.js';
 import { leadingProof } from '../model/flake-ledger.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { trialTimeoutMinutes } from '../master/merge-writer-settings.js';
+import { trialHomeVariables, trialTemporaryMode, trialTemporaryVariables } from '../merge-writer/trial.js';
 
 /**
  * A submission is observed on GitHub before it is accepted, so while the control plane's GitHub
@@ -54,14 +55,12 @@ export function worktreeHead(root: string): string {
   return result.stdout.trim();
 }
 /**
- * What `complete GY-N EPOCH ...` submits (GY-1523): `{epoch, pr}` for `PR`, exactly as before, or
- * `{epoch, head}` for `--head [SHA]`, the SHA defaulting to the worktree's HEAD. parseArgs has no
- * flag with an optional value, so `--head` and the SHA that follows it (unless the next word is a
- * flag) are taken out before the positionals are parsed; without `--head` the
- * arguments reach parseArgs untouched and the body is byte-identical to the PR form's.
+ * What `complete GY-N EPOCH [--head [SHA]]` submits (GY-1523): `{epoch, head}`, the SHA defaulting
+ * to the worktree's HEAD. parseArgs has no flag with an optional value, so `--head` and the SHA that
+ * follows it (unless the next word is a flag) are taken out before the positionals are parsed.
  */
-export function completionBody(args: readonly string[], headOf: () => string): { epoch: number; pr?: number; head?: string } {
-  const rest: string[] = []; let head: string | undefined | null = null;
+export function completionBody(args: readonly string[], headOf: () => string): { epoch: number; head: string } {
+  const rest: string[] = []; let head: string | undefined;
   for (let index = 0; index < args.length; index++) {
     const argument = args[index];
     if (argument === '--head') { const next = args[index + 1]; if (next !== undefined && !next.startsWith('-')) { head = next; index++; } else head = undefined; continue; }
@@ -69,8 +68,7 @@ export function completionBody(args: readonly string[], headOf: () => string): {
     rest.push(argument);
   }
   const { positionals } = parseArgs({ args: rest, options: {}, allowPositionals: true });
-  if (head === null) return { epoch: Number(positionals[0]), pr: Number(positionals[1]) };
-  if (positionals[1] !== undefined) throw new Error('complete takes either a PR number or --head [SHA], not both');
+  if (positionals[1] !== undefined) throw new Error(`complete submits a commit, never a pull request number: drop ${positionals[1]} and run complete GY-N EPOCH --head [SHA]`);
   const sha = (head ?? headOf()).trim();
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error(`--head takes a 40-hex commit, or none for the worktree's HEAD; ${JSON.stringify(sha)} is neither`);
   return { epoch: Number(positionals[0]), head: sha };
@@ -122,13 +120,25 @@ export function rerunCommand(root: string, files: readonly string[]): [string, s
  */
 export async function rerunTrialFiles(root: string, files: readonly string[], run: ChildRun = defaultChildRun): Promise<{ ok: boolean; output: string; timedOut?: true }> {
   const [command, args] = rerunCommand(root, files);
-  // A NODE_TEST_CONTEXT inherited from an enclosing test run makes node's runner report to it instead of running the files.
-  const { NODE_TEST_CONTEXT: _, ...env } = process.env;
-  try { return { ok: true, output: await run(command, args, { cwd: root, env, timeoutMs: rerunBound.ms, group: true }) }; }
+  let scratch: string | undefined;
+  try {
+    // /var/tmp is durable scratch available to confined workers. Keep it short and outside
+    // the checkout: fixture sockets have a pathname bound and upward lookups must stay clean.
+    // The operator HOME stays read-only, including for runners that relocate tmpfs beneath HOME.
+    scratch = await mkdtemp('/var/tmp/gy-r');
+    const home = join(scratch, 'home'), temporary = join(scratch, 'tmp');
+    await mkdir(home); await mkdir(temporary); await chmod(temporary, trialTemporaryMode);
+    // A NODE_TEST_CONTEXT inherited from an enclosing test run suppresses the child's runner.
+    const { NODE_TEST_CONTEXT: _, ...inherited } = process.env;
+    const env = { ...inherited, ...trialHomeVariables(home), ...trialTemporaryVariables(temporary),
+      PATH: [dirname(process.execPath), inherited.PATH].filter(Boolean).join(delimiter) };
+    return { ok: true, output: await run(command, args, { cwd: root, env, timeoutMs: rerunBound.ms, group: true }) };
+  }
   catch (error: any) {
     const output = `${error.stdout ?? ''}${error.stderr ?? ''}` || (error instanceof Error ? error.message : String(error));
     return error?.timedOut ? { ok: false, output, timedOut: true } : { ok: false, output };
   }
+  finally { if (scratch) await rm(scratch, { recursive: true, force: true }); }
 }
 
 /** One failing case a rerun's output names: the case, where the run locates it, and the timing the runner reported. */
@@ -281,23 +291,9 @@ export async function judgeRerun(root: string, work: { key: string; criteria?: {
 }
 
 /**
- * GY-1753 AC-1: push the repository's current branch to origin with upstream when it is a
- * `graphyard/` branch, so the PR head exists for a worker whose own push was refused; any other
- * branch (or a detached HEAD) pushes nothing. A failed push is returned, never thrown: `complete`'s own
- * refusals still run, and then it refuses to submit a head the remote does not hold.
- */
-export function pushGraphyardBranch(root: string, git: typeof spawnSync = spawnSync): { pushed: string | null; failure?: string } {
-  const branch = String(git('git', ['-C', root, 'rev-parse', '--abbrev-ref', 'HEAD'], { encoding: 'utf8' }).stdout ?? '').trim();
-  // A foreign branch is left alone.
-  if (!branch.startsWith('graphyard/')) return { pushed: null };
-  const pushed = git('git', ['-C', root, 'push', '--quiet', '-u', 'origin', branch], { encoding: 'utf8' });
-  return pushed.status === 0 ? { pushed: branch } : { pushed: null, failure: String(pushed.stderr ?? pushed.error ?? '').trim() };
-}
-
-/**
- * `complete GY-N EPOCH PR`, or `complete GY-N EPOCH --head [SHA]` while the control plane is the
- * merge writer (GY-1523): submit the implementation and end the lease. Beside the control
- * plane's answer it reports the worker's own verification of HEAD (`graphyard verify GY-N`): which
+ * `complete GY-N EPOCH [--head [SHA]]` (GY-1523): submit the commit and end the lease; nothing is
+ * pushed, since the shared object store already holds it. Beside the control plane's answer it
+ * reports the worker's own verification of HEAD (`graphyard verify GY-N`): which
  * mechanical proofs were run and their outcome, which proofs are outstanding, or that none was run.
  * The report never changes what is submitted — the gates decide from trusted evidence alone — but a
  * head whose proof failed here is the head the control plane returns before review.
@@ -306,19 +302,17 @@ export const completeCommand: CliCommand = {
   name: 'complete',
   scope: 'work',
   help: [
-    '  complete GY-N EPOCH PR        Submit implementation and end the lease; gates decide',
-    '                                completion. Reports what graphyard verify ran on HEAD and its',
-    "                                outcome. Refused while GitHub requests are paused, it waits for the",
-    '                                named reset and submits again (bounded)',
-    '  complete GY-N EPOCH --head [SHA]  While the control plane is the merge writer: submit the',
-    '                                commit (the worktree\'s HEAD when no SHA is given), which the',
-    '                                shared object store already holds, so nothing is pushed; the',
-    '                                control plane allocates its change number and ends the lease',
+    '  complete GY-N EPOCH [--head [SHA]]  Submit the commit (the worktree\'s HEAD when no SHA is',
+    '                                given) and end the lease; gates decide completion. The shared',
+    '                                object store already holds it, so nothing is pushed. Reports',
+    '                                what graphyard verify ran on HEAD and its outcome. Refused while',
+    '                                GitHub requests are paused, it waits for the named reset and',
+    '                                submits again (bounded)',
   ],
   run: async (context, work) => {
     const body = completionBody(context.args, () => worktreeHead(context.repositoryRoot())), requestId = process.env.GRAPHYARD_REQUEST_ID ?? randomUUID();
     // GY-2517: a rework after a failed merge trial re-runs the trial's failing test files here,
-    // before anything is pushed or submitted, so a head that still fails them no longer costs the
+    // before anything is submitted, so a head that still fails them no longer costs the
     // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape
     // names files; every other item runs nothing.
     const failing = trialFailureTests(work.mergeLedger?.refusal, context.repositoryRoot());
@@ -335,18 +329,8 @@ export const completeCommand: CliCommand = {
       if (rerun.flaked.length) console.error(`complete records the flaked ${rerun.flaked.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
       if (rerun.baseFailures.length) console.error(`complete records the base failures ${rerun.baseFailures.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
     }
-    // GY-1925: the two forms map one-to-one onto the merger modes the engine enforces at submit
-    // (GY-1523 — a head is accepted only while the control plane is the merge writer, a pull request
-    // only while GitHub is), so the form alone decides whether anything is pushed. The `--head` form
-    // pushes nothing: the shared object store already holds the commit, so a sandbox that cannot
-    // push (no SSH inside its user namespace) still completes. The PR form keeps its push of the
-    // graphyard/ branch and its refusal when that push fails.
-    let push: { pushed: string | null; failure?: string } = { pushed: null };
-    if (body.head === undefined) try { push = pushGraphyardBranch(context.repositoryRoot(), spawnSync); } catch { /* no readable worktree: nothing to push; the head the PR is observed at reports it */ }
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
-    // A failed push leaves the remote head at an earlier commit: nothing is submitted (and no lease ended) for it.
-    if (push.failure !== undefined) throw new Error(`complete refused: pushing the graphyard/ branch failed, so the pull request would not hold this head: ${push.failure || 'git push failed'}`);
     // GY-2968: what the rerun set aside travels with the submission, for the control plane to
     // record on the item's history beside it.
     const submitted = await submitThroughPause(() => context.api(`work/${work.id}/submit`, {

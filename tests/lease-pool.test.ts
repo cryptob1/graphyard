@@ -16,6 +16,10 @@ import { isConfirmedCoordinationRefusal } from '../src/cli/context.js';
 import { renewalGraceMs, supervise } from '../src/supervisor.js';
 import type { Principal, Work } from '../src/model.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-558: lease renewals timed out waiting for a connection behind slow report and observation
 // queries, and live workers lost their leases. Each test is named for the proof it produces.
 const operator: Principal = { id: 'lease-pool-operator', role: 'admin', sessionKind: 'human' };
@@ -37,10 +41,9 @@ after(async () => { if (database) await database.stop(); });
 function engineOn(store: Store, leaseSeconds = 120) {
   const engine = new Engine(store, leaseSeconds, 'owner/project');
   engine.principals = [operator, engineer, rival];
-  engine.submissionObserver = null;
   return engine;
 }
-async function ready(engine: Engine, title: string, criteria = [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }]) {
+async function ready(engine: Engine, title: string, criteria = [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }]) {
   const work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria }, randomUUID());
   return engine.execute(operator, 'ready', work.id, {}, randomUUID());
 }
@@ -85,7 +88,7 @@ test('unit:lease-pool-isolated — renewal, claim, complete, blocked and defer o
     const work = await claimed(engine, 'isolated-renewal');
     const open = await ready(engine, 'isolated-claim');
     // GY-1726: a post-deploy follow-up whose reading cannot exist yet, deferred by its worker under the same exhaustion.
-    const followUp = await engine.execute(engineer, 'claim', (await ready(engine, 'isolated-defer', [{ id: 'AC-1', text: 'The serving release reads clean', proofs: ['manual:lease-pool-on-serving-release'] }])).id, {}, randomUUID());
+    const followUp = await engine.execute(engineer, 'claim', (await ready(engine, 'isolated-defer', [{ id: 'AC-1', text: 'The serving release reads clean', proofs: ['manual:lease-pool-on-serving-release', 'e2e:fixture'] }])).id, {}, randomUUID());
     // Every pool but the lease pool — the general pool, and the report pool where the store has one —
     // is held to its last connection, as slow report and observation queries held it in production.
     const others = Object.entries(store).filter((entry): entry is [string, pg.Pool] => entry[1] instanceof pg.Pool && entry[1] !== store.leasePool);
@@ -104,9 +107,13 @@ test('unit:lease-pool-isolated — renewal, claim, complete, blocked and defer o
       assert.deepEqual([deferred.value.body.lease, deferred.value.body.blocker, deferred.value.body.observationWindow?.basis], [null, null, 'worker-reading'], 'defer ended the attempt and holds the window');
       const claim = await timed(() => http.post(rival, `work/${open.id}/claim`, {}));
       assert.equal(claim.value.status, 200, JSON.stringify(claim.value.body)); assert.ok(claim.ms < 2000, `claim completed in ${Math.round(claim.ms)} ms`);
-      const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 }));
+      const head = 'a'.repeat(40);
+      const number = await http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, pr: 558 });
+      assert.match(number.body.error, /never a pull request number[^]*--head/, 'the HTTP route refuses a pull request number');
+      engine.gitRunner = async args => ({ status: 0, stdout: args[0] === 'diff' ? '' : head, stderr: '' });
+      const complete = await timed(() => http.post(engineer, `work/${work.id}/submit`, { epoch: work.epoch, head }));
       assert.equal(complete.value.status, 200, JSON.stringify(complete.value.body)); assert.ok(complete.ms < 2000, `complete completed in ${Math.round(complete.ms)} ms`);
-      assert.equal(complete.value.body.submission.pr, 558);
+      assert.equal(complete.value.body.candidate.sha, head);
     } finally { for (const client of held) client.release(); }
     // The other way round: with every lease connection held, status and reconciliation still run,
     // because neither ever takes a lease connection.

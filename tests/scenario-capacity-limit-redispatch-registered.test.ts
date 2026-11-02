@@ -81,8 +81,13 @@ test('unit:scenario-capacity-limit-redispatch-registered — revision 1 ships in
   const file = join(root, caseDirectory, `${id}.json`);
   assert.ok(existsSync(file), `e2e/cases/${id}.json must ship beside the revision`);
   const definition = parseCase(`e2e/cases/${id}.json`, await readFile(file, 'utf8'));
-  assert.equal(definition.required, false, 'the case is optional: it never blocks releases');
+  assert.equal(definition.required, true, 'the case is required: a failing run blocks releases');
   assert.equal(definition.target, 'any');
+  const commands = definition.steps.filter(step => step.kind === 'command');
+  assert.ok(commands.length > 0, 'the case runs the capacity proofs');
+  const testFiles = commands.flatMap(step => step.run.split(/\s+/).filter(argument => argument.endsWith('.test.ts')));
+  assert.ok(testFiles.length > 0, 'the command names test files');
+  for (const file of testFiles) assert.ok(existsSync(join(root, file)), `the case must not run a deleted test: ${file}`);
   assert.ok(!definition.steps.some(step => step.kind === 'http' && step.method === 'POST' && step.path === '/api/work'),
     'the case must not create backlog items on every run');
   const fromCase = scenarioDefinition({ file: `e2e/cases/${id}.json`, definition });

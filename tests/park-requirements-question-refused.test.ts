@@ -10,6 +10,10 @@ import { humanRequestSchema, parkRefusal, requirementsQuestionRefusal } from '..
 import { routedParkCommand } from '../src/cli/session-commands.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1816: GY-1814's release-soak fix sat parked under goals and priorities on a question that was
 // never the operator's — its worker asked whether AC-1 should be rewritten to match GY-1762's test
 // assertions or GY-1762 reversed, and only a master session noticing it unblocked the item.
@@ -33,7 +37,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('park-requirements-question'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('park_requirements_question');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/park_requirements_question`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
@@ -48,7 +52,7 @@ const request = async (credential: string, method: 'GET' | 'POST', path: string,
 const reload = async (workId: string) => (await store.list()).find(item => item.id === workId)!;
 /** A claimed item to park on: created, readied and claimed under the worker's own credential. */
 const claimed = async (n: number): Promise<Work> => {
-  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Requirements question ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves'] }] }, id());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Requirements question ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:behaves', 'e2e:fixture'] }] }, id());
   work = await engine.execute(operator, 'ready', work.id, {}, id());
   return engine.execute(worker, 'claim', work.id, {}, id());
 };

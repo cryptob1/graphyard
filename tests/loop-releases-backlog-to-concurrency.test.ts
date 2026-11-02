@@ -10,6 +10,10 @@ import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProf
 import type { Principal, Work } from '../src/model.js';
 import { coordinationViewHeader } from '../src/server/work-view.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+
+// Every filed fixture owes an E2E proof and the serve declaration its trial needs.
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-2991: the loop keeps the pipeline full itself: when fewer items are in flight than its
 // concurrency, it releases the highest-priority backlog item whose dependencies are done. Driven
@@ -45,7 +49,7 @@ const reload = async (id: string) => (await store.list()).find(item => item.id =
 const events = async (id: string) => (await store.pool.query('SELECT kind, actor FROM events WHERE work_id=$1', [id])).rows as { kind: string; actor: string }[];
 /** One backlog item as the operator filed it, older than every item filed after it. */
 const file = async (key: string, overrides: Record<string, unknown> = {}) => ok(token(operator.id), 'POST', 'work', {
-  title: `Pipeline ${key}`, type: 'chore', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop-releases-backlog-to-concurrency'] }],
+  title: `Pipeline ${key}`, type: 'chore', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:loop-releases-backlog-to-concurrency', 'e2e:fixture'] }],
   policy: { checks: ['test'], review: true }, ...overrides,
 }) as Promise<Work>;
 /** The park a worker records: the item waits on a human-only decision, blocked, unclaimed. */
@@ -81,7 +85,7 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/pipeline_full`);
   await store.init();
   engine = new Engine(store, 300, repository);
-  engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
+ engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

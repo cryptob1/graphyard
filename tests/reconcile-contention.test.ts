@@ -10,6 +10,10 @@ import { advisoryLocks } from '../src/store/locks.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 // GY-1115: with about 100 open items, production reconciliation ticks took 4-6 minutes. Every
 // contended batch rolled back and reran whole up to six times holding its item row locks, each
 // resync started a tick of its own, job wakes deadlocked against the batches, and the pool ran
@@ -58,9 +62,8 @@ before(async () => {
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
   engine.principals = [operator, ...workers];
-  engine.submissionObserver = null;
   for (let n = 0; n < 100; n++) {
-    const work = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Contended item ${n}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID());
+    const work = await engine.execute(operator, 'create', null, { type: 'chore',  title: `Contended item ${n}`, criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention', 'e2e:fixture'] }] }, randomUUID());
     items.push(await engine.execute(operator, 'ready', work.id, {}, randomUUID()));
   }
   for (const [n, actor] of workers.entries()) leased.push({ work: await engine.execute(actor, 'claim', items[n].id, {}, randomUUID()), actor });
@@ -134,7 +137,7 @@ test('unit:reconcile-leaves-pool-headroom — while a tick runs, heartbeats, cla
   const watch = (async () => { while (ticking) { peakBackground = Math.max(peakBackground, store.background.inUse); await new Promise(resolve => setTimeout(resolve, 2)); } })();
   const extra: Principal = { id: 'contention-headroom', role: 'worker', sessionKind: 'ai' };
   engine.principals = [...engine.principals, extra];
-  const free = await engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Claimed while the tick runs', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention'] }] }, randomUUID())).id, {}, randomUUID());
+  const free = await engine.execute(operator, 'ready', (await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Claimed while the tick runs', criteria: [{ id: 'AC-1', text: 'Proven', proofs: ['unit:reconcile-contention', 'e2e:fixture'] }] }, randomUUID())).id, {}, randomUUID());
   const timings: { what: string; ms: number }[] = [];
   const timed = async (what: string, run: () => Promise<unknown>) => { const started = performance.now(); await run(); timings.push({ what, ms: performance.now() - started }); };
   const earlier = new Set(engine.reconcileTicks);

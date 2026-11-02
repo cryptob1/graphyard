@@ -11,10 +11,15 @@ import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
 import { harnessDecision } from '../src/harness.js';
+import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { blockerCommands, branchRestoration, sessionHarnessPlan, unrunnableRemedies, workerHarnessPlan } from '../src/master.js';
 import { parseLocalScopeDiff } from '../src/sync.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-128: the recovery the control plane authorizes for an ejected or contaminated tip — reset
 // the assigned branch to the reviewed head, sync it onto the base, push — must be executable by
@@ -71,7 +76,7 @@ test('unit:worker-may-force-with-lease-its-own-branch — the worker restores it
   assert.equal(decision(`${cli} restore-branch GY-9 4`, session), 'allow');
   for (const command of [`git push --force origin ${branch}`, 'git push --force-with-lease origin graphyard/gy-7-1', 'git push origin :graphyard/gy-7-1']) assert.equal(decision(command, session), 'deny', command);
   // The restoration the rework reason carries is permitted command by command, with no human shell.
-  const steps = branchRestoration({ cliPath: launcher, key: 'GY-9', epoch: 4, pr: 31, reviewedHead: 'f'.repeat(40) });
+  const steps = branchRestoration({ cliPath: launcher, key: 'GY-9', epoch: 4, reviewedHead: 'f'.repeat(40) });
   assert.deepEqual(steps.map(step => decision(step)), steps.map(() => 'allow'), steps.join('\n'));
   assert.ok(steps.includes(`${cli} restore-branch GY-9 4`));
   assert.ok(!steps.some(step => /^git push/.test(step)), 'no raw push in the restoration');
@@ -115,8 +120,8 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
   commit(seed, 'README.md', 'base', 'Seed'); commit(seed, 'src-own.txt', 'own v0', 'Own file'); commit(seed, 'src-foreign.txt', 'foreign v0', 'Foreign file');
   git(seed, 'push', '-q', 'origin', 'main');
 
-  let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Contaminated rework', criteria: [{ id: 'AC-1', text: 'Own change', proofs: ['unit:own'] }] }, randomUUID());
-  const foreign: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Foreign unlanded', criteria: [{ id: 'AC-1', text: 'Foreign change', proofs: ['unit:foreign'] }] }, randomUUID());
+  let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Contaminated rework', criteria: [{ id: 'AC-1', text: 'Own change', proofs: ['unit:own', 'e2e:fixture'] }] }, randomUUID());
+  const foreign: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Foreign unlanded', criteria: [{ id: 'AC-1', text: 'Foreign change', proofs: ['unit:foreign', 'e2e:fixture'] }] }, randomUUID());
   const itemBranch = `graphyard/${work.key.toLowerCase()}-1`, pr = 4128;
   // The observer reads the real origin, as the provider would: the PR head, the base tip and the diff between them.
   const observeOrigin = async () => {
@@ -126,7 +131,8 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
     return { candidate: { sha: head, baseSha: base, pr, branch: itemBranch, author: worker.id }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
       files: scopeFiles.map(file => file.path), scopeFiles, baseTip: base, at: new Date().toISOString() } satisfies Observation;
   };
-  engine.submissionObserver = observeOrigin;
+  // complete's head is read from the origin's own object store, which restore-branch just pushed it to.
+  engine.gitRunner = gitRunnerFor(origin); engine.baseBranch = 'main';
   // The provider observation the control plane's sync job records for the submitted head.
   const observed = async () => { const latest = (await store.list()).find(item => item.id === work.id)!; return engine.observe(latest.id, latest.revision, await observeOrigin()); };
 
@@ -190,7 +196,7 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
 
   // The restoration, exactly as the rework carries it: every step permitted by the worker's own
   // harness, run non-interactively in its worktree against the live control plane.
-  const steps = branchRestoration({ cliPath: launcher, key: work.key, epoch: 2, pr, reviewedHead: reviewed });
+  const steps = branchRestoration({ cliPath: launcher, key: work.key, epoch: 2, reviewedHead: reviewed });
   const outputs: string[] = [];
   for (const step of steps) {
     assert.equal(harnessDecision(harness, step).decision, 'allow', `${step} is permitted to the worker session`);
@@ -207,7 +213,6 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
   work = (await store.list()).find(item => item.id === work.id)!;
   assert.equal(work.submission?.epoch, 2);
   assert.equal(work.lease, null, 'complete ended the lease');
-  work = await observed();
   const head = git(seed, 'ls-remote', origin, `refs/heads/${itemBranch}`).split('\t')[0];
   assert.equal(work.candidate?.sha, head);
   assert.equal(work.candidate?.baseSha, base);
@@ -225,7 +230,7 @@ test('integration:authorized-rework-is-executable — a rework over an ejected, 
 
 test('integration:unrunnable-remedy-reported — a blocker naming a command no launched session may run is reported in master status as a Graphyard defect', async () => {
   const blocked = async (title: string, reason: (branch: string) => string) => {
-    let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }] }, randomUUID());
+    let work: Work = await engine.execute(operator, 'create', null, { type: 'chore',  title, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }] }, randomUUID());
     work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
     work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
     const itemBranch = `graphyard/${work.key.toLowerCase()}-${work.epoch}`;

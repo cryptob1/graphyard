@@ -1,6 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
@@ -29,7 +33,7 @@ const interrupted = (epoch: number, endsBlocker: boolean) => ({ event: 'exhauste
   reason: `attempt ${epoch} blocked again after its blocker was cleared`, resetsAt: null, partialWork: { state: 'committed', commit: 'a'.repeat(40), branch: 'graphyard/x', detail: 'kept' }, ...(endsBlocker ? { endsBlocker: true } : {}) });
 
 async function blockedAttempt(title: string) {
-  let work = (await call(master.token, 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], reason: 'Operator goal: reblocked attempts end' })).body as Work;
+  let work = (await call(master.token, 'work', { title, type: 'chore', criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works', 'e2e:fixture'] }], reason: 'Operator goal: reblocked attempts end' })).body as Work;
   work = (await call(master.token, `work/${work.id}/ready`, { expectedRevision: work.revision, reason: 'Ready' })).body as Work;
   work = await engine.execute(implementer, 'claim', work.id, {}, randomUUID());
   const lease = work.lease!;
@@ -46,7 +50,7 @@ before(async () => {
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('reblocked-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await database.initialise(); await database.start(); await database.createDatabase('reblocked_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/reblocked_test`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null;
+  engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

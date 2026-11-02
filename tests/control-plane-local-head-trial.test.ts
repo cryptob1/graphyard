@@ -17,6 +17,10 @@ import { completionBody } from '../src/cli/complete.js';
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// Every fixture item carries an E2E proof and declares the serve its trial needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-2010 AC-3: in control-plane mode a submitted head present in the shared object store
  * progresses through the merge writer when origin holds only the base branch. The pull-request-era
@@ -70,13 +74,13 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('control-plane-local-head-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('local_head_trial');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/local_head_trial`); await store.init();
-  engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, repository);
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (fixtureRoot) await rm(fixtureRoot, { recursive: true, force: true }); });
 
 async function submittedItem(): Promise<Work> {
-  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: 'Local head trial', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works'] }] }, randomUUID());
+  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: 'Local head trial', criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(admin, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
@@ -119,7 +123,7 @@ test('integration:control-plane-local-head-trial — a head present only in the 
   const fixtureConfig = masterConfigSchema.parse({ ...config, run: { mergeWriter: { deployKeyFile: join(fixtureRoot, 'deploy-key'), retrials: 3 } } });
   const records: { kind: string }[] = [];
   const reads = mergeWriterReads(fixtureConfig, checkout, writerRun, {
-    base: worktreeBase, merger: async () => 'control-plane', trial,
+    base: worktreeBase,  trial,
     record: async (_work, event) => { records.push({ kind: event.kind }); return {}; },
   });
 

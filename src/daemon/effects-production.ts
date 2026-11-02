@@ -80,12 +80,16 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
       const name = profile?.name ?? session.principal, epoch = session.epoch ?? Number(/:(\d+)$/.exec(session.id)?.[1]);
       const account = profile && Number.isFinite(epoch) ? (await sessionAccount(root, config, 'worker', profile.name, { work: item.key, epoch }))?.environment ?? null : null;
       if (stall.notice) await recordObservedExhaustion(config, account ?? profileAccount(name), { at: new Date().toISOString(), resetsAt: stall.notice.resetsAt, reason: stall.notice.reason, role: 'worker', profile: name, work: item.key }, undefined, {});
+      const space = item.workspaces?.find(entry => entry.epoch === epoch);
+      const partialWork = space && space.host === config.hostId
+        ? await preservePartialWork(space.path, `${item.key} attempt ${epoch} stopped: ${stall.reason}`, run)
+        : { state: 'not-applicable' as const, detail: 'the stalled attempt has no registered worktree on this host to keep work from' };
       await mutate(`work/${item.id}/capacity`, {
         event: 'exhausted', role: 'worker', epoch, ...(stall.notice ? {} : { cause: 'interrupted' }),
         profile: name, account, runtime: session.runtime,
         reason: `${stall.reason}${stall.notice ? ` on its provider's limit notice: ${stall.notice.reason}` : ''}`.slice(0, 500),
         resetsAt: stall.notice?.resetsAt ?? null,
-        partialWork: { state: 'not-applicable', detail: 'the stalled attempt left its worktree as it stood; the redispatch starts from the shared base' },
+        partialWork,
       }, randomUUID());
     },
     // GY-2953: a lease a supervisor's time bound or a worker's silence ended without a submission
@@ -174,7 +178,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // files a reverted item's re-land as the master's operator-agent identity — only while the
     // live configuration names that identity, like the rework beside it.
     get mergeWriter() { const config = current();
-      const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const });
+      const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
       return { ...reads,
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),

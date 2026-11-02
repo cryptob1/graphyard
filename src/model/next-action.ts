@@ -10,7 +10,6 @@ import { nextActionLlmRoles, type NextAction, type NextActionInputs, type NextAc
 import type { ActionAccount, ActionWait } from './action-account.js';
 import { carriedAction, type OpenAction } from './concerns.js';
 import { livenessCarry } from './liveness.js';
-import { baseBreakWait } from '../master/base-break-refresh.js';
 
 // The vocabulary lives in `action-kinds.ts` and the accounting vocabulary in
 // `action-account.ts`; each is re-exported here so what an item needs next is still read from
@@ -225,7 +224,6 @@ function computeAccount(work: Work, all: Work[], now: Date): Computed {
         { kind: 'request-review', provider: work.policy.reviewProvider ?? 'github', requestId: request?.id ?? null, pr: work.candidate!.pr, sha: work.candidate!.sha, baseSha: work.candidate!.baseSha, policyRevision: work.policyRevision },
         binding, failing.name, refusal);
     }
-    if (kind === 'request-rework') { const broken = baseBreakWait(work, failing.name); if (broken) return waits(broken, failing.name, refusal); } // GY-793: refreshed onto the tip that fixed it, never reworked
     if (kind === 'request-rework') return make('request-rework', `${key} needs a new head: ${detail}`,
       { kind: 'request-rework', pr: work.candidate?.pr ?? null, sha: work.candidate?.sha ?? null, detail }, binding, failing.name, refusal);
     if (kind === 'resync') return make('resync', `${key} is waiting on a fresh reading of its pull request: ${detail}`, resyncInputs(work), binding, failing.name, refusal);
@@ -282,8 +280,6 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
   { gate: 'review', match: /^Product review requested changes/, kind: 'request-rework' },
   { gate: 'review', match: /^Product review rejected/, kind: 'attention' },
   { gate: 'review', match: /^human:\S+ failed a person's check/, kind: 'request-rework' },
-  // An approval whose mechanical nits await the worker bot's round (GY-971): that round is a rework.
-  { gate: 'review', match: /^Approval (\d+ )?of [0-9a-f]+ names \d+ findings? classified mechanical/, kind: 'request-rework' },
   { gate: 'review', match: /.*/, kind: 'request-review' },
   // test and merge: the merge writer trials and pushes the head itself (GY-2010); its own merge step
   // answers both. No remote check, mergeability or protection refuses a gate any more.

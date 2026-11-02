@@ -113,9 +113,8 @@ test('unit:post-merge-review-owed — owed reviews are the merge writer\'s deliv
   assert.equal(controlPlaneVerdict(record(owed, { launch: 'other-launch' }), [launched]), null, 'another launch\'s verdict is not this record\'s');
   const refused = delivered('GY-10', { reviewLaunch: { ...launched.reviewLaunch!, verdict: null, refused: { at, reason: 'Reviewer review-claude-1 implemented GY-10' } } });
   assert.match(controlPlaneRefusal(record(owed), [refused])!, /refused the verdict: Reviewer review-claude-1 implemented GY-10/);
-  // The dispatcher: one post-merge session per merge commit, without a reviewer App.
-  assert.equal(selectReviewerProfile(config, 'control-plane').profile!.name, 'reviewer-claude');
-  assert.match(selectReviewerProfile(config).reason!, /no reviewer identity is registered/, 'github mode still needs the App');
+  // The dispatcher: one post-merge session per merge commit; a profile answers it with no reviewer App.
+  assert.equal(selectReviewerProfile(config).profile!.name, 'reviewer-claude');
   const log: string[] = [], reviews: any[] = [], filed: unknown[] = [], settled: unknown[] = [], memory: string[][] = [];
   let items: Work[] = [owed];
   const effects = stubEffects(() => items, log, reviews, {
@@ -226,7 +225,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('post-merge-review-pg'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('post_merge_review_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/post_merge_review_test`); await store.init();
-  const engine = new Engine(store, 120, repository); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  const engine = new Engine(store, 120, repository);
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

@@ -23,7 +23,7 @@ const SERVER = 'http://127.0.0.1:4310';
 const OPERATOR = 'octo-operator';
 const GH_TOKEN = `gho_${'g'.repeat(36)}`;
 
-const baseConfig = (extra: Partial<MasterConfig> = {}): MasterConfig => ({ version: 1, url: SERVER, credentialFile: '/outside/master.token', cliPath: launcher, repository: 'acme/shop', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-shop', autoMerge: true, mergeMethod: 'merge', workers: [], reviewers: [], producers: [],
+const baseConfig = (extra: Partial<MasterConfig> = {}): MasterConfig => ({ version: 1, url: SERVER, credentialFile: '/outside/master.token', cliPath: launcher, repository: 'acme/shop', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-shop', mergeMethod: 'merge', workers: [], reviewers: [], producers: [],
   run: { intervalSeconds: 20, deploymentShaField: 'commit', dispatchIntervalSeconds: 10, producerTimeoutMinutes: 120 } as MasterConfig['run'], ...extra });
 const identities = {
   reviewer: { slug: 'graphyard-reviewer', appId: 9, installationId: 10, credentialFile: '/outside/reviewer.json', boundAt: '2026-10-08T00:00:00.000Z' },
@@ -144,7 +144,7 @@ function work(reviews: Observation['reviews'], author = 'graphyard-worker[bot]')
   const at = '2026-10-08T00:00:00.000Z', candidate = { sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author };
   const observation: Observation = { candidate, checks: [{ name: 'test', result: 'success', appId: 15368 }, { name: 'typecheck', result: 'success', appId: 15368 }], reviews, merged: false, mergeSha: null, mergeable: true, protected: true,
     files: ['src/app.ts'], scopeFiles: [], at, prState: 'open', draft: false, baseTip: B, baseTree: sha('7b'), baseTipContained: true } as Observation;
-  return { id: 'work-7', key: 'GY-7', title: 'A supervised change', description: '', type: 'feature', priority: 0, dependencies: [], 
+  return { id: 'work-7', key: 'GY-7', title: 'A supervised change', description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Works', proofs: ['manual:works'] }], policy: { checks: ['test', 'typecheck'], review: true }, stage: 'review', revision: 3, policyRevision: 1,
     createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 1, lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 7 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
     observation, blocker: null, gates: [], violations: [] } as unknown as Work;
@@ -175,7 +175,7 @@ test('unit:supervised-review-gate-human — review stays required: no approval n
   const supervised = withRoleDefaults(baseConfig({ supervision: 'supervised', ...identities, reviewers: [reviewer] }));
   assert.equal(supervised.reviewer, undefined); assert.equal(supervised.operatorAgent, undefined);
   // GY-1978: no pull request awaits the operator, so the reviewer profile answers every head in control-plane mode, which needs no App.
-  assert.equal(selectReviewerProfile(supervised, 'control-plane').profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
+  assert.equal(selectReviewerProfile(supervised).profile?.name, 'claude-reviewer', 'the control-plane reviewer is launched');
   // The same identities in autonomous mode are kept.
   const autonomous = withRoleDefaults(baseConfig(identities));
   assert.ok(autonomous.reviewer && autonomous.operatorAgent);

@@ -14,6 +14,10 @@ import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-da
 import type { Principal, Work } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
+// GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+
 /**
  * GY-2875 AC-1: plannedFiles is only a hint. Nothing requests, widens, derives, splits, researches,
  * triages or judges an item: a head that changes files outside the item's planned files is
@@ -47,7 +51,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('planned-files-hint-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('planned_files_hint');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/planned_files_hint`); await store.init();
-  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null; engine.directMergeEnvironment = null;
+  engine = new Engine(store, 120, 'owner/project');
   engine.gitRunner = gitRunnerFor(checkout); engine.baseBranch = 'main';
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); if (root) await rm(root, { recursive: true, force: true }); });
@@ -64,7 +68,7 @@ test('unit:planned-files-only-a-hint — the scope, split, research and triage m
 });
 
 test('unit:planned-files-only-a-hint — a head outside the item\'s plannedFiles is accepted with no scope request, hold, blocker or decision', async () => {
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Hinted', plannedFiles: ['src/planned.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:planned-files-only-a-hint'] }] }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Hinted', plannedFiles: ['src/planned.ts'], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:planned-files-only-a-hint', 'e2e:fixture'] }] }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused));
@@ -83,7 +87,7 @@ test('unit:planned-files-only-a-hint — a head outside the item\'s plannedFiles
 
 test('unit:planned-files-only-a-hint — an item with twelve planned source files is dispatched whole on the next cycle, with no decomposition or research record', async () => {
   const planned = Array.from({ length: 12 }, (_, index) => `src/module-${index + 1}.ts`);
-  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Broad', plannedFiles: planned, criteria: [1, 2, 3, 4, 5, 6].map(n => ({ id: `AC-${n}`, text: `Behaviour ${n}`, proofs: [`unit:broad-${n}`] })) }, randomUUID());
+  let w = await engine.execute(operator, 'create', null, { type: 'chore',  title: 'Broad', plannedFiles: planned, criteria: [1, 2, 3, 4, 5, 6].map(n => ({ id: `AC-${n}`, text: `Behaviour ${n}`, proofs: [`unit:broad-${n}`, 'e2e:fixture'] })) }, randomUUID());
   w = await engine.execute(operator, 'ready', w.id, {}, randomUUID());
   const directory = await temporaryDirectory('planned-files-hint-loop');
   const credential = join(directory, 'token');
