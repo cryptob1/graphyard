@@ -76,7 +76,7 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
     'mise ERROR Config files in /host/.config/mise/config.toml are not trusted',
     'mise ERROR No version is set for tool node',
     '/usr/bin/env: ‘node’: No such file or directory',
-    '/usr/bin/env: ‘npm’: No such file or directory',
+    "/usr/bin/env: 'npm': No such file or directory",
     '/bin/sh: 1: npm: not found',
     '/bin/bash: line 1: npx: command not found',
     'bwrap: execvp npm: No such file or directory',
@@ -86,11 +86,11 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
     const run: ChildRun = async (command, args, options) => {
       if (command === 'npm') {
         invocations.push(args);
-        if (diagnostic === '/usr/bin/env: ‘npm’: No such file or directory') {
+        if (diagnostic === "/usr/bin/env: 'npm': No such file or directory") {
           // The private-root backend starts, then its entrypoint cannot find npm.
           assert.ok(options?.wrapper?.length);
           try {
-            await defaultChildRun(command, args, { ...options, env: { ...options?.env, PATH: '/missing-toolchain' } });
+            await defaultChildRun('/usr/bin/env', ['LC_ALL=C', 'PATH=/missing-toolchain', command, ...args], options);
           } catch (error) {
             assert.ok(error instanceof ChildProcessError);
             assert.equal(error.cause, undefined);
@@ -98,8 +98,7 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
             assert.equal(error.timedOut, false);
             assert.ok(error.status !== null && error.status > 0);
             assert.match(error.stderr, /(?:env:.*npm.*No such file or directory|bwrap: execvp npm: No such file or directory)/);
-            // Normalize Docker env and nested bubblewrap's equivalent diagnostics.
-            throw Object.assign(new Error('cannot start'), { status: error.status, stderr: diagnostic });
+            throw error;
           }
           assert.fail('the real trial wrapper must fail to exec missing npm');
         }
@@ -120,7 +119,7 @@ for (const phase of ['install', 'build'] as const) test(`unit:trial-build-failur
       assert.ok(error.outputTail.includes(diagnostic), error.outputTail);
       assert.deepEqual(trialAttempts(error).map(attempt => attempt.outcome), ['host-failure', 'host-failure']);
       return true;
-    });
+    }, diagnostic);
     assert.equal(invocations.length, 2);
     assert.ok(invocations.every(args => phase === 'install' ? args[0] === 'ci' : args.join(' ') === 'run build'));
     assert.deepEqual(events.map(event => event.kind), ['intent', 'trial']);
