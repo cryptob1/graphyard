@@ -68,7 +68,7 @@ Reviewers/producers are `awaiting acknowledgement` until 30s active, re-prompted
 | attempts per item | `pipeline.attempts.length` |
 | rework rounds | `pipeline.reworkRounds` |
 
-**Reviewer verdict**: launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
+**Reviewer verdict**: every review launches on the control plane under the profile’s agent identity; no reviewer GitHub App, installation or private key is configured. `master reviewer add|remove` manages launch profiles. Launch writes `review-binding.json` (0600: head, base, policy revision; `verdictToken`, `previousHead`) into `GH_CONFIG_DIR`; no binding, no session. Verdicts post once via `graphyard review post --event …`; refused on a moved head. **Self-review**: before `complete`, workers run `graphyard review self GY-N`.
 
 **Registry slot**: the launch's agent-registry session rides its ledger record; the loop's close step ends it once the verdict is recorded, the item leaves review, or the pane is gone from Herdr (the reason names the pane), so a finished review or proof stops consuming its role's concurrency. Producers likewise. A session whose launching loop restarted away has no handle the successor loop tracks; each dispatch tick also judges every registry session the control plane lists live for this host by the pane its ledger record names, and ends it on the second consecutive miss.
 

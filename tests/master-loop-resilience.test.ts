@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { chmod, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { randomUUID, generateKeyPairSync } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
@@ -13,13 +13,13 @@ import { launchAuthorization } from '../src/repository-setup.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { expandTypedCommand, roleOf, startedAtOnce, typedRuntime } from './helpers/launch-shell.js';
 import { repositoryClaudeConfig, writeHarnessPermissions } from '../src/harness.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, noteConfigReload, readDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readMasterGuide } from './helpers/master-guide.js';
-// Time-bomb allowance (GY-1694): the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, already past) and the 2026-10-09 lock start is only rendered; the launcher runs on the real clock with relative mint expiries.
+// Time-bomb allowance (GY-1694): the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, already past) and the 2026-10-09 lock start is only rendered; the launcher runs on the real clock with relative registerLaunch expiries.
 
 // Each test is named for the proof it produces (GY-69): integration:producer-session-retry,
 // integration:master-config-reload, integration:master-profile-management,
@@ -34,7 +34,6 @@ const clock = Date.parse(at);
 const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
 const coordinatorToken = 'coordinator-token-'.padEnd(40, 'x');
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 
 function observation(candidate: { sha: string; baseSha: string }, extra: Partial<Observation> = {}): Observation {
   return { candidate: { ...candidate, pr: 69, branch: 'graphyard/gy-69-1', author: 'implementer' }, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
@@ -71,7 +70,6 @@ async function repository() {
 async function installed(options: { reviewer?: boolean; herdrWorkspace?: string } = {}) {
   const root = await repository(), credentials = await temporaryDirectory('resilience-credentials');
   await setupMaster(root, { url: 'https://graphyard.example', token: coordinatorToken, cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: options.herdrWorkspace ?? 'wE' }, coordinatorStatus as typeof fetch);
-  if (options.reviewer) await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   const token = async (name: string) => { const file = join(credentials, `${name}.token`); await writeFile(file, `${name}-token-`.padEnd(40, 'x'), { mode: 0o600 }); return file; };
   return { root, credentials, token, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
@@ -83,7 +81,7 @@ const herdr = (calls: string[][], extra: (args: string[]) => unknown = () => und
   return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-1', tab_id: 'tab-1' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
 };
 const producerVerify = (principal: string) => async () => ({ actor: { id: principal, role: 'producer', proofs: ['unit:*', 'integration:*'] } });
-const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+const registerLaunch = async () => ({ launch: 'fixture-launch' });
 function masterConfig(credentialFile: string, overrides: Partial<Omit<MasterConfig, 'run'>> & { run?: Partial<MasterRun> } = {}): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project',
     producers: [{ name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: join(credentialFile, '..', 'producer-a.token') }], ...overrides });
@@ -373,7 +371,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     // Reviewer: its own file allows exactly the verdict the master's rules deny.
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
     const reviewCalls: string[][] = [];
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr(reviewCalls), mint });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr(reviewCalls), registerLaunch });
     const reviewerFile = sessionHarnessFile(root, 'reviewer', 'claude-reviewer');
     const typedReview = expandTypedCommand(reviewCalls[1][3]);
     assert.deepEqual(reviewCalls[1].slice(0, 2), ['pane', 'run']); assert.equal(typedReview.kind, 'claude');
@@ -404,7 +402,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     await saveReviewerProfile(root, { name: 'cursor-reviewer', agentName: 'review-cursor-1', kind: 'cursor' });
     const ledger = await readReviewLedger(root); ledger.reviews = []; await writeFile(join(root, '.graphyard/reviews.json'), JSON.stringify(ledger), { mode: 0o600 });
     const cursorCalls: string[][] = [];
-    await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), mint });
+    await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), registerLaunch });
     const typedCursor = expandTypedCommand(cursorCalls[1][3]);
     assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
   } finally { await cleanup(); }
@@ -441,7 +439,7 @@ test('unit:autonomous-session-prompts — reviewer, producer and worker sessions
     assert.match(producer.resolution!, /ended waiting on input \(Herdr reports it blocked\) instead of deciding on its own/);
 
     await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr([]), mint, requestId: 'review-request' });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdr([]), registerLaunch, requestId: 'review-request' });
     const reviewStart = Date.parse((await readReviewLedger(root)).reviews[0].requestedAt);
     const reviewAgents = [{ name: 'review-claude-1', pane_id: 'pane-1', agent_status: 'blocked' }];
     const pending = await reconcileReviews(root, master, { run: herdr([]), observe: () => null, work: [work()], agents: reviewAgents, now: () => new Date(reviewStart + 1000) });

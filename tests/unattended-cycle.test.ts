@@ -373,8 +373,8 @@ test('an agent or Codex review that has not approved is not a verdict: a head no
   /** One cycle of the real loop from a loop that has seen nothing. */
   const run = async () => ({ actions: (await runCycle(master, emptyDaemonState(master), simulation.effects(), simulation.now)).actions });
 
-  // Every state the observers report short of approval, as they report it. None is a verdict,
-  // and each would have read as one.
+  // Every state the observers report short of approval, as they report it.
+  // None is a verdict, and each would have read as one.
   const unreviewed: [string, () => void][] = [
     ['not dispatched', () => observe(refusal('Graphyard must dispatch a review to this profile bound to this candidate and policy'))],
     ['waiting', () => observe(refusal(`Waiting for reviewer profile ${reviewer.name} to post a verdict through its registered App`), { reviewRequest: request })],

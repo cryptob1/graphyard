@@ -85,7 +85,6 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/pipeline_full`);
   await store.init();
   engine = new Engine(store, 300, repository);
- engine.controlPlaneAppId = 1234;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;

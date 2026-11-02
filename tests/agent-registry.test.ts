@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,7 @@ import { ledgerTables } from '../src/store/schema.js';
 import { AgentRegistry, readRegistry } from '../src/agent-registry.js';
 import { discoverHostLogins, fleetRoleHealth, proposeFleet } from '../src/fleet.js';
 import { registryCommand } from '../src/cli/master-registry.js';
-import { bindReviewer, launchReview, saveReviewerProfile } from '../src/reviewer.js';
+import { launchReview, saveReviewerProfile } from '../src/reviewer.js';
 import { NoHealthyAccountError, atomicPrivateWrite, dispatchWork, loadMasterConfig, selectAccount, setupMaster, type EnvironmentProbe } from '../src/master.js';
 import { applyRegistryMutation, chooseSession, emptyRegistry, fleetRoles, fleetView, foldObservation, launchGraceMs, proposedRuntimes, sessionEnded, settleSessions, type AgentRegistry as Registry, type FleetSession, type FleetView } from '../src/model/registry.js';
 import type { Principal, Work } from '../src/model.js';
@@ -112,7 +112,7 @@ const herdr = (calls: string[][], fail?: (args: string[]) => boolean) => (_comma
 };
 const tabEnvironment = (tab: string[]) => Object.fromEntries(tab.flatMap((value, index) => value === '--env' ? [tab[index + 1].split(/=(.*)/s).slice(0, 2)] : []));
 let items = 0;
-const readyWork = (key = `GY-${++items + 900}`) => ({ id: `work-${key}`, key, title: 'Registry fixture', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true }, 
+const readyWork = (key = `GY-${++items + 900}`) => ({ id: `work-${key}`, key, title: 'Registry fixture', description: '', type: 'feature', priority: 1, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:x'] }], policy: { checks: ['test'], review: true },
   stage: 'ready', revision: 1, policyRevision: 1, createdAt: '', updatedAt: '', stageEnteredAt: '', ready: true, epoch: 0, lease: null, workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], observation: null,
   // GY-2992: a released feature dispatches only with its spec check reported; this fixture stands after it did.
   specCheck: readySpecCheck(new Date().toISOString()) }) as unknown as Work;
@@ -124,8 +124,7 @@ function reviewWork(key: string, sha: string): Work {
     observation: { candidate, checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true, files: ['src/a.ts'], scopeFiles: [],
       at: new Date().toISOString(), prState: 'open', draft: false, baseTip: candidate.baseSha, baseTree: 'c'.repeat(40), baseTipContained: true } } as unknown as Work;
 }
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-const mintReviewerSession = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+const registerReviewerSession = async () => ({ launch: 'fixture-launch' });
 
 /** One executor action: a worker dispatch through the same code path `master run` and `master dispatch` take. */
 async function dispatch(root: string, config: any, profile: string, probe: EnvironmentProbe, calls: string[][] = [], fail?: (args: string[]) => boolean) {
@@ -318,27 +317,25 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
   assert.deepEqual(await selectAccount(config, 'reviewer', { name: 'review-a' }, probe), { account: null, health: null, skipped: [] });
 
   // A launch that fails *after* the choice gives its session back on every path, not only the
-  // worker's: the reviewer's token mint fails here, and its account and the role's one slot are
+  // worker's: the review launch registration fails here, and its account and the role's one slot are
   // free again at once rather than at the two-hour session cap.
-  await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['claude-fresh'], concurrency: 1 }, reason: 'one reviewer at a time' });
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') },
-    async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }) as any);
+  await ok('agent-registry/roles', operator, { role: { name: 'reviewer', accounts: ['claude-fresh'], concurrency: 1, policy: { args: ['--setting-sources', 'user'] } }, reason: 'one reviewer at a time' });
   await saveReviewerProfile(root, { name: 'reviewer-a', agentName: 'review-a', kind: 'claude' });
   const head = 'a'.repeat(40), reviewed = reviewWork('GY-960', head);
   await assert.rejects(launchReview(root, reviewed, 'reviewer-a', [], new Date().toISOString(),
-    { run: herdr([]), probe, mint: async () => { throw new Error('the installation token could not be minted'); } }), /could not be minted/);
+    { run: herdr([]), probe, registerLaunch: async () => { throw new Error('the review launch could not be registered'); } }), /could not be registered/);
   const givenBack = (await ok('agent-registry/document', coordinator) as Registry).sessions.at(-1)!;
   assert.equal(givenBack.role, 'reviewer'); assert.ok(givenBack.endedAt, 'the session the failed launch chose is ended');
-  assert.match(givenBack.endReason!, /reviewer launch for GY-960 failed: the installation token could not be minted/);
+  assert.match(givenBack.endReason!, /reviewer launch for GY-960 failed: the review launch could not be registered/);
 
   // So the next attempt of the same request is selected, at a concurrency of 1, rather than being
   // refused by the session of its own first attempt.
-  const relaunch = await launchReview(root, reviewed, 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, mint: mintReviewerSession });
+  const relaunch = await launchReview(root, reviewed, 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, registerLaunch: registerReviewerSession });
   assert.equal(relaunch.account!.environment, 'claude-fresh');
 
   // And a review relaunched for a new head supersedes the live session of the head it replaces:
   // the local ledger cancels its record, and the registry frees the slot in the same breath.
-  const next = await launchReview(root, reviewWork('GY-960', 'd'.repeat(40)), 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, mint: mintReviewerSession });
+  const next = await launchReview(root, reviewWork('GY-960', 'd'.repeat(40)), 'reviewer-a', [], new Date().toISOString(), { run: herdr([]), probe, registerLaunch: registerReviewerSession });
   assert.equal(next.account!.environment, 'claude-fresh');
   const reviewSessions = (await ok('agent-registry/document', coordinator) as Registry).sessions.filter(entry => entry.role === 'reviewer' && entry.work === 'GY-960');
   assert.equal(reviewSessions.filter(entry => !entry.endedAt).length, 1, 'one live reviewer session for the item, the newest');

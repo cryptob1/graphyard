@@ -19,8 +19,8 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
  */
 /** A fresh install with no App and no reviewer App, only a worker account; an old `github` mergeWriter changes nothing. */
 const bare = (supervision = 'autonomous') => ({
-  actor: { role: 'admin' }, github: false, githubAppId: null, githubRepository: null, baseBranch: 'main', reviewerApps: [],
-  appPermissions: null, setup: { loop: true, supervision },
+  actor: { role: 'admin' }, github: false, githubAppId: null, githubRepository: null, baseBranch: 'main',
+  setup: { loop: true, supervision },
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, eligible: true }] },
   mergeWriter: { merger: 'github' },
 });

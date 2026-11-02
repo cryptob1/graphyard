@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { readProducerLedger, reconcileProducers, saveProducerLedger, type ProducerRecord } from '../src/producer.js';
 import { paneAlreadyGone } from '../src/request-settlement.js';
 import type { Observation, Work } from '../src/model.js';
@@ -21,16 +21,14 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const H = sha40('c1'), B = sha40('b1');
-const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
 const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
-const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
+const registerLaunch = async () => ({ launch: 'fixture-launch' });
 
 async function boundMaster() {
   const root = await temporaryDirectory('session-reconcile'), credentialDirectory = await temporaryDirectory('session-reconcile-credentials');
   execFileSync('git', ['init', '-q', root]);
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wE' }, coordinatorStatus as typeof fetch);
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentialDirectory, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
   return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentialDirectory, { recursive: true, force: true }); } };
 }
@@ -41,7 +39,7 @@ function observation(candidate: { sha: string; baseSha: string }): Observation {
 }
 function work(): Work {
   const candidate = { sha: H, baseSha: B, pr: 127, branch: 'graphyard/gy-127-1', author: 'implementer' };
-  return { id: 'work-127', key: 'GY-127', title: 'Queue tip approval', description: '', type: 'bug', priority: 0, dependencies: [], 
+  return { id: 'work-127', key: 'GY-127', title: 'Queue tip approval', description: '', type: 'bug', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['integration:absent-pane-resolves-request'] }], policy: { checks: ['test'], review: true, reviewProvider: 'github' },
     stage: 'review', revision: 7, policyRevision: 1, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1,
     lease: null, workspaces: [], candidate, submission: { epoch: 1, pr: 127 }, reworkRequested: false, scenarioRequirements: [], evidence: [],
@@ -70,7 +68,7 @@ test('integration:absent-pane-resolves-request — a pane close answered with pa
   try {
     const calls: string[][] = [];
     const item = work();
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), mint, requestId: 'review-request' });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
     const record: ReviewRecord = (await readReviewLedger(root)).reviews[0];
     // The session is still listed by Herdr (so nothing is forced), its token has expired, and its
     // pane was closed by hand before the reconcile got to it: Herdr answers the close pane_not_found.
@@ -84,7 +82,7 @@ test('integration:absent-pane-resolves-request — a pane close answered with pa
     assert.match(after.resolution!, /pane pane-review was already gone when the session was closed/);
     assert.deepEqual(calls.filter(args => args[0] === 'pane' && args[1] === 'close').at(-1), ['pane', 'close', 'pane-review']);
     // The settled request no longer holds the key: a new review launch for the same item proceeds.
-    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), mint, requestId: 'review-request' });
+    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
     assert.equal(next.work, 'GY-127');
     assert.deepEqual((await readReviewLedger(root)).reviews.map(entry => entry.state), ['expired', 'pending']);
   } finally { await cleanup(); }
@@ -94,14 +92,14 @@ test('integration:absent-pane-resolves-request — a close failing for any other
   const { root, cleanup } = await boundMaster();
   try {
     const calls: string[][] = [];
-    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), mint, requestId: 'review-request' });
+    await launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
     const record: ReviewRecord = (await readReviewLedger(root)).reviews[0];
     const agents = [{ name: record.agentName, pane_id: 'pane-review', agent_status: 'working' }];
     const held = await reconcileReviews(root, await loadMasterConfig(root), { run: herdrRun(calls, 'broken'), observe: () => null, agents, now: afterExpiry(record) });
     assert.equal(held.reviews[0].state, 'pending');
     assert.match(held.reviews[0].closeFailure!, /Herdr could not close pane pane-review: herdr: connection reset/);
     assert.equal(held.reviews[0].closedAt, undefined);
-    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), mint }), /already pending/);
+    await assert.rejects(launchReview(root, work(), 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch }), /already pending/);
     // The classification itself: Herdr's code, or the code in a message, and nothing else.
     assert.equal(paneAlreadyGone(Object.assign(new Error('Herdr refused the operation'), { herdrCode: 'pane_not_found' })), true);
     assert.equal(paneAlreadyGone(new Error('Herdr refused the operation: pane_not_found')), true);
@@ -133,7 +131,7 @@ test('integration:expired-request-never-blocks — a request past its token expi
   try {
     const calls: string[][] = [];
     const item = work();
-    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), mint, requestId: 'review-request' });
+    await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
     const record: ReviewRecord = (await readReviewLedger(root)).reviews[0];
     const config = await loadMasterConfig(root);
     assert.ok(config.run.dispatchIntervalSeconds * 1000 <= expiredRequestBoundMs, 'the reconcile runs at least as often as the bound it declares');
@@ -150,7 +148,7 @@ test('integration:expired-request-never-blocks — a request past its token expi
     assert.match(after.resolution!, /the reviewer token expired at/);
     assert.match(after.closeFailure!, /Herdr could not close pane pane-review/);
     // Nothing blocks the next launch for the same item.
-    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), mint, requestId: 'review-request' });
+    const next = await launchReview(root, item, 'claude-reviewer', [], new Date().toISOString(), { run: herdrRun(calls, 'ok'), registerLaunch, requestId: 'review-request' });
     assert.equal(next.work, 'GY-127');
     assert.deepEqual((await readReviewLedger(root)).reviews.map(entry => entry.state), ['expired', 'pending']);
   } finally { await cleanup(); }

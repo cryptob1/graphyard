@@ -1,8 +1,8 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, stat } from 'node:fs/promises';
+import { readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,7 @@ import { neededRework } from '../src/daemon/rework.js';
 import { sensitiveReviewRefusal, postMergeReviewMark } from '../src/model/post-merge-review.js';
 import { postReview, readReviewBinding, reviewBindingFile, reviewBindingSchema, ReviewPostRefusal, screenshotUploads, writeReviewBinding, type ReviewPostBinding } from '../src/review-post.js';
 import { independenceRefusal, headRefusal, reviewLaunchBodySchema, secondVerdictRefusal, tokenRefusal, tokenRegistered } from '../src/server/review-verdict.js';
-import { assertReviewCandidate, bindReviewer, launchReview, readReviewLedger, reviewRecordSchema, reviewPrompt, reviewStandard, saveReviewerProfile, staleReviewReason } from '../src/reviewer.js';
+import { assertReviewCandidate, launchReview, readReviewLedger, reviewRecordSchema, reviewPrompt, reviewStandard, saveReviewerProfile, staleReviewReason } from '../src/reviewer.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -39,7 +39,7 @@ const planeObservation = (candidate: Work['candidate'], files: string[]) => ({
 function item(key: string, fields: Record<string, unknown> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 7, branch: 'graphyard/gy-7-1', author: 'graphyard-claude-1' };
   return { id: randomUUID(), key, title: `Item ${key}`, description: '', type: 'feature', priority: 1, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true }, 
+    criteria: [{ id: 'AC-1', text: 'Works', proofs: ['unit:works'] }], policy: { checks: ['test'], review: true },
     stage: 'review', revision: 3, policyRevision: 1, createdAt: now(), updatedAt: now(), stageEnteredAt: now(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w', branch: 'graphyard/gy-7-1', epoch: 1, owner: 'graphyard-claude-1' }], candidate, submission: { epoch: 1, pr: 7 }, reworkRequested: false,
     scenarioRequirements: [], evidence: [], blocker: null, gates: [], violations: [], implementers: ['graphyard-claude-1'],
@@ -515,55 +515,65 @@ test('unit:review-standard-shared-with-reviewer — the control-plane request ke
   assert.ok(at('Review against the acceptance criteria of GY-9') < at('is a declared post-deploy verification') && at('is a declared post-deploy verification') < at('Name each nit on its own "Nit: PATH:LINE'), 'the post-deploy rule sits directly after the criteria rule, before the BLOCKING/Nit rule, as in the request before the factoring');
 });
 
-// ——— GY-2008: the launcher and the route, together, with the reviewer App bound. ———
-// An installation that retains its reviewer App after switching to control-plane merging launches
-// under the App's bot identity `${slug}[bot]`; the launch route must take exactly that shape. Both
-// regressions drive the real `launchReview` with no injected registration, so its default POST
-// runs against this file's in-process server: against the base these fail on the route's 400
-// Invalid input for the bracketed identity, and nothing is launched.
-const reviewerApp = 'graphyard-reviewer';
-const botIdentity = `${reviewerApp}[bot]`;
+// ——— GY-2008: the launcher and the route, together. ———
+// These regressions drive the real launcher and review-launch route with no App credential.
+const reviewerIdentity = 'review-claude-1';
 const herdrStub = (calls: string[][]) => (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
 const tabsOf = (calls: string[][]) => calls.filter(args => args[0] === 'tab' && args[1] === 'create');
-/** A master root with a reviewer profile and the reviewer App bound, as an App-retaining installation is configured. */
-async function reviewerAppMaster(label: string) {
+/** A master root with a reviewer profile and no App credential. */
+async function reviewerMaster(label: string) {
   const root = await temporaryDirectory(label), credentials = await temporaryDirectory(`${label}-credentials`);
   try {
     execFileSync('git', ['init', '-q', root]);
     execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
-    await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'workspace-graphyard' });
+    await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'workspace-graphyard', run: { worktreeRoot: await temporaryDirectory('review-checkouts', join(process.cwd(), '.graphyard')) } });
     await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
-    const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-    const bound = await bindReviewer(root, { appId: 99, installationId: 555, slug: reviewerApp, privateKey, credentialDirectory: credentials }, async () => ({ repository, permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
-    assert.equal(bound.identity, botIdentity);
     return { root, credentials };
   } catch (error) { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); throw error; }
 }
 
-test('integration:control-plane-reviewer-app-launch — with a reviewer App configured, the real launcher registers its bot identity through the real review-launch route and starts exactly one session on the requested head and base; a malformed identity is still a 400', async () => {
-  const master = await reviewerAppMaster('review-app-launch');
+test('integration:control-plane-reviewer-profile-launch — without a reviewer App configured, the real launcher registers its profile identity through the real review-launch route and starts exactly one session on the requested head and base; a malformed identity is still a 400', async () => {
+  const master = await reviewerMaster('review-app-launch');
   try {
     const calls: string[][] = [];
     const work = await insert(item('GY-9007'));
     const launched = await launchReview(master.root, work, 'reviewer-claude', [], now(), { run: herdrStub(calls) }) as { reviewer: string; mode?: string; launch: string | null; sha: string; baseSha: string };
-    assert.equal(launched.reviewer, botIdentity, 'the configured App identity, not the profile agent name');
+    assert.equal(launched.reviewer, reviewerIdentity, 'the profile agent identity');
     assert.deepEqual([launched.mode, launched.sha, launched.baseSha], ['control-plane', H, B], 'one launch on the requested head and base');
     assert.ok(launched.launch, 'the real route registered the launch');
     assert.equal(tabsOf(calls).length, 1, 'exactly one session started');
     const [record] = (await readReviewLedger(master.root)).reviews;
     assert.equal(record!.launch, launched.launch, 'the session record carries the launch the route allocated');
     const registered = await stored(work.id);
-    assert.deepEqual([registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester, registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.verdict], [botIdentity, coordinator.id, H, B, null]);
+    assert.deepEqual([registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester, registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.verdict], [reviewerIdentity, coordinator.id, H, B, null]);
     assert.ok(await tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), 'the launch token authenticates the bot identity');
     // The widening is the `[bot]` suffix alone: every other shape stays a refusal, so independent
     // review is not weakened to let the launch through.
-    for (const bad of ['review claude', 'reviewer[deputy]', 'sla[bot]ug', `${botIdentity} extra`])
+    for (const bad of ['review claude', 'reviewer[deputy]', 'sla[bot]ug', `${reviewerIdentity} extra`])
       assert.equal((await request(tokenOf(coordinator), `work/${work.id}/review-launch`, launchBody(freshToken(), { reviewer: bad }))).status, 400, bad);
   } finally { await rm(master.root, { recursive: true, force: true }); await rm(master.credentials, { recursive: true, force: true }); }
 });
 
-test('integration:control-plane-reviewer-app-independence — the launched reviewer session posts its verdict with its own launch token; wrong head, wrong token, implementer-as-reviewer, requester-as-reviewer and a second verdict are still refused, each with its refusal recorded', async () => {
-  const master = await reviewerAppMaster('review-app-independence');
+test('unit:review-verdict — a master config with no githubAppId launches a reviewer session for a submitted head, and its verdict is recorded with no App credential configured', async () => {
+  const master = await reviewerMaster('review-no-app');
+  try {
+    const file = join(master.root, '.graphyard', 'master.json');
+    const { githubAppId: _retired, ...config } = JSON.parse(await readFile(file, 'utf8'));
+    await writeFile(file, JSON.stringify(config));
+    const calls: string[][] = [];
+    const work = await insert(item('GY-9011'));
+    await launchReview(master.root, work, 'reviewer-claude', [], now(), { run: herdrStub(calls) });
+    const [tab] = tabsOf(calls);
+    const binding = JSON.parse(await readFile(join(tab!.find(value => value.startsWith('GH_CONFIG_DIR='))!.slice('GH_CONFIG_DIR='.length), reviewBindingFile), 'utf8')) as ReviewPostBinding;
+    const approved = await request(binding.verdictToken!, `work/${work.id}/review-verdict`, verdict(binding.verdictToken!, 'APPROVE'));
+    assert.equal(approved.status, 200, JSON.stringify(approved.body));
+    const [review] = (await stored(work.id)).observation!.reviews as { reviewer: string; state: string }[];
+    assert.deepEqual([review!.reviewer, review!.state], [reviewerIdentity, 'APPROVED']);
+  } finally { await rm(master.root, { recursive: true, force: true }); await rm(master.credentials, { recursive: true, force: true }); }
+});
+
+test('integration:control-plane-reviewer-profile-independence — the launched reviewer session posts its verdict with its own launch token; wrong head, wrong token, implementer-as-reviewer, requester-as-reviewer and a second verdict are still refused, each with its refusal recorded', async () => {
+  const master = await reviewerMaster('review-app-independence');
   try {
     const calls: string[][] = [];
     const work = await insert(item('GY-9008'));
@@ -587,22 +597,22 @@ test('integration:control-plane-reviewer-app-independence — the launched revie
     // The session's own verdict, with its own launch token, lands under the bot identity.
     const approved = await request(token, `work/${work.id}/review-verdict`, verdict(token, 'APPROVE'));
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
-    assert.equal(approved.body.reviewer, botIdentity);
+    assert.equal(approved.body.reviewer, reviewerIdentity);
     const [review] = (await stored(work.id)).observation!.reviews as { reviewer: string; state: string }[];
-    assert.deepEqual([review!.reviewer, review!.state], [botIdentity, 'APPROVED']);
+    assert.deepEqual([review!.reviewer, review!.state], [reviewerIdentity, 'APPROVED']);
     // One launch yields one verdict; the spent token is withdrawn.
     const second = await request(tokenOf(coordinator), `work/${work.id}/review-verdict`, verdict(token, 'APPROVE'));
     assert.deepEqual([second.status, second.body.error], [409, secondVerdictRefusal('GY-9008', H)]);
     assert.equal(await tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), false);
-    // The bot identity implementing the item: the launcher refuses before anything starts, and the
+    // The reviewer identity implementing the item: the launcher refuses before anything starts, and the
     // route refuses the verdict with review.independence-refused recorded and the token withdrawn.
-    const implemented = await insert(item('GY-9009', { implementers: [botIdentity], workspaces: [] }));
-    await assert.rejects(launchReview(master.root, implemented, 'reviewer-claude', [], now(), { run: herdrStub(calls) }), /graphyard-reviewer\[bot\] implemented GY-9009/);
+    const implemented = await insert(item('GY-9009', { implementers: [reviewerIdentity], workspaces: [] }));
+    await assert.rejects(launchReview(master.root, implemented, 'reviewer-claude', [], now(), { run: herdrStub(calls) }), /review-claude-1 implemented GY-9009/);
     assert.equal(tabsOf(calls).length, 1, 'no session for a reviewer of its own work');
     const own = freshToken();
-    assert.equal((await request(tokenOf(coordinator), `work/${implemented.id}/review-launch`, launchBody(own, { reviewer: botIdentity }))).status, 200);
+    assert.equal((await request(tokenOf(coordinator), `work/${implemented.id}/review-launch`, launchBody(own, { reviewer: reviewerIdentity }))).status, 200);
     const refused = await request(own, `work/${implemented.id}/review-verdict`, verdict(own, 'APPROVE'));
-    assert.deepEqual([refused.status, refused.body.error], [403, independenceRefusal(botIdentity, 'implemented', 'GY-9009')]);
+    assert.deepEqual([refused.status, refused.body.error], [403, independenceRefusal(reviewerIdentity, 'implemented', 'GY-9009')]);
     assert.equal((await events(implemented.id, 'review.independence-refused')).length, 1);
     assert.equal(await tokenRegistered(http.services, hashOf(own)), false);
     assert.equal((await request(own, `work/${implemented.id}/review-verdict`, verdict(own, 'APPROVE'))).status, 401);
@@ -619,7 +629,7 @@ test('integration:control-plane-reviewer-app-independence — the launched revie
 test('unit:review-launch-bot-identity — the launch body takes the configured App\'s bot login (SLUG[bot]) beside principal names and refuses every other shape', () => {
   const base = { head: H, baseTip: B, tokenHash: 'e'.repeat(64), expiresAt: now() };
   assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: 'review-claude-1' }).reviewer, 'review-claude-1');
-  assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: botIdentity }).reviewer, botIdentity);
-  for (const bad of ['', 'review claude', '[bot]', 'reviewer[deputy]', 'sla[bot]ug', `${botIdentity} extra`])
+  assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: reviewerIdentity }).reviewer, reviewerIdentity);
+  for (const bad of ['', 'review claude', '[bot]', 'reviewer[deputy]', 'sla[bot]ug', `${reviewerIdentity} extra`])
     assert.throws(() => reviewLaunchBodySchema.parse({ ...base, reviewer: bad }), Error, bad);
 });

@@ -1,14 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertReviewerProfiles, evaluate, exhaustedReviewerProfiles, nativeReviewRequired, parseReviewerApps, policySchema, reviewerProfileFor, type ReviewerApp, type ReviewerProfile, type Work } from '../src/model.js';
-// Time-bomb allowance (GY-1694): new Date() only stamps work() items and clocks their gate evaluation.
+import { evaluate, exhaustedReviewerProfiles, nativeReviewRequired, policySchema, reviewerProfileFor, type ReviewerProfile, type Work } from '../src/model.js';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), other = 'c'.repeat(40);
-const GRAPHYARD_APP = 1234, CLAUDE_APP = 55_001, CLAUDE_BOT = 55_002, CURSOR_APP = 66_001, CURSOR_BOT = 66_002;
-const registry: ReviewerApp[] = [
-  { id: 'claude-reviewer', runtime: 'claude', appId: CLAUDE_APP, botUserId: CLAUDE_BOT },
-  { id: 'cursor-reviewer', runtime: 'cursor', appId: CURSOR_APP, botUserId: CURSOR_BOT },
-];
 const profiles: ReviewerProfile[] = [
   { name: 'claude-reviewer', runtime: 'claude', reviewerApp: 'claude-reviewer', timeoutSeconds: 1800 },
   { name: 'cursor-reviewer', runtime: 'cursor', reviewerApp: 'cursor-reviewer', timeoutSeconds: 900 },
@@ -18,7 +12,7 @@ function work(overrides: Partial<Work> = {}): Work {
   const now = new Date().toISOString();
   return {
     id: 'work-id', key: 'GY-42', title: 'Pluggable review', description: '', type: 'feature', priority: 2, dependencies: [],
-    criteria: [{ id: 'AC-1', text: 'Reviewed', proofs: ['integration:claim-safety'] }], 
+    criteria: [{ id: 'AC-1', text: 'Reviewed', proofs: ['integration:claim-safety'] }],
     policy: { checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: profiles },
     stage: 'review', revision: 5, policyRevision: 3, createdAt: now, updatedAt: now, stageEnteredAt: now, ready: true,
     epoch: 1, lease: null, workspaces: [{ host: 'h', path: '/p', branch: 'graphyard/gy-42-1', epoch: 1, owner: 'agent-a' }],
@@ -46,23 +40,6 @@ test('policy validation binds agent review to registered, distinct reviewer iden
     [profiles[0], { ...profiles[1], name: 'claude-reviewer' }],
     [profiles[0], { ...profiles[1], reviewerApp: 'claude-reviewer' }],
   ]) assert.throws(() => policySchema.parse({ checks: ['test'], review: true, reviewProvider: 'agent', reviewerProfiles: duplicated }), /must be unique|distinct/);
-  assert.doesNotThrow(() => assertReviewerProfiles(profiles, registry, GRAPHYARD_APP));
-  assert.throws(() => assertReviewerProfiles([{ ...profiles[0], reviewerApp: 'unregistered' }], registry, GRAPHYARD_APP), /not registered/);
-  assert.throws(() => assertReviewerProfiles([{ ...profiles[0], runtime: 'cursor' }], registry, GRAPHYARD_APP), /registered runtime/);
-  assert.throws(() => assertReviewerProfiles(profiles, [{ ...registry[0], appId: GRAPHYARD_APP }], GRAPHYARD_APP), /control-plane App/);
-  assert.throws(() => assertReviewerProfiles([], registry, GRAPHYARD_APP), /at least one reviewer profile/);
-});
-
-test('the reviewer registry refuses ambiguous identities and unknown fields', () => {
-  assert.deepEqual(parseReviewerApps(undefined), []);
-  assert.deepEqual(parseReviewerApps(JSON.stringify(registry)), registry);
-  for (const invalid of [
-    [registry[0], { ...registry[1], id: 'claude-reviewer' }],
-    [registry[0], { ...registry[1], appId: CLAUDE_APP }],
-    [registry[0], { ...registry[1], botUserId: CLAUDE_BOT }],
-    [{ ...registry[0], secret: 'x' }],
-    [{ ...registry[0], appId: 0 }],
-  ]) assert.throws(() => parseReviewerApps(JSON.stringify(invalid)));
 });
 
 test('native branch protection stays required only for formal GitHub review', () => {

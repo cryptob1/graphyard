@@ -15,7 +15,7 @@ import { APP_PENDING, type AgentEnvironment, type Supervision, type MasterConfig
 import { withoutMasterInstructions } from './instructions.js';
 import { herdrWorkspaceRefused, liveHerdrWorkspace, scopeHerdr, targetHerdr, type HerdrInstance } from './herdr.js';
 import { agentEnvironmentRoot, agentLaunchPlan, checkAgentEnvironment, discoverAgentEnvironments, type EnvironmentProbe, inspectProfileAccounts, type LaunchRole } from './environments.js';
-import { controlPlaneAttention, retiredAppRemedy } from './attention.js';
+import { controlPlaneAttention } from './attention.js';
 
 /** The config names a CLI launcher no launch could run — an absolute path this host does not hold (GY-2995). Every session the config would start is refused before it starts, and the launcher and the loop name the fix as configuration attention instead of relaunching. */
 export class LauncherUnavailableError extends Error {}
@@ -190,28 +190,24 @@ export async function setupMaster(root: string, input: { url: string; token: str
   ).catch(error => ({ supported: false, unit: loopUnitOf(root), unitPath: null, installed: false, enabled: null, active: null, linger: null, wrote: 'none' as const, refused: null, performed: [],
     reason: `Installing the loop's supervisor failed: ${error instanceof Error ? error.message : String(error)}`,
     instruction: unsupervisedInstruction({ root, cliPath: config.cliPath }) })) : null;
-  // A permission the installed App lacks is announced here with its exact migration steps, not
-  // discovered later as a 403 loop. It never blocks setup: master status keeps reporting it.
-  const { attention, appPermissions, delegationLimits, production } = controlPlaneAttention(status);
+  const { attention, delegationLimits, production } = controlPlaneAttention(status);
   // A loop nothing restarts is an installation fact like any other, so it is stated where the rest
   // are — in the same words `master status` will keep using — rather than left for whoever
   // eventually notices the silence. A refused install is stated with what the operator runs.
   const supervision = !supervisor ? [] : supervisor.wrote === 'refused' ? [`${supervisor.reason}: ${supervisor.instruction}`] : loopSupervisionAttention(supervisor).map(gap => `${gap.text}: ${gap.next}`);
   attention.push(...supervision);
-  // Each installation fact keeps its own remedy: a permission shortfall is a GitHub migration, a
-  // capacity variable is a deployment setting, and production lag is a deploy to confirm.
-  const remedy = appPermissions?.missing?.length || status.appPermissions?.attention?.length ? retiredAppRemedy
-    : delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
+  // Capacity drift and production lag each name their own remedy.
+  const remedy = delegationLimits?.drift.length ? `Set ${delegationLimits.drift.map(entry => `${entry.variable}=${entry.required}`).join(' ')} on the deployment`
     : production?.incidents.length ? `Deploy main: ${production.attention[0] ?? production.incidents[0].reason}` : null;
   const profiles = 'graphyard master environments --apply to generate worker, reviewer and producer profiles from the logged-in agent accounts';
-  const start = config.reviewer ? `run ${profiles}, then graphyard master start codex (or another supported agent kind)` : `run graphyard master reviewer setup to register the independent reviewer identity, then ${profiles}, then graphyard master start codex (or another supported agent kind)`;
+  const start = `run ${profiles}, then graphyard master start codex (or another supported agent kind)`;
   // Which agent accounts this machine has, and which are logged in; quota is read by master environments.
   const environmentDirectory = agentEnvironmentRoot();
   const environments = await Promise.all((await discoverAgentEnvironments(environmentDirectory).catch(() => [] as AgentEnvironment[])).map(async environment => {
     const health = await checkAgentEnvironment(environment, { quota: false });
     return { environment: environment.name, kind: environment.kind, home: environment.home, loggedIn: health.loggedIn, login: health.login };
   }));
-  return { repository: config.repository, server: config.url, role: status.actor.role, workers: config.workers.length, run: config.run, config: '.graphyard/master.json', reviewer: config.reviewer ? `${config.reviewer.slug}[bot]` : null, attention,
+  return { repository: config.repository, server: config.url, role: status.actor.role, workers: config.workers.length, run: config.run, config: '.graphyard/master.json', attention,
     worktreeRoot: { path: verifiedRoot.path, freeBytes: verifiedRoot.freeBytes, minFreeBytes: verifiedRoot.minFreeBytes, configured: !!config.run.worktreeRoot },
     agentEnvironments: { directory: environmentDirectory, discovered: environments },
     // What setup installed for the loop, in the words of the commands it ran.
