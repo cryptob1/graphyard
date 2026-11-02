@@ -24,6 +24,8 @@ import { FleetOverview, pastesCredential } from '../web/pages/fleet.js';
 import { views, visibleViews } from '../web/pages/index.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { dispatchKey } from '../src/daemon/reconcile.js';
 import { readySpecCheck } from './helpers/spec-check.js';
 // Time-bomb allowance (GY-1694): the 2026-09-20 at/now/resetsAt trio is the fixed clock handed to fleetView, chooseSession and sessionEnded; Date.now() only builds relative expiries and reset times.
 
@@ -607,4 +609,66 @@ test('integration:reviewer-provider-diversity — the select route reads the imp
   // An implementer provider that is unknown chooses exactly as before.
   const unknown = await select('reviewer', 'GY-7003');
   assert.equal(unknown.session.account, 'codex-r'); assert.deepEqual(unknown.session.skipped, []);
+});
+
+
+// Both proofs traverse HTTP registry selection, worker dispatch, and the loop's master-wake decision.
+for (const proof of ['integration:normal-capacity-wait', 'e2e:normal-capacity-wait']) test(`${proof} — live role saturation stays queued until release; real failures still wake`, async () => {
+  await reset();
+  const homes = await temporaryDirectory('normal-capacity', scratch);
+  const home = await login(homes, 'capacity-worker', 'claude');
+  await ok('agent-registry/runtimes', operator, { runtime: runtimeNamed('claude'), reason: 'fixture' });
+  await ok('agent-registry/models', operator, { model: { name: 'opus', id: 'claude-opus-5' }, reason: 'fixture' });
+  await ok('agent-registry/accounts', operator, { account: { name: 'capacity-worker', runtime: 'claude', model: 'opus', credential: { host: HOST, home }, maxSessions: 5 }, reason: 'fixture' });
+  await ok('agent-registry/roles', operator, { role: { name: 'worker', accounts: ['capacity-worker'], concurrency: 2 }, reason: 'fixture' });
+  const { root, config } = await master([{ name: 'queued-worker', principal: 'implementer', kind: 'claude' }]);
+  const probe = network({ 'capacity-worker-oauth-token': { five: 5, seven: 10 } });
+  const occupied = [];
+  for (const key of ['GY-8001', 'GY-8002']) occupied.push(await selectAccount(config, 'worker', config.workers[0], { ...probe, work: key }));
+  const item = readyWork('GY-8003'), state = emptyDaemonState(config), prompts: string[] = [], calls: string[][] = [];
+  let now = Date.now(), claims = 0, mode = 'normal';
+  const effects: DaemonEffects = {
+    snapshot: async () => ({ work: [item], now: new Date(now).toISOString() }),
+    agents: () => [{ name: config.masterAgentName, pane_id: 'master-pane', agent_status: 'working' }],
+    credentials: async () => ({ 'queued-worker': { available: true, reason: null } }),
+    closeSession: () => {}, persist: async () => {},
+    dispatch: async (work, profile, _agents, snapshot) => dispatchWork(root, work, profile, [], herdr(calls, args => mode === 'launcher' && args[0] === 'pane' && args[1] === 'run'), [work], async () => {
+      claims++;
+      return { epoch: 1, path: join(root, 'assigned'), base: 'c'.repeat(40) };
+    }, async () => {}, 5_000, snapshot.now, { probe: mode === 'unreadable' ? { ...probe, fetch: async () => { throw new Error('registry unreadable'); } } : probe, prompt: { attempts: 1, pauseMs: 0, acceptMs: 1_000 } }),
+    masterSession: { launch: async () => { throw new Error('master already visible'); }, wake: async (_target, text) => { prompts.push(text); } },
+  };
+  const cycle = () => runCycle(config, state, effects, () => now);
+  for (let i = 0; i < 5; i++) {
+    await cycle();
+    assert.equal(state.actions[dispatchKey(item)].state, 'waiting');
+    assert.match(state.actions[dispatchKey(item)].detail, /worker slot.*role worker is at its concurrency limit/);
+    assert.deepEqual(state.profiles, {});
+    assert.equal(claims, 0);
+    assert.equal(calls.length, 0);
+    assert.deepEqual(prompts, []);
+  }
+  // Capacity waits do not suppress the bounded open-work heartbeat.
+  now += 31 * 60_000;
+  await cycle();
+  assert.equal(prompts.length, 1); assert.match(prompts[0], /coordinator heartbeat/);
+  await occupied[0].release!('fixture slot released');
+  await cycle();
+  assert.equal(claims, 1); assert.equal(state.actions[dispatchKey(item)].state, 'done');
+  await cycle();
+  assert.equal(claims, 1, 'a successful launch is never duplicated');
+  const registry = await ok('agent-registry/document', coordinator) as Registry;
+  assert.equal(registry.sessions.filter(session => !session.endedAt).length, 2, 'role limit is preserved');
+  for (const session of registry.sessions.filter(session => !session.endedAt)) await ok(`agent-registry/sessions/${session.id}/end`, coordinator, { reason: 'fixture completed' });
+  for (const failure of ['launcher', 'unreadable']) {
+    mode = failure;
+    delete state.actions[dispatchKey(item)];
+    delete state.profiles['queued-worker'];
+    await cycle();
+    assert.equal(state.actions[dispatchKey(item)].state, 'failed');
+    assert.match(state.actions[dispatchKey(item)].detail, failure === 'launcher' ? /herdr refused the launch/ : /registry unreadable/);
+    await cycle(); // asynchronous launch settles before the next wake decision
+    assert.match(prompts.at(-1)!, failure === 'launcher' ? /herdr refused the launch/ : /registry unreadable/);
+  }
+  assert.equal(claims, 2, 'an unreadable registry claims no lease');
 });

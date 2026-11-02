@@ -5,6 +5,7 @@ import { z } from 'zod';
 import { type MasterConfig } from '../master.js';
 import { emptyProjectMemory, projectMemorySchema } from '../model/project-memory.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
+import { continuitySchema } from '../master/conversation.js';
 
 // 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
 // A cursor's rows of the retired 'decision' and 'escalation' kinds (GY-2874) load as 'judgement' and 'attention'.
@@ -91,6 +92,8 @@ export type LoopRelease = z.infer<typeof loopReleaseSchema>;
  * loop adopts the live session from this record and its Herdr name rather than launching a second.
  */
 export const masterSessionSchema = z.object({
+  /** Native conversation identity; independent of the registry allocation and retained on rotation. */
+  continuity: continuitySchema.nullable().default(null),
   agentName: z.string().max(200).nullable().default(null),
   pane: z.string().max(200).nullable().default(null),
   runtime: z.string().max(40).nullable().default(null),

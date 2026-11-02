@@ -14,11 +14,14 @@ import { responderFromEnv, type Responder } from '../closed-question.js';
 import { assembleDelegationLimits } from './limits.js';
 import { Next, type Route, type RouteContext, type RouteModule, type Services } from './routes.js';
 import { leaseCommandRequest } from './routes/work.js';
+import { launchTokenActor } from './review-verdict.js';
 import { signinClaimFromEnv } from './routes/signin.js';
 
 /**
  * Resolve the bearer token to a principal: a configured credential first, then a human session a
- * one-time sign-in link opened (GY-738, `HumanSignIn` below), then a live operator-agent credential. A lease command (`method` and `pathname`) authenticates on the lease pool (GY-558), so an exhausted
+ * one-time sign-in link opened (GY-738, `HumanSignIn` below), a live operator-agent credential,
+ * then an unused durable reviewer/spec-check launch. A lease command (`method` and `pathname`)
+ * authenticates on the lease pool (GY-558), so an exhausted
  * general pool cannot stop a renewal before it reaches its own connections.
  */
 export async function authenticate(services: Services, authorization: string | undefined, repository: string, method?: string, pathname = ''): Promise<Principal> {
@@ -27,7 +30,7 @@ export async function authenticate(services: Services, authorization: string | u
   const hash = createHash('sha256').update(token).digest();
   const configured = configuredCredential(services, hash);
   if (configured) await services.operatorAgents.assertConfiguredPrincipalSafe({ id: configured.actor.id, tokenHash: hash.toString('hex') }, { lease });
-  const actor = configured?.actor ?? humanSignIn(services).authenticate(token) ?? await services.operatorAgents.authenticate(token);
+  const actor = configured?.actor ?? humanSignIn(services).authenticate(token) ?? await services.operatorAgents.authenticate(token) ?? await launchTokenActor(services, hash.toString('hex'));
   demand(actor, 'A valid Graphyard bearer token is required', 401);
   if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
   return actor;

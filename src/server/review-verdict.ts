@@ -31,8 +31,8 @@ import type { Services } from './routes.js';
  * source: 'control-plane' }` to `observation.reviews` so `exactApproval` and the review gate read it
  * unchanged, re-evaluates the item, and refuses a second verdict for the same launch. A post-merge
  * launch's verdict marks the delivered item `reviewed`; the item is never reopened, and the loop
- * files its findings (auto-dispatch.ts). The in-process bearer registry changes only once the
- * transaction has committed: a save that fails leaves the token usable for the session's retry.
+ * files its findings (auto-dispatch.ts). Bearer authorization reads only committed launch facts:
+ * a save that fails leaves the token usable for the session's retry.
  */
 const sha = z.string().regex(/^[0-9a-f]{40}$/i).transform(value => value.toLowerCase());
 const hex64 = z.string().regex(/^[0-9a-f]{64}$/);
@@ -104,25 +104,24 @@ export const secondVerdictRefusal = (key: string, head: string) => `${key}'s lau
 export const independenceRefusal = (reviewer: string, how: 'implemented' | 'requested', key: string) =>
   how === 'implemented' ? `Reviewer ${reviewer} implemented ${key}; an identity cannot independently review its own work` : `Reviewer ${reviewer} requested this review launch of ${key}; the requester of a review is never its reviewer`;
 
-/** The bearer registrations this process holds for launched reviewer sessions, by token hash, so a verdict or an expiry can withdraw exactly one. */
-const registrations = new WeakMap<Services, Map<string, { expiresAt: number }>>();
-const registry = (services: Services) => { let map = registrations.get(services); if (!map) { map = new Map(); registrations.set(services, map); } return map; };
-function withdrawToken(services: Services, tokenHash: string) {
-  registry(services).delete(tokenHash);
-  const hash = Buffer.from(tokenHash, 'hex');
-  for (let index = services.principals.length - 1; index >= 0; index--) if (services.principals[index]!.hash.equals(hash)) services.principals.splice(index, 1);
+/**
+ * Resolve a launch bearer from the current committed work record, including delivered items.
+ * Only the original reader identity is recovered; verdict routes still enforce the launch's
+ * token, head, policy binding and independence inside their write transaction.
+ */
+export async function launchTokenActor(services: Services, tokenHash: string): Promise<Principal | null> {
+  const rows = await services.engine.store.pool.query(`
+    SELECT launch FROM work_items
+    CROSS JOIN LATERAL (VALUES (document->'reviewLaunch'), (document->'specCheckLaunch')) AS launches(launch)
+    WHERE launch->>'tokenHash' = $1
+      AND (launch->>'expiresAt')::timestamptz > now()
+      AND launch->>'verdict' IS NULL AND launch->>'refused' IS NULL
+    LIMIT 1`, [tokenHash]);
+  const launch = rows.rows[0]?.launch;
+  return launch ? { id: launch.reviewer, role: 'reader' } : null;
 }
-function registerToken(services: Services, reviewer: string, tokenHash: string, expiresAt: number) {
-  withdrawToken(services, tokenHash);
-  registry(services).set(tokenHash, { expiresAt });
-  services.principals.push({ actor: { id: reviewer, role: 'reader' }, hash: Buffer.from(tokenHash, 'hex') });
-}
-/** Withdraw every registration past its expiry; called on each launch and verdict, so a token outlives its session by at most the next call. */
-function pruneExpired(services: Services, now: number) {
-  for (const [tokenHash, entry] of registry(services)) if (entry.expiresAt <= now) withdrawToken(services, tokenHash);
-}
-/** Whether this process still registers `tokenHash` as a bearer (tests read it; nothing else does). */
-export const tokenRegistered = (services: Services, tokenHash: string) => registry(services).has(tokenHash);
+/** Whether a standing launch still authorizes this bearer. */
+export const tokenRegistered = async (services: Services, tokenHash: string) => !!await launchTokenActor(services, tokenHash);
 
 async function replayOrRun<T>(db: pg.PoolClient, actor: Principal, key: string, fingerprint: string, run: () => Promise<T>): Promise<T> {
   const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
@@ -132,21 +131,11 @@ async function replayOrRun<T>(db: pg.PoolClient, actor: Principal, key: string, 
   return result;
 }
 
-/** The registry changes a committed transaction applies: the hashes it withdraws and the launch it registers. */
-interface RegistryChange { withdraw: string[]; register?: { reviewer: string; tokenHash: string; expiresAt: number } }
-function applyRegistryChange(services: Services, change: RegistryChange | undefined, now: number) {
-  pruneExpired(services, now);
-  if (!change) return;
-  for (const tokenHash of change.withdraw) withdrawToken(services, tokenHash);
-  if (change.register) registerToken(services, change.register.reviewer, change.register.tokenHash, change.register.expiresAt);
-}
-
 export async function recordReviewLaunch(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity registers a reviewer launch', 403);
   const data = reviewLaunchBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
-  let change: RegistryChange | undefined;
   const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
@@ -164,16 +153,13 @@ export async function recordReviewLaunch(services: Services, actor: Principal, i
       demand(diffBase.toLowerCase() === data.baseTip, `${work!.key}'s candidate is judged against base ${diffBase.slice(0, 12)}, not ${data.baseTip.slice(0, 12)}`, 409);
     }
     // One launch stands per item: a relaunch replaces the earlier registration and withdraws its token.
-    const withdraw = work!.reviewLaunch ? [work!.reviewLaunch.tokenHash] : [];
     const expiresAt = new Date(Math.min(Date.parse(data.expiresAt), now.getTime() + launchTokenBoundMs)).toISOString();
     const launch: ControlPlaneReviewLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, head: data.head, baseTip: data.baseTip, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt, postMerge: data.postMerge, ...(data.product ? { product: true } : {}), verdict: null };
     work!.reviewLaunch = launch;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, reviewLaunchEvent, JSON.stringify({ key: work!.key, ...launch })]);
     await save(db, work!, actor.id, `${reviewLaunchEvent}.recorded`, now, { launch: launch.id, reviewer: launch.reviewer, head: launch.head, postMerge: launch.postMerge });
-    change = { withdraw, register: { reviewer: data.reviewer, tokenHash: data.tokenHash, expiresAt: Date.parse(expiresAt) } };
     return { registered: true, key: work!.key, launch: launch.id, reviewer: launch.reviewer, head: launch.head, baseTip: launch.baseTip, expiresAt, postMerge: launch.postMerge };
   }));
-  applyRegistryChange(services, change, Date.now());
   return result;
 }
 
@@ -184,7 +170,6 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
   const engine = services.engine;
-  let change: RegistryChange | undefined;
   const judged: Judged = await engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async (): Promise<Judged> => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
@@ -204,7 +189,6 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
       work!.reviewLaunch = { ...launch!, refused: { at: now.toISOString(), reason } };
       await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, independenceRefusedEvent, JSON.stringify({ key: work!.key, launch: launch!.id, reviewer: launch!.reviewer, requester: launch!.requester, head: launch!.head, how, reason })]);
       await save(db, work!, actor.id, `${independenceRefusedEvent}.recorded`, now, { launch: launch!.id, reviewer: launch!.reviewer, how, reason });
-      change = { withdraw: [launch!.tokenHash] };
       return { refusal: { reason, status: 403 } };
     }
     const state = verdictStateOf(data.event), submittedAt = now.toISOString();
@@ -242,7 +226,6 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
     work!.reviewLaunch = { ...launch!, verdict };
     if (product) work!.productReview = { sha: launch!.head, baseSha, verdict: productVerdict!, reviewer: launch!.reviewer, findings: data.body, screenshots: await keepProductScreenshots(db, work!.id, data.screenshots ?? [], productScreenshots(data.body)), at: submittedAt };
     if (launch!.postMerge) work!.postMergeReview = 'reviewed';
-    change = { withdraw: [launch!.tokenHash] };
     if (work!.stage !== 'done') {
       engine.evaluate(work!, all, now);
       await (engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
@@ -250,8 +233,6 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
     await save(db, work!, actor.id, `${product ? productReviewVerdictEvent : reviewVerdictEvent}.recorded`, now, { launch: launch!.id, reviewer: launch!.reviewer, sha: data.sha, state, reviewId, postMerge: launch!.postMerge, product });
     return { result: { recorded: true, key: work!.key, launch: launch!.id, reviewId, state: product ? productVerdict : state, sha: data.sha, reviewer: launch!.reviewer, stage: work!.stage, postMerge: launch!.postMerge, product } };
   }));
-  // The token is spent only once the verdict or the refusal is committed (a failed save leaves the session its retry).
-  applyRegistryChange(services, change, Date.now());
   if ('refusal' in judged) demand(false, judged.refusal.reason, judged.refusal.status);
   return (judged as { result: unknown }).result;
 }
@@ -313,7 +294,6 @@ export async function recordSpecCheckLaunch(services: Services, actor: Principal
   const data = specCheckLaunchBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
-  let change: RegistryChange | undefined;
   const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
@@ -321,15 +301,12 @@ export async function recordSpecCheckLaunch(services: Services, actor: Principal
     demand(needsSpecCheck(work!), `${work!.key} owes no spec check: bugs and chores skip it`, 409);
     const expiresAt = new Date(Math.min(Date.parse(data.expiresAt), now.getTime() + launchTokenBoundMs)).toISOString();
     // One launch stands per item: a relaunch replaces the earlier registration and withdraws its token.
-    const withdraw = work!.specCheckLaunch ? [work!.specCheckLaunch.tokenHash] : [];
     const launch: SpecCheckLaunch = { id: randomUUID(), reviewer: data.reviewer, requester: actor.id, tokenHash: data.tokenHash, at: now.toISOString(), expiresAt, policyRevision: data.policyRevision };
     work!.specCheckLaunch = launch;
     await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [work!.id, actor.id, specCheckLaunchEvent, JSON.stringify({ key: work!.key, ...launch })]);
     await save(db, work!, actor.id, `${specCheckLaunchEvent}.recorded`, now, { launch: launch.id, reviewer: launch.reviewer });
-    change = { withdraw, register: { reviewer: data.reviewer, tokenHash: data.tokenHash, expiresAt: Date.parse(expiresAt) } };
     return { registered: true, key: work!.key, launch: launch.id, reviewer: launch.reviewer, expiresAt };
   }));
-  applyRegistryChange(services, change, Date.now());
   return result;
 }
 
@@ -337,7 +314,6 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
   const data = specCheckBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
-  let change: RegistryChange | undefined;
   const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
@@ -354,12 +330,10 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
       // The report judged the revision the session was handed: one master requirements revised
       // meanwhile leaves it stale, and the loop runs the check again.
       policyRevision = launch!.policyRevision;
-      change = { withdraw: [launch!.tokenHash] };
     } else {
       demand(actor.role === 'admin' || actor.role === 'coordinator', 'Only an admin or the loop\'s coordinator records a spec check by hand; a launched session posts as its token', 403);
       demand(data.reviewer, 'A hand-recorded spec check names its reviewer', 400);
       reviewer = data.reviewer!;
-      if (work!.specCheckLaunch) change = { withdraw: [work!.specCheckLaunch.tokenHash] };
     }
     // The re-check is a fact of the record: a report on a revision later than a standing gaps
     // verdict's is the one re-check master requirements' revision ran; its own gaps verdict dispatches.
@@ -373,6 +347,5 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
     await save(db, work!, actor.id, `${specCheckVerdictEvent}.recorded`, now, { reviewer, verdict: data.verdict, recheck });
     return { recorded: true, key: work!.key, verdict: data.verdict, recheck, reviewer, policyRevision: specCheck.policyRevision, stage: work!.stage };
   }));
-  applyRegistryChange(services, change, Date.now());
   return result;
 }
