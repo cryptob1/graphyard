@@ -38,6 +38,7 @@ Missing `herdrWorkspace` is replaced with the master's workspace or first listed
 ### The request is the session's first message
 
 Requests arrive on the runtime command line. Later authorized reminders come from the launcher ([authorization](onboarding.md#what-the-generated-instructions-authorize)).
+
 #### How the request reaches the runtime
 
 `.graphyard/launch/NAME.request` and Claude's `NAME.role` are 0600 and removed with the checkout. The typed line stays within 512 bytes:
