@@ -22,7 +22,7 @@ async function privateDirectory() {
 function config(credentialFile: string, overrides: Partial<Omit<MasterConfig, 'run'>> & { run?: Partial<MasterRun> } = {}): MasterConfig {
   return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: launcher,
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a',
-    masterAgentName: 'graphyard-master-project', autoMerge: true, mergeMethod: 'merge', workers: [], ...overrides });
+    masterAgentName: 'graphyard-master-project', mergeMethod: 'merge', workers: [], ...overrides });
 }
 function profile(name: string, credentialFile: string, overrides: Partial<WorkerProfile> = {}): WorkerProfile {
   return { name, principal: `${name}-principal`, agentName: `agent-${name}`, mode: 'launch', kind: 'codex',
@@ -252,7 +252,7 @@ test('one cycle closes finished sessions, dispatches, leaves proofs to CI and th
 test('a disabled automatic merge keeps the loop cycling, never merges, and asks no operator for a merge GitHub makes', async () => {
   const { directory, token } = await privateDirectory();
   try {
-    const master = config(token, { autoMerge: false });
+    const master = config(token, {});
     const mergeable = submitted({ id: 'mergeable', key: 'GY-45', stage: 'merge', gates: [{ name: 'merge', passed: true, reasons: [] }] });
     const log: string[] = [];
     const state = emptyDaemonState(master);

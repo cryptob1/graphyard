@@ -16,7 +16,7 @@ import { harness } from './install-harness.js';
 // is what the check reads: an https url with an SSH pushurl pushes over SSH and passes.
 
 const SERVER = 'http://127.0.0.1:4310';
-const request = (): UpRequest => ({ repository: 'owner/project', provider: 'compose', agent: false, reviewer: 'claude', master: 'claude', browserProfile: null, merger: 'control-plane' });
+const request = (): UpRequest => ({ repository: 'owner/project', provider: 'compose', agent: false, master: 'claude' });
 
 /** A git host answering `remote` reads from memory, as a checkout would. */
 function gitHost() {

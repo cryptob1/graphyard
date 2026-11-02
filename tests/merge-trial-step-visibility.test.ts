@@ -99,7 +99,7 @@ function harness(): StepHarness {
       return {};
     },
   };
-  const reads: MergeWriterReads = { ...ports, merger: async () => 'control-plane' };
+  const reads: MergeWriterReads = { ...ports};
   const effects = { mergeWriter: reads, persist: async () => {} };
   made.advance = ms => { clock += ms; };
   made.step = async () => { clock += 1000; await mergeWriterStep({ state: made.state, effects, now: () => clock, snapshot: { work }, performed: [] } as unknown as Cycle); };
@@ -232,7 +232,7 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
       return {};
     },
   };
-  const reads: MergeWriterReads = { ...ports, merger: async () => 'control-plane' };
+  const reads: MergeWriterReads = { ...ports};
   const cycle = { state, effects: { mergeWriter: reads, persist: async () => {} }, now: () => Date.now(), snapshot: { work }, performed: [] } as unknown as Cycle;
   await mergeWriterStep(cycle);
   await mergeWriterIdle(state);

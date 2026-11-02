@@ -22,7 +22,7 @@ import { verificationEnvironment, verificationSlotsDirectory } from './verificat
 /**
  * The master's harness rules cover everything the master owns, not only the coordination loop:
  * tuning its own configuration through the CLI's owned fields (`master config` — a direct edit of
- * master.json would reach autoMerge and the credential and identity paths onboarding owns, so it
+ * master.json would reach the credential and identity paths onboarding owns, so it
  * is not granted), restarting and reading the durable loop's exact unit, administering the
  * deployment it verifies, and re-running CI for a candidate. None of these reaches a merge, a
  * verdict, evidence, or a credential; the enforced boundaries are unchanged.
@@ -233,10 +233,7 @@ export function masterPrompt(config: MasterConfig): string {
     : config.reviewer
     ? `Independent review and proof collection start on their own: when a candidate passes the build gate the control plane records a review request and producer requests bound to its exact head, and node ${config.cliPath} master run launches the reviewer identity ${config.reviewer.slug}[bot] and one producer session per proof group for them within 30 seconds. Read the findings, route rework, and merge; never launch reviews or producers by hand, never review a candidate yourself, and never submit evidence. master status shows what is running per candidate and since when, and node ${config.cliPath} master review GY-N is only the recovery of a review request the loop has stopped relaunching: its session settled without answering it, its automatic sessions are exhausted, or its launch reached the dispatch failure limit with no request-review row still queued; on a system-driven item it is refused before then.`
     : `No reviewer identity is registered yet: run node ${config.cliPath} master reviewer setup before routing work that needs independent review; master run launches reviews and producers on its own once registered. Never approve a candidate yourself.`;
-  const administrationInstruction = config.browser
-    ? `GitHub administration of ${config.repository} is yours: when only a GitHub page can do it run node ${config.cliPath} master browser app-permissions or installation-accept, which drive the operator's browser profile ${config.browser.profile} headless, record every step, verify through the API, and append an audit entry. Report a pending sudo code from master status; the operator only approves it on their device. Never ask the operator to click through what those flows cover.`
-    : `No browser profile is configured: App permission updates and installation acceptance stay with the operator, and master status records that as a setup attention item naming node ${config.cliPath} master init --token-stdin --browser-profile PROFILE; never ask the operator in chat, leave the item to master status.`;
-  return `${prompt} ${reviewInstruction} ${administrationInstruction}`;
+  return `${prompt} ${reviewInstruction}`;
 }
 
 export async function startMaster(root: string, kind: WorkerProfile['kind'], agentArgs: string[], agents: HerdrAgent[], run?: ChildRun) {

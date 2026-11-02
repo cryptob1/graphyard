@@ -174,6 +174,8 @@ function accountsWorld(checkout: string, installDir: string, options: AccountsWo
     status: async () => installed ? status() : null,
     installDirectory: () => installDir,
     publishOnboarding: async () => null,
+    // The repository exists: the control-plane merger's preflight creates it only when missing.
+    gh: async () => ({ code: 0, stdout: '{}' }), git: async () => ({ code: 0, stdout: '', stderr: '' }),
     async cli(args) {
       calls.push(args);
       const joined = args.join(' ');
@@ -201,7 +203,7 @@ function accountsWorld(checkout: string, installDir: string, options: AccountsWo
   };
 }
 
-const request = (extra: Partial<UpRequest> = {}): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', browserProfile: null, ...extra });
+const request = (extra: Partial<UpRequest> = {}): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: true, master: 'claude', ...extra });
 
 async function installRecordIn(directory: string) {
   await mkdir(directory, { recursive: true, mode: 0o700 });

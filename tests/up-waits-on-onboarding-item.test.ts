@@ -77,7 +77,7 @@ function dependencies(root: string, events: UpEvent[], w: UpWorld, over: Partial
   };
 }
 
-const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: true, reviewer: 'claude', master: 'claude', browserProfile: null, merger: 'control-plane' });
+const request = (): UpRequest => ({ repository: 'acme/shop', provider: 'compose', agent: true, master: 'claude' });
 
 /** A root whose up state records every step but onboarding done, so a run reaches the onboarding step alone. */
 async function resumedRoot(label: string, state: Record<string, unknown> = {}) {

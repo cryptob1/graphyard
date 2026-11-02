@@ -82,6 +82,12 @@
       "action": "expectText",
       "text": "Production verification",
       "exact": false
+    },
+    {
+      "kind": "browser",
+      "action": "expectText",
+      "text": "The control plane (GitHub only a mirror)",
+      "exact": true
     }
   ]
 }
