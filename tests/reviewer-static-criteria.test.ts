@@ -28,7 +28,7 @@ test('unit:reviewer-static-criteria — generated GitHub, control-plane and post
     reviewPrompt({ repository: 'owner/project' }, binding, undefined, undefined, criteria),
     ...[undefined, { mergeSha: head }].map(postMerge => reviewPrompt(
       { repository: 'owner/project' }, binding, undefined, undefined, criteria,
-      undefined, undefined, undefined, undefined, undefined, undefined,
+      undefined, undefined, undefined, undefined, undefined,
       { head, baseTip: base, postMerge },
     )),
   ];
@@ -56,7 +56,7 @@ test('review brief bindings also reach GitHub launches and legacy retries withou
   const pins = [{ proof: 'e2e:review-brief-proof-bindings', revision: 3, environment: 'local', hash: 'c'.repeat(64) }];
   const config = { repository: 'owner/project', cliPath: '/bin/graphyard.mjs' };
   const briefs = [
-    reviewPrompt(config, binding, undefined, undefined, criteria, undefined, undefined, undefined, undefined, undefined, undefined, undefined, pins),
+    reviewPrompt(config, binding, undefined, undefined, criteria, undefined, undefined, undefined, undefined, undefined, undefined, pins),
     reviewRetryPrompt(config.repository, binding, criteria, config.cliPath, pins),
   ];
   for (const brief of briefs) {
