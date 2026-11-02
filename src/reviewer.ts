@@ -748,7 +748,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
   memory ??= projectMemory;
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification, scenarioRequirements);
   const memorySection = projectMemoryDigest(memory, 'reviewer', { baseSha: binding.baseSha });
-  return `Independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
+  return `You are the independent Graphyard reviewer for ${config.repository}. Review pull request #${binding.pr} at head ${binding.sha} against base ${binding.baseSha} under policy revision ${binding.policyRevision}, for work item ${binding.key}. `
     + `Read the change with: gh pr diff ${binding.pr} --repo ${config.repository}. `
     + (memorySection || '')
     + verificationMapDigest(verification?.maps, verification?.paths, 'reviewer')

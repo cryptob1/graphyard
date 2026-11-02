@@ -407,7 +407,7 @@ test('integration:role-scoped-harness-rules — worker, reviewer and producer se
     const cursorCalls: string[][] = [];
     await launchReview(root, work(), 'cursor-reviewer', [], new Date().toISOString(), { run: herdr(cursorCalls), mint });
     const typedCursor = expandTypedCommand(cursorCalls[1][3]);
-    assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} Independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
+    assert.deepEqual([typedCursor.kind, ...typedCursor.args.slice(0, -1)], ['cursor', '--force', '--trust']); assert.ok(typedCursor.args.at(-1)!.startsWith(`${autonomyContract} You are the independent Graphyard reviewer`), 'plus the request (GY-93), led by the autonomy contract since Cursor loads no role file (GY-184)');
   } finally { await cleanup(); }
 });
 
