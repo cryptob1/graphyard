@@ -64,6 +64,11 @@ test('review brief bindings also reach GitHub launches and legacy retries withou
     assert.ok(brief.includes(`git show ${head}:PATH`));
     assert.match(brief, /guide review is supported and needs no worker or coordinator credential/);
     assert.match(brief, /repository reads and reviews only/);
+    assert.match(brief, /mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker/);
+    assert.match(brief, /rg --files/);
+    assert.match(brief, /CLI --help, then retry the authorized read/);
+    assert.match(brief, /necessary input remains unavailable through authorized equivalent reads/);
+    assert.doesNotMatch(brief, /If a command you need is refused or cannot succeed/);
   }
   const unpinned = reviewPrompt(config, binding, undefined, undefined, criteria);
   assert.match(unpinned, /e2e\/cases\/review-brief-proof-bindings.json/);

@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, writeFile } from 'node:fs/promises';
+import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -206,6 +206,24 @@ test('unit:post-merge-review-refused-launch-recovers — a request the loop stop
 
 
 test('integration:review-brief-proof-bindings — real ordinary and post-merge launches retain exact task proof inputs for retries', async () => {
+  // GY-3055 COMMENT3006142 stopped on these reviewer-selected paths, even though
+  // authorized surrounding-code reads were available. Reproduce the exact search and recover.
+  const discovery = await temporaryDirectory('review-brief-path-discovery');
+  await symlink(fileURLToPath(new URL('../', import.meta.url)), join(discovery, 'checkout'));
+  const pattern = 'reviewLaunch|specCheckLaunch|policyRevision';
+  assert.throws(() => execFileSync('rg', ['-n', pattern,
+    'checkout/src/server/routes/review.ts', 'checkout/src/model/post-merge-review.ts',
+    'checkout/tests/review-verdict.test.ts', 'checkout/tests/spec-check.test.ts',
+  ], { cwd: discovery, stdio: 'pipe' }), (error: any) => {
+    assert.equal(error.status, 2);
+    assert.match(error.stderr.toString(), /checkout\/src\/server\/routes\/review.ts: No such file or directory/);
+    assert.match(error.stderr.toString(), /checkout\/tests\/spec-check.test.ts: No such file or directory/);
+    return true;
+  });
+  const paths = execFileSync('rg', ['--files', 'checkout/src', 'checkout/tests'], { cwd: discovery, encoding: 'utf8' }).split('\n');
+  const corrected = ['checkout/src/server/review-verdict.ts', 'checkout/tests/spec-check-before-dispatch.test.ts'];
+  for (const path of corrected) assert.ok(paths.includes(path));
+  assert.match(execFileSync('rg', ['-n', pattern, ...corrected], { cwd: discovery, encoding: 'utf8' }), /reviewLaunch|specCheckLaunch|policyRevision/);
   for (const postMerge of [false, true]) {
     const work = deliveredPrLess(postMerge ? 'GY-9011' : 'GY-9010');
     // The criterion text deliberately supplies no proof or path: only structured launch inputs do.
@@ -230,6 +248,7 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
     assert.deepEqual(record.reviewInputs, { criteria: work.criteria, scenarioRequirements: work.scenarioRequirements });
     // A changed later snapshot must not replace the launch facts when its session is reminded.
     const retry = reviewRetryPrompt(repository, record, [{ id: 'AC-9', text: 'Later data', proofs: ['e2e:wrong-case'] }], launcher);
+    assert.match(retry, /otherwise finish the authorized reads and judge it before posting/);
     assert.equal(prompts.length, 1);
     for (const brief of [prompts[0], retry]) {
       assert.match(brief, /\[AC-1\] proofs:/);
@@ -244,6 +263,12 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
       assert.match(brief, /Post exactly one verdict/);
       assert.match(brief, /one review posted with --event COMMENT/);
       assert.match(brief, /one-time token/);
+      assert.match(brief, /mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker/);
+      assert.match(brief, /Discover the correct path with rg --files or command with CLI --help, then retry the authorized read/);
+      assert.match(brief, /necessary input remains unavailable through authorized equivalent reads/);
+      assert.match(brief, /genuine permission, identity, binding or runtime failure prevents judging it/);
+      assert.match(brief, /Do not blanket-ignore errors, run builds\/tests\/servers, edit code, expand credentials, guess evidence or weaken a criterion/);
+      assert.doesNotMatch(brief, /If a command you need is refused or cannot succeed/);
       assert.doesNotMatch(brief, /Later data|e2e:wrong-case|graphyard show GY-/);
     }
     assert.deepEqual([record.sha, record.baseSha, record.policyRevision], [postMerge ? M : H, B, 1]);

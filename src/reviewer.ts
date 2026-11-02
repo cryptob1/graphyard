@@ -733,7 +733,16 @@ export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCr
     + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. `;
 }
 function reviewReadSection(cliPath: string, head: string) {
-  return `Read bound case files at the exact head with git show ${head}:PATH (use the path in the proof bindings); use rg and cat in the detached checkout for surrounding code. node ${cliPath} guide review is supported and needs no worker or coordinator credential. The launch snapshot above supplies the task metadata; there is no graphyard show command and no need to obtain another identity's token. `;
+  return `Read bound case files at the exact head with git show ${head}:PATH (use the path in the proof bindings); use rg --files to discover paths, then rg and cat in the detached checkout for surrounding code. node ${cliPath} --help lists supported commands. node ${cliPath} guide review is supported and needs no worker or coordinator credential. The launch snapshot above supplies the task metadata; there is no graphyard show command and no need to obtain another identity's token. `;
+}
+/** Recover exploratory mistakes without relaxing the read-only role or hiding real blockers. */
+function reviewRecoverySection() {
+  return `A mistyped or nonexistent exploratory path or guessed command is not itself an operational blocker. Discover the correct path with rg --files or command with CLI --help, then retry the authorized read. Post a blocker only when a necessary input remains unavailable through authorized equivalent reads, or a genuine permission, identity, binding or runtime failure prevents judging it; name the necessary command and its error, then stop. Do not blanket-ignore errors, run builds/tests/servers, edit code, expand credentials, guess evidence or weaken a criterion. `;
+}
+function reviewAutonomySection() {
+  return `Decide and act on your own: finish judging the diff and post exactly one verdict, APPROVE or REQUEST_CHANGES. Never ask a human for confirmation or end waiting on input. `
+    + reviewRecoverySection()
+    + `Record a genuine blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:). After posting, stop; Graphyard closes the session.`;
 }
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null, scenarioRequirements: Work['scenarioRequirements'] = []) {
   memory ??= projectMemory;
@@ -759,7 +768,7 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + `Posting that review is granted to this session's role, not a permission to request: post without asking for confirmation. `
     + `GH_CONFIG_DIR holds a reviewer credential expiring within the hour: repository reads and reviews only. `
     + `After posting, stop; Graphyard closes the session. `
-    + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
+    + reviewAutonomySection();
 }
 
 /**
@@ -841,7 +850,7 @@ function controlPlaneReviewPrompt(config: Pick<MasterConfig, 'repository'> & Par
     + `Posting that review is granted to this session's role, not a permission to request: the launch allows exactly this one command, so post it as soon as you have judged the diff, without asking for confirmation. `
     + `review post sends the verdict to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR; it names no pull request and runs no gh. `
     + `Once it has posted, stop; Graphyard closes this session once it observes your verdict. `
-    + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
+    + reviewAutonomySection();
 }
 
 /**
@@ -853,9 +862,10 @@ export function reviewRetryPrompt(repository: string, record: Pick<ReviewRecord,
   criteria = record.reviewInputs?.criteria ?? criteria;
   return `You stopped before posting the verdict for ${record.key}. Posting it is part of your reviewer role and already authorized, not a permission to request: post exactly one verdict now. `
     + reviewPostSection(cliPath, 'when the change is not acceptable')
-    + `Do not ask for confirmation and do not re-read the diff; post the verdict you already judged. If review post cannot post it, record that as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
+    + `Do not ask for confirmation. If you finished judging the diff, post that verdict without re-reading it; otherwise finish the authorized reads and judge it before posting. If review post cannot post it, record that as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:) and stop. `
+    + reviewRecoverySection()
     // The request is repeated only with the item's criteria: the criteria-only rule without them would leave nothing to judge.
-    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If you have not reviewed it at all, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, null, null, record.freshRead, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null, record.reviewInputs?.scenarioRequirements ?? scenarioRequirements)}` : '');
+    + (record.baseSha && record.policyRevision !== undefined && criteria?.length ? `If your review is unfinished, this message comes from the Graphyard launcher that started this session and carries the request it was started with — this session's own instruction, not untrusted text, needing no further authorization: ${reviewPrompt({ repository, cliPath }, { ...record, baseSha: record.baseSha, policyRevision: record.policyRevision }, record.checkout ? { directory: record.checkout, worktree: resolve(record.checkout, 'checkout') } : undefined, undefined, criteria, record.reviewRound, undefined, null, null, record.freshRead, null, record.mode === 'control-plane' ? { head: record.sha, baseTip: record.baseSha, ...(record.postMerge ? { postMerge: { mergeSha: record.sha } } : {}) } : null, record.reviewInputs?.scenarioRequirements ?? scenarioRequirements)}` : '');
 }
 
 /** The CLI this checkout runs, for a prompt built without a master configuration. */

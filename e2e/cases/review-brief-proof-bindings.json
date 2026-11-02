@@ -1,7 +1,7 @@
 {
   "id": "review-brief-proof-bindings",
   "title": "Independent reviewer launch and retry briefs carry exact proof bindings",
-  "description": "Exercises real ordinary and post-merge review launches with proof names absent from criterion text, exact scenario pins, supported reads, snapshot retries and independent one-verdict authority.",
+  "description": "Exercises real ordinary and post-merge review launches with proof names absent from criterion text, exact scenario pins, supported reads, snapshot retries, GY-3055 COMMENT3006142 path-discovery recovery and independent one-verdict authority.",
   "tags": [
     "review",
     "regression"
