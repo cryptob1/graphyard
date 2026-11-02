@@ -16,8 +16,6 @@ export const upAppReuseRefusal = 'graphyard up --reuse-app is refused: install r
 export function refuseUpAppReuse(args: readonly (string | undefined)[]): void {
   if (args.some(arg => arg === '--reuse-app' || arg?.startsWith('--reuse-app='))) throw new Error(upAppReuseRefusal);
 }
-/** up's usage without the refused --reuse-app line. */
-export const upUsageWithoutAppReuse = upUsage.split('\n').filter(line => !line.trimStart().startsWith('--reuse-app')).join('\n');
 
 /**
  * The capacity variables that accompany the principals `init --apply` registers: derived from
@@ -87,11 +85,10 @@ export const installCommands = defineCommands([
     name: 'up',
     help: [
       '  up --repo OWNER/NAME [--provider compose|local] [--local]',
-      '     [--master claude|codex] [--agent] [--browser-profile PROFILE]',
-      '     [--wait MINUTES] [--no-wait] [--share-tailnet]',
-      '  up --sudo-code CODE|email',
+      '     [--master claude|codex] [--agent] [--wait MINUTES] [--share-tailnet]',
       '                                First-run setup in one command: preflight, control plane, host supervisor and',
-      '                                Herdr, onboarding, agent accounts, harness and master loop, resumable (.graphyard/up.json;',
+      '                                Herdr, the merge writer\'s deploy key, master autonomy, onboarding, agent',
+      '                                accounts, harness and master loop, resumable (.graphyard/up.json;',
       '                                a rerun reuses its --repo/--provider). Ctrl-C stops the install too. Onboarding files are',
       '                                published on graphyard/onboarding and filed as a work item; setup waits for the loop',
       '                                to merge them; no pull request is opened.',
@@ -107,7 +104,7 @@ export const installCommands = defineCommands([
     // `up` installs the control plane and records the connection; it never reads a stale one.
     readsConnection: () => false,
     async run(context) {
-      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsageWithoutAppReuse); return; }
+      if (upHelpRequested([context.id, ...context.args])) { console.log(upUsage); return; }
       refuseUpAppReuse([context.id, ...context.args]);
       const result = await upCommand(context.repositoryRoot(), () => context.activeCliPath(), [context.id, ...context.args].filter((value): value is string => value !== undefined));
       context.print(result);
