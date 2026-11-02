@@ -178,7 +178,7 @@ export function daemonEffects(root: string, source: MasterConfig | (() => Master
     // files a reverted item's re-land as the master's operator-agent identity — only while the
     // live configuration names that identity, like the rework beside it.
     get mergeWriter() { const config = current();
-      const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)), merger: async () => 'control-plane' as const });
+      const reads = mergeWriterReads(config, root, run, { base: worktreeRoot(root, config), record: (work, event) => mutate(`work/${work.id}/merge-record`, event, mergeRecordKey(work, event)) });
       return { ...reads,
         serveRecord: async () => { const record = readServeRecord(serveRecordPath(root)); return record?.commit ? { commit: record.commit, check: record.check ?? null } : null; },
         ...(current().operatorAgent ? { createWork: (input: RelandInput, idempotencyKey: string) => asOperatorAgent('work', input, idempotencyKey) } : {}),

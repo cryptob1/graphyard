@@ -11,17 +11,22 @@ import { masterConfigSchema } from '../src/master.js';
 const base = { version: 1, url: 'https://graphyard.example', credentialFile: '/tmp/token', cliPath: '/tmp/graphyard.mjs',
   repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'host-a', masterAgentName: 'graphyard-master-project' };
 
-test('unit:retired-merge-queue-keys — parsing keeps the live merge-queue setting and drops optimistic, optimisticExclude and the queue\'s batchSize, parallelTips and ciConcurrency', () => {
+test('unit:retired-merge-queue-keys — parsing drops rerunFailedChecks, optimistic, optimisticExclude and the queue\'s batchSize, parallelTips and ciConcurrency', () => {
   const parsed = masterConfigSchema.parse({ ...base, mergeQueue: { parallelTips: 4, batchSize: 2, ciConcurrency: 20, rerunFailedChecks: 1, optimistic: true, optimisticExclude: ['**/package.json'] } });
-  assert.deepEqual(parsed.mergeQueue, { rerunFailedChecks: 1 }, 'only the setting something reads survives the parse');
+  assert.deepEqual(parsed.mergeQueue, {}, 'all retired settings drop from the parse');
   const rewritten = JSON.parse(JSON.stringify(parsed));
-  for (const retired of ['optimistic', 'optimisticExclude', 'batchSize', 'parallelTips', 'ciConcurrency'])
+  for (const retired of ['optimistic', 'optimisticExclude', 'batchSize', 'parallelTips', 'ciConcurrency', 'rerunFailedChecks'])
     assert.equal(retired in rewritten.mergeQueue, false, `a config written back from the parse no longer names ${retired}`);
-  assert.deepEqual(masterConfigSchema.parse(rewritten).mergeQueue, { rerunFailedChecks: 1 }, 'and re-parses unchanged');
+  assert.deepEqual(masterConfigSchema.parse(rewritten).mergeQueue, {}, 'and re-parses unchanged');
 });
 
 test('unit:retired-merge-queue-keys — unknown merge-queue keys are kept and written back (GY-1960), the retired declared ones still drop', () => {
   const parsed = masterConfigSchema.parse({ ...base, mergeQueue: { parallelTips: 4, optimisticLane: true } });
   assert.deepEqual(parsed.mergeQueue, { optimisticLane: true }, 'the retired declared key drops; the unknown one a newer version wrote is kept (GY-1960)');
   assert.deepEqual(masterConfigSchema.parse(JSON.parse(JSON.stringify(parsed))).mergeQueue, { optimisticLane: true }, 'and re-parses unchanged');
+});
+
+test('retired autoMerge loads and drops on rewrite', () => {
+  const parsed = masterConfigSchema.parse({ ...base, autoMerge: false });
+  assert.equal('autoMerge' in parsed, false);
 });

@@ -80,7 +80,7 @@ class World {
   ports(): MergeWriterReads {
     const world = this;
     return {
-      baseBranch: 'main', retrials: 3, now: this.now, merger: async () => 'control-plane',
+      baseBranch: 'main', retrials: 3, now: this.now,
       fetch: async () => world.tip(),
       merge: async (head, baseTip) => { const mergeSha = sha(`merge:${head}:${baseTip}`); world.merges.set(mergeSha, head); return { mergeSha, files: ['src/app.ts'] }; },
       trial: async mergeSha => ({ build: [...world.submittedAt.keys()].some(n => failsTrial(n) && world.merges.get(mergeSha) === sha(`head${n}`)) ? 'fail' : 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1000, logTail: mergeSha, files: ['tests/item.test.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } }),

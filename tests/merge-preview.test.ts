@@ -224,7 +224,7 @@ test('unit:preview-skipped-when-not-applicable — a merge of only docs or tests
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/coordinator.token', cliPath: '/bin/graphyard',
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
   const called: string[][] = [];
-  const reads = (environment: NodeJS.ProcessEnv) => mergeWriterReads(config, '/repo', async () => '', { base: '/worktrees', record: async () => ({}), merger: async () => 'control-plane', environment,
+  const reads = (environment: NodeJS.ProcessEnv) => mergeWriterReads(config, '/repo', async () => '', { base: '/worktrees', record: async () => ({}),  environment,
     preview: async input => { called.push([input.mergeSha, input.site.directory, String(input.site.build), String('token' in input)]); return { result: 'pass', mergeSha: input.mergeSha, cases: [], failed: [], detail: '', durationMs: 0 }; } });
   assert.equal(await reads({}).preview!(mergeSha, ['src/game.ts'], work()), null, 'no static UAT, no preview');
   const staticSite = { GRAPHYARD_UAT_STATIC: 'dist', GRAPHYARD_UAT_BUILD: 'npm run build:site', GRAPHYARD_UAT_TOKEN: 'uat-token' };

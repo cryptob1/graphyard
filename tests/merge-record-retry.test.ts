@@ -69,7 +69,7 @@ function coordinator(options: { loseReply?: (event: MergeRecordEvent) => boolean
     holds: async mergeSha => pushed.has(mergeSha),
     record,
   };
-  const reads: MergeWriterReads = { ...ports, merger: async () => 'control-plane' };
+  const reads: MergeWriterReads = { ...ports};
   const work = () => { const item = submitted(); return [{ ...item, mergeLedger: ledger, reworkRequested: reworked, ...(ledger?.state === 'reconciled' ? { stage: 'done' } : {}) } as Work]; };
   const effects = {
     agents: () => [], herdr: () => ({ agents: [], available: true }), credentials: async () => ({}),

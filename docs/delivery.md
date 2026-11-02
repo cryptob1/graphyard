@@ -42,3 +42,5 @@ Rollback registrations carry `rollback.fencing` (`provider`/`serialized`/`none`,
 ## Coordinator recovery
 
 Self-merge stalled the loop: `graphyard master recover [--to SHA] --admin-token-stdin` repins and restarts it.
+
+The control plane always merges passing heads; the Delivery view identifies it directly as the merge writer without a status setting. There is no merger-mode switch or automatic-merging setting; `master init` no longer accepts `--auto-merge` or `--no-auto-merge`. The retired `/api/auto-merge` and `POST /api/merge-queue` routes are removed. Old policy events remain in the ledger, and old `master.json` files load with `autoMerge` and `mergeQueue.rerunFailedChecks` dropped when rewritten. `GET /api/merger` remains for the end-to-end runner’s delivery probe.

@@ -20,7 +20,6 @@ import { installIdFor } from './install/types.js';
 import { installDirectory, readInstallRecord } from './install/secrets.js';
 import { settleWorkerCredentials } from './install/worker-credentials.js';
 import { ensureDeployKey } from './install/deploy-key.js';
-import type { MergerMode } from './merger-mode.js';
 import type { GitHubCli } from './install/github.js';
 import type { Transport } from './install/transport.js';
 import { herdrAttachCommand, installHerdrInstance, type HerdrInstance } from './master/herdr.js';
@@ -89,7 +88,7 @@ export interface UpRequest {
   /** The Chrome profile signed in to GitHub that drives the App manifest in agent mode; the master's recorded one when omitted. */
   browserProfile: string | null;
   /** GY-1552: `control-plane` for every up (upRequestFromArgs sets it); absent only on a request recorded before. */
-  merger?: MergerMode;
+  merger?: 'control-plane';
   /** GY-1442: Apps already installed on the account that install reuses instead of creating (`--reuse-app SLUG`). */
   reuseApps?: string[];
   /**
