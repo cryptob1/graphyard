@@ -36,8 +36,7 @@ const planeFetch = (plane: Plane): typeof fetch => async (input, init) => {
 
 /** The checklist all green, as /api/status reports it once everything is installed and the loop runs. */
 const green = (loop: boolean) => ({
-  github: true, githubRepository: 'acme/shop', appPermissions: { missing: [], installationUrl: 'https://github.com/settings/installations/7' },
-  reviewerApps: [{ id: 'claude', appId: 9 }], mergeWriter: { merger: 'github' },
+  github: true, githubRepository: 'acme/shop', mergeWriter: { merger: 'github' },
   fleet: { roles: [{ role: 'worker', accounts: ['claude-a'] }, { role: 'reviewer', accounts: ['claude-a'] }], accounts: [{ name: 'claude-a', enabled: true, loggedIn: true, smoke: { result: 'pass' } }] },
   setup: { protection: 'checks', loop },
 });

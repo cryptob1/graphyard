@@ -211,8 +211,6 @@ export function assembleServices(engine: Engine, credentials: Credential[], arti
   const repository = engine.repository || process.env.GITHUB_REPOSITORY || '';
   // Mutations authorize against the same canonical binding as authentication; embedders may leave it to the process default.
   engine.repository = repository;
-  demand(!(engine.reviewerApps ?? []).some(app => app.appId === engine.controlPlaneAppId),
-    'A registered reviewer App must be distinct from the Graphyard control-plane App');
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
   validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);

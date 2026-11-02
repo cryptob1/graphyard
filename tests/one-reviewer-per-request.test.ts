@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { readFile, rm } from 'node:fs/promises';
 import { join } from 'node:path';
-import { randomUUID, generateKeyPairSync } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -13,7 +13,7 @@ import type { Observation, Principal, Work } from '../src/model.js';
 import { reconcileAutoDispatch } from '../src/model/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster, sessionAgentName, type HerdrAgent } from '../src/master.js';
-import { bindReviewer, launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
+import { launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type DispatchTick } from '../src/auto-dispatch.js';
 import { neededRework, standingVerdict } from '../src/master-daemon.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
@@ -38,7 +38,7 @@ function observation(candidate: { sha: string; baseSha: string }, extra: Partial
 }
 function work(overrides: Partial<Work> = {}): Work {
   const candidate = { sha: H, baseSha: B, pr: 119, branch: 'graphyard/gy-114-1', author: 'implementer' };
-  return { id: 'work-114', key: 'GY-114', title: 'Supervisor install', description: '', type: 'feature', priority: 0, dependencies: [], 
+  return { id: 'work-114', key: 'GY-114', title: 'Supervisor install', description: '', type: 'feature', priority: 0, dependencies: [],
     criteria: [{ id: 'AC-1', text: 'Review', proofs: ['unit:x'] }], policy: { checks: [], review: true, reviewProvider: 'github' }, stage: 'review', revision: 7, policyRevision: 3,
     createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), stageEnteredAt: new Date().toISOString(), ready: true, epoch: 1, lease: null,
     workspaces: [{ host: 'h', path: '/w/gy-114', branch: 'graphyard/gy-114-1', epoch: 1, owner: 'implementer' }], candidate, submission: { epoch: 1, pr: 119 }, reworkRequested: false,
@@ -46,14 +46,12 @@ function work(overrides: Partial<Work> = {}): Work {
     gates: [{ name: 'ready', passed: true, reasons: [] }, { name: 'build', passed: true, reasons: [] }, { name: 'review', passed: false, reasons: ['Independent approval of the current commit is required'] }], violations: [], ...overrides } as Work;
 }
 
-/** A master with a bound reviewer App and two reviewer profiles — the two runtimes the incident launched. */
+/** A master with two reviewer profiles — the two runtimes the incident launched. */
 async function reviewerMaster() {
   const root = await temporaryDirectory('gy124'), credentials = await temporaryDirectory('gy124-cred');
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinator = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'wE' }, coordinator as typeof fetch);
-  const { privateKey } = generateKeyPairSync('rsa', { modulusLength: 2048, privateKeyEncoding: { type: 'pkcs8', format: 'pem' }, publicKeyEncoding: { type: 'spki', format: 'pem' } });
-  await bindReviewer(root, { appId: 5678, installationId: 91011, slug: 'graphyard-reviewer', privateKey, credentialDirectory: join(credentials, 'reviewers') }, async () => ({ repository: 'owner/project', permissions: { metadata: 'read', contents: 'read', pull_requests: 'write' } }));
   await saveReviewerProfile(root, { name: 'claude-reviewer', agentName: 'review-claude-1', kind: 'claude' });
   await saveReviewerProfile(root, { name: 'second-reviewer', agentName: 'review-second-1', kind: 'claude' });
   // Herdr, stubbed: every tab created and every runtime started is logged, and at the moment a
@@ -68,8 +66,8 @@ async function reviewerMaster() {
     if (args[0] === 'tab' && args[1] === 'create') { const pane = `pane-${++panes}`; log.tabs.push(pane); return JSON.stringify({ result: { root_pane: { pane_id: pane, tab_id: `tab-${panes}` } } }); }
     return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} });
   };
-  const mint = async () => ({ token: 'ghs_review_session_token', expiresAt: new Date(Date.now() + 3_500_000).toISOString() });
-  return { root, credentials, run, mint, log, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
+  const registerLaunch = async () => ({ launch: 'fixture-launch' });
+  return { root, credentials, run, registerLaunch, log, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
 
 type Launcher = 'cycle' | 'dispatcher';
@@ -111,9 +109,9 @@ async function race(master: Awaited<ReturnType<typeof reviewerMaster>>, order: (
   const outcomes: Partial<Record<Launcher, { launched: boolean; error?: string }>> = {};
   // A token is minted after the reservation is written and before any tab exists: holding the first
   // launcher there keeps its record `launching` while the second one is let in.
-  const mint = (who: Launcher) => async () => { minting[who].resolve(); if (order.at === 'launching' && order.first === who) await settled[other(who)].promise; return master.mint(); };
+  const registerLaunch = (who: Launcher) => async () => { minting[who].resolve(); if (order.at === 'launching' && order.first === who) await settled[other(who)].promise; return master.registerLaunch(); };
   const launch = (who: Launcher, profile: string) => (work: Work, dispatch: { id: string }, herdr: { name?: string }[], observedAt: string) => door[who].promise
-    .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, mint: mint(who), requestId: dispatch.id }))
+    .then(() => launchReview(master.root, work, profile, herdr, observedAt, { run: master.run, registerLaunch: registerLaunch(who), requestId: dispatch.id }))
     .then(result => { outcomes[who] = { launched: true }; settled[who].resolve(); return result; }, error => { outcomes[who] = { launched: false, error: error.message }; settled[who].resolve(); throw error; });
   // A dispatch tick, launching through the real launcher with WHO's profile.
   const effects = (who: Launcher): DispatchEffects => ({
@@ -178,19 +176,19 @@ test('unit:one-reviewer-per-request — the cycle step and the dispatcher launch
     const { item, request, agents } = last;
 
     // `master review`, the third launcher, is refused for the same request while the session is pending.
-    await assert.rejects(reviewCommand(master.root, ['GY-114', 'second-reviewer'], { work: [item], now: new Date().toISOString() }, agents, { run: master.run, mint: master.mint }), /already pending on c1fffff/);
+    await assert.rejects(reviewCommand(master.root, ['GY-114', 'second-reviewer'], { work: [item], now: new Date().toISOString() }, agents, { run: master.run, registerLaunch: master.registerLaunch }), /already pending on c1fffff/);
     assert.equal(master.log.tabs.length, 1);
 
     // A Herdr session serving the request refuses a launch even when the ledger has no pending
     // record for it — here the settled record whose pane Herdr could not close.
     await updateReviewLedger(master.root, current => { current.reviews = current.reviews.map(entry => ({ ...entry, state: 'failed' as const, closeFailure: 'Herdr could not close pane' })); });
-    await assert.rejects(launchReview(master.root, item, 'second-reviewer', [{ name: record.agentName }], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: request.id }),
+    await assert.rejects(launchReview(master.root, item, 'second-reviewer', [{ name: record.agentName }], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: request.id }),
       new RegExp(`Reviewer session ${record.agentName} is already visible in Herdr for GY-114 review request ${request.id}`));
     // So does a session a multi-session profile named for the request, with no record at all.
     await updateReviewLedger(master.root, current => { current.reviews = []; });
     await saveReviewerProfile(master.root, { name: 'many-reviewer', agentName: 'review-many', kind: 'claude', concurrency: 3 });
     const derived = sessionAgentName({ agentName: 'review-many', concurrency: 3 }, { id: request.id, requestId: request.id, attempt: 2 });
-    await assert.rejects(launchReview(master.root, item, 'second-reviewer', [{ name: derived }], new Date().toISOString(), { run: master.run, mint: master.mint, requestId: request.id }),
+    await assert.rejects(launchReview(master.root, item, 'second-reviewer', [{ name: derived }], new Date().toISOString(), { run: master.run, registerLaunch: master.registerLaunch, requestId: request.id }),
       new RegExp(`Reviewer session ${derived} is already visible in Herdr`));
     assert.equal(master.log.tabs.length, 1, 'no refused launch created a tab');
 

@@ -156,8 +156,8 @@ export function workerConfinementRefusal(profile: { kind?: string; agentArgs?: r
   return null;
 }
 
-// A reviewer session holds no Graphyard identity: it reads a candidate and posts one GitHub
-// verdict with a short-lived reviewer-App token, so it needs no principal and no credential file.
+// A reviewer session reads a candidate and posts one control-plane verdict with a one-time
+// token, so it needs no principal credential file.
 export const reviewerProfileSchema = z.object({
   name: profileName,
   agentName: sessionNameField,
@@ -257,15 +257,6 @@ export function profileAtLimit(role: 'Reviewer' | 'Producer', profile: { name: s
     : `${role} profile ${profile.name} is at its concurrency limit (${sessions.running.length} running, limit ${sessions.limit}: ${sessions.running.join(', ')}); raise concurrency in .graphyard/master.json or add a ${role.toLowerCase()} profile`;
 }
 
-export const reviewerIdentitySchema = z.object({
-  appId: z.number().int().positive(),
-  installationId: z.number().int().positive(),
-  slug: z.string().trim().regex(/^[a-zA-Z0-9][a-zA-Z0-9-]{0,99}$/),
-  credentialFile: z.string(),
-  boundAt: z.string().min(1).max(40),
-}).strict();
-export type ReviewerIdentity = z.infer<typeof reviewerIdentitySchema>;
-
 // Durable-loop settings. The daemon adds no credential of its own: a proof or smoke workflow is
 // requested from the provider, which holds the trusted producer secret, and a deployment probe only reads.
 export const masterRunSchema = z.object({
@@ -347,14 +338,14 @@ export type MasterRun = z.infer<typeof masterRunSchema>;
 export const agentIdentitySchema = z.object({ id: z.string().regex(/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,99}$/), credentialFile: z.string().min(1).max(1000) }).strict();
 /**
  * Who reviews and merges (GY-1501). `autonomous`, the default every existing install keeps: the
- * reviewer App reviews and the master's operator-agent identity decides. `supervised`,
+ * reviewer session reviews and the master's operator-agent identity decides. `supervised`,
  * where `up --local` starts: the operator reviews each pull request on GitHub (a non-author approval of
  * the exact head) and GitHub auto-merge merges it; the loop launches no reviewer or
  * session and the master claims no autonomy. `master promote` promotes it (GY-1502).
  */
 export const supervisionModes = ['autonomous', 'supervised'] as const;
 export type Supervision = typeof supervisionModes[number];
-export const promotionCommand = 'graphyard master promote --admin-token-stdin (after graphyard master reviewer setup and master reviewer add)';
+export const promotionCommand = 'graphyard master promote --admin-token-stdin (after graphyard master reviewer add)';
 export const masterConfigSchema = forwardTolerant(z.object({
   forPerson: z.string().trim().min(1).max(200).optional(),
   people: z.array(z.string().trim().min(1).max(200)).optional(),
@@ -368,8 +359,8 @@ export const masterConfigSchema = forwardTolerant(z.object({
   cliPath: z.string(),
   repository: z.string().min(1),
   baseBranch: z.string().min(1).max(200),
-  // APP_PENDING (0) while `install --apply` still waits at its App step (GY-1413); the real id once confirmed.
-  githubAppId: z.number().int().nonnegative(),
+  // Retained for older master.json files; control-plane reviews need no GitHub App.
+  githubAppId: z.number().int().nonnegative().optional(),
   hostId: z.string().trim().min(1).max(200),
   herdrWorkspace: z.string().trim().min(1).max(200).optional(),
   // This install's own Herdr instance (GY-1511), when the host's default one serves another install:
@@ -381,7 +372,7 @@ export const masterConfigSchema = forwardTolerant(z.object({
   reviewRoundCap: z.unknown().optional(),
   mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
   workers: z.array(workerProfileSchema).max(100).default([]),
-  reviewer: reviewerIdentitySchema.optional(),
+  reviewer: z.unknown().optional(), // Retired reviewer App binding; old configs still load.
   reviewers: z.array(reviewerProfileSchema).max(20).default([]),
   producers: z.array(producerProfileSchema).max(20).default([]),
   // The agent environments profiles may launch on, discovered or created by master environments.

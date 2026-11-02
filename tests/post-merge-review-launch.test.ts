@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -66,9 +66,7 @@ before(async () => {
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
-  // The loop's own checkout, with one reviewer profile and the reviewer identity the production loop
-  // registers (GY-2008): the configured reviewer App's bot login. In control-plane mode the App's
-  // credential is never read, so the binding alone drives the identity.
+  // The loop's own checkout, with one reviewer profile.
   root = await temporaryDirectory('post-merge-launch-master');
   credentialDirectory = await temporaryDirectory('post-merge-launch-credentials');
   execFileSync('git', ['init', '-q', root]);
@@ -76,10 +74,6 @@ before(async () => {
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: coordinator.id, role: coordinator.role }, repository, baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard', run: { worktreeRoot: await temporaryDirectory('post-merge-launch-checkouts', '/var/tmp') } }, coordinatorStatus as typeof fetch);
   await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', concurrency: 4 });
-  const file = join(root, '.graphyard/master.json');
-  const storedConfig = JSON.parse(await readFile(file, 'utf8')) as Record<string, unknown>;
-  storedConfig.reviewer = { appId: 4242, installationId: 99, slug: 'graphyard-reviewer', credentialFile: join(credentialDirectory, 'reviewer.json'), boundAt: at() };
-  await writeFile(file, JSON.stringify(storedConfig, null, 2));
   config = await loadMasterConfig(root);
 });
 after(async () => { if (http) await new Promise<void>(resolve => http.close(() => resolve())); if (store) await store.close(); if (pg) await pg.stop(); });
@@ -130,10 +124,10 @@ test('unit:post-merge-review-without-pr-launches — a post-merge request for a 
   const tick = await runDispatchTick(config, cursor, effects, () => Date.parse(at()));
   assert.deepEqual(tick.refused, [], JSON.stringify(tick.refused));
   assert.deepEqual(tick.launched.map(launch => [launch.kind, launch.work, launch.requestId]), [['review', 'GY-9001', postMergeRequestId('GY-9001', M)]], 'the launch went out, not a 400');
-  // The plane registered the launch: post-merge, on the merge commit, as the configured reviewer App's bot identity.
+  // The plane registered the launch: post-merge, on the merge commit, as the reviewer profile's identity.
   const registered = await stored(work.id);
   assert.equal(registered.reviewLaunch!.postMerge, true);
-  assert.deepEqual([registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester], [M, B, 'graphyard-reviewer[bot]', coordinator.id]);
+  assert.deepEqual([registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester], [M, B, 'review-claude-1', coordinator.id]);
   assert.equal(registered.reviewLaunch!.verdict, null);
   // The session is on the ledger: control-plane mode, post-merge, under the request id, and the record's pr is positive —
   // `reviewRecordSchema` requires it, and the binding's `|| 1` stands in for the pull request the merge never had.
@@ -272,7 +266,7 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
       assert.doesNotMatch(brief, /Later data|e2e:wrong-case|graphyard show GY-/);
     }
     assert.deepEqual([record.sha, record.baseSha, record.policyRevision], [postMerge ? M : H, B, 1]);
-    assert.equal((await stored(work.id)).reviewLaunch!.reviewer, 'graphyard-reviewer[bot]');
+    assert.equal((await stored(work.id)).reviewLaunch!.reviewer, 'review-claude-1');
     await assert.rejects(launchReview(root, work, 'reviewer-claude', [], at(), { run, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) }), /pending|already/);
     assert.equal(prompts.length, 1, 'one session answers this head');
     const session = await readReviewBinding(record.sessionDirectory!);
