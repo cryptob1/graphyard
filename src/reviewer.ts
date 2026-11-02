@@ -733,7 +733,7 @@ export function criteriaRuleSection(key: string, sha: string, criteria: ReviewCr
     + `Judge every criterion met or unmet at head ${sha} from code and test coverage, including bound E2E cases; state each judgement in the review body. Do not run builds, tests or servers. Post APPROVE or REQUEST_CHANGES before the automated merge trial: missing later trusted results do not block review; missing or inadequate test implementation can. The merge writer must pass every required exact-head test/E2E proof before updating main. Never waive gates or ask workers for trusted evidence; no human step. `;
 }
 function reviewReadSection(cliPath: string, head: string) {
-  return `Read bound case files at the exact head with git show ${head}:PATH (use the path in the proof bindings); use rg --files to discover paths, then rg and cat in the detached checkout for surrounding code. node ${cliPath} --help lists supported commands. node ${cliPath} guide review is supported and needs no worker or coordinator credential. The launch snapshot above supplies the task metadata; there is no graphyard show command and no need to obtain another identity's token. `;
+  return `Read bound cases with git show ${head}:PATH, using snapshot paths; rg and cat read surrounding code. node ${cliPath} --help lists commands; node ${cliPath} guide review is supported and needs no worker or coordinator credential. Use snapshot metadata; there is no graphyard show command. `;
 }
 /** Recover exploratory mistakes without relaxing the read-only role or hiding real blockers. */
 function reviewRecoverySection() {
@@ -759,14 +759,12 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + reviewReadSection(config.cliPath ?? launcherPath, binding.sha)
     + `Classify findings and post by node ${config.cliPath ?? launcherPath} guide review. `
     + simplicityParagraph
-    + blockingStandardSection
     + repetitionReviewSection(files)
     + (checkout ? `When judging the diff needs the surrounding code, read it from a detached checkout of the exact head, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git fetch --no-write-fetch-head origin ${binding.sha} && git worktree add --detach ${checkout.worktree} ${binding.sha}. Read there and change nothing; Graphyard removes ${checkout.directory} when this session ends. ` : '')
-    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
+    + 'Read-only: no edits, Git mutations, builds/tests/servers, work claims or evidence submissions. '
     + reviewPostSection(config.cliPath ?? launcherPath, 'only when a BLOCKING finding stands')
     + `Posting that review is granted to this session's role, not a permission to request: post without asking for confirmation. `
     + `GH_CONFIG_DIR holds a reviewer credential expiring within the hour: repository reads and reviews only. `
-    + `After posting, stop; Graphyard closes the session. `
     + reviewAutonomySection();
 }
 
