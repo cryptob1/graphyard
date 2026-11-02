@@ -215,7 +215,10 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
           for (const key of ['runtime', 'storage_opt', 'credential_spec', 'provider']) if (entry[key]) problems.push(`service ${name} sets ${key}`);
           if (entry.build?.network === 'host') problems.push(`service ${name} builds in the host network`);
           if ((entry.security_opt ?? []).some((option: string) => !/^no-new-privileges(?::true|=true)?$/.test(option))) problems.push(`service ${name} sets custom security options`);
-          if (entry.build?.additional_contexts) problems.push(`service ${name} declares additional build contexts`);
+          for (const context of Object.values<unknown>(entry.build?.additional_contexts ?? {})) {
+            if (typeof context !== 'string' || (!/^(?:https?:|git:|docker-image:|service:)/.test(context)
+              && !insideCheckout(resolve(entry.build.context, context), options.checkout))) problems.push(`service ${name} reads an additional build context outside the checkout`);
+          }
           const build = entry.build;
           if (build?.dockerfile && !insideCheckout(resolve(build.context, build.dockerfile), options.checkout)) problems.push(`service ${name} reads a Dockerfile outside the checkout`);
         }
@@ -236,7 +239,6 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
           copies.push({ service: name, source: volume.source, target: volume.target });
           return false;
         });
-        entry.cap_drop = ['ALL'];
       }
       await writeFile(generated, JSON.stringify(config_));
       started = true;

@@ -134,7 +134,7 @@ export async function containerTrialE2e(input: {
     let wrapper = input.wrapper;
     try {
       if ('kind' in target && target.kind === 'compose') {
-        const environment = dockerEnvironment(input.env);
+        const environment = dockerEnvironment(input.env, { DOCKER_HOST: 'unix:///var/run/docker.sock' });
         // Unpredictable project identities prevent collisions between parallel trials of a head.
         const project = composeProjectName('trial-e2e-' + target.id, randomUUID());
         stack = composeStack({ checkout: input.worktree, file: target.file, service: target.service, port: target.port,
