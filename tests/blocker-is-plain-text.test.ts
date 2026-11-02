@@ -29,7 +29,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('blocker-plain-text-db'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('blocker_plain_text');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/blocker_plain_text`); await store.init();
-  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null
+  engine = new Engine(store, 120, 'owner/project');
   services = { engine, repository: 'owner/project', principals: [] } as unknown as Services;
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });

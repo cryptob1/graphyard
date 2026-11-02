@@ -166,16 +166,11 @@ export const statusRoutes = defineRoutes('status', [
   },
   {
     // The work list is the bounded fleet read (GY-1778): every open item whole and each settled
-    // delivery as the work index's stored summary (store.fleet, GY-1376). `?pr=N` narrows it to
-    // the item whose candidate or submission names pull request N, which is all the CI plan step
-    // needs. store.list() served every document whole here:
-    // 134 MB on a 1,777-item ledger, past the plan's abort on every acceptance run.
+    // delivery as the work index's stored summary (store.fleet, GY-1376). store.list() served every
+    // document whole here: 134 MB on a 1,777-item ledger, past the plan's abort on every acceptance run.
     method: 'GET', path: '/api/work',
-    async handle({ url, services, operatorVisible }) {
-      const requested = url.searchParams.get('pr');
-      if (requested === null) return operatorVisible(await services.engine.store.fleet());
-      demand(/^[1-9]\d{0,14}$/.test(requested), 'pr must be a pull request number', 400);
-      return operatorVisible(await services.engine.store.workForPullRequest(Number(requested)));
+    async handle({ services, operatorVisible }) {
+      return operatorVisible(await services.engine.store.fleet());
     },
   },
   {

@@ -31,7 +31,7 @@ before(async () => {
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('ledger-compaction'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('ledger_compaction_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/ledger_compaction_test`); await store.init();
-  engine = new Engine(store, 120, 'owner/project'); engine.submissionObserver = null;
+  engine = new Engine(store, 120, 'owner/project');
 });
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 

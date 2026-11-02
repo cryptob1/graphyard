@@ -339,7 +339,6 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/graphyard_test`);
   await store.init();
   engine = new Engine(store, 120, 'owner/project');
-  engine.submissionObserver = null;
   engine.principals = [{ id: 'human-operator', role: 'admin', sessionKind: 'human' as const }, { id: 'engineer-a', role: 'worker', sessionKind: 'ai' as const }];
 });
 after(async () => { if (store) await store.close(); if (database) await database.stop(); });
