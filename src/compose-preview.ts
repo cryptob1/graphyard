@@ -234,6 +234,24 @@ export function composeStack(options: ComposeStackOptions): ComposeStack {
       const config_ = composePreviewConfig(resolved, { ...options, owner: currentOwner() });
       const copies: { service: string; source: string; target: string }[] = [];
       if (options.isolatedTrial) for (const [name, entry] of Object.entries<Json>(config_.services)) {
+        // Compose implements file secrets/configs as host binds too. Materialize
+        // their declared content before create, just like checkout volume content.
+        for (const kind of ['secrets', 'configs']) {
+          for (const reference of entry[kind] ?? []) {
+            const source = typeof reference === 'string' ? reference : reference.source;
+            const definition = config_[kind]?.[source];
+            if (!definition) throw new Error(`service ${name} names an unknown ${kind} source ${source}`);
+            let file = definition.file;
+            if (!file && typeof definition.content === 'string') {
+              const directory = await mkdtemp(join(options.scratch, 'inline-'));
+              file = join(directory, 'content');
+              await writeFile(file, definition.content);
+            }
+            if (!file) throw new Error(`service ${name} declares ${kind} without file content`);
+            copies.push({ service: name, source: file, target: reference.target ?? (kind === 'secrets' ? '/run/secrets/' : '/') + source });
+          }
+          delete entry[kind];
+        }
         entry.volumes = (entry.volumes ?? []).filter((volume: Json) => {
           if (volume.type !== 'bind') return true;
           copies.push({ service: name, source: volume.source, target: volume.target });

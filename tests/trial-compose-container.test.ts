@@ -26,12 +26,12 @@ test('Compose bound E2E uses trusted orchestration and private-root case command
   const environment = { ...trialEnvironment(), ...trialHomeVariables(scratch), PATH: '/usr/local/bin:/usr/bin:/bin' };
   const compose = (extra = {}) => JSON.stringify({ services: { api: {
     image: 'graphyard-trial:local', command: ['node', '/nested/service/serve.mjs'],
-    volumes: ['./serve.mjs:/nested/service/serve.mjs:ro', './content:/nested/content:ro'], ...extra,
-  } } });
+    volumes: ['./serve.mjs:/nested/service/serve.mjs:ro', './content:/nested/content:ro'], secrets: ['fixture'], configs: [{ source: 'inline', target: '/nested/config' }], ...extra,
+  } }, secrets: { fixture: { file: './content/body.json' } }, configs: { inline: { content: 'fixture config' } } });
   await mkdir(join(worktree, 'content'));
   await writeFile(join(worktree, 'content/body.json'), '{"message":"compose served"}');
   await writeFile(join(worktree, 'serve.mjs'), `import http from 'node:http'; import fs from 'node:fs';
-http.createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); res.end(fs.readFileSync('/nested/content/body.json')); }).listen(8080, '0.0.0.0');`);
+http.createServer((req, res) => { res.setHeader('Content-Type', 'application/json'); if (fs.readFileSync('/nested/config', 'utf8') !== 'fixture config') throw new Error('config missing'); if (fs.readFileSync('/run/secrets/fixture', 'utf8') !== fs.readFileSync('/nested/content/body.json', 'utf8')) throw new Error('secret missing'); res.end(fs.readFileSync('/nested/content/body.json')); }).listen(8080, '0.0.0.0');`);
   await writeFile(join(worktree, 'compose.json'), compose());
   await writeFile(join(worktree, 'graphyard.json'), JSON.stringify({ delivery: {
     mode: 'local', applications: [{ id: 'api', kind: 'compose', file: 'compose.json', service: 'api', port: 8080 }], cases: { 'compose-bound': 'api' },
@@ -68,6 +68,8 @@ http.createServer((req, res) => { res.setHeader('Content-Type', 'application/jso
     const path = join(scratch, entry, 'compose.preview.json');
     if (!existsSync(path)) continue;
     const config = JSON.parse(await readFile(path, 'utf8'));
+    assert.equal(config.services.api.secrets, undefined);
+    assert.equal(config.services.api.configs, undefined);
     assert.ok(config.services.api.volumes.every((volume: { type: string }) => volume.type !== 'bind'));
     const left = await composeLeftovers(config.name);
     assert.ok(Object.values(left).every(items => items.length === 0), JSON.stringify(left));
