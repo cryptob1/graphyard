@@ -1,3 +1,4 @@
+import { once } from './store/mutations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -37,18 +38,8 @@ export type SessionKind = 'human' | 'ai' | 'undeclared';
 export function sessionKind(principal?: { sessionKind?: 'human' | 'ai' }): SessionKind { return principal?.sessionKind ?? 'undeclared'; }
 export function classifyIntake(origin: string) { return routineIntakeOrigins.includes(origin as any) ? 'routine' : humanOnlyIntakeOrigins.includes(origin as any) ? 'human-only' : 'unknown'; }
 
-// The same receipt/fingerprint contract the engine and validation routes use: a
-// lost response must never duplicate an immutable intake item or lead ruling.
-async function once<T>(store: Store, actor: Principal, key: string, fingerprintInput: unknown, run: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
-  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = createHash('sha256').update(JSON.stringify(fingerprintInput)).digest('hex');
-  return store.transaction(async (db, now) => {
-    const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-    if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as T; }
-    const result = await run(db, now);
-    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-    return result;
-  });
+async function mutateOnce<T>(store: Store, actor: Principal, key: string, input: unknown, run: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
+  return store.transaction((db, now) => once(db, actor, key, input, () => run(db, now)));
 }
 
 /** The environment variables the limits are read from, in the order an installer sets them. */
@@ -205,7 +196,7 @@ export function delegationSnapshot(principals: Principal[], work: Work[], now: n
 export async function recordLeadRuling(store: Store, actor: Principal, id: string, input: unknown, key: string) {
   demand(actor.role === 'slice-lead' && actor.slice, 'Slice lead permission required', 403);
   const data = rulingSchema.parse(input);
-  return once(store, actor, key, { command: 'lead.ruling', id, data }, async (db, now) => {
+  return mutateOnce(store, actor, key, { command: 'lead.ruling', id, data }, async (db, now) => {
     const work = (await db.query(`SELECT document FROM work_items WHERE id = ${workIdByRef('$1')}`, [id])).rows[0]?.document as Work | undefined;
     demand(work, 'Work item not found', 404); demand(work.slice === actor.slice, 'Slice leads may coordinate only their own slice', 403);
     // Delivery is an immutable snapshot. A ruling must never bump a delivered
@@ -279,7 +270,7 @@ export async function recordIntake(store: Store, actor: Principal, input: unknow
     demand(actor.role === 'admin', `${data.origin} intake is human-only`, 403);
     demand(sessionKind(actor) === 'human', `${data.origin} intake requires a declared human session; ${actor.id} is ${sessionKind(actor)}`, 403);
   }
-  return once(store, actor, key, { command: 'intake', data }, async (db, now) => {
+  return mutateOnce(store, actor, key, { command: 'intake', data }, async (db, now) => {
     if (data.sourceWorkId) {
       // Existence is not authority: the cited source must be inside the actor's
       // own scope, or its history would gain an entry from outside that scope.

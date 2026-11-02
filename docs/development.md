@@ -70,3 +70,5 @@ Use the release's checkout, one release at a time. Each run creates/removes a sc
 Edit handwritten guides and their `<!-- page: Section | order | summary -->` metadata. `npm run docs:check -- --write` generates `docs/README.md` and `docs/protocol.md`; `npm run docs:check` validates relative links and anchors. The [generated-file policy](coordination.md#generated-files) keeps sync from hand-merging indexes.
 
 Diagram specs live in `scripts/render-docs-diagrams.mjs`. The opening video has a separate HTML source and renderer under `scripts/walkthrough/`; [rendering instructions](walkthrough.md) cover both committed media assets.
+
+Mutation bookkeeping lives in `src/store/mutations.ts`: call `once(db, actor, key, input, fn)` inside the existing transaction and locks. It fingerprints input, replays the recorded result and refuses changed input with HTTP 409. `record` appends history. Use `appendEvidence(work, evidence, db)` from `src/model/append-evidence.ts` to append evidence and its scenario run together. External I/O stays outside the transaction; receipt preflight reads never replace the transactional check.

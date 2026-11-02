@@ -1,3 +1,4 @@
+import { once, digest } from './store/mutations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Store } from './store.js';
@@ -67,10 +68,8 @@ export class ProductionDelivery {
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data = observationSchema.parse(input);
     demand(actor.deploymentProviders!.includes(data.provider), 'Deployment-observer authority does not cover this provider', 403);
-    const fingerprint = createHash('sha256').update(JSON.stringify(data)).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key was already used for another request'); return receipt.result; }
+    const receiptInput = data;
+    return this.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
       const providerTime = Date.parse(data.deployedAt);
       const deployedAtRepository = new Date(providerTime + data.clockOffset.min);
       const deployedAtRepositoryMax = new Date(providerTime + data.clockOffset.max);
@@ -90,9 +89,8 @@ export class ProductionDelivery {
       await db.query(`INSERT INTO production_observations(id,provider,deployment_id,status,kind,deployed_at,observed_at,deployed_at_repository,deployed_at_repository_max,clock_offset_min_ms,clock_offset_max_ms,commit_sha,artifact_digest,source_url,producer,document)
         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`, [result.id, data.provider, data.deploymentId, data.status, data.kind, data.deployedAt, now, deployedAtRepository, deployedAtRepositoryMax, data.clockOffset.min, data.clockOffset.max, data.commitSha?.toLowerCase() ?? null, data.artifactDigest ?? null, data.sourceUrl, actor.id, result]);
       for (const mergeSha of result.mergeShas) await db.query('INSERT INTO production_observation_merges(observation_id,merge_sha,deployed_at,status,kind,deployed_at_repository,deployed_at_repository_max) VALUES($1,$2,$3,$4,$5,$6,$7)', [result.id, mergeSha, data.deployedAt, data.status, data.kind, deployedAtRepository, deployedAtRepositoryMax]);
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, result]);
       return result;
-    });
+    }));
   }
 }
 

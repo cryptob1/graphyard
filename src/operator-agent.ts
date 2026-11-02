@@ -1,3 +1,4 @@
+import { once } from './store/mutations.js';
 import { createHash } from 'node:crypto';
 import { z } from 'zod';
 import { demand, operatorCapabilities, operatorCredentialHash, type Principal } from './model.js';
@@ -125,13 +126,11 @@ export class OperatorAgents {
   private validateRepository(repositories: string[]) { demand(!!this.repository && repositories.includes(this.repository), 'Scope must explicitly include this configured repository'); }
   private async mutate(actor: Principal, kind: string, target: string, key: string, fingerprintInput: unknown, operation: (db: any, now: Date) => Promise<any>) {
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const fp = digest(JSON.stringify({ kind, target, input: fingerprintInput }));
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fp, 'Idempotency key reused with different input'); return receipt.result; }
+    const receiptInput = { kind, target, input: fingerprintInput };
+    return this.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
       const result = await operation(db, now);
       await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, kind, JSON.stringify({ target, result })]);
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fp, JSON.stringify(result)]); return result;
-    });
+      return result;
+    }));
   }
 }

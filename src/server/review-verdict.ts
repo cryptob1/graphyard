@@ -1,3 +1,4 @@
+import { once, digest } from '../store/mutations.js';
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -123,20 +124,13 @@ export async function launchTokenActor(services: Services, tokenHash: string): P
 /** Whether a standing launch still authorizes this bearer. */
 export const tokenRegistered = async (services: Services, tokenHash: string) => !!await launchTokenActor(services, tokenHash);
 
-async function replayOrRun<T>(db: pg.PoolClient, actor: Principal, key: string, fingerprint: string, run: () => Promise<T>): Promise<T> {
-  const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-  if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
-  const result = await run();
-  await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-  return result;
-}
 
 export async function recordReviewLaunch(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity registers a reviewer launch', 403);
   const data = reviewLaunchBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
-  const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
+  const receiptInput = { id, data };
+  const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     if (data.postMerge) {
@@ -168,9 +162,9 @@ type Judged = { refusal: { reason: string; status: number } } | { result: unknow
 export async function recordReviewVerdict(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = reviewVerdictBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
+  const receiptInput = { id, data };
   const engine = services.engine;
-  const judged: Judged = await engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async (): Promise<Judged> => {
+  const judged: Judged = await engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async (): Promise<Judged> => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     const launch = work!.reviewLaunch;
@@ -249,8 +243,8 @@ export async function recordProductReviewByHand(services: Services, actor: Princ
   demand(actor.role === 'admin' || actor.role === 'coordinator', 'Only an admin or the loop\'s coordinator records a product review by hand', 403);
   const data = productReviewBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
-  return services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
+  const receiptInput = { id, data };
+  return services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(!implementerIdentities(work!).includes(data.reviewer), independenceRefusal(data.reviewer, 'implemented', work!.key), 403);
@@ -293,8 +287,8 @@ export async function recordSpecCheckLaunch(services: Services, actor: Principal
   demand(actor.role === 'coordinator', "Only the loop's coordinator identity registers a spec-check launch", 403);
   const data = specCheckLaunchBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
-  const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
+  const receiptInput = { id, data };
+  const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', `${work!.key} is done; a spec check launches for released work`, 409);
@@ -313,8 +307,8 @@ export async function recordSpecCheckLaunch(services: Services, actor: Principal
 export async function recordSpecCheck(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = specCheckBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = createHash('sha256').update(JSON.stringify({ id, data })).digest('hex');
-  const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => replayOrRun(db, actor, key, fingerprint, async () => {
+  const receiptInput = { id, data };
+  const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', `${work!.key} is done; its spec check is history`, 409);

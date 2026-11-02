@@ -1,4 +1,6 @@
-import { createHash, randomUUID } from 'node:crypto';
+import { appendEvidence } from '../model/append-evidence.js';
+import { once, receipt } from '../store/mutations.js';
+import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { demand, type Evidence, type Principal, type Work } from '../model.js';
 import { appliedThreshold, closedQuestionFor, closedQuestionRefusal, closedQuestionRequestSchema, judgeAnswer, type ClosedQuestionRecord } from '../model/closed-question.js';
@@ -17,7 +19,6 @@ import { gitRunnerFor } from '../merge-writer/local-observation.js';
  */
 
 type Db = pg.PoolClient;
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const findWork = async (db: Db, id: string): Promise<{ work: Work | undefined; all: Work[] }> => {
   const all = await lockedWork(db, [id]);
   return { work: all.find(item => item.id === id || item.key === id), all };
@@ -57,9 +58,9 @@ export async function judgeClosedQuestion(services: Services, actor: Principal, 
   demand(['admin', 'coordinator', 'producer'].includes(actor.role), 'Closed questions are requested by the loop, a producer or an admin', 403);
   const data = closedQuestionRequestSchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = digest({ id, closedQuestion: data });
-  const replayed = (await services.engine.store.pool.query('SELECT fingerprint, result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-  if (replayed) { demand(replayed.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replayed.result; }
+  const receiptInput = { id, closedQuestion: data };
+  const replayed = await receipt(services.engine.store.pool, actor, key, receiptInput);
+  if (replayed) return replayed.result;
 
   const work = refusal(await services.engine.store.workDocument(id), data);
   const question = closedQuestionFor(work, data.proof)!;
@@ -75,9 +76,7 @@ export async function judgeClosedQuestion(services: Services, actor: Principal, 
   const threshold = appliedThreshold(question, responder!.threshold);
   const verdict = judgeAnswer(work, question, answer, threshold);
 
-  return services.engine.store.transaction(async (db, now) => {
-    const again = (await db.query('SELECT fingerprint, result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-    if (again) { demand(again.fingerprint === fingerprint, 'Idempotency key reused with different input'); return again.result; }
+  return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
     const { work: current, all } = await findWork(db, work.id);
     // The item may have moved while the responder was asked; the answer binds only what it saw.
     const item = refusal(current, data);
@@ -92,14 +91,13 @@ export async function judgeClosedQuestion(services: Services, actor: Principal, 
       producer: `responder:${responder!.id}`, trusted: verdict.trusted, result: verdict.result, executed: 1, skipped: 0,
       at: now.toISOString(), closedQuestion: record,
     };
-    item.evidence.push(evidence);
+    await appendEvidence(item, evidence, db);
     services.engine.evaluate(item, all, now);
     // The engine's auto-dispatch ledger entries for this evaluation, exactly as waits.ts records them:
     // a decided proof withdraws its producer request here, an escalated one keeps it.
     await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, item, now);
     await save(db, item, actor.id, verdict.verdict === 'decided' ? 'closed-question.answered' : 'closed-question.escalated', now, { evidence, requestedBy: actor.id });
     const result = { work: item.key, evidence, verdict: verdict.verdict, escalation: verdict.escalation ?? null, gates: item.gates, stage: item.stage };
-    await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-    return result;
-  });
+      return result;
+  }));
 }
