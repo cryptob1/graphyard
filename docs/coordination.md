@@ -17,7 +17,7 @@ Only exclusiveResources lock dispatch. Sync and merge trials integrate path over
 
 Graphyard reads exact-head verdicts, not remote review threads. Pre-merge review judges implementation and bound E2E coverage: missing later trusted results do not block approval; missing or inadequate tests can. The writer must pass every required exact-head E2E proof before updating main; workers never submit trusted evidence. Sensitive changes need approval before merge. Normal changes receive post-merge review; blocking findings become follow-up bugs. Pre-merge `BLOCKING:` findings cause rework once per submission, without a round cap.
 
-Use `Nit: PATH:LINE — FINDING` for advisory feedback. Graphyard keeps nits in project memory for later workers; no bot fixes them in control-plane mode. Put required fixes on `BLOCKING:` lines. Use `guide review` for the procedure. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions and budget-test blockers.
+Use `Nit: PATH:LINE — FINDING`, ending with `(mechanical: …)` or `(substantive: …)`; findings about behavior, criteria or scope are substantive. Nits stay advisory: they never hold approval or trigger a bot round. Graphyard keeps them in project memory for later workers. Put required fixes on `BLOCKING:` lines; see `guide review`. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions and budget-test blockers.
 
 ## Scope is a plan, not a lock
 

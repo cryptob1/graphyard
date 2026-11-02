@@ -19,6 +19,8 @@ Optional item `owner` names a human, separate from the worker lease. Set with cr
 4. **Merge writer:** trial and merge submitted heads in order ([delivery](delivery.md)).
 5. **Persist:** save the loop cursor.
 
+When live registry sessions fill a worker role's capacity, its launch stays queued and status shows why. Each cycle retries; a freed slot launches it. Waiting claims no lease, adds no failed-launch cooldown and sends no incident wake. Real launch and registry failures still wake the master; open-work heartbeats continue.
+
 The loop follows the master's live Herdr pane after a move. Weekly/session limits or exhausted credits hold that account, close its pane and launch the next account in the same cycle. Status names the live pane, reports `screen unreadable` on read failure and `unknown` for missing runtime status.
 
 `master restart` restarts the install's loop unit; confined masters record a request. The loop reloads newly served code. [Unit names](delivery.md#continuous-deployment) are per install, with legacy aliases.
