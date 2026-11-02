@@ -16,13 +16,13 @@ const harnessModules = dirname(dirname(fileURLToPath(import.meta.resolve('tsx/pa
 // Resolve the invocation's cwd and environment at spawn time, including the E2E
 // session host's stdin. Docker never receives candidate-controlled launch flags.
 const launch = String.raw`
-import json, os, signal, subprocess, sys, uuid
+import json, os, select, signal, subprocess, sys, uuid
 spec = json.loads(sys.argv[1])
 container_name = 'graphyard-trial-' + uuid.uuid4().hex
 if os.getuid() == 0:
     sys.exit('Graphyard trials require a nonroot launcher')
 docker = ['docker', '--host', 'unix:///var/run/docker.sock']
-args = docker + ['run', '--name', container_name, '--rm', '-i', '--init',
+args = docker + ['create', '--name', container_name, '-i', '--init',
         '--read-only', '--cap-drop=ALL', '--security-opt=no-new-privileges',
         '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=bridge',
         '--user', str(os.getuid()) + ':' + str(os.getgid()),
@@ -34,14 +34,48 @@ for source, target, readonly in spec['mounts']:
 for name, value in os.environ.items():
     args += ['--env', name + '=' + value]
 args += ['--entrypoint', '/usr/bin/env', spec['image']] + sys.argv[2:]
+# A separate session owns the container, including after SIGKILL of the launcher
+# or its process group. Only the launcher holds the pipe's write end; exec'd
+# Docker clients cannot keep it alive. Create before start closes the cleanup
+# race where a killed docker-run client still creates a container afterwards.
+reader, writer = os.pipe()
+guardian = os.fork()
+if guardian == 0:
+    os.close(writer)
+    os.setsid()
+    def owner_gone():
+        return bool(select.select([reader], [], [], 0)[0])
+    try:
+        created = subprocess.call(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
+        if created != 0:
+            sys.exit(created)
+        status = 137
+        if not owner_gone():
+            client = subprocess.Popen(docker + ['start', '--attach', '--interactive', container_name])
+            while client.poll() is None:
+                if select.select([reader], [], [], 0.05)[0]:
+                    break
+            # Remove first: this also ends the attached client and its output pipes.
+            subprocess.run(docker + ['rm', '--force', container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            status = client.wait()
+    finally:
+        subprocess.run(docker + ['rm', '--force', container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os._exit(status if status >= 0 else 128 - status)
+os.close(reader)
 def stop(number, frame):
     raise SystemExit(128 + number)
 signal.signal(signal.SIGTERM, stop)
 signal.signal(signal.SIGINT, stop)
 try:
-    sys.exit(subprocess.call(args))
+    _, status = os.waitpid(guardian, 0)
+    sys.exit(os.waitstatus_to_exitcode(status))
 finally:
-    subprocess.run(docker + ['rm', '--force', container_name], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    os.close(writer)
+    # Graceful cancellation waits for removal; SIGKILL is handled by pipe EOF.
+    try:
+        os.waitpid(guardian, 0)
+    except ChildProcessError:
+        pass
 `;
 
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage): string[] {
@@ -63,6 +97,7 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
     // filesystem Landlock domain is inherited, so further sandbox mounts work.
     return ['bwrap', '--die-with-parent', '--unshare-user', '--unshare-pid', '--unshare-net',
       '--tmpfs', '/', '--ro-bind', '/usr', '/usr', '--ro-bind', '/etc', '/etc',
+      '--ro-bind', '/opt/graphyard-browsers', '/opt/graphyard-browsers',
       '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/sbin', '/sbin',
       '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
       '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/var/tmp', '--tmpfs', '/run',

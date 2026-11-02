@@ -7,6 +7,7 @@ import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultChildRun } from '../src/child-runner.js';
+import { confinedSession } from '../src/e2e/steps.js';
 import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 import { trialEnvironment, trialHomeVariables } from '../src/merge-writer/trial.js';
 
@@ -62,11 +63,12 @@ test('integration:worker-host-filesystem-isolation integration:worker-control-so
   } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
 });
 
-test('integration:worker-home-deletion-regression — cancelling a trial stops its background writers before scratch is reclaimed', async () => {
+for (const signal of ['SIGTERM', 'SIGKILL'] as const) test(`integration:worker-home-deletion-regression — ${signal} stops trial background writers before scratch is reclaimed`, async () => {
   const allocation = await temporaryDirectory('cancel-trial', process.cwd());
   const beat = join(allocation, 'heartbeat');
   const [command, ...wrapper] = trialContainerWords([allocation]);
   const child = spawn(command!, [...wrapper, 'node', '-e', `
+    require('node:fs').writeFileSync('container-id', require('node:os').hostname());
     require('node:child_process').spawn(process.execPath, ['-e',
       "setInterval(() => require('node:fs').writeFileSync(process.argv[1], String(Date.now())), 50)", process.argv[1]],
       { detached: true, stdio: 'ignore' });
@@ -79,9 +81,73 @@ test('integration:worker-home-deletion-regression — cancelling a trial stops i
     const deadline = Date.now() + 30_000;
     while (!existsSync(beat) && child.exitCode === null && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
     assert.ok(existsSync(beat), 'the background writer started before cancellation');
-  } finally { child.kill('SIGTERM'); await closed; }
-  const stopped = await readFile(beat, 'utf8');
-  await new Promise(resolve => setTimeout(resolve, 200));
-  assert.equal(await readFile(beat, 'utf8'), stopped, 'no background writer survives the cancelled boundary');
+  } finally { child.kill(signal); await closed; }
+  await assertWriterStopped(beat);
+  if (!existsSync('/etc/graphyard-trial')) {
+    const id = await readFile(join(allocation, 'container-id'), 'utf8');
+    await assert.rejects(defaultChildRun('docker', ['--host', 'unix:///var/run/docker.sock', 'inspect', id]), /No such/);
+  }
 });
 
+async function assertWriterStopped(beat: string) {
+  const deadline = Date.now() + 10_000;
+  let stopped = await readFile(beat, 'utf8');
+  while (Date.now() < deadline) {
+    await new Promise(resolve => setTimeout(resolve, 500));
+    const next = await readFile(beat, 'utf8');
+    if (next === stopped) return;
+    stopped = next;
+  }
+  assert.fail('background writer survived the cancelled boundary');
+}
+
+test('integration:worker-home-deletion-regression — output overflow forcibly kills the launcher and removes its running container', { timeout: 30_000 }, async () => {
+  const allocation = await temporaryDirectory('overflow-trial', process.cwd());
+  const beat = join(allocation, 'heartbeat');
+  await assert.rejects(defaultChildRun('node', ['-e', `
+    const fs = require('node:fs');
+    setInterval(() => { fs.writeFileSync(process.argv[1], String(Date.now())); console.log('x'.repeat(8192)); }, 50);
+  `, beat], { cwd: allocation, wrapper: trialContainerWords([allocation]), maxBuffer: 1024, timeoutMs: 20_000,
+    env: { ...trialEnvironment(), ...trialHomeVariables(allocation), PATH: '/usr/local/bin:/usr/bin:/bin' },
+  }), /exceeded 1024 bytes/);
+  await assertWriterStopped(beat);
+});
+
+test('integration:worker-home-deletion-regression — closing an E2E session removes its container and detached writers', { timeout: 30_000 }, async () => {
+  const allocation = await temporaryDirectory('session-trial', process.cwd());
+  const beat = join(allocation, 'heartbeat');
+  const env = { ...trialEnvironment(), ...trialHomeVariables(allocation), PATH: '/usr/local/bin:/usr/bin:/bin' };
+  const session = confinedSession(trialContainerWords([allocation]), env);
+  try {
+    const result = await session.run('node', ['-e', `
+      require('node:child_process').spawn(process.execPath, ['-e',
+        "setInterval(() => require('node:fs').writeFileSync(process.argv[1], String(Date.now())), 50)", process.argv[1]],
+        { detached: true, stdio: 'ignore' }).unref();
+    `, beat], { cwd: allocation, env, timeoutMs: 20_000, shell: false });
+    assert.equal(result.code, 0, result.output);
+    const deadline = Date.now() + 5000;
+    while (!existsSync(beat) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 50));
+    assert.ok(existsSync(beat));
+  } finally { await session.close(); }
+  await assertWriterStopped(beat);
+});
+
+test('integration:worker-home-deletion-regression — real Chromium launches and renders inside the private-root trial image', { timeout: 60_000 }, async () => {
+  const allocation = await temporaryDirectory('browser-trial', process.cwd());
+  const output = await defaultChildRun('node', ['--input-type=module', '-e', `
+    import { chromium } from '/graphyard-harness/node_modules/playwright/index.mjs';
+    import assert from 'node:assert/strict';
+    const browser = await chromium.launch({ headless: true });
+    try {
+      const page = await browser.newPage();
+      await page.setContent('<h1>Trial browser works</h1>');
+      assert.equal(await page.locator('h1').textContent(), 'Trial browser works');
+      await page.screenshot({ path: 'browser.png' });
+      console.log('real Chromium rendered');
+    } finally { await browser.close(); }
+  `], { cwd: allocation, wrapper: trialContainerWords([allocation]), timeoutMs: 50_000,
+    env: { ...trialEnvironment(), ...trialHomeVariables(allocation), PATH: '/usr/local/bin:/usr/bin:/bin', PLAYWRIGHT_BROWSERS_PATH: '/opt/graphyard-browsers' },
+  });
+  assert.match(output, /real Chromium rendered/);
+  assert.ok((await readFile(join(allocation, 'browser.png'))).length > 100);
+});
