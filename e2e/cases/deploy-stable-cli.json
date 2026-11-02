@@ -1,0 +1,16 @@
+{
+  "id": "deploy-stable-cli",
+  "title": "Active CLI survives deployment builds and release handover",
+  "description": "An isolated scratch installation runs real CLI processes during a delayed dependency install, install failure, successful health-gated publication and rollback. Persistent CLI/server mismatches refuse requests after three observable handover retries.",
+  "tags": ["deployment", "regression"],
+  "target": "any",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "exercise real CLI loading across isolated deployment transitions",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/deploy-stable-cli.test.ts",
+      "timeoutSeconds": 180
+    }
+  ]
+}
