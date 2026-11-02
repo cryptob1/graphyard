@@ -61,7 +61,7 @@ async function served(work: Work[]): Promise<Board> {
 const humanRows = (work: Work[]) => openHumanOnly(work.map(item => ({ work: item, decisions: [] })), NOW);
 const entry = (board: Board, key: string) => groups.flatMap(group => board.groups[group]).find(item => item.key === key)!;
 
-test('unit:board-api-matches-dashboard — GET /api/board gives each open item its group, next actor and command, and web/groups.ts groups the same data the same way', async () => {
+test('unit:board-api — GET /api/board gives each open item its group, next actor and command, and web/groups.ts groups the same data the same way', async () => {
   assert.ok(boardRoute, 'the server registers GET /api/board');
   const work = scenario();
   const board = await served(work);

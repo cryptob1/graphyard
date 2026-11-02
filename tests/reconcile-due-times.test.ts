@@ -1,3 +1,4 @@
+import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -170,12 +171,12 @@ test('unit:reconcile-due-times-match-full-evaluation — the default full pass i
       { type: 'chore',  title: 'Hour draft', criteria: [{ id: 'AC-1', text: 'Holds', proofs: ['unit:reconcile-due-times-match-full-evaluation', 'e2e:fixture'] }] }, id());
     const rowClaim = await create('Hour row claim'), rowDone = await create('Hour row done'), rowRetry = await create('Hour row retry');
     const stalled = await create('Hour stalled'), windowed = await create('Hour window');
-    const claimRow = async (item: Work) => (await engine.claimNextAction(executor, { executor: 'exec-1', host: 'hour-host', leaseSeconds: 300, work: item.id }, id())).action!;
+    const claimRow = async (item: Work) => (await claimFixture(store, executor, { executor: 'exec-1', host: 'hour-host', leaseSeconds: 300, work: item.id })).action!;
     await claimRow(rowClaim);
     const doneRow = await claimRow(rowDone);
-    await engine.settleClaimedAction(executor, doneRow.id, { executor: 'exec-1', result: 'done', reason: 'seeded completion for the due-times hour' }, id());
+    await settleFixture(store, executor, doneRow.id, { executor: 'exec-1', result: 'done', reason: 'seeded completion for the due-times hour' });
     const retryRow = await claimRow(rowRetry);
-    await engine.settleClaimedAction(executor, retryRow.id, { executor: 'exec-1', result: 'failed', reason: 'seeded failure for the due-times hour' }, id());
+    await settleFixture(store, executor, retryRow.id, { executor: 'exec-1', result: 'failed', reason: 'seeded failure for the due-times hour' });
     // The deferral window: the reading the windowed item owes can first exist at +20 min.
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{observationWindow}', $2::jsonb) WHERE id = $1`,
       [windowed.id, JSON.stringify({ notBefore: new Date(baseMs + 20 * 60_000).toISOString(), basis: 'criterion-window', detail: 'seeded for the due-times hour' })]);
