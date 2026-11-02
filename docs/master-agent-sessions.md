@@ -29,7 +29,7 @@ Accounts below `run.quotaCeilingPercent` are preferred; simultaneous launches sp
 
 ### A pane stopped on its provider's limit is absent (GY-2949)
 
-Each cycle replaces exited or provider-limited master panes. Limits hold the account until reset; exits impose no quota hold. Status is working, idle, limited or absent; none proves delivery.
+Each cycle reads the master's recent output with the worker limit-notice judge. A provider limit holds the account until reset, closes the pane and launches the next account in the same cycle. Exited panes relaunch without a hold. Status is working, idle, limited until T or absent; none proves delivery.
 
 ### A closed Herdr workspace is replaced
 
@@ -38,7 +38,6 @@ Missing `herdrWorkspace` is replaced with the master's workspace or first listed
 ### The request is the session's first message
 
 Requests arrive on the runtime command line. Later authorized reminders come from the launcher ([authorization](onboarding.md#what-the-generated-instructions-authorize)).
-
 #### How the request reaches the runtime
 
 `.graphyard/launch/NAME.request` and Claude's `NAME.role` are 0600 and removed with the checkout. The typed line stays within 512 bytes:
@@ -71,6 +70,12 @@ Claude records session ID, runtime, account and worktree in `.graphyard/dispatch
 
 Verdict, stage change or missing pane ends the ledger-linked registry slot. Completed reviews release on the first eligible pane miss after launch grace; other orphaned slots close after two consecutive misses, including after loop restart. See [session liveness](master-agent.md#session-liveness-is-reconciled-not-trusted).
 
-### The launch reads short; the procedure loads on demand (GY-2972)
+### One continuing master conversation
+
+Claude and Codex masters resume their current native conversation on the same account/runtime. Another account/runtime starts a successor: its request names the predecessor's runtime, account, native id, full read-only transcript and last unanswered person input (explicitly `none` when answered). A→B→A continues B: successors supersede predecessors. Failed launches retain the conversation; native resumes never fall back fresh. Unsupported master runtimes refuse explicitly. Across repeated failovers, an unanswered input keeps its native-event reference.
+
+`master.continuity` persists current/predecessor identities independently of registry allocations. `.graphyard/master-records/` holds full native transcripts, mounted read-only without granting another account home or credentials. `.graphyard/launch/LAUNCH.inputs.jsonl` records launch/wake/retry origins before submission, joined to native input events by unique markers. Tools and partial output never answer a person; a completed assistant final after the input batch does. Pre-upgrade/adopted sessions recover native records from their recorded account and import known delivery origins; failed recovery retains state.
+
+`master-session-resumes` and `master-continues-after-failover` run fixtures with user-only Claude settings under bubblewrap, inspecting records and transcript confinement.
 
 Use `node $GRAPHYARD_CLI guide TOPIC` for the procedure named by the brief; standing rules remain in AGENTS.md.

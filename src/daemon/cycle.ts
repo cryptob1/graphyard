@@ -615,6 +615,15 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   for (const key of Object.keys(state.master.subjects)) if (!current.has(key)) delete state.master.subjects[key];
   const master = state.master;
   const handle = herdr.agents.find(agent => agent.name === (master.agentName ?? config.masterAgentName));
+  if (!master.continuity && sessions.initialize && (handle || master.startedAt || master.account)) {
+    try {
+      master.continuity = await sessions.initialize(master, handle, Object.values(state.actions).filter(action => action.kind === 'wake' && action.state === 'done').map(action => action.detail));
+      await effects.persist(state);
+    } catch (error) {
+      await note(cycle, config.forPerson ? `${masterLaunchKey}:${config.forPerson}` : masterLaunchKey, 'session', null, 'failed', `Master continuity recovery failed: ${message(error)}`);
+      return;
+    }
+  }
   if (!handle) {
     submitMasterLaunch(cycle, open);
     return;
@@ -632,7 +641,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   const key = config.forPerson ? `master:wake:${config.forPerson}` : 'master:wake';
   cycle.launcher.submit(key, [], async sink => {
     try {
-      await sessions.wake!(target, prompt);
+      await sessions.wake!(target, prompt, state.master.continuity);
       for (const cause of changed) state.master.subjects[cause.key] = cause.digest;
       state.master.lastWake = { at: new Date(cycle.now()).toISOString(), causes: changed.map(cause => cause.key).slice(0, 20), heartbeat };
       sink.push(await record(state, key, { kind: 'wake', work: null, principal: null, state: 'done', detail: prompt, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));
@@ -650,9 +659,10 @@ function submitMasterLaunch(cycle: Cycle, open: Work[]) {
     try {
       if (state.master.session && sessions.end) await sessions.end(state.master.session, 'the master session it recorded is gone from Herdr; the loop launches its replacement').catch(() => undefined);
       const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
-      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(causes.length ? [masterCausePrompt(causes)] : [])].join('\n'));
+      const previous = state.master.continuity;
+      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(causes.length ? [masterCausePrompt(causes)] : [])].join('\n'), previous);
       const at = new Date(cycle.now()).toISOString();
-      state.master = { ...emptyMasterSession(), ...launched, startedAt: at,
+      state.master = { ...emptyMasterSession(), ...launched, continuity: launched.continuity ?? previous, startedAt: at,
         subjects: Object.fromEntries(causes.map(cause => [cause.key, cause.digest])),
         lastWake: causes.length ? { at, causes: causes.map(cause => cause.key).slice(0, 20), heartbeat: false } : null };
       sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));

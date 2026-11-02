@@ -17,6 +17,8 @@ Only exclusiveResources lock dispatch. Sync and merge trials integrate path over
 
 Graphyard reads exact-head verdicts, not remote review threads. Pre-merge review judges implementation and bound E2E coverage: missing later trusted results do not block approval; missing or inadequate tests can. The writer must pass every required exact-head E2E proof before updating main; workers never submit trusted evidence. Sensitive changes need approval before merge. Normal changes receive post-merge review; blocking findings become follow-up bugs. Pre-merge `BLOCKING:` findings cause rework once per submission, without a round cap.
 
+Reviewer and spec-check launch bearers authenticate from committed launch records, including delivered items, so unexpired unused tokens survive server restarts. Recovery grants only the launch's reader identity; verdicts retain their token, head, requirements revision and independence checks. Recording, refusing, replacing or clearing a launch revokes its token; expiry needs no process-local cleanup. Session reconciliation can release an unusable session without supplying an approval.
+
 Use `Nit: PATH:LINE — FINDING`, ending with `(mechanical: …)` or `(substantive: …)`; findings about behavior, criteria or scope are substantive. Nits stay advisory: they never hold approval or trigger a bot round. Graphyard keeps them in project memory for later workers. Put required fixes on `BLOCKING:` lines; see `guide review`. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions and budget-test blockers.
 
 ## Scope is a plan, not a lock
