@@ -52,7 +52,7 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/credit_work`);
   await store.init();
   engine = new Engine(store, 7200, 'owner/credit-work');
-  engine.submissionObserver = null; engine.controlPlaneAppId = 1234;
+  engine.submissionObserver = null;
   http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
