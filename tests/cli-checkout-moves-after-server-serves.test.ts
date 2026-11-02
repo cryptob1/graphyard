@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { createServer as createHttpServer } from 'node:http';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { applyInstall, buildPlan, installRequestFromArgs, prepareInstall } from '../src/install/index.js';
 import { gitWatchPorts, watchPorts } from '../src/cli/upgrade.js';
 import { deployRecordPath, readDeployRecord, watchMain, type DeployWatchPorts } from '../src/deploy-watch.js';
+import { cliReleasePath } from '../src/install/cli-release.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { harness } from './install-harness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -82,7 +83,7 @@ test('unit:cli-checkout-moves-after-server-serves — a deploy pass builds and r
   } finally { server.close(); }
 });
 
-test('unit:deploy-builds-from-its-own-worktree — a watch pass over a fixture install redeploys from the install\'s build worktree at the new commit while the watched checkout still holds the old one, then moves the checkout and npm-cis it', async () => {
+test('unit:deploy-builds-from-its-own-worktree — a watch pass over a fixture install redeploys from the install\'s build worktree at the new commit while the watched checkout still holds the old one, then publishes the ready CLI without moving or npm-ci-ing the watched checkout', async () => {
   const fixture = await harness({ provider: 'compose', serverUrl: 'http://127.0.0.1:4310' });
   const saved = { configHome: process.env.GRAPHYARD_CONFIG_HOME, testCli: process.env.GRAPHYARD_TEST_CLI, testLog: process.env.GRAPHYARD_TEST_REDEPLOY_LOG };
   process.env.GRAPHYARD_CONFIG_HOME = fixture.configHome;
@@ -90,18 +91,24 @@ test('unit:deploy-builds-from-its-own-worktree — a watch pass over a fixture i
     const session = await prepareInstall(fixture.root, installRequestFromArgs(['--provider', 'compose', '--repo', 'owner/project', '--apply']).request, fixture.deps, 'apply');
     await applyInstall(session, await buildPlan(session));
 
-    // The watched CLI checkout, and the redeploy CLI the plan runs: a committed stub that records each
-    // invocation with the watched checkout's HEAD at that moment. The fixture's one file: dependency
-    // makes every npm ci observable without a registry.
+    // A tiny install CLI records actual invocations and the watched checkout's HEAD.
+    // Local fixture dependencies exercise npm ci without a registry; the no-op loader is
+    // sufficient for this JavaScript-only CLI (real tsx loading has integration coverage).
     const { checkout, commit, a } = await repositories('deploy-build-worktree', async pusher => {
-      await writeFile(join(pusher, 'package.json'), JSON.stringify({ name: 'fixture', private: true, version: '1.0.0', dependencies: { 'fixture-lib': 'file:vendor/fixture-lib' } }));
+      await writeFile(join(pusher, 'package.json'), JSON.stringify({ name: 'fixture', private: true, type: 'module', version: '1.0.0', dependencies: { 'fixture-lib': 'file:vendor/fixture-lib', tsx: 'file:vendor/tsx' } }));
       await mkdir(join(pusher, 'vendor/fixture-lib'), { recursive: true });
       await writeFile(join(pusher, 'vendor/fixture-lib/package.json'), JSON.stringify({ name: 'fixture-lib', version: '1.0.0' }));
+      await mkdir(join(pusher, 'vendor/tsx'), { recursive: true });
+      await writeFile(join(pusher, 'vendor/tsx/package.json'), JSON.stringify({ name: 'tsx', version: '1.0.0', type: 'module', exports: './index.mjs' }));
+      await writeFile(join(pusher, 'vendor/tsx/index.mjs'), '');
       await mkdir(join(pusher, 'bin'), { recursive: true });
-      await writeFile(join(pusher, 'bin', 'graphyard.mjs'), `import { appendFileSync } from 'node:fs';
+      await writeFile(join(pusher, 'bin/graphyard.mjs'), await readFile(new URL('../bin/graphyard.mjs', import.meta.url)));
+      await mkdir(join(pusher, 'src'), { recursive: true });
+      await writeFile(join(pusher, 'src', 'cli.ts'), `import { appendFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 const cliHead = () => { try { return execFileSync('git', ['-C', process.env.GRAPHYARD_TEST_CLI, 'rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(); } catch { return 'unreadable'; } };
-appendFileSync(process.env.GRAPHYARD_TEST_REDEPLOY_LOG, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), cliHead: cliHead() }) + '\\n');
+appendFileSync(process.env.GRAPHYARD_TEST_REDEPLOY_LOG, JSON.stringify({ args: process.argv.slice(2), cwd: process.cwd(), cliHead: cliHead(), root: fileURLToPath(new URL('../', import.meta.url)) }) + '\\n');
 `);
       execFileSync('npm', ['install', '--package-lock-only', '--ignore-scripts'], { cwd: pusher, stdio: 'ignore' });
     });
@@ -121,20 +128,27 @@ appendFileSync(process.env.GRAPHYARD_TEST_REDEPLOY_LOG, JSON.stringify({ args: p
     ports.prune = async () => {};
     try {
       await watchMain(file, ports, { intervalMs: 1000, once: true, log: () => {} });
-      const build = join(fixture.configHome, 'owner-project', 'deploy', 'build');
+      const build = cliReleasePath(join(fixture.configHome, 'owner-project'), b);
       assert.equal(readDeployRecord(file)?.tip, b, 'the new tip is recorded as served');
-      assert.equal(head(checkout), b, 'the watched checkout moved to the new tip');
+      assert.equal(readDeployRecord(file)?.reason, null, 'deployment succeeded without falling through schema-aware failure handling');
+      assert.equal(head(checkout), a, 'the watched checkout retains its original source');
+      assert.equal(await realpath(join(checkout, '.graphyard/cli-current')), build, 'the ready CLI is published after health');
+      assert.equal(await ports.head(), b, 'deployment reads the published CLI commit');
       assert.ok(existsSync(join(build, '.git')), 'the build worktree exists under the install directory');
       assert.equal(head(build), b, 'the build worktree holds the deployed commit');
       assert.ok(existsSync(join(build, 'node_modules', 'fixture-lib')), 'the build worktree holds the dependencies npm ci installed');
-      assert.ok(existsSync(join(checkout, 'node_modules', 'fixture-lib')), 'the watched checkout was npm-ci-ed after it moved');
-      const redeploys = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[]; cwd: string; cliHead: string });
+      assert.ok(!existsSync(join(checkout, 'node_modules')), 'publication never installs dependencies over the watched checkout');
+      const redeploys = (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line) as { args: string[]; cwd: string; cliHead: string; root: string });
       assert.equal(redeploys.length, 2, 'the redeploy ran its --plan preview and its --apply');
       for (const invocation of redeploys) {
+        assert.equal(invocation.root, build + '/', 'the redeploy loads the candidate CLI source');
         assert.equal(invocation.cliHead, a, 'the redeploy ran while the watched checkout still held the old commit');
         assert.equal(invocation.args[invocation.args.indexOf('--source-root') + 1], build, 'the image builds from the install\'s build worktree, never from the watched checkout');
       }
       assert.ok(redeploys[1].args.includes('--apply'), 'the second invocation applies');
+      execFileSync(process.execPath, [join(checkout, 'bin/graphyard.mjs'), 'status'], { cwd: checkout, env: process.env });
+      const published = JSON.parse((await readFile(log, 'utf8')).trim().split('\n').at(-1)!);
+      assert.equal(published.root, build + '/', 'the watched launcher loads the published source and its isolated loader');
     } finally { server.close(); }
   } finally {
     for (const [name, value] of [['GRAPHYARD_CONFIG_HOME', saved.configHome], ['GRAPHYARD_TEST_CLI', saved.testCli], ['GRAPHYARD_TEST_REDEPLOY_LOG', saved.testLog]] as const) {
