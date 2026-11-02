@@ -91,9 +91,5 @@ export function reviewStandard(binding: { key: string; head: string; base: strin
     + repetitionReviewSection(files);
 }
 
-/**
- * The finding rule of a control-plane review: the same `Nit:` line as GitHub mode, without its
- * mechanical class — no worker bot patches a control-plane head (reconcileReviews keeps these
- * records out of the mechanical rounds), so a nit here is advisory and kept for later workers.
- */
+/** Nits stay advisory and are kept for later workers. */
 export const controlPlaneFindingSection = 'Name each nit on its own "Nit: PATH:LINE — FINDING" line. Nits are advisory in control-plane mode: Graphyard keeps them in project memory for later workers, and no bot fixes them, so put anything that must be fixed on a BLOCKING: line instead. ';

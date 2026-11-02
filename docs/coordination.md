@@ -17,7 +17,7 @@ A failed dispatch is retried next cycle, never blocked.
 
 Exact-head approval lands; remote threads and reviews are never read or resolved. Pre-merge review judges implementation and bound E2E coverage before the merge trial: missing later trusted results do not block approval; missing or inadequate tests can. The writer must pass every required exact-head E2E proof before updating main; workers never submit trusted evidence. A `BLOCKING:` finding reworks the item once per submission, uncapped. A sensitive delta needs exact-head approval; a normal one merges, and its post-merge review files `BLOCKING:` bugs. Control-plane mode switches off plan refusals, sync restore, the scope hook, producer sessions, budget-test blockers.
 
-`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Mechanical findings hold approval until the round window or the loop's clear; the loop requests bot `rework`, one commit, only those files. `Rejected bot commit: SHA — reason` rejects it.
+`Nit: PATH:LINE — FINDING` ends `(mechanical: …)` or `(substantive: …)`; behaviour/criterion/scope signs: substantive. Nits stay advisory: they never hold approval or trigger a bot round.
 
 ## Scope is a plan, not a lock
 

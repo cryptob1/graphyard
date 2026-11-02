@@ -4,7 +4,6 @@ import { readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, resolve } from 'node:path';
 import { z } from 'zod';
 import { type ChildRun, ChildProcessError, defaultChildRun } from '../child-runner.js';
-import { appliedMechanicalRework, mechanicalWorkerSection, readMechanicalFixRequests, type MechanicalFixRequest } from '../mechanical-findings.js';
 import { discover, assertRepository } from '../onboarding.js';
 import { concurrentOverlap, resourceConflicts } from '../coordination.js';
 import { type SandboxExec, WorkerSandboxError, verifyWorkerSandbox, workerPaths, writablePaths, grantWorkerPaths } from '../worker-sandbox.js';
@@ -148,7 +147,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
   const config = await loadMasterConfig(root);
   // GY-1523: a worker is launched with no push credential and no keyring proxy: the control plane is the only merge writer.
   const mergeWriter: MergerMode = 'control-plane';
-  let round: ReworkRound;
+  let rework: AppliedRework | null;
   let target = agents.find(agent => agent.name === profile.agentName);
   let selected: Awaited<ReturnType<typeof selectAccount>> | undefined, launched: ReturnType<typeof accountLaunch> | undefined, relaunched = 0;
   // GY-1772: which runtimes the worker is tried on first, never judged from its path lane; recorded with the selection it ordered.
@@ -179,7 +178,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // A rework round's grounds are read before anything is claimed, too (GY-1569).
-    round = await reworkRound(root, work);
+    rework = work.submission ? appliedReworkBrief(work) : null;
     // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
     // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
     const unreserve = await reserveDispatch(root, work, profile, observedAt);
@@ -243,7 +242,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
             try {
               assertClaimDeadline(work.key, options.claimBy);
               let epoch: number;
-              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, round, observedAt, previous));
+              ({ target, harness, dependencies, delivery, sandbox, started, consent, epoch, reclaimed, pushCredential, resumed } = await launchWorker(root, config, work, profile, launch, run, prepare, release, agentTimeoutMs, options.prompt, options.start, options.sandbox ?? (prepare === prepareWorkerLaunch ? 'host' : null), options.claimBy, options.coordinatorRoot, options.renew ?? (prepare === prepareWorkerLaunch ? renewWorkerLaunch : null), options.renewIntervalMs, options.verificationMaps, mergeWriter, rework, observedAt, previous));
               claimedEpoch = epoch;
               // The epoch this launch claimed outlives the reservation, so a dispatcher still holding the older snapshot is refused cleanly.
               const at = new Date().toISOString();
@@ -302,19 +301,6 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // Planned-file overlap is recorded with the dispatch, never held on: the item runs beside the
     // in-flight items that touch the same files and whichever lands second is re-integrated.
     overlap: concurrent.length ? { concurrent, note: `Dispatched beside ${describeOverlap(concurrent)}; the merge queue orders them and whichever lands second is re-integrated by base refresh, or sent back for a sync on a real conflict` } : null };
-}
-
-/**
- * GY-971. Whether this attempt is a mechanical-fix round: only a rework of a submitted candidate can
- * be, and only when the item's last applied rework was that round's; the review ledger's plans are
- * read only then. Any other rework round carries the last rework's reason as its brief (GY-1569).
- */
-export type ReworkRound = { mechanical: { requests: MechanicalFixRequest[]; reviewId: number } | null; rework: AppliedRework | null };
-async function reworkRound(root: string, work: Work): Promise<ReworkRound> {
-  if (!work.submission) return { mechanical: null, rework: null };
-  const reviewId = work.candidate ? appliedMechanicalRework(work) : null;
-  if (reviewId !== null) return { mechanical: { requests: await readMechanicalFixRequests(root), reviewId }, rework: null };
-  return { mechanical: null, rework: appliedReworkBrief(work) };
 }
 
 export const herdrAttach = (pane: string, workspace?: string | null) => `herdr pane attach ${pane}${workspace ? ` --workspace ${workspace}` : ''}`;
@@ -376,7 +362,7 @@ export function consentHold(config: Pick<MasterConfig, 'herdrWorkspace'>, key: s
   return { key, epoch, agentName, pane, attach: herdrAttach(pane, config.herdrWorkspace), prompt: awaiting.prompt, kind: awaiting.kind, since: new Date(now).toISOString(), releaseAt: new Date(now + consentHoldMs).toISOString(), ...(awaiting.request ? { request: awaiting.request } : {}), ...(awaiting.named === false ? { named: false } : {}) };
 }
 
-async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'control-plane', round: ReworkRound = { mechanical: null, rework: null }, cycle?: string, previous: AttemptLaunch | null = null) {
+async function launchWorker(root: string, config: MasterConfig, work: Work, profile: WorkerProfile, launch: ReturnType<typeof accountLaunch>, run: ChildRun | undefined, prepare: WorkerPreparer, release: (root: string, key: string, epoch: number, profileName: string) => Promise<void>, agentTimeoutMs: number | undefined, delivery?: PromptDelivery, start?: StartBounds, sandboxProbe: SandboxExec | 'host' | null = null, claimBy?: number, coordinatorRoot?: string, renew: LeaseRenewer | null = null, renewIntervalMs?: number, verificationMaps: NonNullable<DispatchOptions['verificationMaps']> = readVerificationMaps, mergeWriter: MergerMode = 'control-plane', rework: AppliedRework | null = null, cycle?: string, previous: AttemptLaunch | null = null) {
   // The lease is the launch's to keep alive until the supervisor's first heartbeat (GY-1287), from
   // the claim itself (GY-1373): building the worktree of a large repository on a loaded host took
   // longer than the 120 s lease, which lapsed before the credential was minted ("Lease missing,
@@ -409,16 +395,13 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
     // branch and opening its pull request never wait on a keypress. A failure is reported, not fatal.
     const harness = await installWorkerHarness(config, { ...profile, kind: launch.kind as WorkerProfile['kind'] }, work.key, prepared).catch(error => ({ applied: false, reason: error instanceof Error ? error.message : 'Worker rules could not be written' }));
     const memory = await readProjectMemory(root).catch(() => null);
-    // A mechanical-fix round (GY-971) is told exactly which findings its one commit fixes; any other
-    // rework round, the reason of the decision that sent it back (GY-1569), read before the claim.
-    const { mechanical, rework } = round;
     // The area maps the plan touches (GY-1495), read from the base before the session starts.
     const maps = await verificationMaps(root, config.baseBranch).catch(() => []);
     // GY-1797: whether this checkout carries the fast gates is read here, once, and handed to the prompt as an input.
     // GY-2956: the prompt reads the claimed document when the preparer returned it, not the
     // snapshot the dispatch chose from — an attempt preserved in the same cycle is in the claim's
     // record, and a handoff built from the older copy would send the worker back to the shared base.
-    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, mechanical, maps, rework);
+    const prompt = workerPrompt({ ...config, fastGates: workerFastGatesPresent(root) }, prepared.work ?? work, profile, prepared.epoch, prepared.dependencies ?? null, memory, prepared.base, maps, rework);
     // The worker loads its own role rules, never the master's: it may push its assigned branch.
     const sessionHarness = await prepareSessionHarness(root, config, { role: 'worker', kind: launch.kind, profile: profile.name, branch: prepared.branch ?? `graphyard/${work.key.toLowerCase()}-${prepared.epoch}`, credentialFiles: [profile.credentialFile!] });
     let pane: string | undefined, tabId: string | undefined, sandbox: ReturnType<typeof verifyWorkerSandbox> | null = null;
@@ -521,35 +504,15 @@ export function workerPrompt(
   profile: Pick<WorkerProfile, 'principal'>,
   epoch: number,
   dependencies?: Pick<SharedDependencies, 'shared'> | null,
-  memoryOrMechanical?: ProjectMemory | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
-  baseShaOrMechanical?: string | { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
-  mechanicalOpt?: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null,
+  memory?: ProjectMemory | null,
+  baseSha?: string | null,
   verificationMaps?: readonly VerificationMap[] | null,
   rework?: AppliedRework | null,
 ) {
-  let memory: ProjectMemory | null = null;
-  let baseSha: string | undefined = undefined;
-  let mechanical: { requests: readonly MechanicalFixRequest[]; reviewId: number } | null = null;
-
-  if (memoryOrMechanical && 'requests' in memoryOrMechanical) {
-    mechanical = memoryOrMechanical;
-  } else {
-    memory = (memoryOrMechanical as ProjectMemory | null) ?? null;
-  }
-
-  if (baseShaOrMechanical && typeof baseShaOrMechanical === 'object' && 'requests' in baseShaOrMechanical) {
-    mechanical = baseShaOrMechanical;
-  } else if (typeof baseShaOrMechanical === 'string') {
-    baseSha = baseShaOrMechanical;
-  }
-
-  if (mechanicalOpt) {
-    mechanical = mechanicalOpt;
-  }
   // A session that reinstalls dependencies it already has costs the host a gigabyte per attempt,
   // so the launcher says which trees are already there rather than leaving it to be guessed.
   const installed = dependencies?.shared.length ? `The assigned worktree needs no dependency install: ${dependencies.shared.map(entry => `${entry.name} ${entry.how === 'reachable' ? 'already resolves to' : 'is shared with'} the install at ${entry.source}`).join(', ')}, for this exact lockfile. Do not install dependencies again unless you change the lockfile. ` : '';
-  const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha });
+  const memoryDigest = projectMemoryDigest(memory, 'worker', { baseSha: baseSha ?? undefined });
   return `Implement ${work.key}: ${work.title}. The launcher claimed this item under principal ${profile.principal} and put this agent under lease supervision. Run node ${config.cliPath} status ${work.key} before editing. ${config.fastGates ? workerBeforePushSection(config.cliPath, work.key) : ''}Work only in the current assigned worktree, satisfy the stated criteria without weakening them, commit on the assigned branch, and submit with node ${config.cliPath} complete ${work.key} ${epoch} --head as your last action: complete ends your lease; stop at once on lease loss (node ${config.cliPath} guide complete). `
     + attemptBoundSection(config.run, work, epoch)
     + `Do not submit trusted evidence or merge; review and producers are requested on their own. `
@@ -562,9 +525,8 @@ export function workerPrompt(
     + externalDirectoryPromptGuidance
     + specCheckReportSection(work)
     + simplicityParagraph
-    + (config.repository && mechanical ? mechanicalWorkerSection(config.repository, config.cliPath, { key: work.key, candidate: work.candidate ?? null }, epoch, mechanical.requests, mechanical.reviewId) : '')
     // The reason the applied rework decision gave, so the round answers it rather than resubmitting (GY-1569).
-    + (mechanical ? '' : reworkBriefSection(work, rework))
+    + reworkBriefSection(work, rework)
     + resumedAttempt(work)
     // GY-1726: a follow-up whose reading cannot exist yet waits for it rather than escalating.
     + (work.criteria?.some(criterion => criterion.proofs.some(servingReleaseProof)) ? `If the observation this item owes cannot exist yet (its window has not elapsed on the serving release), do not record a blocker: defer it with node ${config.cliPath} defer ${work.key} ${epoch} NOT-BEFORE REASON (NOT-BEFORE is the ISO instant the reading can first exist, at most 30 days away), which ends your lease and holds dispatch until then, then stop. ` : '')
