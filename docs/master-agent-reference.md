@@ -21,6 +21,8 @@ Graphyard's one remote credential is the merge writer's deploy key ([install](in
 
 A dead supervisor's lease lapses; the close step keeps what the attempt had not committed on its branch and records it for the redispatch's handoff, then reconciles the lease and the item is claimable again.
 
+A worker stopped on a provider limit notice also keeps its local work before redispatch to another account: uncommitted changes become a WIP commit on its attempt branch, and the next worker's prompt names that commit (or the existing HEAD for a clean tree) to read and bring forward.
+
 ### Producer-runtime faults
 
 Unacted producer requests relaunch on an untried profile.
