@@ -1,3 +1,4 @@
+import { claimFixture, settleFixture, renewFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
@@ -69,8 +70,8 @@ function observation(item: Work): Observation {
     at: new Date().toISOString(), prState: 'open', draft: false, baseTip: base, baseTree: 'c'.repeat(40), baseTipContained: true,
   };
 }
-const claimResync = async (id: string) => (await engine.claimNextAction(executor, { host: 'host-1', kinds: ['resync'], work: id }, randomUUID())).action!;
-const settle = (row: ActionRow, result: 'done' | 'failed', reason: string) => engine.settleClaimedAction(executor, row.id, { result, reason }, randomUUID());
+const claimResync = async (id: string) => (await claimFixture(store, executor, { host: 'host-1', kinds: ['resync'], work: id })).action!;
+const settle = (row: ActionRow, result: 'done' | 'failed', reason: string) => settleFixture(store, executor, row.id, { result, reason });
 test('unit:action-claim-keeps-observation — an action claimed, renewed and settled between an observation\'s read and its save does not discard the observation', async () => {
   const item = await submitted();
   // The observer reads the item...
@@ -78,7 +79,7 @@ test('unit:action-claim-keeps-observation — an action claimed, renewed and set
   // ...an executor claims the item's resync row, renews it and fails it, each a save of the item...
   const claimed = await claimResync(item.id);
   assert.equal(claimed.kind, 'resync');
-  await engine.renewClaimedAction(executor, claimed.id, {});
+  await renewFixture(store, executor, claimed.id);
   await settle(claimed, 'failed', 'a failure recorded while GitHub was being observed');
   const moved = await reload(item.id);
   assert.ok(moved.revision > read.revision, 'the claim and the settlement saved the item');

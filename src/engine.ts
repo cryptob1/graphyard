@@ -21,7 +21,7 @@ import { buildIdentity } from './protocol-version.js';
 import { liveDispatchHandleIds, reconcileAutoDispatch, type DispatchTransition } from './model/dispatch.js';
 import { submittedBranchMoved } from './model/assignment.js';
 import { reconcileReviewConflict, type ReviewConflictTransition } from './model/review-conflict.js';
-import { actionAccount, nextActionKinds, sameAction } from './model/next-action.js';
+import { actionAccount, sameAction } from './model/next-action.js';
 import type { ActionAccount } from './model/action-account.js';
 import { recordScenarioRun } from './test-runs.js';
 import { resolveScenario } from './scenarios.js';
@@ -29,8 +29,7 @@ import { filingRefusal, e2eProofRefusal } from './model/user-facing.js';
 import { physicalCheckRefusal } from './model/human-proof.js';
 import { sameObservationInputs } from './model/observation-save.js';
 import type { ObservationJobState } from './model/action-kinds.js';
-import { claimCandidatesParams, claimCandidatesSql } from './model/action-candidates.js';
-import { claimAction, openActions, reconcileActions, renewClaim, settleAction, settleDelivered, type ActionRow } from './model/actions.js';
+import { openActions, reconcileActions, settleDelivered } from './model/actions.js';
 import { livenessFallback, livenessOf, livenessRepairEntry, rowDueAt, stalledActionLifts, waitDueAt } from './model/liveness.js';
 import { agentRequestSchema, boundedAgentRequests, deciderFor, expireAgentRequests, leaseHeldRequestTypes, requestResolutionRefusal, type AgentRequest } from './model/agent-requests.js';
 import { recordSession, sessionHandleSchema, sessionObservationFields } from './model/sessions.js';
@@ -131,22 +130,6 @@ const commands = {
   // merge (GY-1236), so nothing reports a merge refusal and none sends a candidate back (GY-1391).
 } as const;
 const executorName = z.string().trim().min(1).max(200).regex(/^[^\u0000-\u001f\u007f]+$/);
-const actionClaimSchema = z.object({
-  /** The identity the claim is recorded under; the credential's own principal by default. */
-  executor: executorName.optional(),
-  host: executorName,
-  /** The action kinds this executor can actually run. A kind it cannot run is left for one that can. */
-  kinds: z.array(z.enum(nextActionKinds)).min(1).max(nextActionKinds.length).optional(),
-  /** Every kind this executor has a handler for, whatever a launch hold lets it claim this tick (GY-1539); presence records it. */
-  serves: z.array(z.enum(nextActionKinds)).min(1).max(nextActionKinds.length).optional(),
-  leaseSeconds: z.number().int().min(10).max(900).optional(),
-  work: z.string().min(1).max(200).optional(),
-}).strict();
-/** A presence-only poll (GY-1288): who is asking, where, and what it runs — a claim's own fields, claiming nothing. */
-const actionSettleSchema = z.object({ executor: executorName.optional(), result: z.enum(['done', 'failed']), reason: z.string().trim().min(1).max(2000) }).strict();
-// A renewal carries no result: it says only that the executor named on the claim is still
-// inside the handler, and asks for the lease it already holds to run on.
-const actionRenewSchema = z.object({ executor: executorName.optional(), leaseSeconds: z.number().int().min(10).max(900).optional() }).strict();
 // A resync names the instant its claim was made, so the answer says whether an observation saved
 // since then satisfies it; `wake: false` only reads, for an executor waiting on the job it woke.
 const resyncSchema = z.object({ since: z.string().datetime({ offset: true }).optional(), wake: z.boolean().optional(), prioritized: z.boolean().optional(), wait: z.boolean().optional() }).strict();
@@ -1297,112 +1280,6 @@ export class Engine {
 
   }
 
-  /**
-   * The one item holding action row `id`, found by containment rather than by loading every document.
-   * `retired` also finds an item that has moved the row to its queue's history (GY-1586).
-   */
-  private async actionOwner(db: { query: (text: string, values: unknown[]) => Promise<{ rows: { document: Work }[] }> }, id: string, item?: string, retired = false): Promise<Work | undefined> {
-    // Given the owning item's id, the owner is read again by its primary key instead of found by a scan (GY-1276).
-    const scope = item === undefined ? 'w.id IN (SELECT id FROM work_index WHERE NOT settled)' : 'w.id=$2::uuid AND w.id IN (SELECT id FROM work_index WHERE NOT settled)';
-    const holds = (list: string) => `document->'actionQueue'->'${list}' @> jsonb_build_array(jsonb_build_object('id', $1::text))`;
-    return (await db.query(`SELECT document FROM work_items w WHERE ${scope} AND (${retired ? `${holds('actions')} OR ${holds('history')}` : holds('actions')}) ORDER BY number LIMIT 1`, item === undefined ? [id] : [id, item])).rows[0]?.document;
-  }
-  /**
-   * Claim the next action for a stateless executor.
-   *
-   * The executor names itself and its host, and the kinds it can actually run; the control plane
-   * hands back the first open row it can take in claim order, leased for a bounded time. Two
-   * executors on two hosts calling this at the same instant are serialized by the coordination lock, so the first
-   * gets the row and the second gets the next one. Neither is configured with the other, and
-   * neither reports to a master: the queue is the whole of their coordination.
-   */
-  async claimNextAction(actor: Principal, input: unknown, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = actionClaimSchema.parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.claim', data })).digest('hex');
-    // An idle poll takes no lock and loads no document (GY-185). A replayed key answers from its
-    // receipt, and the rows an executor could take are found in SQL; only when there are some is
-    // the lock taken, and then only their items are loaded, and claimed again under it.
-    const replayed = (await this.store.pool.query('SELECT fingerprint, result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-    if (replayed) { demand(replayed.fingerprint === fingerprint, idempotencyMismatch); return replayed.result as { action: ActionRow | null }; }
-    const candidates: string[] = (await this.store.pool.query(claimCandidatesSql, claimCandidatesParams(data.work, data.kinds))).rows.map(row => row.id);
-    if (!candidates.length) {
-      const at = (await this.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date;
-      return { action: null, open: 0, at: at.toISOString() };
-    }
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result as { action: ActionRow | null }; }
-      const all: Work[] = (await db.query('SELECT document FROM work_items WHERE id = ANY($1::uuid[]) ORDER BY number', [candidates])).rows.map(r => r.document);
-      const claimed = claimAction(all, { id: data.executor ?? actor.id, host: data.host, principal: actor.id }, now, { kinds: data.kinds, leaseMs: data.leaseSeconds ? data.leaseSeconds * 1000 : undefined, work: data.work });
-      const result = { action: claimed?.row ?? null, open: openActions(all, now, data.kinds).length, at: now.toISOString() };
-      // A poll that claims nothing changed nothing, so it leaves no receipt: an idle executor
-      // asking every few seconds must not write a row per question it asked.
-      if (claimed) {
-        await save(db, claimed.work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, host: claimed.row.claim!.host, principal: actor.id, attempt: claimed.row.attempts });
-        // A row this executor last failed on stepped aside for this claim; its mark makes that once (GY-1132).
-        for (const work of claimed.yielded) await save(db, work, actor.id, 'action.claimed', now, { id: claimed.row.id, kind: claimed.row.kind, executor: claimed.row.claim!.executor, yielded: work.actionQueue!.actions.filter(row => row.yielded === claimed.row.claim!.executor).map(row => row.id) });
-        await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      }
-      return result;
-    });
-  }
-  /**
-   * Record what an executor's attempt did. Only the executor holding the live claim may settle its
-   * row: a claim that expired and was taken by another executor can no longer report a result, so
-   * an executor that comes back from the dead never double-counts the action that replaced it.
-   */
-  async settleClaimedAction(actor: Principal, id: string, input: unknown, key: string) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const data = actionSettleSchema.parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ command: 'action.settle', id, data })).digest('hex');
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, idempotencyMismatch); return receipt.result as { action: ActionRow }; }
-      const work = await this.actionOwner(db, id);
-      demand(work, 'Action is not open on any work item', 404);
-      const transition = settleAction(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, data.result, data.reason, now);
-      // A row settled on a delivered item was the last claim holding it open: it is retired with
-      // the rest of what the delivery no longer needs, rather than offered again (GY-185).
-      if (work!.stage === 'done') settleDelivered(work!, (await lockedWork(db, [work!.id])).map(item => item.id === work!.id ? work! : item), now);
-      await save(db, work!, actor.id, `action.${transition.event}`, now, { id, kind: transition.action.kind, executor: data.executor ?? actor.id, result: data.result, reason: data.reason, attempt: transition.action.attempts });
-      if (work!.submission) await wakeJob(db, work!.id);
-      const result = { action: transition.action, work: { id: work!.id, key: work!.key } };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
-      return result;
-    });
-  }
-  /**
-   * Hold a claim while the handler is still running.
-   *
-   * A claim is a short lease so that a dead executor's row is offered again quickly, but the
-   * handlers are not short: a dispatch prepares a worktree and waits on a runtime, and a guarded
-   * merge chains provider calls that each have their own timeout. Without this a handler that
-   * outlives its lease is run a second time by another executor while the first is still inside
-   * it — the double execution AC-2 forbids. The executor that holds the claim says here that it
-   * is still running; anybody else, and an expired claim, is refused.
-   */
-  async renewClaimedAction(actor: Principal, id: string, input: unknown) {
-    demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-    const data = actionRenewSchema.parse(input);
-    return this.store.transaction(async (db, now) => {
-      const owner = await this.actionOwner(db, id);
-      demand(owner, 'Action is not open on any work item', 404);
-      // The item's lock, which a heartbeat takes alone (GY-1124), then the item as it stands under it,
-      // read again by its id: the action can only have left it, never moved to another item.
-      await lockItem(db, owner!.id);
-      const work = await this.actionOwner(db, id, owner!.id);
-      demand(work, 'Action is not open on any work item', 404);
-      const row = renewClaim(work!, id, { executor: data.executor ?? actor.id, principal: actor.id }, now, data.leaseSeconds ? data.leaseSeconds * 1000 : undefined);
-      // A renewal is a fact about a claim, not a decision: it is persisted without re-evaluating
-      // the item and without an event or revision of its own, so a long handler costs one update
-      // per interval and a reader's ledger lookback still counts saves exactly.
-      await rewriteDocument(db, work!);
-      return { action: row, work: { id: work!.id, key: work!.key } };
-    }, { lane: 'lease' });
-  }
   /**
    * The pull model: a free worker session asks for its next assignment instead of waiting for a
    * dispatcher to inject one.

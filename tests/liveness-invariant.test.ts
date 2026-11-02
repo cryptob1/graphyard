@@ -1,3 +1,4 @@
+import { claimFixture, settleFixture } from './helpers/action-fixtures.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
@@ -179,9 +180,9 @@ test('unit:violations-get-successor-actions — one reconciliation tick opens ex
   const dispatchId = rows(item).find(row => row.kind === 'dispatch')!.id;
   const fail = async () => {
     await store.pool.query("UPDATE work_items SET document=jsonb_set(document,'{actionQueue,actions}',(SELECT jsonb_agg(row - 'retryAt') FROM jsonb_array_elements(document->'actionQueue'->'actions') row)) WHERE id=$1", [item.id]);
-    const taken = await engine.claimNextAction(coordinator, { host: 'host-1', kinds: ['dispatch'], work: item.key }, id());
+    const taken = await claimFixture(store, coordinator, { host: 'host-1', kinds: ['dispatch'], work: item.key });
     assert.equal(taken.action?.id, dispatchId, 'the dispatch row is offered');
-    await engine.settleClaimedAction(coordinator, dispatchId, { result: 'failed', reason }, id());
+    await settleFixture(store, coordinator, dispatchId, { result: 'failed', reason });
   };
   for (let failure = 1; failure < livenessRetryLimit; failure++) await fail();
   await engine.reconcile();
@@ -197,7 +198,7 @@ test('unit:violations-get-successor-actions — one reconciliation tick opens ex
   await engine.reconcile();
   current = await reload(item);
   assert.deepEqual(rows(current).map(row => row.id), [escalationId], 'and it stays converted: one escalation, no dispatch reopened');
-  assert.equal((await engine.claimNextAction(coordinator, { host: 'host-1', kinds: ['dispatch'], work: item.key }, id())).action, null, 'no executor is offered the dispatch again');
+  assert.equal((await claimFixture(store, coordinator, { host: 'host-1', kinds: ['dispatch'], work: item.key })).action, null, 'no executor is offered the dispatch again');
   assert.equal((await judge(item)).violation, null, 'the escalation owns the item');
   assert.equal(actionId('attention', item.id, rows(current)[0].binding), escalationId);
 });
