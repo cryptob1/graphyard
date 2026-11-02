@@ -63,6 +63,8 @@ test('unit:lease-commands-survive-cli-server-skew — heartbeat and blocked from
     const status = await run(['status', 'GY-1']).then(() => null, (error: any) => error);
     assert.match(status?.stderr ?? '', new RegExp(`CLI commit ${head} and server commit ${deployed} differ: run graphyard upgrade$`, 'm'), 'the refusal names no proceeding');
     assert.doesNotMatch(status?.stderr ?? '', /proceeds/);
-    assert.deepEqual(requests, ['GET /healthz'], 'the skewed invocation is refused before its first API request');
+    assert.equal(status?.code, 1, 'persistent skew exits with failure after the bounded handover window');
+    assert.equal((status?.stderr.match(/release handover: retry/g) ?? []).length, 3, 'each of the three retries is observable');
+    assert.deepEqual(requests, Array(4).fill('GET /healthz'), 'the initial probe and three retries send no API request');
   } finally { await close(server); }
 });
