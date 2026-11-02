@@ -1,7 +1,7 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { rm, symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
@@ -266,7 +266,7 @@ test('integration:review-brief-proof-bindings — real ordinary and post-merge l
       assert.doesNotMatch(brief, /Later data|e2e:wrong-case|graphyard show GY-/);
     }
     assert.deepEqual([record.sha, record.baseSha, record.policyRevision], [postMerge ? M : H, B, 1]);
-    assert.equal((await stored(work.id)).reviewLaunch!.reviewer, 'graphyard-reviewer[bot]');
+    assert.equal((await stored(work.id)).reviewLaunch!.reviewer, 'review-claude-1');
     await assert.rejects(launchReview(root, work, 'reviewer-claude', [], at(), { run, ...(postMerge ? { postMerge: { mergeSha: M, baseTip: B } } : {}) }), /pending|already/);
     assert.equal(prompts.length, 1, 'one session answers this head');
     const session = await readReviewBinding(record.sessionDirectory!);
