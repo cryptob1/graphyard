@@ -13,10 +13,10 @@ import type { ChildRun } from './child-runner.js';
 import type { FleetProbe } from './fleet.js';
 import type { SandboxExec } from './worker-sandbox.js';
 import {
-accountLaunch,allocateManagedCheckout,autonomousSession,closeHerdrPane,createdHerdrTab,
-herdrJson,launchStartMs,loadMasterConfig,onSelectedSession,prepareSessionHarness,readCredentialFile,
-profileAtLimit,profileSessions,selectAccount,sessionAgentName,startAgentSession,
-type PromptDelivery,type StartBounds,
+  accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab,
+  herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, prepareSessionHarness, readCredentialFile,
+  profileAtLimit, profileSessions, selectAccount, sessionAgentName, startAgentSession,
+  type PromptDelivery, type StartBounds,
 } from './master.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
 import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';

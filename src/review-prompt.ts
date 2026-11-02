@@ -3,12 +3,6 @@ import { verificationMapDigest, type VerificationMap } from './verification-maps
 import { declaredPostDeploy, pinnedCases } from './model.js';
 export type ReviewCriterion = { id: string; text: string; proofs?: readonly string[] };
 /**
- * How the reviewer judges declared post-deploy verifications (GY-1660): on the head's pre-merge
- * evidence, never holding the merge for the live observation, which is read on the serving
- * release after delivery. Empty when no criterion is declared, so every
- * other review request stays byte-identical.
- */
-/**
  * The shared simplicity paragraph (GY-1999): defined once here and interpolated verbatim into every
  * role prompt — worker (dispatch.ts), reviewer, planner, acceptance and master — and put at the top
  * of AGENTS.md, so agents build the simplest thing that meets the criteria instead of machinery.
@@ -16,6 +10,12 @@ export type ReviewCriterion = { id: string; text: string; proofs?: readonly stri
 export const simplicityParagraph = 'Keep it simple. Build the simplest thing that meets the criteria and gives users a good experience. Do not over-engineer: no defensive layers, extra gates, permission checks or tests for hypothetical cases. Prefer deleting code to adding it. Agents are capable: do not build process around corner cases. ';
 /** The blocking standard (GY-2000): the only findings a review may hold a head with, stated beside the simplicity paragraph in both review prompts; anything else is at most a Nit. */
 export const blockingStandardSection = 'A BLOCKING finding must name a real defect a user or operator would hit with this change, a criterion that is not met, a leaked secret, or lost or corrupted data; anything else is at most a Nit. ';
+/**
+ * How the reviewer judges declared post-deploy verifications (GY-1660): on the head's pre-merge
+ * evidence, never holding the merge for the live observation, which is read on the serving
+ * release after delivery. Empty when no criterion is declared, so every
+ * other review request stays byte-identical.
+ */
 export function postDeployReviewSection(criteria?: readonly ReviewCriterion[]) {
   const declared = (criteria ?? []).filter(criterion => criterion.proofs && declaredPostDeploy({ proofs: criterion.proofs })).map(criterion => criterion.id);
   if (!declared.length) return '';
@@ -67,6 +67,17 @@ export function repetitionReviewSection(files?: readonly string[] | null) {
 }
 
 
+/**
+ * The judging part of a control-plane review request (GY-1987): what the diff is read with, the
+ * criteria rule, the declared post-deploy rule, the BLOCKING/Nit rule, the repetition section and
+ * the verification maps — everything a diff is judged by, and none of the session, posting and
+ * credential instructions around it. `review self`
+ * prints this for the worker's own head, so a worker applies the standard the independent reviewer
+ * will apply to the same diff before it submits. `context` carries the request's project-memory and
+ * review-round sections through their exact pre-factoring positions inside this span, so the
+ * request stays byte-identical whatever a session's history and memory hold; a self-review passes
+ * none, and judges the diff by the shared standard alone.
+ */
 export function reviewStandard(binding: { key: string; head: string; base: string }, criteria?: ReviewCriterion[], files?: readonly string[] | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, context?: { memory?: string; round?: string } | null) {
   return `Read the change with: git diff ${binding.base} ${binding.head} (both commits are in this session's object store; git show --stat ${binding.head} lists its files). `
     + (context?.memory ?? '')

@@ -435,11 +435,6 @@ export function registryLaunchArgs(account: FleetLaunchAccount) {
 }
 
 /**
- * The role policy's tool allowlist on the runtime's tools flag. A policy that limits tools on a
- * runtime whose contract names no tools flag is refused, on the Herdr path and the headless one alike
- * (GY-397): guessing a flag the runtime may not know would start the session with every tool.
- */
-/**
  * What a session launches with once its account is chosen: the account's kind and home, the
  * profile's arguments when they belong to that runtime, and the runtime's broadest approval mode.
  * Codex keeps its workspace sandbox, so the paths and network access the role needs are added to it:

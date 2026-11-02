@@ -1,3 +1,4 @@
+import type { ReviewCriterion } from './review-prompt.js';
 import { reviewStandard, repetitionReviewSection } from './review-prompt.js';
 import { simplicityParagraph, blockingStandardSection, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection } from './review-prompt.js';
 import { createHash, createSign, randomBytes, randomUUID } from 'node:crypto';
@@ -659,7 +660,7 @@ export async function coordinationCheckout(root: string, config: MasterConfig, k
  */
 export interface ControlPlanePrompt { head: string; baseTip: string; postMerge?: { mergeSha: string }; product?: boolean; previewUrl?: string }
 /** A criterion as the review prompt reads it; `proofs` marks a declared post-deploy verification (GY-1660). */
-export type ReviewCriterion = { id: string; text: string; proofs?: readonly string[] };
+export type { ReviewCriterion } from './review-prompt.js';
 export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<Pick<MasterConfig, 'cliPath'>>, binding: Pick<ReviewBinding, 'key' | 'pr' | 'sha' | 'baseSha' | 'policyRevision'>, checkout?: SessionCheckout, _threads?: unknown, criteria?: ReviewCriterion[], history?: ReviewHistory, files?: readonly string[] | null, projectMemory?: ProjectMemory | null, memory?: ProjectMemory | null, fresh?: FreshReadRecord | null, verification?: { maps: readonly VerificationMap[]; paths: readonly string[] } | null, plane?: ControlPlanePrompt | null) {
   memory ??= projectMemory;
   if (plane) return controlPlaneReviewPrompt(config, binding, plane, checkout, criteria, history, files, memory, verification);
@@ -686,17 +687,6 @@ export function reviewPrompt(config: Pick<MasterConfig, 'repository'> & Partial<
     + autonomousSession('post the verdict yourself, APPROVE or REQUEST_CHANGES, as soon as you have judged the diff', `record a blocker as one review posted with --event COMMENT (or, when posting is itself refused, as a final line starting BLOCKED:)`);
 }
 
-/**
- * The judging part of a control-plane review request (GY-1987): what the diff is read with, the
- * criteria rule, the declared post-deploy rule, the BLOCKING/Nit rule, the repetition section and
- * the verification maps — everything a diff is judged by, and none of the session, posting and
- * credential instructions around it. `review self`
- * prints this for the worker's own head, so a worker applies the standard the independent reviewer
- * will apply to the same diff before it submits. `context` carries the request's project-memory and
- * review-round sections through their exact pre-factoring positions inside this span, so the
- * request stays byte-identical whatever a session's history and memory hold; a self-review passes
- * none, and judges the diff by the shared standard alone.
- */
 /**
  * The product review's request (GY-2989): the whole app in context, walked, not the diff. The
  * session uses agent-browser on the head's preview (the loop serves the built head there while the
