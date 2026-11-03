@@ -2,7 +2,7 @@
 
 Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `73ca5f5cb1aa`.
 
-The handwritten set went from **13,930 to 11,291 words (18.9% shorter)**, including the new rendering guide. This report is outside that guide count. Counts include shipped documentation through the current base.
+The handwritten set went from **13,930 to 11,302 words (18.9% shorter)**, including the new rendering guide. This report is outside that guide count. Counts include shipped documentation through the current base.
 
 | Reviewed file | Before | After |
 | --- | ---: | ---: |
@@ -23,7 +23,7 @@ The handwritten set went from **13,930 to 11,291 words (18.9% shorter)**, includ
 | `docs/protocol/work-commands.md` | 696 | 619 |
 | `docs/setup-from-zero.md` | 521 | 398 |
 | `docs/validation.md` | 1327 | 838 |
-| `docs/walkthrough.md` | 0 | 351 |
+| `docs/walkthrough.md` | 0 | 362 |
 
 Setup-from-zero is the setup checklist; install owns provider/key steps; onboarding owns fleet setup. Delivery owns trial/revert behavior, deployment owns serving, and sessions owns runtime recovery. Other guides link there. Removed issue narration, the old brief word-count table and references to deleted docs tests. Existing section anchors remain.
 
@@ -36,14 +36,14 @@ The saved epoch-18 head `4065cdef87db` was already HEAD; no cherry-pick was need
 The trial refusal named twenty test files. Reproducing it found two defects in this change:
 
 - The rewrite omitted the automatic reviewer's concurrency. Restored `run.reviewerProfile`'s four-session default, explicit overrides and other profiles' one-session default. Its existing documentation check passes.
-- The documentation proof and renderer looked for Chromium in the private trial's empty cache. They now select the locked browser at `/opt/graphyard-browsers` inside the trial image, before importing Playwright. Host rendering still uses Playwright's configured cache; the rendering guide explains setup. No browser download or host-home mount is added to trials.
+- The documentation proof and renderer looked for Chromium in the private trial's empty cache. They now select the locked browser at `/opt/graphyard-browsers` inside the trial image, before importing Playwright. Host rendering uses Playwright's configured cache or explicit `WALKTHROUGH_BROWSERS_PATH`; the latter survives the fresh HOME/cache of pre-submit rechecks. The rendering guide explains setup. No browser download or host-home mount is added to trials.
 
 Also corrected the trial-cache summary and documented the renderer's image browser. No runtime gate or requirement changed.
 
 Validation in this attempt:
 
 - `npm run build` and `npm run docs:check` passed.
-- The documentation proof passes with the host's installed Chromium, rendering thirteen sample frames and exercising chapters, scrubbing and playback. Its base exercise fails as expected.
+- The documentation proof passes with the host's installed Chromium, including through the actual `rerunTrialFiles` pre-submit helper with its fresh HOME/cache, rendering thirteen sample frames and exercising chapters, scrubbing and playback. Its base exercise fails as expected.
 - Reran all nineteen other files named in the trial refusal: sixteen files passed, including the twenty consecutive slow-tick executions. The remaining failures are outside changed code: automatic reviewer launches see ancestor Claude settings under an untrusted scratch HOME; submit-head fixtures cannot migrate Git objects (`Invalid cross-device link`); the filesystem-isolation E2E session ends before its command. The reviewer documentation assertion from that run is now fixed and passes separately. These sandbox failures are named in the commit messages; CI retains the full-suite gate.
 - Both committed assets fully decode with ffmpeg. ffprobe confirms H.264 MP4 1200×838 and GIF 800×559, both 120.1 seconds. Inspected MP4 at 0, 55, 100 and 116 seconds, and GIF opening and failure-handoff frames: readable captions, distinct roles, populated opening, independent review and exactly three human decisions. The media from the earlier attempt remains unchanged because this rework changes browser selection and operational prose only.
 

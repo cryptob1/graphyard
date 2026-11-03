@@ -10,6 +10,7 @@ import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Match the actual renderer's browser selection inside the private trial image.
 if (existsSync('/etc/graphyard-trial')) process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/graphyard-browsers';
+else if (process.env.WALKTHROUGH_BROWSERS_PATH) process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.WALKTHROUGH_BROWSERS_PATH;
 const { chromium } = await import('@playwright/test');
 
 const run = promisify(execFile);

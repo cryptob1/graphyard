@@ -7,7 +7,7 @@ Edit `scripts/walkthrough/how-graphyard-works.html`, including its stage, captio
 
 From the repository root, with Playwright Chromium, ffmpeg and uv available:
 
-Install Chromium with `npx playwright install chromium` if needed. If it is already installed in another cache, set `PLAYWRIGHT_BROWSERS_PATH` to that directory for rendering and validation. Private merge trials use the browser bundled at `/opt/graphyard-browsers`.
+Install Chromium with `npx playwright install chromium` if needed. Set `WALKTHROUGH_BROWSERS_PATH` to an existing browser cache for rendering and validation, including `complete` rechecks that reset `PLAYWRIGHT_BROWSERS_PATH` under a fresh HOME. Otherwise Playwright uses its configured cache. Private merge trials always use the browser bundled at `/opt/graphyard-browsers`.
 
 ```sh
 frames=$(mktemp -d)

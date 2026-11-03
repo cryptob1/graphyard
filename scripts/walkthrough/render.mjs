@@ -6,6 +6,7 @@
 import { existsSync } from 'node:fs';
 // Private merge trials carry Chromium in the image, outside their empty home/cache.
 if (existsSync('/etc/graphyard-trial')) process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/graphyard-browsers';
+else if (process.env.WALKTHROUGH_BROWSERS_PATH) process.env.PLAYWRIGHT_BROWSERS_PATH = process.env.WALKTHROUGH_BROWSERS_PATH;
 const { chromium } = await import('playwright');
 const [html, out, fpsArg] = process.argv.slice(2);
 const fps = Number(fpsArg || 10);
