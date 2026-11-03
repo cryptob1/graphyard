@@ -1,0 +1,212 @@
+import { cp, mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
+import { dirname, join, resolve, relative } from 'node:path';
+import { homedir } from 'node:os';
+import { pathToFileURL } from 'node:url';
+import { loadStoredMasterConfig, readCredentialFile, atomicPrivateWrite, atomicPrivateText, applyHerdrConfig } from '../../src/master/config.js';
+import { masterConfigSchema, type MasterConfig } from '../../src/master/profiles.js';
+import { daemonEffects } from '../../src/daemon/effects-production.js';
+import { runCycle, Launcher } from '../../src/daemon/cycle.js';
+import { emptyDaemonState } from '../../src/daemon/state.js';
+import { closeHerdrPane } from '../../src/master.js';
+import { MERGE_PROTOCOL } from '../../src/protocol-version.js';
+import { mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
+import { defaultChildRun } from '../../src/child-runner.js';
+import { command, git } from './process.js';
+import { oracleDigest, oracleSource, digest, oracle } from './oracle.js';
+import { generate } from './generator.js';
+import { configSchema, validateReceipt, overlappingWorkers, comparison, type RunConfig, type Receipt } from './receipt-schema.js';
+import { components, workDescription } from './work.js';
+import { routeAccounts } from './routing.js';
+import { codeRoot, benchmarkRoot, isolatedRepository, startPlane, credential, operator } from './isolation.js';
+import { verifyArtifact } from './artifact.js';
+
+export type Plane=Awaited<ReturnType<typeof startPlane>>;
+export interface RunContext {
+  config:RunConfig; receipt:Receipt; directory:string; root:string;origin:string;install:string;
+  plane:Plane;admin:string;coordinator:string;producer:string;operator:string;workers:{id:string;token:string}[];
+  oracleFile:string; checkpoint():Promise<void>; snapshot():Promise<any[]>; certify(item:any):Promise<boolean>;
+}
+async function frozenInputs() {
+  const frozen=JSON.parse(await readFile(join(benchmarkRoot,'profiles/frozen-v1.json'),'utf8'));
+  for(const [field,file] of [['profileDigest','profiles/v1.json'],['generatorDigest','generator.ts'],['contractDigest','seed/CONTRACT.md']] as const) if(digest(await readFile(join(benchmarkRoot,file)))!==frozen[field]) throw new Error(`Frozen ${field} changed; refusing evaluated run`);
+  if(await oracleDigest()!==frozen.oracleDigest) throw new Error('Frozen oracle changed');
+  return frozen;
+}
+async function sourceCall(config:MasterConfig,path:string) {
+  const token=await readCredentialFile(config.credentialFile);
+  const response=await fetch(`${config.url}/api/${path}`,{headers:{Authorization:`Bearer ${token}`},signal:AbortSignal.timeout(30_000)});
+  if(!response.ok) throw new Error(`Source ${path} HTTP${response.status}`);
+  return response.json() as Promise<any>;
+}
+export async function realPrerequisites(source:MasterConfig,commit:string) {
+  const status=await sourceCall(source,'status');
+  if(status.build?.protocol!==MERGE_PROTOCOL || status.build?.commit!==commit) throw new Error('Real runs require healthy matching CLI/server commit and protocol');
+  const work=await sourceCall(source,'work');
+  for(const key of ['GY-3044','GY-3045','GY-3046','GY-3047','GY-3050','GY-3048']) if(!work.some((w:any)=>w.key===key && w.stage==='done' && w.delivery)) throw new Error(`Real run requires delivered ${key}`);
+  // Shared trial failures are authoritative merge-ledger failures, not worker reports.
+  if(work.some((w:any)=>w.stage!=='done' && (w.mergeLedger?.trial?.outcome==='host-failure' || w.mergeLedger?.trial?.build==='fail' && w.mergeLedger?.trial?.baseFailure))) throw new Error('Unresolved shared trial failure');
+}
+export async function createItems(context:RunContext) {
+  const ids=new Map<string,string>();
+  const definitions=context.config.mode==='team'?components:[{id:'single',title:'Build complete certified exact roots workbench',depends:[] as string[],files:['src/','public/','tests/'],brief:components.map(c=>`${c.title}: ${workDescription(c.id)}`).join('\n')}];
+  for(const component of definitions) {
+    const final=component.id==='integration'||component.id==='single';
+    const item=await context.plane.call('work',context.operator,{
+      type:'chore',title:component.title,description:component.id==='single'?`${component.brief}\nOne implementation agent only; do not delegate.`:workDescription(component.id),
+      criteria:[{id:'AC-1',text:`${component.brief} Files: ${component.files.join(', ')}. Preserve CONTRACT.md.`,proofs:['unit:workbench-contract','e2e:workbench',...(final?['manual:certified-artifact']:[])]}],
+      dependencies:component.depends.map(id=>ids.get(id)),producerProofs:final?['manual:certified-artifact']:[],policy:{checks:['test'],review:true},
+    });
+    ids.set(component.id,item.id);
+    context.receipt.work.push({component:component.id,id:item.id,key:item.key,epoch:0,candidate:null,merge:null,attempts:0,reviews:0,repairs:0,record:item});
+    await context.plane.call(`work/${item.id}/ready`,context.operator,{});
+  }
+}
+export async function execute(configInput:unknown,fixture?: (context:RunContext)=>Promise<void>):Promise<Receipt> {
+  const config=configSchema.parse(configInput),directory=resolve(config.runDirectory),install=resolve(config.credentialDirectory);
+  const frozen=await frozenInputs(),graphyardCommit=await git(codeRoot,'rev-parse','HEAD');
+  if(!fixture) {
+    const base=join(homedir(),'.config/graphyard');
+    if(relative(base,install).startsWith('..') || install===base) throw new Error('Real installation credentials belong under ~/.config/graphyard/<install>/');
+    if(!config.budget.authorization) throw new Error('Existing authorized usage cap required');
+  }
+  // Never overwrite an earlier run or its failed receipt.
+  await mkdir(directory,{recursive:false});
+  const started=Date.now();
+  let context:RunContext|undefined,plane:Plane|undefined,master:MasterConfig|undefined,effects:ReturnType<typeof daemonEffects>|undefined;
+  const receipt:Receipt={version:1,id:config.id,kind:fixture?'controlled-fixture':'real-agent',mode:config.mode,configDigest:digest(JSON.stringify(config)),graphyardCommit,profileVersion:'v1',profileDigest:frozen.profileDigest,generatorDigest:frozen.generatorDigest,contractDigest:frozen.contractDigest,seed:config.seed,startingCommit:'0'.repeat(40),oracleDigest:frozen.oracleDigest,startedAt:new Date(started).toISOString(),endedAt:null,outcome:'RUNNING',reason:'Starting isolated repository and control plane',budget:config.budget,eligibleModels:config.eligibleModels,accountLimits:[],work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costBudgetProven:false,agentSeconds:0,wallClockMs:0,comparativeSelection:'untested',speedupClaim:false};
+  const checkpoint=async()=>{receipt.wallClockMs=Date.now()-started;await writeFile(join(directory,'receipt.json'),JSON.stringify(receipt,null,2)+'\n');};
+  await checkpoint();await writeFile(join(directory,'config.json'),JSON.stringify(config,null,2)+'\n',{mode:0o600});
+  const abort=new AbortController(),timer=setTimeout(()=>abort.abort(new Error('Wall-clock deadline reached')),config.wallClockSeconds*1000);
+  let source:MasterConfig|undefined;
+  try {
+    if(!fixture) {source=await loadStoredMasterConfig(config.sourceRoot);await realPrerequisites(source,graphyardCommit);}
+    await mkdir(install,{recursive:false,mode:0o700});await chmod(install,0o700);
+    const repository=await isolatedRepository(directory);receipt.startingCommit=repository.startingCommit;
+    const admin=credential('benchmark-admin','admin'),coordinator=credential('benchmark-coordinator','coordinator'),producer=credential('benchmark-oracle','producer',['manual:certified-artifact','unit:workbench-contract']);
+    const workers=Array.from({length:config.mode==='team'?3:1},(_,i)=>credential(`benchmark-worker-${i+1}`,'worker'));
+    const producers=(source?.producers??[]).map((_,i)=>credential(`benchmark-proof-${i}`,'producer',['unit:*','integration:*']));
+    for(const c of [coordinator,producer,...workers,...producers]) await atomicPrivateText(join(install,`${c.id}.token`),c.token);
+    // Producer provisions the frozen oracle outside every implementation checkout.
+    const oracleDirectory=resolve(config.oracleDirectory);
+    if(oracleDirectory.startsWith(repository.root+'/') || oracleDirectory===repository.root) throw new Error('Oracle must be outside implementation repository');
+    await mkdir(oracleDirectory,{recursive:false,mode:0o700});
+    await cp(oracleSource,join(oracleDirectory,'verify.py'));await chmod(join(oracleDirectory,'verify.py'),0o400);
+    await writeFile(join(oracleDirectory,'freeze.json'),JSON.stringify({oracleDigest:receipt.oracleDigest,python:config.oraclePython,sympy:'1.14.0',mpmath:'1.3.0'}),{mode:0o400});
+    const baseline=await oracle(config.oraclePython,[{request:generate(config.seed)[2],output:{roots:[]}}],join(oracleDirectory,'verify.py'));
+    if(baseline[0]?.pass!==false) throw new Error('Oracle accepted known-bad empty root baseline');
+    receipt.failures.push({at:new Date().toISOString(),component:'starter-baseline',head:receipt.startingCommit,reason:baseline[0].reason});
+    plane=await startPlane(install,repository.root,[admin,coordinator,producer,...workers,...producers],graphyardCommit);
+    const operatorToken=await operator(plane,admin.token);await atomicPrivateText(join(install,'operator.token'),operatorToken);
+    const snapshot=async()=>{
+      const items=await plane!.call('work',coordinator.token);
+      for(const w of receipt.work) {
+        const record=items.find((i:any)=>i.id===w.id);if(!record) throw new Error(`Missing authoritative item ${w.key}`);
+        Object.assign(w,{epoch:record.epoch,candidate:record.candidate?.sha??null,merge:record.delivery?.mergeSha??null,attempts:record.pipeline.attempts.length,reviews:record.observation?.reviews?.length??0,repairs:record.pipeline.reworkRounds,record});
+        if(w.repairs>2 || w.attempts>3) throw new Error(`Repair bound exceeded for ${w.key}`);
+        if(record.blocker || record.humanRequest&&!record.humanRequest.answer) throw new Error(`${w.key}: unrecoverable gate failure: ${record.blocker??record.humanRequest.needed}`);
+      }
+      const registry=await plane!.call('agent-registry/document',coordinator.token);
+      receipt.sessions=registry.sessions.map((s:any)=>({id:s.id,role:s.role,work:s.work,principal:s.principal,runtime:s.runtime,account:s.account,model:s.model,reason:s.reason,startedAt:s.selectedAt,endedAt:s.endedAt}));
+      receipt.agentSeconds=receipt.sessions.reduce((sum,s)=>sum+(Date.parse(s.endedAt??new Date().toISOString())-Date.parse(s.startedAt))/1000,0);
+      receipt.overlaps=overlappingWorkers(receipt.sessions);
+      receipt.comparativeSelection=new Set(receipt.sessions.filter(s=>s.role==='worker').map(s=>s.model)).size>1?'exercised':'untested';
+      receipt.usage=receipt.sessions.map(s=>({role:s.role,session:s.id,inputTokens:null,outputTokens:null,cost:null,reason:'Runtime usage unavailable; subscription allocation is not measured token cost.'}));
+      if(config.usageCommand) {
+        const measured=JSON.parse((await command(config.usageCommand[0],config.usageCommand.slice(1),{input:JSON.stringify({sessions:receipt.sessions,runDirectory:directory}),timeoutMs:10_000})).stdout);
+        receipt.usage=measured;
+      }
+      receipt.usageComplete=receipt.sessions.length>0 && receipt.sessions.every(s=>receipt.usage.some(u=>u.session===s.id && u.role===s.role && u.inputTokens!==null && u.outputTokens!==null && u.cost!==null));
+      receipt.cost=receipt.usageComplete?receipt.usage.reduce((sum,u)=>sum+u.cost!,0):null;
+      receipt.costBudgetProven=receipt.usageComplete && config.budget.maxCost!==null && receipt.cost!<=config.budget.maxCost;
+      await checkpoint();
+      if(abort.signal.aborted) throw new Error('Wall-clock deadline reached');
+      if(receipt.agentSeconds>=config.budget.maxAgentSeconds || config.budget.maxCost!==null && receipt.cost!==null && receipt.cost>=config.budget.maxCost || config.budget.maxTokens!==null && receipt.usageComplete && receipt.usage.reduce((n,u)=>n+u.inputTokens!+u.outputTokens!,0)>=config.budget.maxTokens) throw new Error('Configured aggregate usage limit reached');
+      return items;
+    };
+    const certify=async(item:any)=>{
+      const head=item.candidate?.sha;if(!head) return false;
+      const target=join(directory,`certify-${head}`),scratch=join(directory,`scratch-${head}`);
+      await git(repository.root,'worktree','add','--detach','-q',target,head);
+      let passed=false,reason='';
+      try {await verifyArtifact({root:target,sha:head,seed:config.seed,python:config.oraclePython,oracleSource:join(oracleDirectory,'verify.py'),oracleDigest:receipt.oracleDigest,scratch,hidden:[install,repository.root,oracleDirectory,config.sourceRoot],signal:abort.signal});passed=true;}
+      catch(error){reason=String(error);receipt.failures.push({at:new Date().toISOString(),component:'integration',head,reason});}
+      await plane!.call(`work/${item.id}/evidence`,producer.token,{proof:'manual:certified-artifact',sha:head,baseSha:item.candidate.baseSha,policyRevision:item.policyRevision,result:passed?'pass':'fail',executed:generate(config.seed).length,skipped:0,exercise:{behaviour:'Empty-root starter solver, independently rejected before implementation',result:'fail',executed:1}});
+      await checkpoint();return passed;
+    };
+    context={config,receipt,directory,...repository,install,plane,admin:admin.token,coordinator:coordinator.token,producer:producer.token,operator:operatorToken,workers,oracleFile:join(oracleDirectory,'verify.py'),checkpoint,snapshot,certify};
+    await createItems(context);
+    if(fixture) await fixture(context);
+    else {
+      master=await configureMaster(context,source!,producers);
+      applyHerdrConfig(master);
+      const state=emptyDaemonState(master),launcher=new Launcher(3);
+      effects=daemonEffects(repository.root,master,{snapshot:async()=>({work:await plane!.call('work',coordinator.token),now:new Date().toISOString()}),mutate:(path,data)=>plane!.call(path,coordinator.token,data)});
+      const checked=new Set<string>();
+      while(true) {
+        const items=await snapshot();
+        const final=items.find((i:any)=>i.id===receipt.work.at(-1)!.id);
+        if(final.candidate && !checked.has(final.candidate.sha) && final.stage!=='done') {checked.add(final.candidate.sha);await certify(final);}
+        if(receipt.work.every(w=>w.merge)) break;
+        await runCycle(master,state,effects,Date.now,launcher);
+        await Promise.race([new Promise(accept=>setTimeout(accept,1000)),new Promise((_,reject)=>abort.signal.addEventListener('abort',()=>reject(new Error('Deadline reached')),{once:true}))]);
+      }
+      await launcher.idle();
+    }
+    await snapshot();
+    const final=receipt.work.at(-1)!;
+    if(!receipt.work.every(w=>w.merge)) throw new Error('Missing delivery from authoritative control plane');
+    const tip=await git(repository.origin,'rev-parse','refs/heads/main');
+    if(tip!==final.merge) throw new Error('Final artifact is not origin/main delivery');
+    const delivered=join(directory,'delivered');
+    await git(repository.root,'worktree','add','--detach','-q',delivered,tip);
+    receipt.artifact=await verifyArtifact({root:delivered,sha:tip,seed:config.seed,python:config.oraclePython,oracleSource:context.oracleFile,oracleDigest:receipt.oracleDigest,scratch:join(directory,'artifact-scratch'),hidden:[install,repository.root,config.oracleDirectory,config.sourceRoot],signal:abort.signal});
+    receipt.outcome='PASS';receipt.reason=fixture?'Controlled executor fixture passed isolated delivery and certification; this is not a real-agent rebuild.':'Independently verified CLI/API/UI built from the pushed final merge.';
+    receipt.endedAt=new Date().toISOString();validateReceipt(receipt);
+  } catch(error) {
+    receipt.outcome='FAIL';receipt.reason=error instanceof Error?error.message:String(error);receipt.failures.push({at:new Date().toISOString(),component:'runner',head:receipt.artifact?.sha??null,reason:receipt.reason});
+  } finally {
+    clearTimeout(timer);abort.abort();
+    // Stop only this run's recorded sessions; no shared Herdr sweep or account modification.
+    if(context && !fixture) {
+      const items=await context.plane.call('work',context.coordinator).catch(()=>[]);
+      for(const item of items) for(const s of item.sessions??[]) if(s.state==='running' && s.pane) await closeHerdrPane(s.pane).catch(()=>{});
+    }
+    await plane?.stop();receipt.endedAt=new Date().toISOString();await checkpoint();
+  }
+  return validateReceipt(receipt);
+}
+async function configureMaster(c:RunContext,source:MasterConfig,producers:{id:string;token:string}[]) {
+  const registry=await sourceCall(source,'agent-registry/document');
+  const roles=routeAccounts(registry,c.config.eligibleModels).map(role=>({...role,concurrency:role.name==='worker'?Math.min(role.concurrency,c.config.mode==='team'?3:1):role.concurrency}));
+  for(const role of ['worker','reviewer','producer','master']) if(!roles.some(r=>r.name===role && r.concurrency>0 && r.accounts.length)) throw new Error(`No configured eligible ${role} role`);
+  c.receipt.accountLimits=registry.accounts.map((a:any)=>({account:a.name,enabled:a.enabled,maxSessions:a.maxSessions,quota:a.quota}));
+  await c.plane.call('agent-registry/apply',c.coordinator,{runtimes:registry.runtimes,models:registry.models,accounts:registry.accounts.map(({quota,smoke,unjudged,...a}:any)=>a),roles,reason:'Bounded benchmark: existing eligible accounts, capability then known cost, existing availability/capacity preserved'});
+  const prefix=c.config.id.slice(0,20), credentialFile=join(c.install,'benchmark-coordinator.token');
+  const master=masterConfigSchema.parse({version:1,url:c.plane.url,credentialFile,cliPath:source.cliPath,repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:source.hostId,masterAgentName:`hm-${prefix}-master`,herdrInstance:source.herdrInstance,herdrWorkspace:source.herdrWorkspace,
+    workers:c.workers.map((w,i)=>({name:`hm-worker-${i}`,principal:w.id,agentName:`hm-${prefix}-w${i}`,mode:'launch',kind:source.workers.find(w=>w.mode==='launch')?.kind,credentialFile:join(c.install,`${w.id}.token`),accounts:source.workers.find(w=>w.mode==='launch')?.accounts,agentArgs:[],approvals:'auto',environment:{}})),
+    reviewers:source.reviewers.map((r,i)=>({...r,agentName:`hm-${prefix}-r${i}`})),producers:source.producers.map((p,i)=>({...p,principal:producers[i].id,credentialFile:join(c.install,`${producers[i].id}.token`),agentName:`hm-${prefix}-p${i}`})),
+    environments:source.environments,operatorAgent:{id:'benchmark-master',credentialFile:join(c.install,'operator.token')},confinement:{maskPaths:[c.install,c.config.oracleDirectory,c.config.sourceRoot,...source.confinement?.maskPaths??[]]},
+    run:{...source.run,intervalSeconds:5,worktreeRoot:join(c.directory,'worktrees'),launchConcurrency:c.config.mode==='team'?3:1,mergeWriter:{deployKeyFile:join(c.install,'unused-local-remote-key'),retrials:0}},
+  });
+  await mkdir(join(c.root,'.graphyard'),{recursive:true});await mkdir(join(c.directory,'worktrees'),{recursive:true});
+  await atomicPrivateWrite(join(c.root,'.graphyard/master.json'),master);
+  await writeFile(join(c.root,'BENCHMARK.md'),`Run ${c.config.id}: ${c.config.mode}. Do not alter CONTRACT.md or benchmark criteria.\n${c.config.mode==='single'?'Exactly one implementation session, no delegation.':'Use the eight existing component items; preserve at least three concurrent independent workers. Master coordinates and resolves integration failures, never implements.'}\nStop after two repairs per component. Frozen oracle outside implementation repositories.\n`);
+  return master;
+}
+
+export async function compareRuns(configInput:unknown) {
+  const config=configSchema.parse(configInput);
+  if(config.budget.maxCost===null || !config.usageCommand) throw new Error('Comparison refuses unavailable existing aggregate cost cap or usage meter; no permission to spend is invented');
+  const team=await execute({...config,mode:'team',id:`${config.id}-team`,runDirectory:`${config.runDirectory}-team`,credentialDirectory:`${config.credentialDirectory}-team`,oracleDirectory:`${config.oracleDirectory}-team`});
+  const single=await execute({...config,mode:'single',id:`${config.id}-single`,runDirectory:`${config.runDirectory}-single`,credentialDirectory:`${config.credentialDirectory}-single`,oracleDirectory:`${config.oracleDirectory}-single`});
+  const result=comparison(team,single);await writeFile(`${config.runDirectory}-comparison.json`,JSON.stringify(result,null,2)+'\n');return result;
+}
+if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href) {
+  const [mode,file]=process.argv.slice(2);
+  if(!file || !['run','post-deploy','compare'].includes(mode)) throw new Error('Usage: runner.ts run|post-deploy|compare CONFIG.json');
+  const config=JSON.parse(await readFile(file,'utf8'));
+  if(mode==='post-deploy' && config.mode!=='team') throw new Error('First post-deploy run must use team mode');
+  const result=mode==='compare'?await compareRuns(config):await execute(config);
+  console.log(JSON.stringify(result,null,2));
+  if('outcome' in result && result.outcome!=='PASS') process.exitCode=1;
+}

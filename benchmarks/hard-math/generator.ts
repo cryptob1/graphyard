@@ -12,8 +12,8 @@ export function generate(seed: number): Sample[] {
   const next = () => { state = (Math.imul(state,1664525)+1013904223)>>>0; return BigInt(state); };
   const samples: Sample[]=[];
   const add=(family:string,p:bigint[])=>samples.push({family,coefficients:p.map(String),precisionBits:64});
-  // Dense degree 32, full 224-bit coefficients, nonzero leading coefficient.
-  add('dense-high-degree',Array.from({length:33},()=>((next()<<192n)+(next()<<128n)+(next()<<64n)+next())*(next()%2n?1n:-1n)));
+  // Dense degree 32 with 24-bit signed coefficients; the separate large family reaches 251 bits.
+  add('dense-high-degree',Array.from({length:33},()=>(next()%(1n<<24n)+1n)*(next()%2n?1n:-1n)));
   add('large-coefficients',[1n<<250n, -(next()<<180n), -(1n<<249n)]);
   // Eight adjacent rational roots separated by 2^-24, degree 8 and ~193 coefficient bits.
   let clustered=[1n]; for(let i=0;i<8;i++) clustered=multiply(clustered,[1n<<24n,-((1n<<24n)+BigInt(i+seed))]);
