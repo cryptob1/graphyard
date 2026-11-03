@@ -15,7 +15,10 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
   const database = await temporaryDirectory('postgres', allocation);
   const outerScratch = await temporaryDirectory('outer-scratch', '/var/tmp');
   await writeFile(join(outerScratch, 'sentinel'), 'outside this boundary');
-  const environment = { ...trialEnvironment(), ...trialHomeVariables(home, process.env, true), TMPDIR: scratch, TMP: scratch, TEMP: scratch, PATH: '/usr/local/bin:/usr/bin:/bin' };
+  // Match the canonical service launch: full inherited environment, host LANG,
+  // and no interactive-shell LC_ALL override to hide unsupported image locales.
+  const host = { ...process.env, LANG: 'en_US.UTF-8', LC_ALL: undefined, LC_CTYPE: 'graphyard_UNSUPPORTED.UTF-8' };
+  const environment = { ...trialEnvironment(host), ...trialHomeVariables(home, host, true), TMPDIR: scratch, TMP: scratch, TEMP: scratch, PATH: '/usr/local/bin:/usr/bin:/bin' };
   const wrapper = trialContainerWords([allocation]);
   const emptyCache = join(home, '.cache/ms-playwright');
   // Playwright resolves its registry at import time: reproduce the old environment in a fresh process.
@@ -34,6 +37,9 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
     import { chromium } from '/graphyard-harness/node_modules/playwright/index.mjs';
     import EmbeddedPostgres from '/graphyard-harness/node_modules/embedded-postgres/dist/index.js';
     import pg from '/graphyard-harness/node_modules/pg/lib/index.js';
+    assert.equal(process.env.LANG, 'C.UTF-8');
+    assert.equal(process.env.LC_ALL, 'C.UTF-8');
+    assert.equal(process.env.LC_CTYPE, undefined);
     await assert.rejects(access(${JSON.stringify(join(outerScratch, 'sentinel'))}), error => error.code === 'ENOENT');
     assert.match(execFileSync('rg', ['--version'], { encoding: 'utf8' }), /^ripgrep /);
     const varTmp = await stat('/var/tmp');
@@ -76,6 +82,50 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
   `], { cwd: allocation, wrapper, timeoutMs: 60_000, env: environment });
   assert.match(output, /installed Chromium and native Postgres passed/);
   assert.ok((await readFile(join(allocation, 'browser.png'))).length > 100);
+});
+
+test('integration:private-root-trial-assets — service-style unsupported host locale fails native initdb, canonical trial environment starts real Postgres', { timeout: 60_000 }, async () => {
+  const allocation = await temporaryDirectory('trial-service-locale');
+  const database = await temporaryDirectory('postgres', allocation);
+  const rejectedDatabase = await temporaryDirectory('unsupported-locale', allocation);
+  const home = await temporaryDirectory('home', allocation);
+  const host = { ...process.env, LANG: 'graphyard_UNSUPPORTED.UTF-8', LC_ALL: undefined, LC_CTYPE: 'graphyard_UNSUPPORTED.UTF-8' };
+  // An unknown locale reproduces the image's missing en_US even on hosts which
+  // install en_US themselves. Exercise the installed native executable directly.
+  const { default: binaries } = await import(new URL('./binary.js', import.meta.resolve('embedded-postgres')).href);
+  const { initdb } = await binaries();
+  await assert.rejects(defaultChildRun(initdb, ['--pgdata=' + rejectedDatabase, '--auth=trust'], { env: host }),
+    (error: unknown) => error instanceof ChildProcessError && error.status === 1 && /invalid locale settings/.test(error.stderr));
+  const environment: Record<string, string> = { ...trialEnvironment(host), ...trialHomeVariables(home, host), TMPDIR: allocation };
+  assert.equal(environment.LANG, 'C.UTF-8');
+  assert.equal(environment.LC_ALL, 'C.UTF-8');
+  assert.ok(!('LC_CTYPE' in environment));
+  const output = await defaultChildRun(process.execPath, ['--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { createServer } from 'node:net';
+    import EmbeddedPostgres from ${JSON.stringify(import.meta.resolve('embedded-postgres'))};
+    import pg from ${JSON.stringify(import.meta.resolve('pg'))};
+    const probe = createServer();
+    await new Promise(resolve => probe.listen(0, '127.0.0.1', resolve));
+    const port = probe.address().port;
+    await new Promise(resolve => probe.close(resolve));
+    const database = new EmbeddedPostgres({ databaseDir: ${JSON.stringify(database)}, user: 'graphyard', password: 'testing-only', port,
+      persistent: false, onLog: () => {}, onError: line => console.error(line), postgresFlags: ['-h', '127.0.0.1'] });
+    try {
+      await database.initialise(); await database.start();
+      const client = new pg.Client({ host: '127.0.0.1', port, user: 'graphyard', password: 'testing-only', database: 'postgres' });
+      await client.connect();
+      try {
+        assert.equal((await client.query('select 3061::integer as value')).rows[0].value, 3061);
+        assert.equal((await client.query('show server_encoding')).rows[0].server_encoding, 'UTF8');
+      } finally { await client.end(); }
+    } finally { await database.stop(); }
+    console.log('service-style native Postgres passed');
+  `], { cwd: allocation, env: environment, timeoutMs: 45_000 });
+  assert.match(output, /service-style native Postgres passed/);
+  assert.equal(host.LANG, 'graphyard_UNSUPPORTED.UTF-8');
+  assert.equal(host.LC_ALL, undefined);
+  assert.equal(host.LC_CTYPE, 'graphyard_UNSUPPORTED.UTF-8');
 });
 
 test('integration:private-root-trial-assets — bounded failure diagnostics retain the test and first child error before long stacks', () => {

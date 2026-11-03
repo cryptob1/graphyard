@@ -128,10 +128,12 @@ export const credentialTrialVariable = (name: string) =>
   || /(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL)/i.test(name);
 /** The trial child's environment: the isolated test one, with every credential and Graphyard control removed and git's global configuration off. */
 export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !credentialTrialVariable(name)));
+  const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR|LC)_/.test(name) && name !== 'LANG' && !credentialTrialVariable(name)));
   // Use the running Node installation before host version-manager shims: the trial's empty
   // home intentionally cannot supply the host's mise trust/configuration to those shims.
-  return { ...kept, PATH: [dirname(process.execPath), kept.PATH].filter(Boolean).join(delimiter), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  // The private image supplies C.UTF-8, not the service manager's host locales.
+  // Normalize every inherited category before builds, tests and E2E start.
+  return { ...kept, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', PATH: [dirname(process.execPath), kept.PATH].filter(Boolean).join(delimiter), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 }
 
 /**
