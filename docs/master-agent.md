@@ -49,6 +49,8 @@ Missing panes free role capacity after two consecutive misses, including across 
 
 ## Automatic dispatch at submit
 
+The profile named by `run.reviewerProfile` defaults to 4 sessions when its concurrency is unset. An explicit concurrency wins; other profiles default to one session.
+
 Control-plane acceptance reads executed unit/integration/E2E counts from the merge trial, not producer evidence. Sensitive changes also need manual attestations. Review is automatic; unanswered sessions retry, then record `dispatch.abandoned`. Producer APIs remain for integrations, but these candidates launch no producer sessions.
 
 Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. Exact-head control-plane approval lets the head proceed immediately to the merge trial. Settings ignore old `run.awaitReviewers` and `run.awaitReviewersMinutes`; dispatch cursors discard old `botReviewers`.

@@ -7,6 +7,8 @@ Edit `scripts/walkthrough/how-graphyard-works.html`, including its stage, captio
 
 From the repository root, with Playwright Chromium, ffmpeg and uv available:
 
+Install Chromium with `npx playwright install chromium` if needed. If it is already installed in another cache, set `PLAYWRIGHT_BROWSERS_PATH` to that directory for rendering and validation. Private merge trials use the browser bundled at `/opt/graphyard-browsers`.
+
 ```sh
 frames=$(mktemp -d)
 node scripts/walkthrough/render.mjs "$PWD/scripts/walkthrough/how-graphyard-works.html" "$frames" 10

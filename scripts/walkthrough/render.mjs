@@ -3,7 +3,10 @@
 //
 // See docs/walkthrough.md for complete rendering, encoding and decode commands.
 // HTML uses local font fallbacks and a fixed caption height so all frames share dimensions.
-import { chromium } from 'playwright';
+import { existsSync } from 'node:fs';
+// Private merge trials carry Chromium in the image, outside their empty home/cache.
+if (existsSync('/etc/graphyard-trial')) process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/graphyard-browsers';
+const { chromium } = await import('playwright');
 const [html, out, fpsArg] = process.argv.slice(2);
 const fps = Number(fpsArg || 10);
 const browser = await chromium.launch();

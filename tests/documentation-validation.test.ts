@@ -1,12 +1,16 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { readFile, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { promisify } from 'node:util';
-import { chromium } from '@playwright/test';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+
+// Match the actual renderer's browser selection inside the private trial image.
+if (existsSync('/etc/graphyard-trial')) process.env.PLAYWRIGHT_BROWSERS_PATH = '/opt/graphyard-browsers';
+const { chromium } = await import('@playwright/test');
 
 const run = promisify(execFile);
 const root = fileURLToPath(new URL('..', import.meta.url));
