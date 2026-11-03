@@ -44,6 +44,9 @@ Validation in this attempt:
 
 - `npm run build` and `npm run docs:check` passed.
 - The documentation proof passes with the host's installed Chromium, rendering thirteen sample frames and exercising chapters, scrubbing and playback. Its base exercise fails as expected.
+- Reran all nineteen other files named in the trial refusal: sixteen files passed, including the twenty consecutive slow-tick executions. The remaining failures are outside changed code: automatic reviewer launches see ancestor Claude settings under an untrusted scratch HOME; submit-head fixtures cannot migrate Git objects (`Invalid cross-device link`); the filesystem-isolation E2E session ends before its command. The reviewer documentation assertion from that run is now fixed and passes separately. These sandbox failures are named in the commit messages; CI retains the full-suite gate.
 - Both committed assets fully decode with ffmpeg. ffprobe confirms H.264 MP4 1200×838 and GIF 800×559, both 120.1 seconds. Inspected MP4 at 0, 55, 100 and 116 seconds, and GIF opening and failure-handoff frames: readable captions, distinct roles, populated opening, independent review and exactly three human decisions. The media from the earlier attempt remains unchanged because this rework changes browser selection and operational prose only.
 
 Reproduce with [the rendering guide](../../docs/walkthrough.md).
+
+Self-review: AC-1 met (roles, independent ownership, concrete failed-check handoff, shipped master wakes and three human decisions); AC-2 met (corrected storyboard and regenerated assets retained, readable samples, decoding and repeatable rendering); AC-3 met (all handwritten guides reviewed, operational details preserved, counts refreshed and generated links valid). No blocking finding remains.
