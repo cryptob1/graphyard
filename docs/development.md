@@ -15,6 +15,8 @@ npm ci && npm run build && npm test
 
 Worktrees need [bubblewrap](install.md#preconditions). CI's `test` aggregates shards balanced by file count and runs affected tests.
 
+Worker storage moves: `integration:worker-reparenting` in `tests/worker-filesystem-isolation.test.ts` reproduces the old Landlock `EXDEV` for cache publication, hardlinks and a real local Git push, then exercises the fix inside the ordinary worker mounts and socket domain. `e2e/cases/worker-reparenting.json` runs it with the existing home and socket denials; `e2e:worker-reparenting` runs that bound case in the private-root trial container. Run `npm run build` and full `npm test`. If inherited worker Landlock prevents nested mounts, commit a clean HEAD for operator container placement; standalone filesystem checks do not satisfy this regression.
+
 `tests/architecture.test.ts` enforces the Git network module allowlist and the ban on GitHub API calls. Keep behavioral regressions with their module tests; deleted-file inventories, resolution tables and module line budgets do not belong in the suite.
 
 ### Verification maps
