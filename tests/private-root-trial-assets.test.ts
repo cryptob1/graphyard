@@ -29,11 +29,13 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
     import { readFile, realpath, lstat, stat, statfs, writeFile, access } from 'node:fs/promises';
     import { dirname, join } from 'node:path';
     import { createRequire } from 'node:module';
+    import { execFileSync } from 'node:child_process';
     import { createServer } from 'node:net';
     import { chromium } from '/graphyard-harness/node_modules/playwright/index.mjs';
     import EmbeddedPostgres from '/graphyard-harness/node_modules/embedded-postgres/dist/index.js';
     import pg from '/graphyard-harness/node_modules/pg/lib/index.js';
     await assert.rejects(access(${JSON.stringify(join(outerScratch, 'sentinel'))}), error => error.code === 'ENOENT');
+    assert.match(execFileSync('rg', ['--version'], { encoding: 'utf8' }), /^ripgrep /);
     const varTmp = await stat('/var/tmp');
     assert.equal(varTmp.uid, process.getuid());
     assert.ok(varTmp.mode & 0o1000, 'private durable scratch is sticky');
