@@ -8,7 +8,7 @@ export const receiptSchema=z.object({
   version:z.literal(1),id:z.string(),kind:z.enum(['controlled-fixture','real-agent']),mode:z.enum(['team','single']),configDigest:hash,
   graphyardCommit:sha,profileVersion:z.literal('v1'),profileDigest:hash,generatorDigest:hash,contractDigest:hash,seed:z.number(),startingCommit:sha,oracleDigest:hash,
   startedAt:z.string().datetime(),endedAt:z.string().datetime().nullable(),outcome:z.enum(['RUNNING','PASS','FAIL']),reason:z.string(),
-  budget:budgetSchema,eligibleModels:z.array(z.string()),accountLimits:z.array(z.unknown()),
+  budget:budgetSchema,eligibleModels:z.array(z.string()),accountLimits:z.array(z.unknown()),sourceCapacity:z.array(z.unknown()),wallClockLimitSeconds:z.number().positive(),
   work:z.array(z.object({component:z.string(),id:z.string(),key:z.string(),epoch:z.number(),candidate:sha.nullable(),merge:sha.nullable(),attempts:z.number(),reviews:z.number(),repairs:z.number(),record:z.unknown()})),
   sessions:z.array(z.object({id:z.string(),role:z.string(),work:z.string().nullable(),principal:z.string().nullable(),runtime:z.string(),account:z.string(),model:z.string(),reason:z.string(),startedAt:z.string().datetime(),endedAt:z.string().datetime().nullable()})),
   overlaps:z.array(z.object({sessions:z.array(z.string()).length(3),milliseconds:z.number().positive()})),
@@ -51,7 +51,7 @@ export function validateReceipt(value:unknown):Receipt {
 }
 export function comparison(team:Receipt,single:Receipt) {
   if(team.kind!=='real-agent' || single.kind!=='real-agent' || team.mode!=='team' || single.mode!=='single') throw new Error('Comparison requires actual team and single runs');
-  for(const field of ['startingCommit','profileDigest','generatorDigest','contractDigest','oracleDigest','seed'] as const) if(team[field]!==single[field]) throw new Error(`Comparison differs: ${field}`);
+  for(const field of ['wallClockLimitSeconds','startingCommit','profileDigest','generatorDigest','contractDigest','oracleDigest','seed'] as const) if(team[field]!==single[field]) throw new Error(`Comparison differs: ${field}`);
   if(JSON.stringify(team.budget)!==JSON.stringify(single.budget) || JSON.stringify(team.eligibleModels)!==JSON.stringify(single.eligibleModels)) throw new Error('Comparison bounds/model sets differ');
   return {team:{correct:team.outcome==='PASS',milliseconds:team.wallClockMs,cost:team.cost},single:{correct:single.outcome==='PASS',milliseconds:single.wallClockMs,cost:single.cost},costAdvantageProven:team.costBudgetProven&&single.costBudgetProven,repeatableAdvantageProven:false,reason:'One fixed seed is not evidence of a repeatable advantage; no serial speedup claim.'};
 }

@@ -1,3 +1,4 @@
+import { masterRunSchema } from '../../src/master/profiles.js';
 /** Controlled executors test the runner and real Graphyard gates; never model/agent evidence. */
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -21,9 +22,9 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     roles:[{name:'worker',accounts:['fixture-limited',...c.workers.map((_,i)=>`fixture-${i}`)],concurrency:3}],reason:'Controlled deterministic executor fixtures; no real coding agents or paid usage',
   });
   await c.plane.call('agent-registry/accounts/fixture-limited/quota',c.coordinator,{quota:{loggedIn:true,state:'exhausted',usage:[],resetsAt:new Date(Date.now()+3600_000).toISOString(),reason:'Controlled availability routing fault'},reason:'Exercise existing unavailable-account skip'});
-  const writer=mergeWriterReads({baseBranch:'main',repository:'scratch/hard-math',run:{mergeWriter:{deployKeyFile:join(c.install,'unused')}}},c.root,defaultChildRun,{
-    base:trials,merger:async()=>'control-plane',
-    trial:input=>runMergeTrial({...input,checkoutRoots:[trials],temporaryRoots:[trials],retries:0,hidden:[c.install,c.config.oracleDirectory,c.config.sourceRoot]}),
+  const writer=mergeWriterReads({baseBranch:'main',repository:'scratch/hard-math',run:masterRunSchema.parse({mergeWriter:{deployKeyFile:join(c.install,'unused')}})},c.root,defaultChildRun,{
+    base:trials,
+    trial:input=>runMergeTrial({...input,checkoutRoots:[trials],temporaryRoots:[trials],retries:0,hidden:[c.install,c.config.oracleDirectory,join(c.config.sourceRoot,'.graphyard')]}),
     record:(item,event)=>c.plane.call(`work/${item.id}/merge-record`,c.coordinator,event),
   });
   type Attempt={work:typeof c.receipt.work[number];item:any;worker:typeof c.workers[number];directory:string;branch:string;selection:any};

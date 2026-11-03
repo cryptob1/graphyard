@@ -16,6 +16,7 @@ import { oracleDigest, oracleSource, digest, oracle } from './oracle.js';
 import { generate } from './generator.js';
 import { configSchema, validateReceipt, overlappingWorkers, comparison, type RunConfig, type Receipt } from './receipt-schema.js';
 import { components, workDescription } from './work.js';
+import { sourceCapacity } from './capacity.js';
 import { routeAccounts } from './routing.js';
 import { codeRoot, benchmarkRoot, isolatedRepository, startPlane, credential, operator } from './isolation.js';
 import { verifyArtifact } from './artifact.js';
@@ -73,13 +74,16 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
   await mkdir(directory,{recursive:false});
   const started=Date.now();
   let context:RunContext|undefined,plane:Plane|undefined,master:MasterConfig|undefined,effects:ReturnType<typeof daemonEffects>|undefined;
-  const receipt:Receipt={version:1,id:config.id,kind:fixture?'controlled-fixture':'real-agent',mode:config.mode,configDigest:digest(JSON.stringify(config)),graphyardCommit,profileVersion:'v1',profileDigest:frozen.profileDigest,generatorDigest:frozen.generatorDigest,contractDigest:frozen.contractDigest,seed:config.seed,startingCommit:'0'.repeat(40),oracleDigest:frozen.oracleDigest,startedAt:new Date(started).toISOString(),endedAt:null,outcome:'RUNNING',reason:'Starting isolated repository and control plane',budget:config.budget,eligibleModels:config.eligibleModels,accountLimits:[],work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costBudgetProven:false,agentSeconds:0,wallClockMs:0,comparativeSelection:'untested',speedupClaim:false};
+  const receipt:Receipt={version:1,id:config.id,kind:fixture?'controlled-fixture':'real-agent',mode:config.mode,configDigest:digest(JSON.stringify(config)),graphyardCommit,profileVersion:'v1',profileDigest:frozen.profileDigest,generatorDigest:frozen.generatorDigest,contractDigest:frozen.contractDigest,seed:config.seed,startingCommit:'0'.repeat(40),oracleDigest:frozen.oracleDigest,startedAt:new Date(started).toISOString(),endedAt:null,outcome:'RUNNING',reason:'Starting isolated repository and control plane',budget:config.budget,eligibleModels:config.eligibleModels,accountLimits:[],sourceCapacity:[],wallClockLimitSeconds:config.wallClockSeconds,work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costBudgetProven:false,agentSeconds:0,wallClockMs:0,comparativeSelection:'untested',speedupClaim:false};
   const checkpoint=async()=>{receipt.wallClockMs=Date.now()-started;await writeFile(join(directory,'receipt.json'),JSON.stringify(receipt,null,2)+'\n');};
   await checkpoint();await writeFile(join(directory,'config.json'),JSON.stringify(config,null,2)+'\n',{mode:0o600});
   const abort=new AbortController(),timer=setTimeout(()=>abort.abort(new Error('Wall-clock deadline reached')),config.wallClockSeconds*1000);
   let source:MasterConfig|undefined;
   try {
-    if(!fixture) {source=await loadStoredMasterConfig(config.sourceRoot);await realPrerequisites(source,graphyardCommit);}
+    if(!fixture) {source=await loadStoredMasterConfig(config.sourceRoot);await realPrerequisites(source,graphyardCommit);
+      const status=await sourceCall(source,'status'),registry=await sourceCall(source,'agent-registry/document');
+      try {receipt.sourceCapacity.push(sourceCapacity(status,registry,config.eligibleModels));} catch(error:any) {if(error.capacity) receipt.sourceCapacity.push(error.capacity);throw error;}
+    }
     await mkdir(install,{recursive:false,mode:0o700});await chmod(install,0o700);
     const repository=await isolatedRepository(directory);receipt.startingCommit=repository.startingCommit;
     const admin=credential('benchmark-admin','admin'),coordinator=credential('benchmark-coordinator','coordinator'),producer=credential('benchmark-oracle','producer',['manual:certified-artifact','unit:workbench-contract']);
@@ -98,6 +102,10 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     plane=await startPlane(install,repository.root,[admin,coordinator,producer,...workers,...producers],graphyardCommit);
     const operatorToken=await operator(plane,admin.token);await atomicPrivateText(join(install,'operator.token'),operatorToken);
     const snapshot=async()=>{
+      if(source) {
+        const status=await sourceCall(source,'status'),registry=await sourceCall(source,'agent-registry/document');
+        try {receipt.sourceCapacity.push(sourceCapacity(status,registry,config.eligibleModels));} catch(error:any) {if(error.capacity) receipt.sourceCapacity.push(error.capacity);throw error;}
+      }
       const items=await plane!.call('work',coordinator.token);
       for(const w of receipt.work) {
         const record=items.find((i:any)=>i.id===w.id);if(!record) throw new Error(`Missing authoritative item ${w.key}`);
@@ -128,7 +136,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       const target=join(directory,`certify-${head}`),scratch=join(directory,`scratch-${head}`);
       await git(repository.root,'worktree','add','--detach','-q',target,head);
       let passed=false,reason='';
-      try {await verifyArtifact({root:target,sha:head,seed:config.seed,python:config.oraclePython,oracleSource:join(oracleDirectory,'verify.py'),oracleDigest:receipt.oracleDigest,scratch,hidden:[install,repository.root,oracleDirectory,config.sourceRoot],signal:abort.signal});passed=true;}
+      try {await verifyArtifact({root:target,sha:head,seed:config.seed,python:config.oraclePython,oracleSource:join(oracleDirectory,'verify.py'),oracleDigest:receipt.oracleDigest,scratch,hidden:[install,repository.root,oracleDirectory,join(config.sourceRoot,'.graphyard')],signal:abort.signal});passed=true;}
       catch(error){reason=String(error);receipt.failures.push({at:new Date().toISOString(),component:'integration',head,reason});}
       await plane!.call(`work/${item.id}/evidence`,producer.token,{proof:'manual:certified-artifact',sha:head,baseSha:item.candidate.baseSha,policyRevision:item.policyRevision,result:passed?'pass':'fail',executed:generate(config.seed).length,skipped:0,exercise:{behaviour:'Empty-root starter solver, independently rejected before implementation',result:'fail',executed:1}});
       await checkpoint();return passed;
@@ -159,7 +167,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     if(tip!==final.merge) throw new Error('Final artifact is not origin/main delivery');
     const delivered=join(directory,'delivered');
     await git(repository.root,'worktree','add','--detach','-q',delivered,tip);
-    receipt.artifact=await verifyArtifact({root:delivered,sha:tip,seed:config.seed,python:config.oraclePython,oracleSource:context.oracleFile,oracleDigest:receipt.oracleDigest,scratch:join(directory,'artifact-scratch'),hidden:[install,repository.root,config.oracleDirectory,config.sourceRoot],signal:abort.signal});
+    receipt.artifact=await verifyArtifact({root:delivered,sha:tip,seed:config.seed,python:config.oraclePython,oracleSource:context.oracleFile,oracleDigest:receipt.oracleDigest,scratch:join(directory,'artifact-scratch'),hidden:[install,repository.root,config.oracleDirectory,join(config.sourceRoot,'.graphyard')],signal:abort.signal});
     receipt.outcome='PASS';receipt.reason=fixture?'Controlled executor fixture passed isolated delivery and certification; this is not a real-agent rebuild.':'Independently verified CLI/API/UI built from the pushed final merge.';
     receipt.endedAt=new Date().toISOString();validateReceipt(receipt);
   } catch(error) {
@@ -185,7 +193,7 @@ async function configureMaster(c:RunContext,source:MasterConfig,producers:{id:st
   const master=masterConfigSchema.parse({version:1,url:c.plane.url,credentialFile,cliPath:source.cliPath,repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:source.hostId,masterAgentName:`hm-${prefix}-master`,herdrInstance:source.herdrInstance,herdrWorkspace:source.herdrWorkspace,
     workers:c.workers.map((w,i)=>({name:`hm-worker-${i}`,principal:w.id,agentName:`hm-${prefix}-w${i}`,mode:'launch',kind:source.workers.find(w=>w.mode==='launch')?.kind,credentialFile:join(c.install,`${w.id}.token`),accounts:source.workers.find(w=>w.mode==='launch')?.accounts,agentArgs:[],approvals:'auto',environment:{}})),
     reviewers:source.reviewers.map((r,i)=>({...r,agentName:`hm-${prefix}-r${i}`})),producers:source.producers.map((p,i)=>({...p,principal:producers[i].id,credentialFile:join(c.install,`${producers[i].id}.token`),agentName:`hm-${prefix}-p${i}`})),
-    environments:source.environments,operatorAgent:{id:'benchmark-master',credentialFile:join(c.install,'operator.token')},confinement:{maskPaths:[c.install,c.config.oracleDirectory,c.config.sourceRoot,...source.confinement?.maskPaths??[]]},
+    environments:source.environments,operatorAgent:{id:'benchmark-master',credentialFile:join(c.install,'operator.token')},confinement:{maskPaths:[c.install,c.config.oracleDirectory,c.config.sourceRoot,...(source.confinement?.maskPaths??[])]},
     run:{...source.run,intervalSeconds:5,worktreeRoot:join(c.directory,'worktrees'),launchConcurrency:c.config.mode==='team'?3:1,mergeWriter:{deployKeyFile:join(c.install,'unused-local-remote-key'),retrials:0}},
   });
   await mkdir(join(c.root,'.graphyard'),{recursive:true});await mkdir(join(c.directory,'worktrees'),{recursive:true});

@@ -1,3 +1,4 @@
+import { masterRunSchema } from '../../src/master/profiles.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
@@ -21,7 +22,7 @@ export async function isolatedRepository(directory:string) {
   await git(root,'add','.');
   await command('git',['-C',root,'commit','-q','-m','Frozen exact roots workbench v1 seed'],{env:{...process.env,GIT_AUTHOR_DATE:'2000-01-01T00:00:00Z',GIT_COMMITTER_DATE:'2000-01-01T00:00:00Z'}});
   await mkdir(origin);await git(origin,'init','--bare','-q','-b','main');await git(root,'remote','add','origin',origin);
-  const writer=mergeWriterReads({baseBranch:'main',repository:'scratch/hard-math',run:{mergeWriter:{deployKeyFile:join(directory,'unused')}}},root,defaultChildRun,{merger:async()=>'control-plane',record:async()=>{}});
+  const writer=mergeWriterReads({baseBranch:'main',repository:'scratch/hard-math',run:masterRunSchema.parse({mergeWriter:{deployKeyFile:join(directory,'unused')}})},root,defaultChildRun,{base:directory,record:async()=>{}});
   const startingCommit=await git(root,'rev-parse','HEAD');await writer.push(startingCommit,'0'.repeat(40));await writer.fetch();
   return {root,origin,startingCommit};
 }

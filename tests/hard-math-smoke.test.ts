@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { readFile, mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { generate, profile } from '../benchmarks/hard-math/generator.js';
@@ -43,7 +43,9 @@ test('integration:hard-math-smoke — routing retains eligible models, capabilit
 });
 
 async function runFixture(label:string,options:Parameters<typeof fixtureExecutor>[1]={}) {
-  const parent=await temporaryDirectory(`hard-math-${label}`);
+  const testRoot=join(process.cwd(),'.graphyard','hard-math-fixtures');
+  await mkdir(testRoot,{recursive:true});
+  const parent=await temporaryDirectory(`hard-math-${label}`,testRoot);
   return execute({id:`fixture-${label}`,mode:'team',profileVersion:'v1',seed:1,wallClockSeconds:180,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds:1000,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},c=>fixtureExecutor(c,options));
 }
 
