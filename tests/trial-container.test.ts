@@ -63,6 +63,54 @@ test('integration:worker-host-filesystem-isolation integration:worker-control-so
   } finally { await Promise.all(servers.map(server => new Promise<void>(resolve => server.close(() => resolve())))); }
 });
 
+test('integration:worker-host-filesystem-isolation — a real nested trial preserves linked checkout dependencies without binding onto their symlink', { timeout: 60_000 }, async () => {
+  const base = await temporaryDirectory('linked-trial', process.cwd());
+  const allocation = await temporaryDirectory('allocation', base);
+  const checkout = await temporaryDirectory('checkout', allocation);
+  const modules = await temporaryDirectory('installed-modules', base);
+  const linked = join(checkout, 'node_modules'), externalAlias = join(base, 'external-modules');
+  await writeFile(join(modules, 'fixture.cjs'), 'module.exports = "installed dependency";');
+  await symlink(modules, linked);
+  await symlink(modules, externalAlias);
+  const output = await defaultChildRun('node', ['--import', '/graphyard-harness/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', `
+    import assert from 'node:assert/strict';
+    import { spawnSync } from 'node:child_process';
+    import { trialContainerWords } from '/graphyard-harness/src/merge-writer/trial-container.ts';
+    const wrapper = trialContainerWords(${JSON.stringify([allocation, checkout])}, ${JSON.stringify([linked, externalAlias])});
+    assert.equal(wrapper[0], 'bwrap', 'exercise the real nested private-root backend');
+    // Reproduce the old composition first, retaining the exact child diagnostic.
+    const old = [...wrapper];
+    old.splice(old.indexOf('--remount-ro'), 0, '--ro-bind', ${JSON.stringify(modules)}, ${JSON.stringify(linked)});
+    const failed = spawnSync(old[0], [...old.slice(1), 'true'], { encoding: 'utf8' });
+    assert.notEqual(failed.status, 0);
+    assert.ok(failed.stderr.includes('Cannot mount on symlink destination ' + ${JSON.stringify(linked)}), failed.stderr);
+    const child = spawnSync(wrapper[0], [...wrapper.slice(1), 'node', '-e', ${JSON.stringify(`
+      const fs = require('node:fs'), assert = require('node:assert/strict');
+      assert.ok(fs.lstatSync(${JSON.stringify(linked)}).isSymbolicLink());
+      assert.equal(fs.readlinkSync(${JSON.stringify(linked)}), ${JSON.stringify(modules)});
+      for (const path of ${JSON.stringify([linked, modules, externalAlias])}) {
+        assert.equal(require(path + '/fixture.cjs'), 'installed dependency');
+        assert.throws(() => fs.writeFileSync(path + '/forbidden', 'bad'), { code: 'EROFS' });
+      }
+      assert.ok(fs.existsSync('/graphyard-harness/node_modules/tsx/package.json'));
+      assert.throws(() => fs.writeFileSync('/graphyard-harness/src/forbidden', 'bad'), { code: 'EROFS' });
+      assert.throws(() => fs.writeFileSync('/outside', 'bad'), { code: 'EROFS' });
+      fs.writeFileSync('edit', 'allowed');
+      fs.writeFileSync(${JSON.stringify(join(allocation, 'profile'))}, 'private');
+      fs.writeFileSync('/var/tmp/scratch', 'private');
+      console.log('linked nested trial passed');
+    `)}], { encoding: 'utf8', cwd: ${JSON.stringify(checkout)} });
+    assert.equal(child.status, 0, child.stdout + child.stderr);
+    console.log(child.stdout);
+  `], { cwd: checkout, wrapper: trialContainerWords([allocation, checkout], [linked, externalAlias]), timeoutMs: 50_000,
+    env: { ...trialEnvironment(), ...trialHomeVariables(allocation), PATH: '/usr/local/bin:/usr/bin:/bin' },
+  });
+  assert.match(output, /linked nested trial passed/);
+  assert.equal(await readFile(join(checkout, 'edit'), 'utf8'), 'allowed');
+  assert.equal(await readFile(join(allocation, 'profile'), 'utf8'), 'private');
+  assert.equal(existsSync(join(modules, 'forbidden')), false);
+});
+
 for (const signal of ['SIGTERM', 'SIGKILL'] as const) test(`integration:worker-home-deletion-regression — ${signal} stops trial background writers before scratch is reclaimed`, async () => {
   const allocation = await temporaryDirectory('cancel-trial', process.cwd());
   const beat = join(allocation, 'heartbeat');

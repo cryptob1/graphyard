@@ -1,6 +1,6 @@
 // The outer trial has a private filesystem, rather than a host Landlock domain:
 // its tests can establish their own mount namespaces before applying Landlock.
-import { chmodSync, existsSync, mkdtempSync, realpathSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkoutGitDirectory } from '../master/checkout-git.js';
@@ -105,13 +105,21 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
     // Nested trial tests have no Docker socket. Reconstruct a private root from
     // the container's toolchain and explicit allocations. No host-root bind or
     // filesystem Landlock domain is inherited, so further sandbox mounts work.
+    // A checkout bind already exposes its dependency symlink. Bubblewrap cannot
+    // bind onto that link; mount only its real tree. Aliases outside bound
+    // directories (including the harness) still need their explicit mounts.
+    const nestedMounts = mounts.filter(([source, target, readonly], index) => !readonly || source === target ||
+      !mounts.slice(0, index).some(([parentSource, parentTarget]) =>
+        target.startsWith(parentTarget + '/') &&
+        lstatSync(join(parentSource, target.slice(parentTarget.length))).isSymbolicLink() &&
+        realpathSync(join(parentSource, target.slice(parentTarget.length))) === source));
     return ['bwrap', '--die-with-parent', '--unshare-user', '--unshare-pid', '--unshare-net',
       '--tmpfs', '/', '--ro-bind', '/usr', '/usr', '--ro-bind', '/etc', '/etc',
       '--ro-bind', '/opt/graphyard-browsers', '/opt/graphyard-browsers',
       '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/sbin', '/sbin',
       '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
       '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/run',
-      ...mounts.flatMap(([source, target, readonly]) => [readonly ? '--ro-bind' : '--bind', source, target]),
+      ...nestedMounts.flatMap(([source, target, readonly]) => [readonly ? '--ro-bind' : '--bind', source, target]),
       '--remount-ro', '/', '--'];
   }
   return ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ image, mounts, network })];
