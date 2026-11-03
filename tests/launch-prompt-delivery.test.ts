@@ -89,7 +89,7 @@ class FakeHerdr {
   constructor(private options: { occupant?: (kind: string) => string | null } = {}) {}
   private start(pane: string, kind: string, args: string[], name: string | null) {
     const request = requestOf(kind, args);
-    const session = { name, kind: this.options.occupant?.(kind) ?? kind, request, role: roleOf(args), args, toolCalls: [] as string[], pasted: [] as string[], status: request ? 'working' : 'idle', screen: `${kind} ready\n` };
+    const session = { name, kind: this.options.occupant?.(kind) ?? kind, request, role: roleOf(args), args, toolCalls: [] as string[], pasted: [] as string[], status: request ? 'working' : 'idle', screen: `${({ claude: 'Claude Code', codex: 'Codex', opencode: 'Ask anything…', cursor: 'Cursor', gemini: 'Gemini' } as Record<string, string>)[kind] ?? kind} ready\n` };
     // The runtime acts on its own request at once: its first tool call, before any further input.
     if (request) { session.toolCalls.push(`first tool call on request: ${request.slice(0, 60)}`); session.screen += `❯ ${request}\n  Ran 1 shell command\n`; }
     this.sessions.set(pane, session);

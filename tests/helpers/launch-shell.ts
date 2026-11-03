@@ -70,7 +70,7 @@ export function startedAtOnce(args: string[], status = 'idle'): string | null {
   if (args[0] === 'pane' && args[1] === 'run') { typedKind = expandTypedCommand(args[3]).kind; return ''; }
   if (args[0] === 'pane' && args[1] === 'read') return `${({ claude: 'Claude Code', codex: 'Codex', opencode: 'Ask anything…', cursor: 'Cursor', gemini: 'Gemini' } as Record<string, string>)[typedKind] ?? typedKind} ready\n`;
   if (args[0] === 'agent' && args[1] === 'get') return json({ agent: { agent: typedKind, agent_status: status, pane_id: args[2] } });
-  if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: [{ argv: [typedKind] }] } });
+  if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: [{ argv: [typedKind === 'cursor' ? 'agent' : typedKind] }] } });
   if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: typedKind, agent_status: status, name: args[3] } });
   return null;
 }

@@ -3,6 +3,8 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { readOnlyMountWrapper } from '../../src/master/confinement.js';
+import { accountLaunch } from '../../src/master/environments.js';
+import { proposedRuntimes } from '../../src/model/registry.js';
 import { prepareConfinedGitPaths, startAgentSession } from '../../src/master/launch.js';
 import { runtimeLaunchProvider } from './runtime-launch-provider.js';
 import { runtimeLaunchTerminal } from './runtime-launch-terminal.js';
@@ -49,7 +51,14 @@ export async function runtimeLaunchSession(base: string, resolver: boolean) {
     const provider = await runtimeLaunchProvider();
     try {
       const account = await temporaryDirectory(`${role}-account`, base);
-      const selected = { PATH: `${dirname(installed)}:/usr/local/bin:/usr/bin:/bin`, MISE_NO_CONFIG: '1', CODEX_HOME: account };
+      const contract = { ...proposedRuntimes.find(runtime => runtime.name === 'codex')!.launch,
+        args: provider.args, environment: { PATH: `${dirname(installed)}:/usr/local/bin:/usr/bin:/bin`, MISE_NO_CONFIG: '1' } };
+      const launch = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: { PROFILE_ONLY: 'ignored' } }, {
+        name: `${role}-account`, kind: 'codex', home: account,
+        fleet: { runtime: 'codex', contract, model: 'test', modelId: null, session: `${role}-session`, role: role as 'worker' | 'reviewer', reason: 'fixture', revision: 7 },
+      });
+      const selected = launch.environment;
+      assert.equal(selected.PROFILE_ONLY, undefined, 'only the chosen registry runtime environment applies');
       const terminal = await runtimeLaunchTerminal(worktree, rc, { ...process.env, ...selected, TERM: 'dumb' });
       try {
         const options = { directory: worktree, coordinatorRoot: root, cwd: worktree, secretsBus: null,
@@ -63,7 +72,7 @@ export async function runtimeLaunchSession(base: string, resolver: boolean) {
       const recovered = await runtimeLaunchTerminal(worktree, rc, { ...process.env, ...selected, TERM: 'dumb' });
       try {
         const request = `First request for ${role}: preserve exact apostrophe ' and newline\nrequest-marker-${role}`;
-        const launched = await startAgentSession(`recovered-${role}`, 'codex', 'pty', provider.args, request, recovered.run, {
+        const launched = await startAgentSession(`recovered-${role}`, 'codex', 'pty', launch.args, request, recovered.run, {
           directory: worktree, coordinatorRoot: root, cwd: worktree, secretsBus: null, environment: selected,
           timeoutMs: 5000, ceilingMs: 10_000, pollMs: 25, keyringWarning: async () => null,
         });
@@ -72,8 +81,7 @@ export async function runtimeLaunchSession(base: string, resolver: boolean) {
         const actual = JSON.stringify(provider.requests.at(-1));
         assert.ok(actual.includes(JSON.stringify(request).slice(1, -1)), 'provider receives the exact initial request');
         provider.release();
-        await recovered.until(() => recovered.screen().includes('"type":"turn.completed"'), 'installed runtime completed response');
-        assert.ok(recovered.screen().includes('runtime-request-completed'));
+        await recovered.until(() => recovered.screen().includes('runtime-request-completed') && recovered.screen().trimEnd().endsWith('GY-PTY>'), 'installed runtime completed response and exited successfully');
         assert.equal(await readFile(join(home, 'sentinel'), 'utf8'), 'protected');
         console.log(`${role}: installed Codex received its first request and completed the provider response`);
       } finally { await recovered.close(); }

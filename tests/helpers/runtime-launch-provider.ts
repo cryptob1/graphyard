@@ -25,7 +25,7 @@ export async function runtimeLaunchProvider() {
   return {
     requests,
     release,
-    args: ['exec', '--skip-git-repo-check', '--json', '--sandbox', 'workspace-write',
+    args: ['--ask-for-approval', 'never', 'exec', '--skip-git-repo-check', '--sandbox', 'workspace-write',
       '-c', 'model_provider="launch_test"', '-c', 'model="launch-test"',
       '-c', 'model_providers.launch_test.name="Launch regression"',
       '-c', `model_providers.launch_test.base_url="http://localhost:${port}/v1"`,

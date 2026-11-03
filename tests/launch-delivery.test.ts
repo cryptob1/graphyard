@@ -120,7 +120,7 @@ class FakePane {
     const json = (result: unknown) => JSON.stringify({ result });
     const shown = this.timeline(this.now - clock);
     if (args[0] === 'pane' && args[1] === 'run') { this.typed = args[3]; return ''; }
-    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: shown.agent ? [{ argv: [shown.agent.agent === 'cursor' ? 'agent' : shown.agent.agent] }] : [] } });
+    if (args[0] === 'pane' && args[1] === 'process-info') return shown.agent ? json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: [{ argv: [shown.agent.agent === 'cursor' ? 'agent' : shown.agent.agent] }] } }) : json({});
     if (args[0] === 'pane' && args[1] === 'read') return shown.screen ?? '';
     if (args[0] === 'agent' && args[1] === 'get') return shown.agent ? json({ agent: { pane_id: args[2], ...shown.agent } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
     if (args[0] === 'agent' && args[1] === 'rename') { this.renamed = args[3]; return json({ agent: shown.agent }); }
@@ -173,7 +173,7 @@ test('unit:launch-command-bounded — the typed launch command line is short and
     // The other contracts reference the same file: OpenCode through --prompt, Gemini and Qwen through --prompt-interactive, Copilot through --interactive, the rest positionally.
     for (const [kind, expected] of [['opencode', '--prompt "$(cat "$GY.request")"'], ['codex', '"$(cat "$GY.request")"'], ['cursor', '"$(cat "$GY.request")"'], ['muse', '"$(cat "$GY.request")"'], ['pi', '"$(cat "$GY.request")"'],
       ['gemini', '--prompt-interactive "$(cat "$GY.request")"'], ['qwen', '--prompt-interactive "$(cat "$GY.request")"'], ['copilot', '--interactive "$(cat "$GY.request")"']] as const) {
-      const other = new FakePane(() => ({ agent: { agent: kind, agent_status: 'working' } }));
+      const other = new FakePane(() => ({ agent: { agent: kind, agent_status: 'working' }, screen: `${({ opencode: 'Ask anything…', codex: 'Codex', cursor: 'Cursor', gemini: 'Gemini' } as Record<string, string>)[kind] ?? kind} ready` }));
       const result = await startAgentSession(`${kind}-1`, kind, 'w1V:pR6', ['--flag'], request, other.run, { directory, ...other.bounds() });
       assert.ok(other.typed!.endsWith(` ${kind === 'cursor' ? 'agent' : kind} --flag ${expected}`), `${kind}: ${other.typed}`); assert.equal(result.delivery, 'request'); assert.equal(result.files.role, null);
       assert.ok(!other.calls.some(call => call[0] === 'agent' && call[1] === 'prompt'), `${kind}: nothing is pasted`);

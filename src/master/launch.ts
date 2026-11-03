@@ -454,7 +454,10 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // polled again until a read shows its screen, never taken as ready without one.
   if (screen === null && agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'starting', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status} but its pane could not be read, so a consent prompt is not ruled out`, line };
   const showing = screen !== null && !!runtimeScreens[kind]?.test(screen);
-  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '') && (showing || holder === 'runtime')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
+  // A wrapper/supervisor's argv can name the runtime before it executes it. For
+  // known runtimes require their own screen as well; unknown runtimes have only
+  // the foreground-process contract to judge by.
+  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '') && (showing || !runtimeScreens[kind] && holder === 'runtime')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
   // Blocked on a dialog nothing above recognises: the refusal names what the dialog asked (GY-1561).
   const dialog = agent?.agent === kind && agent.agent_status === 'blocked' ? screenDialog(screen) : null;
   if (agent?.agent === kind && agent.agent_status === 'blocked') return { state: 'blocked', agent, detail: dialog ? `Herdr reports it blocked on a dialog the launcher does not recognise: "${dialog}"` : 'Herdr reports it blocked', line };

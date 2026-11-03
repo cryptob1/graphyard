@@ -25,6 +25,15 @@ test('integration:runtime-launch-real-progress — named idle/working shells and
     }), (error: unknown) => error instanceof SessionStartError && error.startCase === (holder === 'shell' ? 'never started' : 'blocked'));
     assert.ok(now <= 1000, 'refused at the existing start bound, never the attempt lifetime');
   }
+  const setup = (_command: string, args: string[]) => {
+    const json = (result: unknown) => JSON.stringify({ result });
+    if (args[0] === 'agent') return json({ agent: { agent: 'codex', agent_status: 'working' } });
+    if (args[1] === 'read') return '$ codex\n';
+    if (args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200,
+      foreground_processes: [{ argv: ['bwrap', '--', 'codex'] }] } });
+    throw new Error(`Unexpected ${args}`);
+  };
+  assert.equal((await observeStart('pane', 'codex', 'codex', setup)).state, 'starting', 'the runtime named in a wrapper argv is insufficient without its screen');
 });
 
 test('integration:runtime-launch-real-progress — real PTY worker/reviewer requests and systemd resolver failure/recovery keep the sandbox', { timeout: 90_000 }, async () => {
