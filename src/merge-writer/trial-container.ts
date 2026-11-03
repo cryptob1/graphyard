@@ -111,7 +111,7 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
     const nestedMounts = mounts.filter(([source, target, readonly], index) => !readonly || source === target ||
       !mounts.slice(0, index).some(([parentSource, parentTarget]) =>
         target.startsWith(parentTarget + '/') &&
-        lstatSync(join(parentSource, target.slice(parentTarget.length))).isSymbolicLink() &&
+        lstatSync(join(parentSource, target.slice(parentTarget.length)), { throwIfNoEntry: false })?.isSymbolicLink() &&
         realpathSync(join(parentSource, target.slice(parentTarget.length))) === source));
     return ['bwrap', '--die-with-parent', '--unshare-user', '--unshare-pid', '--unshare-net',
       '--tmpfs', '/', '--ro-bind', '/usr', '/usr', '--ro-bind', '/etc', '/etc',
