@@ -135,7 +135,8 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
 }
 
 /**
- * GY-2997: the trial child's home and caches belong to its allocation. Preserve
+ * GY-2997: the trial child's home and caches belong to its allocation. The
+ * installed Chromium lives in the read-only image, while its profiles use scratch. Preserve
  * explicit host mise resolution for launcher tooling; candidate commands use the
  * private container's toolchain without mounting the host home.
  */
@@ -150,7 +151,7 @@ export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = proce
     if (host[name] !== undefined) shared[name] = host[name];
     else if (directory) shared[name] = join(directory, 'mise');
   }
-  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
+  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: '/opt/graphyard-browsers', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
 export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
@@ -639,9 +640,15 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
     const summary = failingSummary(output), exit = summary ? /\n(\[exit [^\n]*\])\s*$/.exec(output)?.[1] : undefined;
     const end = exit ? `\n${exit}` : '', room = Math.max(0, share - command.length - cut.length - end.length);
     if (summary && summary.length <= room) return `${command}${cut}${summary}${end}`;
-    // The cut output starts at a whole line after `trialCutLine`, so a summary whose heading was cut still names its tests.
-    const kept = (summary ?? output).slice(-room), whole = kept.slice(kept.indexOf('\n') + 1), entry = summary ? whole.search(/^test at /m) : -1;
-    return `${command}${cut}${entry > 0 ? whole.slice(entry) : whole}${end}`;
+    // Keep each test's name and first assertion/child error, before its long stack.
+    // Taking the end of the summary loses exactly the asset-startup diagnosis we need.
+    if (summary) {
+      const entries = summary.replace(ansiEscape, '').split(/(?=^test at )/m).filter(entry => /^test at /m.test(entry));
+      const perEntry = Math.floor((room - Math.max(0, entries.length - 1)) / Math.max(1, entries.length));
+      return `${command}${cut}${entries.map(entry => entry.slice(0, Math.max(0, perEntry)).trimEnd()).join('\n')}${end}`;
+    }
+    const kept = output.slice(-room), whole = kept.slice(kept.indexOf('\n') + 1);
+    return `${command}${cut}${whole}${end}`;
   }).join('\n').slice(-length);
 }
 const testFile = /tests\/[\w./-]+\.test\.ts/g;

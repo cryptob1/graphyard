@@ -31,7 +31,7 @@ test('unit:trial-finds-host-toolchain — mise directories follow host HOME/XDG 
   assert.equal(defaults.HOME, '/fresh');
   assert.equal(defaults.XDG_CONFIG_HOME, '/fresh/.config');
   assert.equal(defaults.npm_config_cache, '/fresh/.npm');
-  assert.equal(defaults.PLAYWRIGHT_BROWSERS_PATH, '/fresh/.cache/ms-playwright');
+  assert.equal(defaults.PLAYWRIGHT_BROWSERS_PATH, '/opt/graphyard-browsers');
 });
 
 test('unit:trial-finds-host-toolchain — private container toolchain builds with host shims and credentials absent', async () => {
