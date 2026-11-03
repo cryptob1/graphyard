@@ -461,8 +461,10 @@ async function dispatchStep(cycle: Cycle) {
     if (!key.startsWith('spec-check:') || !action.pane) continue;
     const item = snapshot.work.find(entry => entry.key === action.work && entry.stage !== 'done');
     if (item && Date.parse(snapshot.now) < Date.parse(action.at)) continue;
-    const ended = item && specCheckLaunchLive(item, clock) ? await specCheckEnded(cycle, action.pane) : null;
-    if (item && specCheckLaunchLive(item, clock) && !ended) continue;
+    // A stale or pre-binding action closes only its own pane; it cannot end today's launch.
+    const current = item && action.specCheckLaunch === item.specCheckLaunch?.id && !!action.specCheckLaunch;
+    const ended = current && specCheckLaunchLive(item, clock) ? await specCheckEnded(cycle, action.pane) : null;
+    if (current && specCheckLaunchLive(item, clock) && !ended) continue;
     try {
       await Promise.resolve(effects.closeSession(action.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
       if (ended) await record(state, specCheckEndedKey(item!), { kind: 'attention', work: item!.key, principal: null, state: 'failed', attempts: 1, cycle: state.cycle,
@@ -528,11 +530,11 @@ async function specCheckEnded(cycle: Cycle, pane: string): Promise<string | null
 async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: DaemonAction[]) {
   const { state, effects, now } = cycle;
   const attempts = (state.actions[key]?.attempts ?? 0) + 1;
-  const entry = (outcome: DaemonAction['state'], detail: string, pane?: string | null) => record(state, key, { kind: 'review', work: item.key, principal: null, state: outcome, detail, attempts, cycle: state.cycle, ...(pane ? { pane } : {}) }, now(), effects.persist);
+  const entry = (outcome: DaemonAction['state'], detail: string, pane?: string | null, specCheckLaunch?: string) => record(state, key, { kind: 'review', work: item.key, principal: null, state: outcome, detail, attempts, cycle: state.cycle, ...(pane ? { pane, specCheckLaunch } : {}) }, now(), effects.persist);
   await entry('started', `Launching ${item.key}'s spec check`);
   try {
     const launched = await effects.launchSpecCheck!(item);
-    sink.push(await entry('done', `Launched ${item.key}'s spec check: a fresh-context reviewer restates the item and names its gaps before a worker starts`, launched?.pane));
+    sink.push(await entry('done', `Launched ${item.key}'s spec check: a fresh-context reviewer restates the item and names its gaps before a worker starts`, launched?.pane, launched?.launch));
   } catch (error) {
     sink.push(await entry('failed', `Spec check launch of ${item.key} failed: ${message(error)}; it is retried next cycle`));
   }

@@ -32,6 +32,8 @@ export const daemonActionSchema = z.object({
   owed: z.object({ work: z.object({ id: z.string(), key: z.string() }).strict(), handle: z.record(z.string(), z.unknown()) }).strict().optional(),
   /** Set on a spec-check launch (GY-2992): the session's pane, which the loop closes once the report lands or the launch expires. */
   pane: z.string().max(200).optional(),
+  /** The registered spec-check launch this pane answers; absent on older cursors. */
+  specCheckLaunch: z.string().max(200).optional(),
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 

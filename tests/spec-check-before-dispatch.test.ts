@@ -69,9 +69,10 @@ async function drive(item: Work, verdict: SpecVerdict | null, others: Work[] = [
       launchSpecCheck: async checked => {
         checks.push(checked.key); launches += 1;
         checked.specCheckLaunch = { id: `launch-${launches}`, reviewer: 'spec-checker', requester: 'master', tokenHash: 'f'.repeat(64), at, expiresAt: new Date(clock + 3_600_000).toISOString(), policyRevision: checked.policyRevision };
+        const launch = checked.specCheckLaunch.id;
         if (verdict) post(checked, verdict);
         panes.add(`pane-${launches}`);
-        return { pane: `pane-${launches}` };
+        return { pane: `pane-${launches}`, launch };
       },
       persist: async () => {},
     };
