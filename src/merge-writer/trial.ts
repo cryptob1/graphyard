@@ -645,7 +645,17 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
     if (summary) {
       const entries = summary.replace(ansiEscape, '').split(/(?=^test at )/m).filter(entry => /^test at /m.test(entry));
       const perEntry = Math.floor((room - Math.max(0, entries.length - 1)) / Math.max(1, entries.length));
-      return `${command}${cut}${entries.map(entry => entry.slice(0, Math.max(0, perEntry)).trimEnd()).join('\n')}${end}`;
+      return `${command}${cut}${entries.map(entry => {
+        // node's spec reporter prints ChildProcessError's entire invocation before its
+        // stderr, then repeats the arguments in inspected properties after the stack.
+        // Read the stderr property independently so inline scripts cannot consume the share.
+        const childAt = entry.search(/\n  (?:ChildProcessError|Error \[ChildProcessError\]):/);
+        const stderr = /^    stderr: (?!'',?$)([\s\S]*?)(?=^    \w+:|^  }\s*$)/m.exec(entry)?.[1];
+        const useful = childAt >= 0 && stderr
+          ? `${entry.slice(0, childAt)}\n  ChildProcessError stderr: ${stderr.trim()}`
+          : entry;
+        return useful.slice(0, Math.max(0, perEntry)).trimEnd();
+      }).join('\n')}${end}`;
     }
     const errorAt = output.search(/^.*(?:Error(?: \[[^\]]+\])?:|error:|bwrap:).*$/m);
     if (errorAt >= 0) {

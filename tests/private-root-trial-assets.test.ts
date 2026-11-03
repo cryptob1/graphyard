@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { defaultChildRun } from '../src/child-runner.js';
+import { ChildProcessError, defaultChildRun } from '../src/child-runner.js';
 import { trialEnvironment, trialHomeVariables, failureTail } from '../src/merge-writer/trial.js';
 import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -94,4 +94,46 @@ test('integration:private-root-trial-assets — a raw child startup error surviv
   assert.ok(diagnostic.length <= 1000);
   assert.match(diagnostic, /AssertionError \[ERR_ASSERTION\]: installed browser path differs/);
   assert.match(diagnostic, /\[exit status 1\]/);
+});
+
+test('integration:private-root-trial-assets — multiple long child commands retain each stderr and assertion in bounded reporter output', async () => {
+  const directory = await temporaryDirectory('failure-reporter');
+  const fixture = join(directory, 'failures.mjs');
+  const runner = new URL('../src/child-runner.ts', import.meta.url).href;
+  await writeFile(fixture, `
+    import { test } from 'node:test';
+    import assert from 'node:assert/strict';
+    import { defaultChildRun } from ${JSON.stringify(runner)};
+    for (const [name, message] of [
+      ['installed browser', 'browserType.launch: Executable does not exist in allocated-home cache'],
+      ['native Postgres', 'initdb: error: could not load library libicui18n.so.77']
+    ]) test(name, async () => {
+      const source = '// long inline asset setup\\n'.repeat(200) +
+        'process.stderr.write(' + JSON.stringify(message + '\\n') + '); process.exit(1);';
+      await defaultChildRun(process.execPath, ['-e', source]);
+    });
+    test('owned scratch assertion', () => {
+      assert.equal('wrong owner', 'allocated owner', 'scratch must belong to the allocation');
+    });
+  `);
+  let output = '';
+  await assert.rejects(defaultChildRun(process.execPath, ['--import', 'tsx', '--test', '--test-reporter=spec', fixture], {
+    env: { ...process.env, NODE_TEST_CONTEXT: undefined, FORCE_COLOR: '0', NODE_DISABLE_COLORS: '1' },
+  }), (error: unknown) => {
+    assert.ok(error instanceof ChildProcessError);
+    assert.equal(error.status, 1);
+    output = error.stdout;
+    return true;
+  });
+  assert.ok(output.length > 20_000, 'the real reporter includes long invocations and inspected args');
+  for (const outputs of [[output], [output, output]]) {
+    const diagnostic = failureTail(outputs);
+    assert.ok(diagnostic.length <= 4000);
+    assert.equal(diagnostic.match(/test at /g)?.length, 3 * outputs.length);
+    for (const name of ['installed browser', 'native Postgres', 'owned scratch assertion']) assert.ok(diagnostic.includes(name), name);
+    for (const message of ['browserType.launch: Executable does not exist', 'initdb: error: could not load library',
+      'scratch must belong to the allocation']) {
+      assert.equal(diagnostic.split(message).length - 1, outputs.length, message);
+    }
+  }
 });
