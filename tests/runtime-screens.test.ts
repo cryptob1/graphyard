@@ -105,7 +105,7 @@ class FallbackPane {
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     const kind = this.kinds.at(-1);
     if (!kind) return json({});
-    if (args[0] === 'pane' && args[1] === 'read') return this.healthy.has(kind) ? `${kind} ready\n` : `vish@host ~/code/project ❯ ${this.typed}\n`;
+    if (args[0] === 'pane' && args[1] === 'read') return this.healthy.has(kind) ? `${kind === 'claude' ? 'Claude Code' : 'Ask anything…'} ready\n` : `vish@host ~/code/project ❯ ${this.typed}\n`;
     if (args[0] === 'agent' && args[1] === 'get') return this.healthy.has(kind) ? json({ agent: { agent: kind, agent_status: 'idle', pane_id: args[2] } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
     if (args[0] === 'agent' && args[1] === 'rename') { this.renamed = args[3]; return json({ agent: { agent: kind, name: args[3] } }); }
     return json({});

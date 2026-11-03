@@ -106,6 +106,7 @@ class FakeHerdr {
       this.start(args[2], launch.kind, launch.args, null);
       return '';
     }
+    if (args[0] === 'pane' && args[1] === 'process-info') { const session = this.find(args[3]); return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: session ? [{ argv: [session.kind] }] : [] } }); }
     if (args[0] === 'pane' && args[1] === 'read') return this.sessions.get(args[2])?.screen ?? '';
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     if (args[0] === 'pane' && args[1] === 'close') { this.sessions.delete(args[2]); return json({}); }

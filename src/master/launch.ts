@@ -250,7 +250,7 @@ export function headlessConfinementWrapper(root: string, cwd: string | undefined
 /** The command that starts a runtime of `kind`: its recipe's `program` (Cursor's `agent`, GY-976), otherwise the kind's own name. */
 export const launchProgram = (kind: string) => nonInteractiveLaunch[kind]?.program ?? kind;
 /** The command line typed into the pane: the stem binding, then `prefix` (a supervisor), `wrap` (the coordinator confinement), the runtime, its arguments and the file references. */
-export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = []) {
+export function launchCommand(kind: string, args: string[], files: LaunchFiles, prefix: string[] = [], wrap: readonly string[] = [], environment: Record<string, string> = {}) {
   if (wrap.length) args = confinedRuntimeArgs(kind, args);
   const role = files.role ? launchRoleContracts[kind]?.(roleReference) : undefined;
   const own = launchRequestContracts[kind];
@@ -258,7 +258,9 @@ export function launchCommand(kind: string, args: string[], files: LaunchFiles, 
   // A registry runtime's request goes where its contract places `{request}`; a built-in one drops the marker.
   const placed = args.map(argument => argument !== requestPlaceholder ? shellWord(argument) : files.request && !own ? requestReference : null).filter((word): word is string => word !== null);
   const binding = role || request || placed.includes(requestReference) ? [`${launchVariable}=${shellWord(files.stem)};`] : [];
-  const runtime = [...prefix.map(shellWord), ...wrap.map(shellWord), launchProgram(kind), ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
+  // Reapply the selected environment after interactive shell startup (which can reset PATH).
+  const selected = Object.entries(environment).map(([key, value]) => shellWord(`${key}=${value}`));
+  const runtime = [...(selected.length ? ['/usr/bin/env', ...selected] : []), ...prefix.map(shellWord), ...wrap.map(shellWord), launchProgram(kind), ...placed, ...(role ? [role] : []), ...(request ? [request] : [])].join(' ');
   let command = [...binding, runtime].join(' ');
   // The runtime's flags can name long paths (a producer's checkout and the shared Git directory as
   // Codex writable roots), so a line over the bound moves them into `STEM.launch`, beside the other
@@ -424,7 +426,6 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // A runtime Herdr sees `working` is at work on its request. Any other state is read off the
   // screen too: a runtime stopped on a first-run consent prompt is `idle` to Herdr, just as a
   // started one is, and has not read its request (GY-130).
-  if (agent?.agent === kind && agent.agent_status === 'working' && readyStates.includes('working')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime working`, line: '' };
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
   let foreground: Awaited<ReturnType<typeof paneForeground>> | undefined;
   const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run, launchProgram(kind))));
@@ -433,6 +434,17 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // command not found — and nothing will start in that pane however long the bound (GY-976).
   const printed = outputAfterCommand(screen, command);
   if (printed && await readForeground() === 'shell') return { state: 'exited', agent, detail: `the ${kind} runtime exited back to the shell before it was ready`, line: printed.join(' | ') };
+  // Tool-manager trust happens before the agent exists. Never hold it as agent consent,
+  // grant global trust, or let a name assigned to this shell consume a worker lease.
+  if (/mise[^\n]*trust|config files[^\n]*not trusted/i.test(screen ?? '')) return {
+    state: 'blocked', agent, line: (screen ?? '').trim().slice(-1000),
+    detail: 'mise stopped the launch before the agent started; select the installed runtime PATH and MISE_NO_CONFIG=1 in the registry runtime environment',
+  };
+  const holder = await readForeground();
+  if (agent?.agent === kind && (holder === 'shell' || holder && typeof holder === 'object')) return {
+    state: 'absent', agent: null, line,
+    detail: holder === 'shell' ? 'the pane shell is still in the foreground; no agent runtime began' : `the pane foreground is held by ${holder.other}, not the agent runtime`,
+  };
   const prompt = detectConsentPrompt(screen);
   if (prompt) return { state: 'consent', agent, detail: `the ${kind} runtime is awaiting consent on a ${prompt.kind} prompt`, line, prompt };
   // A runtime stopped on its own settings warning has not started either, whatever Herdr reports,
@@ -442,8 +454,8 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // An unread pane rules nothing out: an idle runtime may be sitting on a consent prompt, so it is
   // polled again until a read shows its screen, never taken as ready without one.
   if (screen === null && agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'starting', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status} but its pane could not be read, so a consent prompt is not ruled out`, line };
-  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
   const showing = screen !== null && !!runtimeScreens[kind]?.test(screen);
+  if (agent?.agent === kind && readyStates.includes(agent.agent_status ?? '') && (showing || holder === 'runtime')) return { state: 'ready', agent, detail: `Herdr reports the ${kind} runtime ${agent.agent_status}`, line: '' };
   // Blocked on a dialog nothing above recognises: the refusal names what the dialog asked (GY-1561).
   const dialog = agent?.agent === kind && agent.agent_status === 'blocked' ? screenDialog(screen) : null;
   if (agent?.agent === kind && agent.agent_status === 'blocked') return { state: 'blocked', agent, detail: dialog ? `Herdr reports it blocked on a dialog the launcher does not recognise: "${dialog}"` : 'Herdr reports it blocked', line };
@@ -570,7 +582,7 @@ export async function startAgentSession(name: string, kind: string, pane: string
   const carried = withAutonomyContract(!!launchRoleContracts[kind], { request: text, role: options.role });
   text = carried.request;
   const files = writeLaunchFiles(options.directory, name, { role: carried.role, request: text });
-  const command = launchCommand(kind, args, files, options.prefix, confinement?.wrapper ?? []);
+  const command = launchCommand(kind, args, files, options.prefix, confinement?.wrapper ?? [], options.environment);
   // The trust record is read back once more immediately before the runtime starts (GY-1306): the
   // account's config is shared with its running sessions, and one that rewrote it since the trust
   // step dropped the record, so the launch is refused naming that config rather than started into

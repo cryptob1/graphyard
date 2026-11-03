@@ -120,6 +120,7 @@ class FakePane {
     const json = (result: unknown) => JSON.stringify({ result });
     const shown = this.timeline(this.now - clock);
     if (args[0] === 'pane' && args[1] === 'run') { this.typed = args[3]; return ''; }
+    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200, foreground_processes: shown.agent ? [{ argv: [shown.agent.agent === 'cursor' ? 'agent' : shown.agent.agent] }] : [] } });
     if (args[0] === 'pane' && args[1] === 'read') return shown.screen ?? '';
     if (args[0] === 'agent' && args[1] === 'get') return shown.agent ? json({ agent: { pane_id: args[2], ...shown.agent } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
     if (args[0] === 'agent' && args[1] === 'rename') { this.renamed = args[3]; return json({ agent: shown.agent }); }
