@@ -423,9 +423,8 @@ export async function shellInForeground(pane: string, run?: ChildRun) {
 export async function observeStart(pane: string, kind: string, command: string, run?: ChildRun, readyStates = startedStates): Promise<StartObservation> {
   let agent: HerdrAgent | null = null;
   try { const raw = await herdrJson(['agent', 'get', pane], run); agent = raw?.agent ?? raw ?? null; } catch { agent = null; }
-  // A runtime Herdr sees `working` is at work on its request. Any other state is read off the
-  // screen too: a runtime stopped on a first-run consent prompt is `idle` to Herdr, just as a
-  // started one is, and has not read its request (GY-130).
+  // Herdr can assign an agent name to a shell or pre-runtime wrapper. Read its
+  // screen and foreground before accepting even a reported working state.
   const screen = await readPaneScreen(pane, run), last = paneLastLine(screen, Infinity), line = paneLastLine(screen);
   let foreground: Awaited<ReturnType<typeof paneForeground>> | undefined;
   const readForeground = async () => (foreground !== undefined ? foreground : (foreground = await paneForeground(pane, run, launchProgram(kind))));
@@ -436,7 +435,7 @@ export async function observeStart(pane: string, kind: string, command: string, 
   if (printed && await readForeground() === 'shell') return { state: 'exited', agent, detail: `the ${kind} runtime exited back to the shell before it was ready`, line: printed.join(' | ') };
   // Tool-manager trust happens before the agent exists. Never hold it as agent consent,
   // grant global trust, or let a name assigned to this shell consume a worker lease.
-  if (/mise[^\n]*trust|config files[^\n]*not trusted/i.test(screen ?? '')) return {
+  if (/^\s*mise(?:\s+(?:ERROR|WARN))?[^\n]*\b(?:not trusted|trust config|config[^\n]*trust)/im.test(screen ?? '')) return {
     state: 'blocked', agent, line: (screen ?? '').trim().slice(-1000),
     detail: 'mise stopped the launch before the agent started; select the installed runtime PATH and MISE_NO_CONFIG=1 in the registry runtime environment',
   };

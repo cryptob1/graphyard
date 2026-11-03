@@ -243,3 +243,42 @@ test('unit:start-failure-fallback-visible — a worker role the agent registry d
     assert.equal((await readAccountStartFailures(master))['opencode-a'].failures, 1);
   } finally { await cleanup(); }
 });
+
+test('integration:runtime-launch-real-progress — an external trust refusal closes its pane and releases the exact claimed epoch and registry capacity', async () => {
+  const { root, master, profile, cleanup } = await installed();
+  try {
+    const host = master.hostId ?? 'unknown-host';
+    const registry = applyRegistryMutation(emptyRegistry(), 'apply', {
+      runtimes: proposedRuntimes.filter(runtime => runtime.name === 'opencode'),
+      models: [{ name: 'glm', id: 'zai-coding-plan/glm-5' }],
+      accounts: [{ name: 'opencode-a', runtime: 'opencode', model: 'glm', credential: { host, home: null } }],
+      roles: [{ name: 'worker', accounts: ['opencode-a'], concurrency: 1 }], reason: 'fixture',
+    }, { actor: 'operator', at }).registry;
+    const ended: string[] = [], released: number[] = [];
+    const session: FleetSession = { id: 'trust-session', role: 'worker', account: 'opencode-a', runtime: 'opencode', model: 'glm', host, work: item.key,
+      principal: profile.principal, selectedAt: at, selectedBy: 'master', reason: 'fixture', skipped: [], endedAt: null, endReason: null };
+    const client: FleetClient = {
+      document: async () => registry,
+      select: async () => ({ selected: true, reason: 'fixture', skipped: [], session, account: registry.accounts[0], runtime: registry.runtimes[0], model: registry.models[0], revision: registry.revision }),
+      end: async (_id, reason) => { ended.push(reason); session.endedAt = new Date().toISOString(); session.endReason = reason; },
+    };
+    const pane = new FallbackPane();
+    const probe: FleetProbe = { registry: client, quota: false, cacheMs: 0 };
+    const run = (program: string, args: string[]) => args[0] === 'pane' && args[1] === 'read'
+      ? 'mise ERROR config files in /home/operator are not trusted.\nTrust them? [y/N]' : pane.run(program, args);
+    let claims = 0;
+    await assert.rejects(dispatchWork(root, item, { ...profile, accounts: undefined }, [], run, [item],
+      async () => { claims++; return { epoch: 7, path: join(root, 'assigned-7'), base: 'c'.repeat(40) }; },
+      async (_root, _key, epoch) => { released.push(epoch); }, 5000, new Date().toISOString(),
+      { start: pane.bounds(), probe }),
+    /mise stopped the launch before the agent started/);
+    assert.equal(claims, 1, 'no attempt-lifetime retry loop');
+    assert.deepEqual(released, [7], 'release the claimed epoch only');
+    assert.equal(ended.length, 1, 'the registry concurrency slot is returned once');
+    assert.ok(session.endedAt);
+    assert.match(ended[0], /mise.*installed runtime PATH/);
+    assert.ok(pane.calls.some(args => args[0] === 'pane' && args[1] === 'close'), 'the failed pane closes');
+    assert.equal(pane.renamed, null, 'the named shell was never adopted');
+    assert.equal(pane.now, clock, 'external trust refuses immediately');
+  } finally { await cleanup(); }
+});

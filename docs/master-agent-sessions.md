@@ -69,7 +69,11 @@ claude … --settings …/.graphyard/harness/ROLE.json --append-system-prompt-fi
 
 #### The start bound reads the pane
 
-**Ready**: Herdr active without prompt, or banner shown (`the claude runtime is on screen while Herdr reports it unknown`). Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line, never Herdr's own `agent_not_found`.
+**Ready**: Herdr identifies the runtime with its screen or foreground process, without a prompt. An assigned agent name on an idle or working shell is insufficient. Ready within **60 seconds** (`run.launchStartSeconds`) starts; starting gets **120 seconds** (`started.extended`). Refusals quote case and pane's last non-empty line, never Herdr's own `agent_not_found`.
+
+The typed command reapplies the selected registry environment after shell startup, including `PATH` and mise overrides. Select the installed runtime directory in `PATH` with `MISE_NO_CONFIG=1` when shell activation otherwise selects a mise shim. A mise configuration trust dialog fails the launch immediately with that repair named; it is never granted trust or held as agent consent. Existing failed-launch cleanup closes the pane and releases its lease epoch and registry capacity. The normal acknowledgement window still requires request activity after start.
+
+When `/etc/resolv.conf` points into `/run`, the sandbox restores only its canonical public resolver file read-only after masking `/run`. Other host runtime files, control sockets and operator-home writes remain isolated. `e2e:runtime-launch-real-progress` reproduces failed and repaired `getent ahosts`, a wrapper trust dialog, and real installed-Codex worker/reviewer first requests and completed responses through PTYs against a deterministic local provider, with Landlock intact and no provider credentials.
 
 #### First-run consent prompts
 
