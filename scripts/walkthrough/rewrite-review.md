@@ -2,7 +2,7 @@
 
 Reviewed README and every Markdown file under docs, including protocol. Generated indexes (`docs/README.md` and `docs/protocol.md`) were regenerated, not hand-edited. Counts use Python `len(text.split())`, including code and metadata, against synced base `73ca5f5cb1aa`.
 
-The handwritten set went from **13,930 to 11,302 words (18.9% shorter)**, including the new rendering guide. This report is outside that guide count. Counts include shipped documentation through the current base.
+The handwritten set went from **13,930 to 11,310 words (18.8% shorter)**, including the new rendering guide. This report is outside that guide count. Counts include shipped documentation through the current base.
 
 | Reviewed file | Before | After |
 | --- | ---: | ---: |
@@ -23,30 +23,47 @@ The handwritten set went from **13,930 to 11,302 words (18.9% shorter)**, includ
 | `docs/protocol/work-commands.md` | 696 | 619 |
 | `docs/setup-from-zero.md` | 521 | 398 |
 | `docs/validation.md` | 1327 | 838 |
-| `docs/walkthrough.md` | 0 | 362 |
+| `docs/walkthrough.md` | 0 | 370 |
 
 Setup-from-zero is the setup checklist; install owns provider/key steps; onboarding owns fleet setup. Delivery owns trial/revert behavior, deployment owns serving, and sessions owns runtime recovery. Other guides link there. Removed issue narration, the old brief word-count table and references to deleted docs tests. Existing section anchors remain.
 
 Checked live source for dispatch, trial acceptance, supervision and serving: master dispatch accepts eligible system-driven items; control-plane acceptance counts trial proofs rather than producer evidence; the watchdog detects incomplete cycles; the deploy service serves main. Epoch 3 synced merged GY-3047 (`1e80c20737cf`) and replaced the temporary pending-candidate text with implemented changed-cause wakes and the bounded heartbeat. No domain behavior or requirement changed.
 
-## Current validation and rework (epoch 34)
+## Current validation and rework (epoch 88)
 
-The saved epoch-18 head `4065cdef87db` was already HEAD; no cherry-pick was needed. `graphyard sync GY-3048` confirms the branch contains base `73ca5f5cb1aa`. Earlier reconciliation retains shipped reviewer tokens, the continuing master conversation, the E2E rule and filesystem isolation.
+The saved epoch-18 commit `4065cdef87db` is already an ancestor of this branch. Sync confirms base `73ca5f5cb1aa`. The inherited changes preserve shipped filesystem isolation, reviewer credentials and continuing master conversations. Earlier rework restored the reviewer's four-session default and selected the trial image's bundled Chromium before importing Playwright.
 
-The trial refusal named twenty test files. Reproducing it found two defects in this change:
+This round makes the existing-cache export explicit in the rendering guide. Verification initially failed without that cache; with `WALKTHROUGH_BROWSERS_PATH=/home/vish/.cache/ms-playwright`, the documentation proof passes and its base exercise fails as expected. It renders thirteen frames and checks chapters, scrubbing and playback. No dependency install, runtime change or gate waiver was needed.
 
-- The rewrite omitted the automatic reviewer's concurrency. Restored `run.reviewerProfile`'s four-session default, explicit overrides and other profiles' one-session default. Its existing documentation check passes.
-- The documentation proof and renderer looked for Chromium in the private trial's empty cache. They now select the locked browser at `/opt/graphyard-browsers` inside the trial image, before importing Playwright. Host rendering uses Playwright's configured cache or explicit `WALKTHROUGH_BROWSERS_PATH`; the latter survives the fresh HOME/cache of pre-submit rechecks. The rendering guide explains setup. No browser download or host-home mount is added to trials.
+Reran every file named in the trial refusal with `npm test --` followed by these paths (all under `tests/`):
 
-Also corrected the trial-cache summary and documented the renderer's image browser. No runtime gate or requirement changed.
+| Test file | Result |
+| --- | --- |
+| `action-claim-observation.test.ts` | Pass |
+| `slow-tick-repeat-receipt.test.ts` | Pass, including twenty consecutive executions |
+| `action-claim-order.test.ts` | Pass |
+| `backup-restore.test.ts` | Pass |
+| `snapshot-bounded-reads.test.ts` | Pass |
+| `action-queue.test.ts` | Pass |
+| `action-totality.test.ts` | Pass |
+| `bootstrap-policy.test.ts` | Pass |
+| `close-work.test.ts` | Pass |
+| `lease-pool.test.ts` | Pass |
+| `master-defer-sets-observation-window.test.ts` | Pass |
+| `session-liveness-model.test.ts` | Pass |
+| `submit-head.test.ts` | Fixture Git push fails: Invalid cross-device link |
+| `unblock-stale-revision.test.ts` | All five cases pass |
+| `worker-filesystem-isolation-e2e.test.ts` | Confined session host ends before command runs |
+| `agent-registry.test.ts` | Pass |
+| `candidate-history-still-loads.test.ts` | Pass |
+| `serve-revert.test.ts` | Fixture Git push fails: Invalid cross-device link |
+| `capacity-hold-respects-machine-bounds.test.ts` | Pass |
+| `expired-worker-partial-work-handoff.test.ts` | Pass |
 
-Validation in this attempt:
+The run executed 111 cases: 87 passed, 24 failed, none skipped. The failures are confined to three unchanged test files: Git cannot migrate temporary fixture objects in submit-head and serve-revert (also reproduced running serve-revert alone); the nested filesystem-isolation session exits before its test command. These sandbox failures are recorded in the commit message. CI retains the full-suite gate.
 
-- `npm run build` and `npm run docs:check` passed.
-- The documentation proof passes with the host's installed Chromium, including through the actual `rerunTrialFiles` pre-submit helper with its fresh HOME/cache, rendering thirteen sample frames and exercising chapters, scrubbing and playback. Its base exercise fails as expected.
-- Reran all nineteen other files named in the trial refusal: sixteen files passed, including the twenty consecutive slow-tick executions. The remaining failures are outside changed code: automatic reviewer launches see ancestor Claude settings under an untrusted scratch HOME; submit-head fixtures cannot migrate Git objects (`Invalid cross-device link`); the filesystem-isolation E2E session ends before its command. The reviewer documentation assertion from that run is now fixed and passes separately. These sandbox failures are named in the commit messages; CI retains the full-suite gate.
-- Both committed assets fully decode with ffmpeg. ffprobe confirms H.264 MP4 1200×838 and GIF 800×559, both 120.1 seconds. Inspected MP4 at 0, 55, 100 and 116 seconds, and GIF opening and failure-handoff frames: readable captions, distinct roles, populated opening, independent review and exactly three human decisions. The media from the earlier attempt remains unchanged because this rework changes browser selection and operational prose only.
+`npm run build` and `npm run docs:check` pass. Both committed assets fully decode with ffmpeg. ffprobe confirms H.264 MP4 1200×838 and GIF 800×559, both 120.1 seconds. Inspected MP4 at 0, 55, 100 and 116 seconds and the GIF opening: readable captions, distinct roles, populated opening, independent review and exactly three human decisions. The prior regenerated media remains valid; this round changes setup instructions and this report only.
 
 Reproduce with [the rendering guide](../../docs/walkthrough.md).
 
-Self-review: AC-1 met (roles, independent ownership, concrete failed-check handoff, shipped master wakes and three human decisions); AC-2 met (corrected storyboard and regenerated assets retained, readable samples, decoding and repeatable rendering); AC-3 met (all handwritten guides reviewed, operational details preserved, counts refreshed and generated links valid). No blocking finding remains.
+Self-review after `review self GY-3048`: AC-1 met (roles, independent ownership, concrete failed-check handoff, shipped master wakes and three human decisions); AC-2 met (corrected storyboard and regenerated assets retained, readable samples, decoding and repeatable rendering); AC-3 met (all handwritten guides reviewed, operational details preserved, counts refreshed and generated links valid). No blocking finding remains.
