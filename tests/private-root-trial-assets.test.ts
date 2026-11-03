@@ -13,6 +13,15 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
   await mkdir(home);
   const scratch = await temporaryDirectory('scratch', allocation);
   const database = await temporaryDirectory('postgres', allocation);
+  const environment = { ...trialEnvironment(), ...trialHomeVariables(home), TMPDIR: scratch, TMP: scratch, TEMP: scratch, PATH: '/usr/local/bin:/usr/bin:/bin' };
+  const wrapper = trialContainerWords([allocation]);
+  const emptyCache = join(home, '.cache/ms-playwright');
+  // Playwright resolves its registry at import time: reproduce the old environment in a fresh process.
+  await assert.rejects(defaultChildRun('node', ['--input-type=module', '-e', `
+    import { chromium } from '/graphyard-harness/node_modules/playwright/index.mjs';
+    await chromium.launch({ headless: true });
+  `], { cwd: allocation, wrapper, timeoutMs: 20_000, env: { ...environment, PLAYWRIGHT_BROWSERS_PATH: emptyCache } }),
+  (error: any) => /Executable doesn't exist/.test(error.stderr) && error.stderr.includes(emptyCache));
   const output = await defaultChildRun('node', ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
     import { readFile, realpath, lstat } from 'node:fs/promises';
@@ -23,10 +32,6 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
     import EmbeddedPostgres from '/graphyard-harness/node_modules/embedded-postgres/dist/index.js';
     import pg from '/graphyard-harness/node_modules/pg/lib/index.js';
     const installed = process.env.PLAYWRIGHT_BROWSERS_PATH;
-    // Reproduce the previous trialHomeVariables override under a genuinely empty HOME.
-    process.env.PLAYWRIGHT_BROWSERS_PATH = join(process.env.HOME, '.cache/ms-playwright');
-    await assert.rejects(chromium.launch({ headless: true }), /Executable doesn't exist/);
-    process.env.PLAYWRIGHT_BROWSERS_PATH = installed;
     assert.equal(installed, '/opt/graphyard-browsers');
     assert.ok(chromium.executablePath().startsWith(installed + '/'));
     const browser = await chromium.launch({ headless: true });
@@ -58,8 +63,7 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
       finally { await client.end(); }
     } finally { await database.stop(); }
     console.log('installed Chromium and native Postgres passed with private HOME and scratch');
-  `], { cwd: allocation, wrapper: trialContainerWords([allocation]), timeoutMs: 80_000,
-    env: { ...trialEnvironment(), ...trialHomeVariables(home), TMPDIR: scratch, TMP: scratch, TEMP: scratch, PATH: '/usr/local/bin:/usr/bin:/bin' } });
+  `], { cwd: allocation, wrapper, timeoutMs: 60_000, env: environment });
   assert.match(output, /installed Chromium and native Postgres passed/);
   assert.ok((await readFile(join(allocation, 'browser.png'))).length > 100);
 });
