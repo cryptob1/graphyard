@@ -615,23 +615,29 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   for (const key of Object.keys(state.master.subjects)) if (!current.has(key)) delete state.master.subjects[key];
   const master = state.master;
   const handle = herdr.agents.find(agent => agent.name === (master.agentName ?? config.masterAgentName));
+  const recoveryKey = config.forPerson ? `master:continuity:${config.forPerson}` : 'master:continuity';
+  let recoveryFailed = false;
   if (!master.continuity && sessions.initialize && (handle || master.startedAt || master.account)) {
     try {
       master.continuity = await sessions.initialize(master, handle, Object.values(state.actions).filter(action => action.kind === 'wake' && action.state === 'done').map(action => action.detail));
+      if (state.actions[recoveryKey]?.state === 'failed') await note(cycle, recoveryKey, 'session', null, 'done', 'Master continuity recovery succeeded');
       await effects.persist(state);
     } catch (error) {
-      await note(cycle, config.forPerson ? `${masterLaunchKey}:${config.forPerson}` : masterLaunchKey, 'session', null, 'failed', `Master continuity recovery failed: ${message(error)}`);
-      return;
+      recoveryFailed = true;
+      const detail = `Master continuity recovery failed; retrying next cycle and retaining its state: ${message(error)}`;
+      if (state.actions[recoveryKey]?.detail !== detail) await note(cycle, recoveryKey, 'session', null, 'failed', detail);
+      else touchStanding(state, recoveryKey, new Date(cycle.now()).toISOString());
     }
   }
   if (!handle) {
+    if (recoveryFailed) return;
     submitMasterLaunch(cycle, open);
     return;
   }
   if (!master.agentName) state.master = { ...master, agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: cycle.snapshot.now, adopted: true };
   if (handle.pane_id) state.master.pane = handle.pane_id;
   if (!state.master.startedAt) state.master.startedAt = cycle.snapshot.now;
-  if (await masterPaneFailover(cycle, handle, open)) return;
+  if (!recoveryFailed && await masterPaneFailover(cycle, handle, open)) return;
   const changed = causes.filter(cause => state.master.subjects[cause.key] !== cause.digest);
   const target = handle.pane_id ?? state.master.pane ?? handle.name;
   const since = Date.parse(state.master.lastWake?.at ?? state.master.startedAt ?? cycle.snapshot.now);

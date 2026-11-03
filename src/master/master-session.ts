@@ -134,7 +134,7 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
     const variable = runtime?.launch.homeVariable ?? (kind === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME');
     const environment = { ...runtime?.launch.environment, ...(login?.credential.home ? { [variable]: login.credential.home } : {}) };
     const request = await readFile(join(root, '.graphyard/launch', `${master.agentName ?? current.masterAgentName}.request`), 'utf8').catch(() => null);
-    return adoptConversation(root, { runtime: kind, account, environment,
+    return adoptConversation(root, { runtime: kind, account, environment, origins: masterInputs(root, current.masterAgentName),
       prompts: [...(request ? [{ origin: 'launch' as const, text: request }] : []), ...prompts.map(text => ({ origin: 'wake' as const, text }))] });
   },
   pendingCauses: async work => {
@@ -142,9 +142,9 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
     const [cursor, serving] = await Promise.all([readDispatchCursor(root, current), servingReport(root, current.repository, current.baseBranch)]);
     return [...dispatchCauses(work, cursor), ...deploymentCauses(serving.failedDeploy)];
   },
-  wake: (target, text, continuity) => deliverPrompt(target, text, run, continuity ? {
-    beforeSubmit: (text, attempt) => graphyardInput(continuity.current.origins, attempt === 1 ? 'wake' : 'retry', text),
-  } : {}),
+  wake: (target, text, continuity) => deliverPrompt(target, text, run, {
+    beforeSubmit: (text, attempt) => graphyardInput(continuity?.current.origins ?? masterInputs(root, config().masterAgentName), attempt === 1 ? 'wake' : 'retry', text),
+  }),
   launch: async (handover, previous) => {
     const { delivery: _, ...launched } = await launchMasterSession(root, config(), await observeHerdrAgents(run), handover, run, {}, previous);
     return launched;

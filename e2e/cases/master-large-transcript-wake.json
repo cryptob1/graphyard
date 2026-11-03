@@ -1,0 +1,13 @@
+{
+  "id": "master-large-transcript-wake",
+  "title": "Large native transcripts do not suppress live master incident wakes",
+  "description": "Reproduces Node's actual >2 GiB readFile refusal with sparse, bounded-storage fixtures; recovers both native formats and hashes full read-only records. An already-live native runtime receives real incident and heartbeat inputs despite an actual recovery failure, deduplicates across restart, and recovers with automated origins and the pending person input intact. Existing native resume, supersession and confinement suites retain their security requirements.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "large native record recovery and live wake regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/master-session-resumes.test.ts tests/master-stalled-delivery-wake.test.ts tests/master-large-transcript-wake.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

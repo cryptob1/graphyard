@@ -93,3 +93,45 @@ test('unit:master-session-resumes — an adopted pre-upgrade Claude record impor
   assert.equal(adopted.current.nativeId, 'legacy-native');
   assert.equal(await captureConversation(adopted.current), 'A person still needs an answer');
 });
+
+test('integration:master-large-transcript-wake — actual >2 GiB transcripts recover native events and retain every byte', async () => {
+  const { largeTranscript } = await import('./helpers/large-transcript.js');
+  const { createReadStream } = await import('node:fs');
+  const { createHash } = await import('node:crypto');
+  const { stat } = await import('node:fs/promises');
+  const digest = async (path: string) => {
+    const hash = createHash('sha256');
+    for await (const chunk of createReadStream(path)) hash.update(chunk);
+    return hash.digest('hex');
+  };
+  for (const runtime of ['claude', 'codex']) {
+    const root = await temporaryDirectory('large-native-record'), home = await temporaryDirectory('large-native-home');
+    const folder = runtime === 'claude' ? join(home, 'projects', root.replace(/[^A-Za-z0-9]/g, '-')) : join(home, 'sessions');
+    await mkdir(folder, { recursive: true });
+    const transcript = join(folder, 'native.jsonl');
+    const user = (id: string, text: string) => runtime === 'claude'
+      ? { type: 'user', uuid: id, message: { content: text } }
+      : { id, type: 'event_msg', payload: { type: 'user_message', message: text } };
+    const final = runtime === 'claude' ? { type: 'assistant', uuid: 'final', parentUuid: 'answered', message: { stop_reason: 'end_turn' } }
+      : { type: 'event_msg', payload: { type: 'task_complete' } };
+    await largeTranscript(transcript, [
+      ...(runtime === 'codex' ? [{ type: 'session_meta', payload: { id: 'native', cwd: root, timestamp: new Date().toISOString() } }] : []),
+      user('launch', 'Known launch'), user('answered', 'Already answered'),
+    ], [final, user('pending', 'Exact unanswered question 🦊')]);
+    await assert.rejects(readFile(transcript), (error: any) => error.code === 'ERR_FS_FILE_TOO_LARGE', 'reproduce Node’s actual whole-file size limit');
+    const adopted = await adoptConversation(root, { runtime, account: 'account', environment: runtime === 'claude' ? { CLAUDE_CONFIG_DIR: home } : { CODEX_HOME: home }, prompts: [{ origin: 'launch', text: 'Known launch' }] });
+    assert.equal(adopted.current.nativeId, 'native');
+    assert.equal(await captureConversation(adopted.current), 'Exact unanswered question 🦊');
+    const record = await stat(adopted.current.record);
+    assert.ok(record.size > 2 ** 31);
+    assert.equal(record.mode & 0o777, 0o400);
+    assert.equal(await digest(adopted.current.record), await digest(transcript));
+    // Resolve an inherited original input from the large read-only record too.
+    const successor = { ...adopted.current, transcript: join(root, 'successor.jsonl'), record: join(root, 'successor-record.jsonl'),
+      inherited: { record: adopted.current.record, runtime, event: 'pending', delivery: '' } };
+    await writeFile(successor.transcript, JSON.stringify(user('new', 'A newer person input')) + '\n');
+    assert.equal(await captureConversation(successor), 'A newer person input');
+    await appendFile(transcript, '\n' + JSON.stringify(runtime === 'claude' ? { ...final, uuid: 'pending-final', parentUuid: 'pending' } : final) + '\n');
+    assert.equal(await captureConversation(adopted.current), null, 'native finals beyond the size boundary answer the pending input');
+  }
+});
