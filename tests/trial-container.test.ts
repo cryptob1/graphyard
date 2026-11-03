@@ -153,7 +153,7 @@ test('integration:worker-home-deletion-regression — real Chromium launches and
       console.log('real Chromium rendered');
     } finally { await browser.close(); }
   `], { cwd: allocation, wrapper: trialContainerWords([allocation]), timeoutMs: 50_000,
-    env: { ...trialEnvironment(), ...trialHomeVariables(allocation), PATH: '/usr/local/bin:/usr/bin:/bin' },
+    env: { ...trialEnvironment(), ...trialHomeVariables(allocation, process.env, true), PATH: '/usr/local/bin:/usr/bin:/bin' },
   });
   assert.match(output, /real Chromium rendered/);
   assert.ok((await readFile(join(allocation, 'browser.png'))).length > 100);

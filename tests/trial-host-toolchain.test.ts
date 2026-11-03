@@ -21,7 +21,7 @@ async function fixture(build = "console.log('build passed')", lockfile = false) 
 }
 
 test('unit:trial-finds-host-toolchain — mise directories follow host HOME/XDG defaults and explicit MISE values win', () => {
-  const defaults = trialHomeVariables('/fresh', { HOME: '/host' });
+  const defaults = trialHomeVariables('/fresh', { HOME: '/host' }, false);
   for (const [kind, suffix] of [['CONFIG', '.config'], ['CACHE', '.cache'], ['DATA', '.local/share'], ['STATE', '.local/state']]) {
     const name = `MISE_${kind}_DIR`;
     assert.equal(defaults[name], `/host/${suffix}/mise`);
@@ -31,7 +31,8 @@ test('unit:trial-finds-host-toolchain — mise directories follow host HOME/XDG 
   assert.equal(defaults.HOME, '/fresh');
   assert.equal(defaults.XDG_CONFIG_HOME, '/fresh/.config');
   assert.equal(defaults.npm_config_cache, '/fresh/.npm');
-  assert.equal(defaults.PLAYWRIGHT_BROWSERS_PATH, '/opt/graphyard-browsers');
+  assert.equal(defaults.PLAYWRIGHT_BROWSERS_PATH, '/fresh/.cache/ms-playwright');
+  assert.equal(trialHomeVariables('/fresh', { HOME: '/host' }, true).PLAYWRIGHT_BROWSERS_PATH, '/opt/graphyard-browsers');
 });
 
 test('unit:trial-finds-host-toolchain — private container toolchain builds with host shims and credentials absent', async () => {

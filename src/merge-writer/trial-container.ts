@@ -1,6 +1,6 @@
 // The outer trial has a private filesystem, rather than a host Landlock domain:
 // its tests can establish their own mount namespaces before applying Landlock.
-import { existsSync, realpathSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkoutGitDirectory } from '../master/checkout-git.js';
@@ -31,7 +31,6 @@ args = docker + ['create', '--name', container_name, '-i', '--init',
         '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=' + spec['network'],
         '--user', str(os.getuid()) + ':' + str(os.getgid()),
         '--tmpfs', '/tmp:rw,nosuid,nodev,exec,mode=1777',
-        '--tmpfs', '/var/tmp:rw,nosuid,nodev,exec,mode=1777',
         '--tmpfs', '/run:rw,nosuid,nodev,mode=1777', '--workdir', os.getcwd()]
 for source, target, readonly in spec['mounts']:
     args += ['--mount', 'type=bind,src=' + source + ',dst=' + target + (',readonly' if readonly else '')]
@@ -83,12 +82,18 @@ finally:
 `;
 
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge'): string[] {
+  // The managed allocation is durable. Give this boundary its own empty, sticky
+  // /var/tmp, reclaimed with that allocation; never mount the host's /var/tmp.
+  const allocation = writable.find((path): path is string => !!path)!;
+  const scratch = mkdtempSync(join(allocation, 'var-tmp-'));
+  chmodSync(scratch, 0o1777);
   const mounts: [string, string, boolean][] = [];
   const add = (path: string, readonly: boolean, target = path) => {
     // Linked installs and harness dependencies can name the same target. Docker
     // rejects duplicate destinations; keep the writable allocation added first.
     if (existsSync(path) && !mounts.some(mount => mount[1] === target)) mounts.push([realpathSync(path), target, readonly]);
   };
+  add(scratch, false, '/var/tmp');
   for (const directory of writable) if (directory) add(directory, false);
   for (const directory of dependencies) { add(directory, true); if (existsSync(directory) && realpathSync(directory) !== directory) add(directory, true, realpathSync(directory)); }
   // Only trusted source and dependencies, never the install's home or credentials.
@@ -104,7 +109,7 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
       '--ro-bind', '/opt/graphyard-browsers', '/opt/graphyard-browsers',
       '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/sbin', '/sbin',
       '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
-      '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/var/tmp', '--tmpfs', '/run',
+      '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/run',
       ...mounts.flatMap(([source, target, readonly]) => [readonly ? '--ro-bind' : '--bind', source, target]),
       '--remount-ro', '/', '--'];
   }

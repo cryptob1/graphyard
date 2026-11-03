@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { defaultChildRun } from '../src/child-runner.js';
 import { trialEnvironment, trialHomeVariables, failureTail } from '../src/merge-writer/trial.js';
@@ -13,7 +13,9 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
   await mkdir(home);
   const scratch = await temporaryDirectory('scratch', allocation);
   const database = await temporaryDirectory('postgres', allocation);
-  const environment = { ...trialEnvironment(), ...trialHomeVariables(home), TMPDIR: scratch, TMP: scratch, TEMP: scratch, PATH: '/usr/local/bin:/usr/bin:/bin' };
+  const outerScratch = await temporaryDirectory('outer-scratch', '/var/tmp');
+  await writeFile(join(outerScratch, 'sentinel'), 'outside this boundary');
+  const environment = { ...trialEnvironment(), ...trialHomeVariables(home, process.env, true), TMPDIR: scratch, TMP: scratch, TEMP: scratch, PATH: '/usr/local/bin:/usr/bin:/bin' };
   const wrapper = trialContainerWords([allocation]);
   const emptyCache = join(home, '.cache/ms-playwright');
   // Playwright resolves its registry at import time: reproduce the old environment in a fresh process.
@@ -24,13 +26,19 @@ test('integration:private-root-trial-assets — empty HOME reproduces the browse
   (error: any) => /Executable doesn't exist/.test(error.stderr) && error.stderr.includes(emptyCache));
   const output = await defaultChildRun('node', ['--input-type=module', '-e', `
     import assert from 'node:assert/strict';
-    import { readFile, realpath, lstat } from 'node:fs/promises';
+    import { readFile, realpath, lstat, stat, statfs, writeFile, access } from 'node:fs/promises';
     import { dirname, join } from 'node:path';
     import { createRequire } from 'node:module';
     import { createServer } from 'node:net';
     import { chromium } from '/graphyard-harness/node_modules/playwright/index.mjs';
     import EmbeddedPostgres from '/graphyard-harness/node_modules/embedded-postgres/dist/index.js';
     import pg from '/graphyard-harness/node_modules/pg/lib/index.js';
+    await assert.rejects(access(${JSON.stringify(join(outerScratch, 'sentinel'))}), error => error.code === 'ENOENT');
+    const varTmp = await stat('/var/tmp');
+    assert.equal(varTmp.uid, process.getuid());
+    assert.ok(varTmp.mode & 0o1000, 'private durable scratch is sticky');
+    assert.notEqual((await statfs('/var/tmp')).type, 0x01021994, 'managed checkout scratch is disk-backed');
+    await writeFile('/var/tmp/owned-scratch', 'writable');
     const installed = process.env.PLAYWRIGHT_BROWSERS_PATH;
     assert.equal(installed, '/opt/graphyard-browsers');
     assert.ok(chromium.executablePath().startsWith(installed + '/'));
@@ -76,4 +84,12 @@ test('integration:private-root-trial-assets — bounded failure diagnostics reta
   assert.match(diagnostic, /child launches installed assets/);
   assert.match(diagnostic, /Executable does not exist in allocated-home cache/);
   assert.match(diagnostic, /\[exit 1\]/);
+});
+
+test('integration:private-root-trial-assets — a raw child startup error survives a long trailing stack', () => {
+  const output = 'AssertionError [ERR_ASSERTION]: installed browser path differs\n' + '    at child (runner.ts:1:1)\n'.repeat(1000) + '\n[exit status 1]\n';
+  const diagnostic = failureTail([output], 1000);
+  assert.ok(diagnostic.length <= 1000);
+  assert.match(diagnostic, /AssertionError \[ERR_ASSERTION\]: installed browser path differs/);
+  assert.match(diagnostic, /\[exit status 1\]/);
 });

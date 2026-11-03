@@ -140,7 +140,7 @@ export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): 
  * explicit host mise resolution for launcher tooling; candidate commands use the
  * private container's toolchain without mounting the host home.
  */
-export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env, installedBrowsers = existsSync('/etc/graphyard-trial')): Record<string, string> {
   const shared: Record<string, string> = {};
   for (const [kind, base, fallback] of [
     ['CONFIG', 'XDG_CONFIG_HOME', '.config'], ['CACHE', 'XDG_CACHE_HOME', '.cache'],
@@ -151,7 +151,7 @@ export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = proce
     if (host[name] !== undefined) shared[name] = host[name];
     else if (directory) shared[name] = join(directory, 'mise');
   }
-  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: '/opt/graphyard-browsers', HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
+  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: installedBrowsers ? '/opt/graphyard-browsers' : join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
 export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
@@ -637,7 +637,7 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
   return outputs.map(output => {
     if (output.length <= share) return output;
     const line = output.slice(0, output.indexOf('\n') + 1), command = line.length < share / 2 ? line : '';
-    const summary = failingSummary(output), exit = summary ? /\n(\[exit [^\n]*\])\s*$/.exec(output)?.[1] : undefined;
+    const summary = failingSummary(output), exit = /\n(\[exit [^\n]*\])\s*$/.exec(output)?.[1];
     const end = exit ? `\n${exit}` : '', room = Math.max(0, share - command.length - cut.length - end.length);
     if (summary && summary.length <= room) return `${command}${cut}${summary}${end}`;
     // Keep each test's name and first assertion/child error, before its long stack.
@@ -646,6 +646,12 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
       const entries = summary.replace(ansiEscape, '').split(/(?=^test at )/m).filter(entry => /^test at /m.test(entry));
       const perEntry = Math.floor((room - Math.max(0, entries.length - 1)) / Math.max(1, entries.length));
       return `${command}${cut}${entries.map(entry => entry.slice(0, Math.max(0, perEntry)).trimEnd()).join('\n')}${end}`;
+    }
+    const errorAt = output.search(/^.*(?:Error(?: \[[^\]]+\])?:|error:|bwrap:).*$/m);
+    if (errorAt >= 0) {
+      const first = output.slice(errorAt, errorAt + Math.floor(room / 2));
+      const last = output.slice(-Math.max(0, room - first.length - 1));
+      return `${command}${cut}${first}\n${last}`;
     }
     const kept = output.slice(-room), whole = kept.slice(kept.indexOf('\n') + 1);
     return `${command}${cut}${whole}${end}`;
@@ -806,7 +812,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
-    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
+    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
     wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root));
   }
@@ -880,7 +886,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR (?:Config files in .+ are not trusted|No version is set for tool (?:node|npm|npx))\s*$|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
   };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
-    new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
+    new TrialRunnerError(phase, ended.status, ended.signal, files, finished, failureTail([`${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`], runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
     const closed = enter();
     const line = `[step] ${stepLabel} took ${stepSeconds(now() - stepAt)}`;
@@ -958,13 +964,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
-        // GY-2092: a change to the dashboard installs Chromium in the allocated trial home and runs the Playwright suite; a failing browser test refuses the merge like any failing test.
-        // An install that fails is the host's, retried, never the merge's.
+        // GY-2092: dashboard changes run the Playwright suite with the image's pinned Chromium.
+        // The image is read-only; profiles and caches belong to this allocation.
         if (hasBrowserTestCheck(packageScripts) && touchesDashboard(input.changedFiles)) {
           enter('tests');
           enterStep('tests: test:browser');
-          const chromium = await child('tests', 'npx', ['playwright', 'install', 'chromium']);
-          if (!chromium.ok) throw runnerFailure('tests', chromium);
           const browser = await child('tests', 'npm', ['run', 'test:browser']);
           if (hostEnded(browser)) throw runnerFailure('tests', browser);
           if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });
