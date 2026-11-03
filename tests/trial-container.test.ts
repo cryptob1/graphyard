@@ -83,7 +83,7 @@ test('integration:worker-host-filesystem-isolation — a real nested trial prese
     old.splice(old.indexOf('--remount-ro'), 0, '--ro-bind', ${JSON.stringify(modules)}, ${JSON.stringify(linked)});
     const failed = spawnSync(old[0], [...old.slice(1), 'true'], { encoding: 'utf8' });
     assert.notEqual(failed.status, 0);
-    assert.ok(failed.stderr.includes('Cannot mount on symlink destination ' + ${JSON.stringify(linked)}), failed.stderr);
+    assert.ok(failed.stderr.includes("Can't mount on symlink destination " + ${JSON.stringify(linked)}), failed.stderr);
     const child = spawnSync(wrapper[0], [...wrapper.slice(1), 'node', '-e', ${JSON.stringify(`
       const fs = require('node:fs'), assert = require('node:assert/strict');
       assert.ok(fs.lstatSync(${JSON.stringify(linked)}).isSymbolicLink());
