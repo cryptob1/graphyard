@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { adoptConversation, assertConversationRuntime, captureConversation, conversationArgs, conversationEvents, conversationHandover, graphyardInput, masterInputs, masterRecords, type Conversation } from '../src/master/conversation.js';
@@ -134,4 +134,26 @@ test('integration:master-large-transcript-wake — actual >2 GiB transcripts rec
     await appendFile(transcript, '\n' + JSON.stringify(runtime === 'claude' ? { ...final, uuid: 'pending-final', parentUuid: 'pending' } : final) + '\n');
     assert.equal(await captureConversation(adopted.current), null, 'native finals beyond the size boundary answer the pending input');
   }
+});
+
+test('integration:master-large-transcript-wake — a streaming read failure preserves the retained record and retries after repair', async () => {
+  const root = await temporaryDirectory('master-record-read-failure');
+  const transcript = join(root, 'native.jsonl'), record = join(root, 'retained.jsonl');
+  const inherited = join(root, 'predecessor.jsonl');
+  const user = (uuid: string, content: string) => JSON.stringify({ type: 'user', uuid, message: { content } }) + '\n';
+  const conversation: Conversation = { launch: 'launch', runtime: 'claude', account: 'account', nativeId: 'native',
+    transcript, record, origins: join(root, 'origins.jsonl'), predecessor: 'previous', supersededBy: null,
+    inherited: { record: inherited, runtime: 'claude', event: 'person', delivery: '' } };
+  await writeFile(transcript, user('new', 'Current question'));
+  await writeFile(record, 'Previously retained bytes\n', { mode: 0o400 });
+  // A directory can be opened as a stream on Linux, but reading it fails asynchronously.
+  await mkdir(inherited);
+  await assert.rejects(captureConversation(conversation), { code: 'EISDIR' });
+  assert.equal(await readFile(record, 'utf8'), 'Previously retained bytes\n');
+  assert.deepEqual((await readdir(root)).sort(), ['native.jsonl', 'predecessor.jsonl', 'retained.jsonl']);
+  // Repair the reference without changing the retained conversation identity.
+  conversation.inherited!.record = join(inherited, 'repaired.jsonl');
+  await writeFile(conversation.inherited!.record, user('person', 'Original question'));
+  assert.equal(await captureConversation(conversation), 'Current question');
+  assert.equal(await readFile(record, 'utf8'), await readFile(transcript, 'utf8'));
 });
