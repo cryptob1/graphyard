@@ -47,10 +47,14 @@ export async function runtimeLaunchSession(base: string, resolver: boolean) {
   await writeFile(rc, `export PATH='${shims}:/usr/local/bin:/usr/bin:/bin'\nunset MISE_NO_CONFIG\nPS1='GY-PTY> '\n`);
   const installed = execFileSync('/bin/sh', ['-c', 'command -v codex'], { encoding: 'utf8' }).trim();
   assert.ok(installed && !installed.includes('/shims/'), 'use the installed binary, never the wrapper');
+  const accounts = await temporaryDirectory('accounts', base);
   for (const role of ['worker', 'reviewer']) {
     const provider = await runtimeLaunchProvider();
     try {
-      const account = await temporaryDirectory(`${role}-account`, base);
+      const account = await temporaryDirectory(`${role}-account`, accounts);
+      // Production exposes only this selected login/state directory after masking
+      // the install's other credentials. CODEX_HOME alone is not a write grant.
+      const credentialMask = { configHome: accounts, extraPaths: [], own: [account], cli: [] };
       const contract = { ...proposedRuntimes.find(runtime => runtime.name === 'codex')!.launch,
         args: provider.args, environment: { PATH: `${dirname(installed)}:/usr/local/bin:/usr/bin:/bin`, MISE_NO_CONFIG: '1' } };
       const launch = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: { PROFILE_ONLY: 'ignored' } }, {
@@ -61,19 +65,20 @@ export async function runtimeLaunchSession(base: string, resolver: boolean) {
       assert.equal(selected.PROFILE_ONLY, undefined, 'only the chosen registry runtime environment applies');
       const terminal = await runtimeLaunchTerminal(worktree, rc, { ...process.env, ...selected, TERM: 'dumb' });
       try {
-        const options = { directory: worktree, coordinatorRoot: root, cwd: worktree, secretsBus: null,
+        const options = { directory: worktree, coordinatorRoot: root, cwd: worktree, secretsBus: null, credentialMask,
           timeoutMs: 3000, ceilingMs: 5000, pollMs: 25, keyringWarning: async () => null } as const;
         // The unrepaired launch hits the real wrapper before any runtime request.
         await assert.rejects(startAgentSession(`failed-${role}`, 'codex', 'pty', provider.args, 'wrapper-negative-request', terminal.run,
           { ...options, environment: { CODEX_HOME: account } }), /mise stopped the launch before the agent started/);
         assert.equal(provider.requests.length, 0);
         assert.ok(!terminal.calls.some(args => args[1] === 'rename' || args[1] === 'send-keys'), 'no adoption or trust grant');
-      } finally { await terminal.close(); }
+      } catch (error) { throw new Error(`${error instanceof Error ? error.message : error}\nFull failed-launch PTY output:\n${terminal.screen()}`, { cause: error }); }
+      finally { await terminal.close(); }
       const recovered = await runtimeLaunchTerminal(worktree, rc, { ...process.env, ...selected, TERM: 'dumb' });
       try {
         const request = `First request for ${role}: preserve exact apostrophe ' and newline\nrequest-marker-${role}`;
         const launched = await startAgentSession(`recovered-${role}`, 'codex', 'pty', launch.args, request, recovered.run, {
-          directory: worktree, coordinatorRoot: root, cwd: worktree, secretsBus: null, environment: selected,
+          directory: worktree, coordinatorRoot: root, cwd: worktree, secretsBus: null, credentialMask, environment: selected,
           timeoutMs: 5000, ceilingMs: 10_000, pollMs: 25, keyringWarning: async () => null,
         });
         assert.equal(launched.started.state, 'started');
@@ -84,7 +89,8 @@ export async function runtimeLaunchSession(base: string, resolver: boolean) {
         await recovered.until(() => recovered.screen().includes('runtime-request-completed') && recovered.screen().trimEnd().endsWith('GY-PTY>'), 'installed runtime completed response and exited successfully');
         assert.equal(await readFile(join(home, 'sentinel'), 'utf8'), 'protected');
         console.log(`${role}: installed Codex received its first request and completed the provider response`);
-      } finally { await recovered.close(); }
+      } catch (error) { throw new Error(`${error instanceof Error ? error.message : error}\nFull recovered-launch PTY output:\n${recovered.screen()}`, { cause: error }); }
+      finally { await recovered.close(); }
     } finally { await provider.close(); }
   }
 }

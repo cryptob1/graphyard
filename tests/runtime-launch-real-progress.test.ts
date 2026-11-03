@@ -36,6 +36,29 @@ test('integration:runtime-launch-real-progress — named idle/working shells and
   assert.equal((await observeStart('pane', 'codex', 'codex', setup)).state, 'starting', 'the runtime named in a wrapper argv is insufficient without its screen');
 });
 
+test('integration:runtime-launch-real-progress — an unknown-banner runtime alongside its supervisor starts, while the supervisor alone does not', async () => {
+  const supervisor = ['/usr/bin/node', '/repo/bin/graphyard.mjs', 'watch', 'GY-1', '7', '--', 'pi'];
+  for (const present of [false, true]) {
+    const run = (_command: string, args: string[]) => {
+      const json = (result: unknown) => JSON.stringify({ result });
+      if (args[0] === 'agent') return json({ agent: { agent: 'pi', agent_status: 'working' } });
+      if (args[1] === 'read') return 'request in progress';
+      if (args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200,
+        foreground_processes: [{ argv: supervisor }, ...present ? [{ argv: ['/usr/bin/node', '/usr/bin/pi'] }] : []] } });
+      throw new Error(`Unexpected ${args}`);
+    };
+    assert.equal((await observeStart('pane', 'pi', 'pi', run)).state, present ? 'ready' : 'starting');
+  }
+  const nodeRuntime = (_command: string, args: string[]) => {
+    const json = (result: unknown) => JSON.stringify({ result });
+    if (args[0] === 'agent') return json({ agent: { agent: 'claude', agent_status: 'working' } });
+    if (args[1] === 'read') return 'Claude Code\nReading request';
+    return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200,
+      foreground_processes: [{ argv: ['/usr/bin/node', '/opt/claude/cli.js'] }] } });
+  };
+  assert.equal((await observeStart('pane', 'claude', 'claude', nodeRuntime)).state, 'ready', 'a known runtime screen identifies an interpreter script whose basename differs');
+});
+
 test('integration:runtime-launch-real-progress — real PTY worker/reviewer requests and systemd resolver failure/recovery keep the sandbox', { timeout: 90_000 }, async () => {
   // The outer fixture reproduces a host with resolv.conf symlinked into /run.
   // The inner wrappers are the production worker/reviewer wrappers, including Landlock.
