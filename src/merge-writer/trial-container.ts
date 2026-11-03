@@ -81,6 +81,7 @@ finally:
         pass
 `;
 
+/** The first writable directory is the disposable allocation that owns boundary scratch. */
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge'): string[] {
   // The managed allocation is durable. Give this boundary its own empty, sticky
   // /var/tmp, reclaimed with that allocation; never mount the host's /var/tmp.
