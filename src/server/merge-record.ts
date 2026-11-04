@@ -1,4 +1,5 @@
-import { createHash } from 'node:crypto';
+import { appendEvidence } from '../model-boundary/append-evidence.js';
+import { once, digest } from '../store/mutations.js';
 import { randomUUID } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -15,7 +16,6 @@ import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
 import { defaultMergeBatch } from '../merge-writer/batch.js';
-import { recordScenarioRun } from '../test-runs.js';
 import { mergeCandidateObsolete, mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
@@ -92,11 +92,11 @@ async function foldItemLedger(db: pg.PoolClient, work: Work, data: MergeRecordBo
 }
 
 /** What a merge record's receipt is matched on: the item and the step, its instants and duration aside, so a retried post replays and a different step under the same key is refused. */
-export function mergeRecordFingerprint(id: string, data: unknown) {
+export function mergeRecordInput(id: string, data: unknown) {
   const fingerprintData = typeof data === 'object' && data !== null
     ? Object.fromEntries(Object.entries(data).filter(([k]) => k !== 'at' && k !== 'pushedAt' && k !== 'durationMs'))
     : data;
-  return createHash('sha256').update(JSON.stringify({ id, data: fingerprintData })).digest('hex');
+  return { id, data: fingerprintData };
 }
 
 /** Recover only the original, proven flight. Read its immutable saves as well as its raw latest
@@ -138,11 +138,13 @@ async function demandOrphanRecovery(db: pg.PoolClient, work: Work, all: Work[], 
     && work.gates.some(gate => gate.name === 'review' && gate.passed), reason, 409);
 }
 
+export const mergeRecordFingerprint = (id: string, data: unknown) => digest(mergeRecordInput(id, data));
+
 export async function recordMergeEvent(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records the merge writer\'s ledger', 403);
   const data = mergeRecordBodySchema.parse(body);
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const fingerprint = mergeRecordFingerprint(id, data);
+  const receiptInput = mergeRecordInput(id, data);
   const engine = services.engine, base = engine.baseBranch;
   // Whether the base branch holds the merge commit is read from the checkout before the transaction, as every provider read is.
   let held: boolean | null = null, recoveryHeld: boolean | null = null;
@@ -153,12 +155,9 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     if (result.status !== 0) throw new Error(result.stderr);
     return result.stdout;
   }, `refs/remotes/origin/${base}`, data.mergeSha);
-  return engine.store.transaction(async (db: pg.PoolClient, now: Date) => {
-    const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-    if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
+  return engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
     const all = await lockedWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
-    const receipt = async (result: unknown) => { await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result; };
     const answer = () => ({ recorded: true, key: work!.key, kind: data.kind, stage: work!.stage, mergeLedger: work!.mergeLedger ?? null, delivery: work!.delivery ?? null });
     if (data.kind === 'intent') {
       demand(work!.stage !== 'done' && !work!.reworkRequested && !work!.lease && work!.submission?.epoch === work!.epoch,
@@ -181,7 +180,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     }
     else {
       // The merge already delivered under this very commit: a record whose receipt was lost, answered as it stands.
-      if (work!.stage === 'done' && work!.delivery?.mergeSha.toLowerCase() === data.mergeSha) return receipt(answer());
+      if (work!.stage === 'done' && work!.delivery?.mergeSha.toLowerCase() === data.mergeSha) return answer();
       demand(work!.stage !== 'done', `${work!.key} is already done, so ${data.mergeSha.slice(0, 12)} delivers nothing`, 409);
       const ledger = await foldItemLedger(db, work!, data);
       const recovering = !!ledger && orphanRefusal(ledger, base);
@@ -208,8 +207,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
         const evidence: Evidence = { id: randomUUID(), proof: entry.proof, sha: data.mergeSha, baseSha: data.baseTip, policyRevision: work!.policyRevision,
           producer: trialAuthor, trusted: true, result: entry.failed === 0 ? 'pass' : 'fail', executed: entry.executed, skipped: 0, at: now.toISOString(),
           environment: 'merge-writer-trial' };
-        work!.evidence.push(evidence);
-        await recordScenarioRun(db, work!, evidence);
+        await appendEvidence(work!, evidence, db);
       }
     }
     if (kind === 'reconciled') {
@@ -230,6 +228,6 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       await (engine as unknown as { recordDispatch(db: pg.PoolClient, work: Work, now: Date): Promise<void> }).recordDispatch(db, work!, now);
       await save(db, work!, actor.id, `merge-writer.${kind}`, now, payload);
     }
-    return receipt(answer());
-  });
+    return answer();
+  }));
 }

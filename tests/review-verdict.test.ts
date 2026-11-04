@@ -325,7 +325,8 @@ const repository = 'owner/project';
 const admin: Principal = { id: 'human-operator', role: 'admin', sessionKind: 'human' };
 const coordinator: Principal = { id: 'graphyard-master', role: 'coordinator' };
 const worker: Principal = { id: 'graphyard-claude-1', role: 'worker' };
-const principals = [admin, coordinator, worker];
+const retryReviewer: Principal = { id: 'review-retry-test', role: 'reader' };
+const principals = [admin, coordinator, worker, retryReviewer];
 const credentials = principals.map(principal => ({ ...principal, token: `${principal.id}-token-${'x'.repeat(32)}` }));
 const tokenOf = (principal: Principal) => credentials.find(credential => credential.id === principal.id)!.token;
 let pg: EmbeddedPostgres, store: Store, http: ReturnType<typeof server>, url: string;
@@ -632,4 +633,33 @@ test('unit:review-launch-bot-identity — the launch body takes the configured A
   assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: 'graphyard-reviewer[bot]' }).reviewer, 'graphyard-reviewer[bot]');
   for (const bad of ['', 'review claude', '[bot]', 'reviewer[deputy]', 'sla[bot]ug', `${reviewerIdentity} extra`])
     assert.throws(() => reviewLaunchBodySchema.parse({ ...base, reviewer: bad }), Error, bad);
+});
+
+
+test('unit:idempotency-uniform — work commands, review verdicts and merge records replay identical results and refuse changed input with HTTP 409', async () => {
+  const work = await insert(item('GY-93024'));
+  const token = freshToken();
+  const launch = await request(tokenOf(coordinator), `work/${work.id}/review-launch`, launchBody(token, { reviewer: retryReviewer.id }));
+  assert.equal(launch.status, 200, JSON.stringify(launch.body));
+  // A stable test credential authenticates the same reviewer after its one-use launch token is
+  // withdrawn. Receipt replay still requires authentication; a spent bearer alone remains 401.
+  const cases = [
+    { credential: tokenOf(admin), path: `work/${work.id}/ready`, body: { reason: 'Keep ready' }, changed: { reason: 'Different input' }, kind: 'ready' },
+    { credential: tokenOf(retryReviewer), path: `work/${work.id}/review-verdict`, body: verdict(token, 'APPROVE'), changed: verdict(token, 'COMMENT'), kind: 'review.verdict' },
+    { credential: tokenOf(coordinator), path: `work/${work.id}/merge-record`, body: { kind: 'refused', head: H, reason: 'Retry fixture' }, changed: { kind: 'refused', head: H, reason: 'Changed refusal' }, kind: 'merge-writer.refused' },
+  ];
+  const refusals = [];
+  for (const entry of cases) {
+    const key = randomUUID();
+    const first = await request(entry.credential, entry.path, entry.body, key);
+    assert.equal(first.status, 200, JSON.stringify(first.body));
+    const count = (await events(work.id, entry.kind)).length;
+    assert.ok(count > 0, `${entry.kind} appended history`);
+    assert.deepEqual(await request(entry.credential, entry.path, entry.body, key), first, `${entry.path} replays its exact result`);
+    const refused = await request(entry.credential, entry.path, entry.changed, key);
+    refusals.push(refused);
+    assert.deepEqual(refused, { status: 409, body: { error: 'Idempotency key reused with different input' } });
+    assert.equal((await events(work.id, entry.kind)).length, count, 'replay and mismatch append no history');
+  }
+  assert.deepEqual(refusals, Array(3).fill(refusals[0]));
 });

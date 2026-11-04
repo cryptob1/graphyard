@@ -1,4 +1,6 @@
-import { createCipheriv, createHash, publicEncrypt, randomBytes, randomUUID, constants as cryptoConstants } from 'node:crypto';
+import { appendEvidence } from '../model-boundary/append-evidence.js';
+import { once } from '../store/mutations.js';
+import { createCipheriv, publicEncrypt, randomBytes, randomUUID, constants as cryptoConstants } from 'node:crypto';
 import type pg from 'pg';
 import { z } from 'zod';
 import { activeLease, demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
@@ -26,25 +28,17 @@ import { lockedWork } from '../store/locked-read.js';
  */
 
 type Db = pg.PoolClient;
-const digest = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const findWork = async (db: Db, id: string): Promise<{ work: Work | undefined; all: Work[] }> => {
   const all = await lockedWork(db, [id]);
   return { work: all.find(item => item.id === id || item.key === id), all };
 };
-async function receipt(db: Db, actor: Principal, key: string, fingerprint: string) {
-  demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-  const row = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-  if (row) demand(row.fingerprint === fingerprint, 'Idempotency key reused with different input');
-  return row?.result as Work | undefined;
-}
-/** Re-evaluate, append the evaluation's dispatch transitions, save with history, and keep the receipt. */
-async function commit(services: Services, db: Db, now: Date, work: Work, all: Work[], actor: Principal, kind: string, details: unknown, key: string, fingerprint: string) {
+/** Re-evaluate, append the evaluation's dispatch transitions, save with history. */
+async function commit(services: Services, db: Db, now: Date, work: Work, all: Work[], actor: Principal, kind: string, details: unknown) {
   services.engine.evaluate(work, all, now);
   // The engine's auto-dispatch ledger entries for this evaluation; the method is internal to the
   // engine's own transactions, and this is one of them.
   await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, work, now);
   await save(db, work, actor.id, kind, now, details);
-  await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(work)]);
   return work;
 }
 /** An attempt that stops without finishing ends on the record as released, never as a silent lapse. */
@@ -68,9 +62,8 @@ export async function requestHumanDecision(services: Services, actor: Principal,
   const data = humanRequestSchema.parse(body);
   const misdirected = parkRefusal(data);
   demand(!misdirected, misdirected!, 422);
-  const fingerprint = digest({ id, park: data });
-  return services.engine.store.transaction(async (db, now) => {
-    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+  const receiptInput = { id, park: data };
+  return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
     demand(actor.role === 'worker' || actor.role === 'admin', 'Worker permission required', 403);
     const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', 'Delivered work is immutable');
@@ -87,8 +80,8 @@ export async function requestHumanDecision(services: Services, actor: Principal,
     work!.blocker = describeHumanRequest(request);
     recordIntervention(work!, 'blocked');
     await endLease(services, db, work!, all, data.epoch, now, 'human.requested');
-    return commit(services, db, now, work!, all, actor, 'human.requested', { request, decision: humanDecisionLabel[request.kind], leaseEnded: { owner: actor.id, epoch: data.epoch } }, key, fingerprint);
-  });
+    return commit(services, db, now, work!, all, actor, 'human.requested', { request, decision: humanDecisionLabel[request.kind], leaseEnded: { owner: actor.id, epoch: data.epoch } });
+  }));
 }
 
 /**
@@ -101,9 +94,8 @@ export async function requestHumanDecision(services: Services, actor: Principal,
 export async function answerHumanDecision(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = humanAnswerSchema.parse(body);
   // The receipt's fingerprint never covers the secret, so not even its digest is stored.
-  const fingerprint = digest({ id, answer: { ...data, secret: data.secret ? 'sealed' : undefined } });
-  return services.engine.store.transaction(async (db, now) => {
-    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+  const receiptInput = { id, answer: { ...data, secret: data.secret ? 'sealed' : undefined } };
+  return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
     // The rule the human surface lists this request under is the rule that refuses the answer,
     // so neither can drift from the other (model/human-request.ts `parkRule`).
     const refusal = humanOnlyRefusal(parkRule.kind, actor);
@@ -119,8 +111,8 @@ export async function answerHumanDecision(services: Services, actor: Principal, 
     work!.humanRequests = [...(work!.humanRequests ?? []), answered].slice(-retainedHumanRequests);
     work!.humanRequest = null;
     if (work!.blocker?.startsWith(humanRequestBlocker)) work!.blocker = resolved.outcome === 'provided' ? null : `A human declined ${humanDecisionLabel[answered.kind]} for this item: ${resolved.text}`.slice(0, 2000);
-    return commit(services, db, now, work!, all, actor, 'human.answered', { request: answered, resumed: resolved.outcome === 'provided' }, key, fingerprint);
-  });
+    return commit(services, db, now, work!, all, actor, 'human.answered', { request: answered, resumed: resolved.outcome === 'provided' });
+  }));
 }
 
 const humanProofRequestSchema = z.object({ proof: proofSchema, sha: z.string().regex(/^[0-9a-f]{40}$/), baseSha: z.string().regex(/^[0-9a-f]{40}$/), url: z.url({ protocol: /^https?$/ }).max(2000).optional() }).strict();
@@ -129,9 +121,8 @@ const humanProofAnswerSchema = z.object({ request: z.string().uuid(), outcome: z
 /** Records one real-world check for an exact commit (GY-2986); the same check asked again changes nothing. */
 export async function requestHumanProof(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = humanProofRequestSchema.parse(body);
-  const fingerprint = digest({ id, data });
-  return services.engine.store.transaction(async (db, now) => {
-    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+  const receiptInput = { id, data };
+  return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
     demand(actor.role === 'admin' || actor.role === 'coordinator', 'Only the loop or an admin asks for a real-world check', 403);
     const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', 'Delivered work is immutable');
@@ -140,16 +131,15 @@ export async function requestHumanProof(services: Services, actor: Principal, id
     if (work!.candidate) demand(work!.candidate.sha === data.sha, `${work!.key}'s head is ${work!.candidate.sha.slice(0, 12)}, not ${data.sha.slice(0, 12)}`, 409);
     if (!requestFor(work!, data.proof, data.sha)) work!.humanProofs = [...(work!.humanProofs ?? []), { id: randomUUID(), proof: data.proof, criterion: criterion!.id, sha: data.sha, baseSha: data.baseSha, policyRevision: work!.policyRevision,
       ask: criterion!.text, steps: [...(data.url ? [`Open ${data.url}`] : []), `Make this check on commit ${data.sha.slice(0, 12)}`, 'Record pass or fail with a note saying what you saw'], at: now.toISOString(), requestedBy: actor.id, answer: null }];
-    return commit(services, db, now, work!, all, actor, 'human-proof.requested', { proof: data.proof, sha: data.sha }, key, fingerprint);
-  });
+    return commit(services, db, now, work!, all, actor, 'human-proof.requested', { proof: data.proof, sha: data.sha });
+  }));
 }
 
 /** The person's answer: a trusted run bound to the commit, kept with their note and any photo. Only a declared human session answers. */
 export async function answerHumanProof(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = humanProofAnswerSchema.parse(body);
-  const fingerprint = digest({ id, data });
-  return services.engine.store.transaction(async (db, now) => {
-    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+  const receiptInput = { id, data };
+  return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
     const refusal = humanOnlyRefusal(humanProofRule.kind, actor);
     demand(!refusal, refusal!, 403);
     const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
@@ -163,9 +153,9 @@ export async function answerHumanProof(services: Services, actor: Principal, id:
       await db.query('INSERT INTO product_review_screenshots(work_id,name,media_type,bytes) VALUES($1,$2,$3,$4)', [work!.id, photo, data.photo.mediaType, bytes]);
     }
     request!.answer = { by: actor.id, at: now.toISOString(), outcome: data.outcome, note: data.note, photo };
-    work!.evidence.push({ id: randomUUID(), proof: request!.proof, sha: request!.sha, baseSha: work!.candidate?.baseSha ?? request!.baseSha, policyRevision: request!.policyRevision, producer: actor.id, trusted: true, result: data.outcome, executed: 1, skipped: 0, at: now.toISOString() });
-    return commit(services, db, now, work!, all, actor, 'human-proof.answered', { proof: request!.proof, sha: request!.sha, outcome: data.outcome, note: data.note }, key, fingerprint);
-  });
+    await appendEvidence(work!, { id: randomUUID(), proof: request!.proof, sha: request!.sha, baseSha: work!.candidate?.baseSha ?? request!.baseSha, policyRevision: request!.policyRevision, producer: actor.id, trusted: true, result: data.outcome, executed: 1, skipped: 0, at: now.toISOString() }, db);
+    return commit(services, db, now, work!, all, actor, 'human-proof.answered', { proof: request!.proof, sha: request!.sha, outcome: data.outcome, note: data.note });
+  }));
 }
 
 /**
@@ -219,9 +209,8 @@ const capacityOf = (work: Work): CapacityState => ({ exhaustions: work.capacity?
  */
 export async function recordCapacity(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   const data = capacityEventSchema.parse(body);
-  const fingerprint = digest({ id, capacity: data });
-  return services.engine.store.transaction(async (db, now) => {
-    const replay = await receipt(db, actor, key, fingerprint); if (replay) return replay;
+  const receiptInput = { id, capacity: data };
+  return services.engine.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
     demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
     const { work, all } = await findWork(db, id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', 'Delivered work is immutable');
@@ -249,17 +238,17 @@ export async function recordCapacity(services: Services, actor: Principal, id: s
       work!.capacity = { ...capacity, exhaustions: [...capacity.exhaustions, record].slice(-retainedExhaustions) };
       // A worker that died is not a spent account: the same record, its own history entry.
       const interrupted = report.cause === 'interrupted';
-      return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, ...(endedBlocker ? { endedBlocker } : {}), requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable again' : 'the attempt ended as released; the item is claimable on another account') : 'the request is launched again on another account' }, key, fingerprint);
+      return commit(services, db, now, work!, all, actor, interrupted ? 'capacity.interrupted' : 'capacity.exhausted', { exhaustion: record, ...(endedBlocker ? { endedBlocker } : {}), requeued: report.role === 'worker' ? (interrupted ? 'the attempt ended as released with its partial work on the record; the item is claimable again' : 'the attempt ended as released; the item is claimable on another account') : 'the request is launched again on another account' });
     }
     const standing = capacity.spent.find(entry => entry.role === data.role);
     if (data.event === 'spent') {
       if (standing && capacitySignature(standing.role, standing.accounts) === capacitySignature(data.role, data.accounts)) return work!;
       const spent = { role: data.role, at: now.toISOString(), accounts: data.accounts, retryAt: capacityRetryAt(data.accounts) };
       work!.capacity = { ...capacity, spent: [...capacity.spent.filter(entry => entry.role !== data.role), spent] };
-      return commit(services, db, now, work!, all, actor, 'capacity.spent', { spent }, key, fingerprint);
+      return commit(services, db, now, work!, all, actor, 'capacity.spent', { spent });
     }
     if (!standing) return work!;
     work!.capacity = { ...capacity, spent: capacity.spent.filter(entry => entry.role !== data.role) };
-    return commit(services, db, now, work!, all, actor, 'capacity.restored', { role: data.role, reason: data.reason, spent: standing }, key, fingerprint);
-  });
+    return commit(services, db, now, work!, all, actor, 'capacity.restored', { role: data.role, reason: data.reason, spent: standing });
+  }));
 }
