@@ -1,7 +1,7 @@
 {
   "id": "local-view-without-login",
   "title": "The dashboard is readable on its own machine without signing in",
-  "description": "A real control plane on loopback answers a tokenless board read addressed to its local host and port, refuses the same read under a foreign Host or through a proxy, and never sends a CORS header.",
+  "description": "A real control plane on loopback answers a tokenless board read addressed to its local host and port, refuses foreign Host, proxy, foreign Origin and cross-site fetch requests, and never sends a CORS header.",
   "tags": [
     "dashboard",
     "authentication"

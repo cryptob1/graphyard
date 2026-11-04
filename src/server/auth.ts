@@ -46,14 +46,16 @@ export const localViewer: Principal = { id: 'local-viewer', role: 'reader', disp
 const loopbackHost = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::(\d+))?$/i;
 /**
  * A read from this machine addressed to the host and port it is served on. Another Host header (a
- * DNS-rebinding page, the tailnet proxy) or a forwarded request is not one, and no CORS header is
- * ever sent, so another website cannot read the answer.
+ * DNS-rebinding page, the tailnet proxy), a forwarded request or a cross-origin browser request
+ * is not one. Headerless local clients and direct browser navigation remain readable.
  */
 export function localRead(req: IncomingMessage) {
   const host = loopbackHost.exec(req.headers.host ?? '');
   return req.method === 'GET' && !!host && Number(host[1] ?? 80) === req.socket.localPort
     && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
-    && !req.headers.forwarded && !req.headers['x-forwarded-for'];
+    && !req.headers.forwarded && !req.headers['x-forwarded-for']
+    && (req.headers.origin === undefined || req.headers.origin === new URL(`http://${req.headers.host}`).origin)
+    && (req.headers['sec-fetch-site'] === undefined || ['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])));
 }
 
 const configuredCredential = (services: Services, hash: Buffer) => services.principals.find(p => timingSafeEqual(p.hash, hash));
