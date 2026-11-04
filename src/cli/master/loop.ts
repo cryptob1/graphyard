@@ -39,7 +39,7 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const loopInterval = () => values.interval ? intervalSeconds : current().run.intervalSeconds;
     // GY-1511: and names the Herdr server holding the install's agents, for the Setup page.
     const coordinationSnapshot = (timeoutMs?: number) => masterApi('work-snapshot', masterToken, timeoutMs, { [coordinationViewHeader]: 'coordination', [loopPresenceHeader]: String(loopInterval()), [loopSupervisionHeader]: current().supervision ?? 'autonomous', [loopPanesHeader]: loopHerdrReport(current().hostId) });
-    const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), mutate: masterMutation });
+    const effects = daemonEffects(root, current, { snapshot: retriedSnapshot(() => coordinationSnapshot()), sessionHistory: async work => (await masterApi(`work/${work.id}`, masterToken)).sessions ?? [], mutate: masterMutation });
     // GY-1603: a stopped loop's process exits within its unit's stop bound, whatever handle is left open.
     const exit = exitWhenStopped();
     const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;

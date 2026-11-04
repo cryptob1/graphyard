@@ -280,13 +280,25 @@ async function closeStep(cycle: Cycle) {
   }
   // A pane Graphyard launched whose runtime exited in a worktree since removed is a leftover shell: close it.
   const launched = new Set([...snapshot.work.flatMap(item => (item.sessions ?? []).map(session => session.pane)), ...Object.values(state.actions).map(action => action.pane)]);
-  for (const master of [state.master, ...Object.values(state.personalMasters)]) launched.delete(master.pane ?? undefined);
+  const masters = new Set([state.master, ...Object.values(state.personalMasters)].map(master => master.pane));
+  const recoveredItems = new Set<string>();
   if (cycle.herdr.available) for (const agent of cycle.herdr.agents) {
     const cwd = (agent.cwd ?? '').replace(/ \(deleted\)$/, '');
-    if (!agent.pane_id || !launched.has(agent.pane_id) || (agent.agent && !endedRuntimeStates.includes(agent.agent_status ?? ''))) continue;
+    if (!agent.pane_id || masters.has(agent.pane_id) || (agent.agent && !endedRuntimeStates.includes(agent.agent_status ?? ''))) continue;
     const managedRoots = [resolve(dataDirectory(), 'worktrees'), ...(config.run.worktreeRoot ? [resolve(config.run.worktreeRoot)] : [])];
     const managed = managedRoots.some(root => cwd.startsWith(root + sep));
     if ((!cwd.includes('/.graphyard/worktrees/') && !managed) || existsSync(cwd)) continue;
+    // Finished sessions disappear from coordination, and old launch actions are pruned.
+    // Read only the leftover's item, once per cycle; never fetch the fleet's full history.
+    if (!launched.has(agent.pane_id) && effects.sessionHistory) {
+      const key = [...cwd.matchAll(/(?:^|[/-])(GY-\d+)(?=[/-]|$)/gi)].at(-1)?.[1].toUpperCase();
+      const item = snapshot.work.find(work => work.key === key || work.workspaces?.some(space => space.path === cwd));
+      if (item && !recoveredItems.has(item.id)) {
+        for (const session of await effects.sessionHistory(item)) launched.add(session.pane);
+        recoveredItems.add(item.id);
+      }
+    }
+    if (!launched.has(agent.pane_id)) continue;
     try { await Promise.resolve(effects.closeSession(agent.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; }); await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'done', `Closed pane ${agent.pane_id}: its runtime exited and its worktree ${cwd} is removed`); }
     catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
   }

@@ -31,6 +31,8 @@ export function refusedBodyDetail(result: unknown): string {
 export interface DaemonEffects {
   /** The coordination read: the work snapshot, one GET. */
   snapshot: () => Promise<{ work: Work[]; now: string }>;
+  /** Full session history, read only to recover ownership of leftover panes omitted by coordination. */
+  sessionHistory?: (work: Work) => Promise<SessionHandle[]>;
   /** Herdr's agent inventory: an empty list when Herdr cannot be read. */
   agents: () => HerdrAgent[] | Promise<HerdrAgent[]>;
   /** The same inventory with whether it could be read at all. */
