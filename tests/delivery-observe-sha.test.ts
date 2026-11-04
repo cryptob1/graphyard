@@ -6,7 +6,6 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
-import { readFile } from 'node:fs/promises';
 import { Delivery } from '../src/delivery.js';
 import { server } from '../src/server.js';
 import { deliveryOutcome, deliveryLabel, shortShas } from '../src/model/format.js';

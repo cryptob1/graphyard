@@ -1,10 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { rm, symlink } from 'node:fs/promises';
+import { symlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
@@ -197,7 +197,6 @@ test('unit:post-merge-review-refused-launch-recovers — a request the loop stop
   assert.equal(reviewedItem.postMergeReview, 'reviewed');
   assert.deepEqual(owedPostMergeReviews([reviewedItem]), []);
 });
-
 
 test('integration:review-brief-proof-bindings — real ordinary and post-merge launches retain exact task proof inputs for retries', async () => {
   // GY-3055 COMMENT3006142 stopped on these reviewer-selected paths, even though

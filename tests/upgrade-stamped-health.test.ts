@@ -7,7 +7,6 @@ import { dirname, join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { composeAdapter, type AdapterContext, type AdapterObservation } from '../src/install/adapters.js';
 import type { InstallRecord } from '../src/install/secrets.js';
-import type { Transport } from '../src/install/transport.js';
 import { cliChangesOf, liveEffects, resolveTarget, runUpgrade, upgradePlan, type UpgradeInputs } from '../src/cli/upgrade.js';
 import { checkoutRelease, imageRepository } from '../src/release.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

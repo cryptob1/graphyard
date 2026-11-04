@@ -124,7 +124,6 @@ export async function harness(options: HarnessOptions): Promise<Harness> {
   const state: FakeState = { installed: !!options.installed, deployKeys: options.deployKeys ?? [] };
   const responses = [...(options.extraResponses ?? []), ...githubResponses(state, repository), ...providerResponses(options.provider, { installed: state.installed, workdir, service, envFile: options.envFile })];
   const transport = fakeTransport({ responses });
-  const serverUrl = options.serverUrl ?? 'http://127.0.0.1:4310';
   const requests: { method: string; url: string; body?: string }[] = [];
   const registry = options.registry ?? { version: 1, revision: 0, updatedAt: null, runtimes: [], models: [], accounts: [], roles: [], sessions: [], refusals: [], lastMutation: null };
   const fetchImpl = (async (input: any, init: any = {}) => {

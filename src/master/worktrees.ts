@@ -1,14 +1,11 @@
 // Concern: removing ended attempts' worktrees, managed checkouts and shared installs, and preparing assignment worktrees: the dispatch cycle's one shared base fetch.
 import { createHash } from 'node:crypto';
 import { existsSync } from 'node:fs';
-import { statfs, readdir, lstat, realpath, rm, mkdir, symlink, writeFile, readFile, rename, appendFile, unlink, rmdir, open, cp } from 'node:fs/promises';
-import { resolve, dirname, basename } from 'node:path';
+import { statfs, readdir, lstat, rm, mkdir, symlink, writeFile, readFile, unlink } from 'node:fs/promises';
+import { resolve, dirname } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
-import type { Work } from '../model.js';
-import { submittedBranchMoved } from '../model/assignment.js';
-import { branchHolders, heldBranchRefusal, holderRefusals } from '../worktree-holders.js';
 import { type WorktreeRootHealth, worktreeRootConcerns, type FilesystemProbe, type SessionCheckout, type CheckoutKind, worktreeRoot, verifyWorktreeRoot, worktreeRootMinFreeBytes, allocateSessionCheckout, removeSessionCheckout, inspectWorktreeRoot, worktreeRootBudgetBytes } from '../install/worktree-root.js';
-import type { MasterConfig, MasterRun } from './profiles.js';
+import type { MasterConfig } from './profiles.js';
 import { assertOutsideWorktrees } from './config.js';
 import { agentOwner, type AttentionItem } from './attention.js';
 

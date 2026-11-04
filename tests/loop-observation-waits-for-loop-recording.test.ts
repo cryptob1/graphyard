@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { dispatchable } from '../src/coordination.js';
 import { actionAccount, nextAction } from '../src/model/next-action.js';
 import { reconcileActions } from '../src/model/actions.js';

@@ -1,7 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
 import { automatableOutcomes, producerGroupDecisions, producerManualFailures, evidenceProves } from '../src/model/mechanical-proofs.js';
 import { deliveredProof } from '../src/model/bootstrap.js';

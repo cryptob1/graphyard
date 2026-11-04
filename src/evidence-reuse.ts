@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { z } from 'zod';
 import type pg from 'pg';
-import { admin, demand, exerciseRefusal, proofSchema, type Evidence, type Principal, type Work } from './model.js';
+import { admin, demand, exerciseRefusal, proofSchema, type Evidence, type Principal } from './model.js';
 import { producerIndependenceRefusal } from './delegation.js';
 import { candidateManifest, compatibilitySignature } from './attribution.js';
 import type { Attempt, BuildAttestation, Bundle, Environment, ReusePolicy, Validation, ValidationCandidate, ValidationRequest } from './validation.js';
