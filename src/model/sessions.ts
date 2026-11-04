@@ -41,6 +41,8 @@ export interface SessionHandle {
   head: string | null; /** When `head` was last recorded as a different commit (GY-1460): a push, which a rewrite of the same head never moves. */ headAt?: string;
   /** HEAD before this implementation runtime started, to recognise a useful attempt. */
   initialHead?: string | null;
+  /** Observed runtime start, after preparation; startedAt may be an earlier registration. */
+  runtimeStartedAt?: string | null;
   /** The loop's reading of the attempt's worktree (GY-2961): its HEAD commit and a fingerprint of its uncommitted changes, stamped when this reading was first seen — the worktree progress that extends the attempt bound. */
   workTree?: { head: string | null; dirty: string | null; at: string } | null;
   /** The command or link the launcher says attaches to this session while it runs. */
@@ -70,6 +72,7 @@ export const sessionHandleSchema = z.object({
   agentName: line(120).optional(), role: line(120).optional(),
   head: z.string().trim().regex(/^[0-9a-f]{7,64}$/, 'A session is bound to a commit by its full or abbreviated SHA').optional(),
   initialHead: z.string().regex(/^[0-9a-f]{7,64}$/).optional(),
+  runtimeStartedAt: z.string().datetime().optional(),
   workTree: z.object({ head: z.string().regex(/^[0-9a-f]{7,64}$/).nullable(), dirty: z.string().max(64).nullable(), at: z.string().datetime() }).optional(),
   workspace: line(120).optional(), tab: line(120).optional(), pane: line(120).optional(),
   attach: z.string().trim().min(1).max(500).regex(/^[^\u0000-\u001f\u007f]+$/).optional(),
@@ -149,6 +152,7 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     // command and transcript say nothing about it, so only what this registration supplies stands.
     agentName: input.agentName ?? runtimeFacts?.agentName ?? null, role: input.role ?? existing?.role ?? null, head: input.head ?? existing?.head ?? null,
     ...(input.initialHead ?? runtimeFacts?.initialHead ? { initialHead: input.initialHead ?? runtimeFacts?.initialHead } : {}),
+    ...((input.runtimeStartedAt ?? runtimeFacts?.runtimeStartedAt) ? { runtimeStartedAt: input.runtimeStartedAt ?? runtimeFacts?.runtimeStartedAt } : {}),
     workTree: reopened ? null : input.workTree ?? runtimeFacts?.workTree ?? null,
     workspace: input.workspace ?? runtimeFacts?.workspace ?? null, tab: input.tab ?? runtimeFacts?.tab ?? null, pane: input.pane ?? runtimeFacts?.pane ?? null,
     attach: input.attach ?? runtimeFacts?.attach ?? null,

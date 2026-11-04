@@ -20,7 +20,7 @@ export async function workerLaunchHealth(cycle: Cycle, item: Work, session: Sess
   const end = (item as Work & CoordinationRounds).attemptEnd
     ?? item.pipeline?.attempts.find(attempt => attempt.epoch === epoch);
   const ended = end?.epoch === epoch && !!end.endedAt;
-  const startedAt = item.lastAssignment?.epoch === epoch ? item.lastAssignment.startedAt ?? session.startedAt : session.startedAt;
+  const startedAt = session.runtimeStartedAt ?? session.startedAt;
   const age = Date.parse(ended ? end.endedAt! : new Date(clock).toISOString()) - Date.parse(startedAt);
   const key = earlyExitKey(item);
   const recovered = () => { delete state.actions[key]; if (profile) clearProfileFailure(state, profile); return null; };

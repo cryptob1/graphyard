@@ -19,6 +19,8 @@ import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
 import type { Principal, Work } from '../src/model.js';
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { renewWorkerLaunch } from '../src/master/dispatch.js';
+import { observeSessions, reportedHandle } from '../src/model/session-state.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
@@ -45,7 +47,7 @@ before(async () => {
 after(async () => { http?.close(); await store?.close(); await database?.stop(); });
 
 const proof = 'integration:early-worker-exit-recovery';
-test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route around, wake once and recover`, { timeout: 120_000 }, async t => {
+test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route around, wake once and recover`, { timeout: 180_000 }, async t => {
   process.env.EARLY_EXIT_TEST_TOKEN = 'plain-known-provider-value';
   t.after(() => { delete process.env.EARLY_EXIT_TEST_TOKEN; });
   await store.pool.query('TRUNCATE work_items, events, receipts, jobs CASCADE');
@@ -89,19 +91,28 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
     dispatch: async (item, profile, _agents, observed) => {
       launchedProfiles.push(profile.name);
       const actor = workers.find(actor => actor.id === profile.principal)!;
-      let claimed: Work, workspace: string;
+      let claimed: Work, workspace: string, firstRenewal: Promise<unknown> | undefined;
       const pane = `${item.key}-pane-${item.epoch + 1}`;
+      // Production registers before claim; this timestamp must not measure runtime age.
+      await api(coordinator, `work/${item.id}/session`, { id: `${actor.id}:${item.epoch + 1}`, kind: 'implementation', principal: actor.id, runtime: 'claude', host, subject: item.title, state: 'running' });
       const result = await dispatchWork(root, item, profile, [], (command, args) => {
         if (command === 'git') return execFileSync(command, args, { encoding: 'utf8' });
         return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' && args[1] === 'create' ? { type: 'tab_created', root_pane: { pane_id: pane, tab_id: pane }, tab: { tab_id: pane } } : {} });
-      }, observed.work, async () => {
+      }, observed.work, async (_root, _key, _profile, _run, _claimBy, keep) => {
         claimed = await api(actor, `work/${item.id}/claim`, {});
+        keep?.(claimed.epoch);
+        if (item.id === target.id && claimed.epoch === 1) {
+          // Real preparation exceeds the startup window while production renewals keep it live.
+          await firstRenewal;
+          assert.ok((await reload()).lastAssignment?.startedAt);
+          await new Promise(resolve => setTimeout(resolve, 61_000));
+        }
         workspace = await temporaryDirectory('early-exit-assigned');
         const branch = `graphyard/${item.key.toLowerCase()}-${claimed.epoch}`;
         git('worktree', 'add', '-qb', branch, workspace, initialHead);
         await api(actor, `work/${item.id}/workspace`, { epoch: claimed.epoch, host, path: workspace, branch });
         return { epoch: claimed.epoch, path: workspace, base: initialHead, work: claimed };
-      }, async () => {}, 5000, observed.now, { prompt: { attempts: 1, pauseMs: 0, acceptMs: 1000 } });
+      }, async () => {}, 5000, observed.now, { renew: (...args) => { const beat = renewWorkerLaunch(...args); firstRenewal ??= beat; return beat; }, renewIntervalMs: 10_000, prompt: { attempts: 1, pauseMs: 0, acceptMs: 1000 } });
       if (item.id !== target.id) return result;
       if (mode === 'long') return result;
       const output = join(root, `runtime-${result.epoch}.txt`);
@@ -117,8 +128,21 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
   };
   let state = emptyDaemonState(config);
   const cycle = async () => { now = Math.max(now, Date.now()); return runCycle(config, state, effects, () => now); };
-  await cycle(); assert.ok(runs.length, JSON.stringify(state.actions)); await Promise.all(runs);
-  assert.equal((await reload()).sessions!.at(-1)!.runtime, 'codex');
+  await cycle(); assert.ok(runs.length, JSON.stringify(state.actions));
+  const live = await reload();
+  const liveReport = observeSessions([live], [{ pane_id: live.sessions!.at(-1)!.pane!, agent: 'codex', agent_status: 'working' }], new Date());
+  for (const entry of liveReport.entries) await api(coordinator, `work/${target.id}/session`, reportedHandle(entry));
+  await Promise.all(runs);
+  const launched = (await reload()).sessions!.at(-1)!;
+  assert.equal(launched.runtime, 'codex');
+  assert.ok(Date.parse(launched.runtimeStartedAt!) - Date.parse(launched.startedAt) >= 60_000);
+  assert.ok(Date.parse(launched.runtimeStartedAt!) - Date.parse((await reload()).lastAssignment!.startedAt!) >= 60_000);
+  // The reporter sees the exited shell before the close step's next snapshot.
+  const report = observeSessions([await reload()], [{ pane_id: launched.pane!, agent: null }], new Date());
+  const ended = report.entries.find(entry => entry.id === launched.id)!;
+  assert.equal(ended.closed, 'ended');
+  await api(coordinator, `work/${target.id}/session`, reportedHandle(ended));
+  assert.equal((await reload()).sessions!.at(-1)!.state, 'finished');
   await fileItem('Unrelated');
   await cycle(); // close first failed pane; the other healthy profile advances unrelated work
   const failed = await reload(), key = `early-exit:${target.id}`, incident = state.actions[key];
@@ -132,6 +156,7 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
   assert.ok(!incident.detail.includes(secret) && !incident.detail.includes('plain-known-provider-value'));
   assert.match(incident.detail, /\[redacted\]/); assert.ok(incident.detail.length <= 500);
   assert.match(failed.sessions![0].outcome!, /controlled startup failure/); assert.ok(closed.includes(`${target.key}-pane-1`));
+  assert.equal(state.actions[`close:${target.id}:${launched.id}`]?.state, 'done');
   assert.equal(state.profiles['claude-0'].failures, 1);
   assert.ok(launchedProfiles.includes('claude-1'), 'healthy fallback profile still advances work');
   assert.equal(prompts.length, 1); assert.match(prompts[0], /controlled startup failure/);
@@ -139,6 +164,7 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
   await Promise.all(runs); await cycle(); await Promise.all(runs); await cycle();
   state = daemonStateSchema.parse(JSON.parse(JSON.stringify(state)));
   await cycle(); assert.equal(prompts.length, 1, 'unchanged diagnosis survives restart without another wake');
+  assert.equal(closed.filter(pane => pane === launched.pane).length, 1, 'reporter-finished pane closes exactly once');
 
   // Retry the same exact failure on another epoch. Starting it does not erase health or incident.
   now += 11 * 60_000;

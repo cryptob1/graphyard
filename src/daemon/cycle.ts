@@ -210,18 +210,13 @@ async function closeStep(cycle: Cycle) {
   for (const item of snapshot.work) if (item.stage === 'done') delete state.actions[earlyExitKey(item)];
   for (const item of snapshot.work) for (const session of item.sessions ?? []) {
     if (session.host !== config.hostId) continue;
-    // The session reporter may have closed the handle before the supervisor released its lease.
-    // Its authoritative attempt end still contributes the launch incident on the next snapshot.
-    if (session.state !== 'running') {
-      if (item.stage === 'done' || state.actions[`close:${item.id}:${session.id}`]?.state === 'done') continue;
-      const failure = await workerLaunchHealth(cycle, item, session);
-      if (failure && session.outcome !== failure) await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: failure });
-      continue;
-    }
-    const reason = sessionEnded(item, session, clock);
+    const key = `close:${item.id}:${session.id}`;
+    if (session.state !== 'running' && (item.stage === 'done' || state.actions[key]?.state === 'done')) continue;
     const failure = item.stage === 'done' ? null : await workerLaunchHealth(cycle, item, session);
+    // A reporter-finished handle can still own a pane. Diagnose it before the same idempotent close.
+    if (session.state !== 'running' && !failure) continue;
+    const reason = sessionEnded(item, session, clock) ?? (session.state !== 'running' ? failure : null);
     if (reason) {
-      const key = `close:${item.id}:${session.id}`;
       try {
         if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
         await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: failure ?? `closed by the loop: ${reason}`.slice(0, 500) });
@@ -593,10 +588,11 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
   const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: profile.principal, epoch: item.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
   await entry('started', `Dispatching ${item.key} to ${profile.name}`);
   try {
-    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot) as { pane?: string | null; epoch?: number; runtime?: string | null; initialHead?: string | null } | undefined;
+    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot) as { pane?: string | null; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null } | undefined;
     // The session's handle is what the close step reads to end it once its attempt does.
     const pane = launched?.pane ?? null, attach = pane ? `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` : null;
     await effects.recordSession?.(item, { id: `${profile.principal}:${launched?.epoch ?? item.epoch + 1}`, kind: 'implementation', principal: profile.principal, runtime: launched?.runtime ?? profile.kind ?? profile.mode, host: config.hostId,
+      ...(launched?.runtimeStartedAt ? { runtimeStartedAt: launched.runtimeStartedAt } : {}),
       ...(launched?.initialHead ? { initialHead: launched.initialHead } : {}),
       ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), ...(pane && attach ? { pane, attach } : {}), subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running' })?.catch(() => undefined);
     sink.push(await entry('done', `Dispatched ${item.key} to ${profile.name}; the worker launcher claimed under ${profile.principal}`));
