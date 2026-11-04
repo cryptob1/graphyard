@@ -79,19 +79,20 @@ const meaning = (label: string): GlossaryTerm | null => {
 };
 
 /**
- * The board's top bar (GY-1979): the one speed number, then the one release line, then the pages
+ * The board's top bar: the configured repository, then the release line, then the pages
  * of the current section, when it has more than one (Shipped, Insights, Settings). The tabs are
  * not a second navigation:
  * no page shares a label with a sidebar entry (a test holds the registry to that), they list only
  * the pages under the entry the sidebar has selected, and a section with a single page draws none
- * at all. The repository and how fresh the data is live at the foot of the sidebar.
+ * at all. An open item keeps the repository and release line, with its own Back control.
  */
 export default function TopBar(dashboard: Dashboard) {
-  const { view, setView, status } = dashboard;
+  const { view, setView, status, selected } = dashboard;
   const section = viewFor(view).section;
   const tabs = section ? visibleViews(dashboard).filter(page => page.section === section) : [];
   return <div className="top-bar">
+    {status?.repository && <p className="project-name" data-title>{status.repository}</p>}
     {status && <ReleaseLine status={status}/>}
-    {tabs.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab => { const term = meaning(tab.label); return <button key={tab.id} type="button" className={tab.id === view ? 'tab active' : 'tab'} aria-current={tab.id === view ? 'page' : undefined} onClick={() => setView(tab.id)}>{term ? <Term term={term} focusable={false}>{tab.label}</Term> : tab.label}</button>; })}</nav>}
+    {!selected && tabs.length >= 2 && <nav className="tabs" aria-label="Pages in this section">{tabs.map(tab => { const term = meaning(tab.label); return <button key={tab.id} type="button" className={tab.id === view ? 'tab active' : 'tab'} aria-current={tab.id === view ? 'page' : undefined} onClick={() => setView(tab.id)}>{term ? <Term term={term} focusable={false}>{tab.label}</Term> : tab.label}</button>; })}</nav>}
   </div>;
 }
