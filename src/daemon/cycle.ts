@@ -547,7 +547,7 @@ async function dispatchStep(cycle: Cycle) {
 }
 
 /** The record of a spec-check launch whose session ended without a report (GY-2994): master status names it, and it frees the item for a relaunch. */
-export const specCheckEndedKey = (item: Pick<Work, 'id' | 'specCheckLaunch'>) => `spec-check-ended:${item.id}:${item.specCheckLaunch?.id ?? ''}`;
+export const specCheckEndedKey = (item: { id: string; specCheckLaunch?: { id: string } | null }) => `spec-check-ended:${item.id}:${item.specCheckLaunch?.id ?? ''}`;
 
 /** Why a checker's session ended without posting, or null while it runs: Herdr no longer reports its pane, or its pane shows a BLOCKED: line. */
 async function specCheckEnded(cycle: Cycle, pane: string): Promise<string | null> {
@@ -566,6 +566,9 @@ async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: Da
   try {
     const launched = await effects.launchSpecCheck!(item);
     sink.push(await entry('done', `Launched ${item.key}'s spec check: a fresh-context reviewer restates the item and names its gaps before a worker starts`, launched?.pane, launched?.launch));
+    // A headless check that ended without an accepted report frees its item for a relaunch, as an ended pane does (GY-2994).
+    if (launched?.settled) void launched.settled.then(failure => failure ? record(state, specCheckEndedKey({ id: item.id, specCheckLaunch: { id: launched.launch } }), { kind: 'attention', work: item.key, principal: null, state: 'failed', attempts: 1, cycle: state.cycle,
+      detail: `${item.key}'s headless spec check ended without a report: ${failure}; it is relaunched` }, now(), effects.persist) : undefined).catch(() => {});
   } catch (error) {
     sink.push(await entry('failed', `Spec check launch of ${item.key} failed: ${message(error)}; it is retried next cycle`));
   }
