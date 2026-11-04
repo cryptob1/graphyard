@@ -20,13 +20,13 @@ export function timedMergePorts(ports: MergePorts, writer: MergeWriterState, per
     }
   };
   return { ...ports,
-    trial: async (mergeSha, files, item, baseTip, onStep, onTiming, heads) => {
+    trial: async (mergeSha, files, item, baseTip, onStep, onTiming, heads, share) => {
       const startedAt = new Date(ports.now()).toISOString();
       const trial: Trial = { mergeSha, startedAt, finishedAt: startedAt, heads: heads ?? [], steps: [] };
       current = trial;
       const record = (step: string, durationMs: number) => { trial.steps.push({ step, durationMs }); onTiming?.(step, durationMs); };
       try {
-        return await ports.trial(mergeSha, files, item, baseTip, onStep, record, heads);
+        return await ports.trial(mergeSha, files, item, baseTip, onStep, record, heads, share);
       } finally {
         trial.finishedAt = new Date(ports.now()).toISOString();
         writer.trials = [...(writer.trials ?? []), trial].slice(-20);
