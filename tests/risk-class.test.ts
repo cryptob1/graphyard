@@ -175,7 +175,7 @@ test('unit:risk-class-shown — graphyard status GY-N prints risk, its reasons a
 test('unit:landability-verdict — the risk class reads beside the lane and gates github mode nothing: the policy never imports it, landability reads it only for a control-plane observation (GY-1528), the gates likewise (GY-1525), and the verdict suites stand unmodified', async () => {
   assert.doesNotMatch(await read('src/model/policy.ts'), /risk-class/, 'src/model/policy.ts does not read the risk class');
   // GY-1528: a control-plane candidate's manual: attestation (landability) follows the risk class; the read sits on a line that asks for that observation.
-  for (const file of ['src/model/landability.ts']) {
+  for (const file of ['src/model-boundary/landability.ts']) {
     const source = await read(file);
     assert.doesNotMatch(source, /classifyRisk|withRisk/, `${file} neither classifies a delta itself nor prints the class`);
     const reads = source.split('\n').filter(line => /\briskOf\(/.test(line));
@@ -186,7 +186,7 @@ test('unit:landability-verdict — the risk class reads beside the lane and gate
   // The gate evaluation reports the lane and never stamps a risk class on the record: the one place
   // it reads the class is the review gate of a head the control plane observed itself (GY-1525 AC-3),
   // where the delta's class decides whether the approval comes before or after the merge.
-  const gates = await read('src/model/gates.ts');
+  const gates = await read('src/model-boundary/gates.ts');
   assert.doesNotMatch(gates, /classifyRisk|withRisk/, 'the gates neither classify a delta themselves nor print the class');
   const reads = gates.split('\n').filter(line => /\briskOf\(/.test(line));
   assert.equal(reads.length, 1, 'the gates read the class exactly once');
