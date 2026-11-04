@@ -1,0 +1,13 @@
+{
+  "id": "refused-intent-push-recovery",
+  "title": "Recover a proven push after a false orphan-intent refusal",
+  "description": "Real temporary Postgres and a first-parent Git remote exercise an orphan refusal while a measured trial runs, its actual push, interruption before the final record, and canonical restart delivering exactly once. Failed/latest failed trials, trial refusals, missing proofs, unheld commits and changed candidate, policy or review bindings stay undelivered.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "real merge-record recovery and security regressions",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/merge-executor.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

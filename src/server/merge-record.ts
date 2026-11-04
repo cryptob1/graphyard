@@ -6,13 +6,16 @@ import { demand, type Evidence, type Principal, type Work } from '../model.js';
 import { foldMergeLedger, mergeLedgerKinds, mergeTrialKind, mergeTrialStepKind, previewVerdictSchema, trialFlakedSchema, type MergeLedgerState } from '../model/merge-ledger.js';
 import { settleDelivered } from '../model/actions.js';
 import { reconciliationRefusalPrefix } from '../model/merge-authorization.js';
-import { save } from '../store.js';
+import { save, eventWorkSql } from '../store.js';
+import { evaluateLandability } from '../model/landability.js';
+import { exactApproval } from '../model/review.js';
+import { riskOf } from '../model/risk-class.js';
 import { lockedWork } from '../store/locked-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
-import { trialAuthor } from '../merge-writer/trial.js';
+import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
 import { defaultMergeBatch } from '../merge-writer/batch.js';
 import { recordScenarioRun } from '../test-runs.js';
-import { mergeRecordKinds, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
 import type { Services } from './routes.js';
@@ -95,6 +98,40 @@ export function mergeRecordFingerprint(id: string, data: unknown) {
   return createHash('sha256').update(JSON.stringify({ id, data: fingerprintData })).digest('hex');
 }
 
+/** Recover only the original, proven flight. Read its immutable saves as well as its raw latest
+ * trial: the compact fold deliberately omits failure details and policy/review bindings. */
+async function demandOrphanRecovery(db: pg.PoolClient, work: Work, all: Work[], ledger: MergeLedgerState, base: string, engine: Engine, now: Date) {
+  const reason = `${work.key}'s refused intent needs its original passing trial, policy and review binding`;
+  demand(orphanRefusal(ledger, base), reason, 409);
+  const rows = (await db.query(`SELECT kind, payload, ${eventWorkSql()} AS work FROM events WHERE work_id=$1
+    AND seq >= (SELECT max(seq) FROM events WHERE work_id=$1 AND kind='merge.intent') ORDER BY seq`, [work.id])).rows;
+  const refusals = rows.filter(row => row.kind === 'merge.refused');
+  demand(refusals.length > 0 && refusals.every(row => row.payload.kind === 'merge' && row.payload.head === ledger.head
+    && row.payload.reason === unpushedIntentReason(ledger.mergeSha!, base)), reason, 409);
+  const original = rows.find(row => row.kind === 'merge-writer.intent')?.work as Work | undefined;
+  const tried = rows.findLast(row => row.kind === 'merge-writer.trial')?.work as Work | undefined;
+  for (const bound of [original, tried]) {
+    demand(bound?.policyRevision === work.policyRevision && bound?.candidate?.sha === work.candidate?.sha
+      && bound?.candidate?.baseSha === work.candidate?.baseSha
+      && (riskOf(work).risk !== 'sensitive' || JSON.stringify(exactApproval(bound!)) === JSON.stringify(exactApproval(work)))
+      && bound?.gates.some(gate => gate.name === 'review' && gate.passed), reason, 409);
+  }
+  const latest = rows.findLast(row => row.kind === 'merge.trial');
+  demand(latest && rows.indexOf(latest) > rows.indexOf(refusals[0]), reason, 409);
+  const parsed = mergeRecordBodySchema.safeParse(latest ? { kind: 'trial', ...latest.payload } : null);
+  demand(parsed.success && parsed.data.kind === 'trial' && parsed.data.outcome === 'verdict', reason, 409);
+  if (!parsed.success || parsed.data.kind !== 'trial' || parsed.data.outcome !== 'verdict') return;
+  const trial = parsed.data;
+  demand(trial.head === ledger.head && trial.baseTip === ledger.baseTip && trial.mergeSha === ledger.mergeSha
+    && trial.build === 'pass' && trial.tests.files > 0 && trial.tests.passed === trial.tests.files && trial.tests.failed.length === 0
+    && (!trial.preview || (trial.preview.mergeSha === trial.mergeSha && trial.preview.result === 'pass'))
+    && (trial.e2e ?? []).every(entry => entry.executed > 0 && entry.failed === 0 && !entry.missing), reason, 409);
+  work.mergeLedger = ledger;
+  engine.evaluate(work, all, now);
+  demand(evaluateLandability(work, all, now).verdict === 'landable'
+    && work.gates.some(gate => gate.name === 'review' && gate.passed), reason, 409);
+}
+
 export async function recordMergeEvent(services: Services, actor: Principal, id: string, body: unknown, key: string) {
   demand(actor.role === 'coordinator', 'Only the loop\'s coordinator identity records the merge writer\'s ledger', 403);
   const data = mergeRecordBodySchema.parse(body);
@@ -103,7 +140,11 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
   const engine = services.engine, base = engine.baseBranch;
   // Whether the base branch holds the merge commit is read from the checkout before the transaction, as every provider read is.
   let held: boolean | null = null;
-  if (data.kind === 'reconciled') held = (await gitRunner(engine)(['merge-base', '--is-ancestor', data.mergeSha, `refs/remotes/origin/${base}`])).status === 0;
+  if (data.kind === 'pushed' || data.kind === 'reconciled') held = await firstParentHolds(async args => {
+    const result = await gitRunner(engine)(args);
+    if (result.status !== 0) throw new Error(result.stderr);
+    return result.stdout;
+  }, `refs/remotes/origin/${base}`, data.mergeSha);
   return engine.store.transaction(async (db: pg.PoolClient, now: Date) => {
     const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
@@ -130,9 +171,11 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
       if (work!.stage === 'done' && work!.delivery?.mergeSha.toLowerCase() === data.mergeSha) return receipt(answer());
       demand(work!.stage !== 'done', `${work!.key} is already done, so ${data.mergeSha.slice(0, 12)} delivers nothing`, 409);
       const ledger = await foldItemLedger(db, work!, data);
-      const intended = ledger && ledger.state !== 'refused' && ledger.head === candidate ? ledger.mergeSha : null;
+      const recovering = !!ledger && orphanRefusal(ledger, base);
+      const intended = ledger && (ledger.state !== 'refused' || recovering) && ledger.head === candidate ? ledger.mergeSha : null;
       demand(intended === data.mergeSha, unintendedShaRefusal(work!.key, data.mergeSha, intended), 409);
-      if (data.kind === 'reconciled') demand(held, unheldShaRefusal(data.mergeSha, base), 409);
+      if (data.kind === 'reconciled' || recovering) demand(held, unheldShaRefusal(data.mergeSha, base), 409);
+      if (recovering) await demandOrphanRecovery(db, work!, all, ledger!, base, engine, now);
     }
     const { kind, ...fields } = data;
     const event: MergeRecordEvent = data;

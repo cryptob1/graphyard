@@ -18,7 +18,7 @@ Four oldest heads share one trial and push, each delivered at its commit; a fail
 
 ## The merger
 
-The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` name no remote-side setup beyond the merge writer's deploy key. Candidates: object store, `Hotfix:`/base-repair first, then oldest item. `POST /api/work/:id/merge-record` records each step; `pushed`/`reconciled` name the open intent's merge commit, else 409. A `refused` names the submitted head, or the open intent its resubmission superseded.
+The control plane is every install's only merge writer: nothing sets another, and old `policy.merger.set` events are never read. Launches get no push credential or keyring proxy; setup and `doctor` name no remote-side setup beyond the merge writer's deploy key. Candidates: object store, `Hotfix:`/base-repair first, then oldest item. `POST /api/work/:id/merge-record` records each step; `pushed`/`reconciled` name the open intent's merge commit, else 409. A `refused` names the submitted head, or the open intent its resubmission superseded. Restart also recovers an orphan/unpushed refusal when first-parent main holds its original merge: the latest actual passing trial must retain the original head, base, policy, review and required proof bindings. Recovery appends pushed/reconciled records without rerunning the trial, changing counts or pushing again; other refusals remain held.
 
 ## Rollout
 
