@@ -9,7 +9,6 @@ import { z } from 'zod';
  */
 const sha = z.string().regex(/^[0-9a-f]{40}$/i);
 
-
 /** `graphyard_submit_evidence`: one proof's result on the exact head, with its exercise run (GY-135). */
 export const evidencePayloadSchema = z.object({
   proof: z.string().trim().min(1).max(200),
@@ -29,7 +28,6 @@ export const evidencePayloadSchema = z.object({
 }).strict();
 export type EvidencePayload = z.infer<typeof evidencePayloadSchema>;
 
-const line = (max: number) => z.string().trim().min(1).max(max);
 export const graphyardTools = { evidence: 'graphyard_submit_evidence' } as const;
 
 /**

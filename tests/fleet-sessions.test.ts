@@ -1,69 +1,9 @@
-import { after, test } from 'node:test';
+import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fleetRequestTimeoutMs, fleetRoleHealth, selectFleetSession, type FleetClient, type FleetSelection } from '../src/fleet.js';
-import { masterConfigSchema, sessionName, type HerdrAgent, type MasterConfig } from '../src/master.js';
-import { applyRegistryMutation, chooseSession, emptyRegistry, liveSessions, proposedRuntimes, supersededByRequest, type AgentRegistry, type FleetSession } from '../src/model/registry.js';
-import { temporaryDirectory } from './helpers/temp-dirs.js';
-
-/**
- * GY-190: on 2026-09-24 a rework approver could not launch because the approver role was "at its
- * concurrency limit (7 of 7 live)" while none of those seven approvers was running: each had judged
- * its decision and exited, and nothing ended the registry session it had been launched on. A
- * registry session now ends with the session it records, and the role counts only sessions that run.
- */
-
-const HOST = 'machine-a';
-const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const clock = Date.parse('2030-01-01T12:00:00Z');
-const iso = (offsetMs: number) => new Date(clock + offsetMs).toISOString();
-const minute = 60_000;
-const directories: string[] = [];
-after(async () => { for (const directory of directories) await rm(directory, { recursive: true, force: true }); });
-
-async function config(): Promise<MasterConfig> {
-  const directory = await temporaryDirectory('fleet-sessions'); directories.push(directory);
-  return masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(directory, 'coordinator.token'), cliPath: launcher,
-    repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: HOST, masterAgentName: 'graphyard-master-project',
-    autoMerge: true, mergeMethod: 'merge', workers: [] });
-}
-
-/**
- * The control plane's registry, in memory: selection supersedes, counts and chooses exactly as the
- * server does (the same pure functions), and `end` records the end with its reason.
- */
-function memoryRegistry(concurrency: number) {
-  let registry: AgentRegistry = applyRegistryMutation(emptyRegistry(), 'apply', {
-    runtimes: [proposedRuntimes.find(runtime => runtime.name === 'claude')!], models: [{ name: 'opus', id: null }],
-    accounts: [{ name: 'claude-b', runtime: 'claude', model: 'opus', credential: { host: HOST, home: null } }],
-    roles: [{ name: 'approver', accounts: ['claude-b'], concurrency }], reason: 'fixture',
-  }, { actor: 'operator', at: iso(-60 * minute) }).registry;
-  let time = clock;
-  const record = (work: string, selectedAt: string): FleetSession => {
-    const session: FleetSession = { id: randomUUID(), role: 'approver', account: 'claude-b', runtime: 'claude', model: 'opus', host: HOST, work, principal: 'approver-agent',
-      selectedAt, selectedBy: 'coordinator', reason: 'recorded', skipped: [], endedAt: null, endReason: null };
-    registry.sessions.push(session);
-    return session;
-  };
-  const client: FleetClient = {
-    document: async () => structuredClone(registry),
-    select: async request => {
-      const at = new Date(time).toISOString();
-      for (const superseded of supersededByRequest(registry, request)) Object.assign(superseded, { endedAt: at, endReason: 'superseded' });
-      const choice = chooseSession(registry, request, time);
-      if (!choice.account) return { selected: false, reason: choice.reason, skipped: choice.skipped, session: null, account: null, runtime: null, model: null, revision: registry.revision } satisfies FleetSelection;
-      const session = record(request.work!, at);
-      return { selected: true, reason: choice.reason, skipped: choice.skipped, session, account: choice.account, runtime: choice.runtime, model: choice.model, revision: registry.revision };
-    },
-    end: async (id, reason) => { const session = registry.sessions.find(entry => entry.id === id); if (session && !session.endedAt) Object.assign(session, { endedAt: new Date(time).toISOString(), endReason: reason }); },
-  };
-  return { client, record, at: (now: number) => { time = now; }, live: () => liveSessions(registry).filter(session => session.role === 'approver'), all: () => registry.sessions };
-}
+import { fleetRequestTimeoutMs } from '../src/fleet.js';
 
 test('unit:registry-request-outlasts-lock-queue — a registry request waits 30 s, so a selection queued behind the coordination lock is not abandoned while the server completes it', () => {
   // 2026-10-01: 45 of 46 selects were abandoned at a 10 s bound; each still completed server-side and left a phantom live session.

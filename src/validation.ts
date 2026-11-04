@@ -1,5 +1,6 @@
+import { appendEvidence } from './model/append-evidence.js';
+import { once, receipt } from './store/mutations.js';
 import { createHash, createPublicKey, randomUUID } from 'node:crypto';
-import { recordScenarioRun } from './test-runs.js';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
 import type pg from 'pg';
@@ -210,13 +211,11 @@ export class Validation {
   }
   async withReceipt(actor: Principal, command: string, data: unknown, key: string, fn: (db: pg.PoolClient, now: Date) => Promise<unknown>) {
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const fingerprint = hash({ command: `validation.${command}`, data });
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) {
-        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
+    const receiptInput = { command: `validation.${command}`, data };
+    return this.store.transaction(async (db, now) => once(db, actor, key, receiptInput, () => fn(db, now), {
+      replay: async (result: any) => {
         if (['dispatch', 'ack', 'heartbeat'].includes(command)) {
-          const previous: ValidationRequest | undefined = command === 'dispatch' ? receipt.result.request : receipt.result;
+          const previous: ValidationRequest | undefined = command === 'dispatch' ? result.request : result;
           if (previous) {
             const r = await this.request(db, previous.id), a = r.attempts.at(-1), old = previous.attempts.at(-1);
             const registration = await this.registration(db, r.runner, 'runner');
@@ -226,15 +225,11 @@ export class Validation {
             demand(w.validation?.[r.proof]?.requestId === r.id, 'Replayed request is superseded');
           }
         }
-        return receipt.result;
-      }
-      const result = await fn(db, now);
-      // A renewal's replay is checked against the request and its live attempt only, and its callers
-      // discard the answer, so its receipt keeps those rather than the whole request per renewal.
-      const stored = command === 'heartbeat' || command === 'collection-heartbeat'
-        ? (({ id, state, workId, proof, attempts }: ValidationRequest) => ({ id, state, workId, proof, attempts: attempts.slice(-1), compactReceipt: true }))(result as ValidationRequest) : result;
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(stored)]); return result;
-    });
+      },
+      // Renewal callers need only the current attempt for replay authorization.
+      store: result => command === 'heartbeat' || command === 'collection-heartbeat'
+        ? (({ id, state, workId, proof, attempts }: ValidationRequest) => ({ id, state, workId, proof, attempts: attempts.slice(-1), compactReceipt: true }))(result as ValidationRequest) : result,
+    }));
   }
   async define(actor: Principal, input: unknown, key: string) {
     admin(actor); const data = definitionSchema.parse(input);
@@ -601,8 +596,7 @@ export class Validation {
       const unexercised = result.passed ? exerciseRefusal(w, all, { proof: c.proof, result: 'pass', exercise: data.exercise }) : null;
       const evidence: Evidence = { id: randomUUID(), proof: c.proof, sha: c.sourceSha, baseSha: c.baseSha, policyRevision: c.policyRevision, producer: actor.id, trusted: !unexercised, result: result.passed ? 'pass' : 'fail', executed: data.executed, skipped: data.skipped, at: now.toISOString(), ...(expiresAt ? { expiresAt } : {}), artifacts: evidenceArtifacts, scenarioRevision: c.scenario.revision, environment: c.scenario.environment, validation: { candidateId: c.id, requestId: r.id, attemptId: a!.id }, attribution, evaluation,
         ...(data.exercise ? { exercise: data.exercise } : {}), ...(unexercised ? { unexercised } : {}) };
-      w.evidence.push(evidence);
-      await recordScenarioRun(db, w, evidence);
+      await appendEvidence(w, evidence, db);
       if (unexercised) await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [w.id, actor.id, 'evidence.exercise.refused',
         JSON.stringify({ details: { proof: c.proof, criteria: attachedCriteria(w, all, c.proof), behaviour: data.exercise?.behaviour ?? null, sha: c.sourceSha, requestId: r.id, attemptId: a!.id, reason: unexercised } })]);
       await appendAttribution(db, now, { workId: w.id, workKey: w.key, proof: c.proof, environmentId: c.environment.id, candidateId: c.id, requestId: r.id, attemptId: a!.id, kind: 'evidence-bound', dedupe: `evidence-bound:${evidence.id}`,
@@ -728,12 +722,8 @@ export class Validation {
     // A failed move is a visible `upload-failed` row, never a silent absence; the same key
     // resumes it, so a collector's retry of an ambiguous transport failure converges.
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const fingerprint = hash({ command: 'validation.artifact', data: { ...metadata, digest } });
-    const receiptOf = async (db: pg.PoolClient) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
-      return receipt?.result;
-    };
+    const receiptInput = { command: 'validation.artifact', data: { ...metadata, digest } };
+    const receiptOf = async (db: pg.PoolClient) => (await receipt(db, actor, key, receiptInput))?.result;
     const reservation = await this.store.transaction(async (db, now) => {
       const done = await receiptOf(db); if (done) return { done };
       const { r, a } = await this.artifactAuthority(db, actor, data, bytes.length, now);
@@ -757,16 +747,15 @@ export class Validation {
       throw new Refusal(`Artifact upload to ${backend.label} failed: ${reason}. Retry with the same idempotency key; the artifact is recorded as upload-failed until it succeeds`, 503);
     }
     try {
-      return await this.store.transaction(async (db, now) => {
-        const done = await receiptOf(db); if (done) return done;
+      return await this.store.transaction(async (db, now) => once(db, actor, key, receiptInput, async () => {
         const { r, a } = await this.artifactAuthority(db, actor, data, 0, now);
         const row: ArtifactRow | undefined = (await db.query('SELECT id,state,digest FROM validation_artifacts WHERE id=$1', [reservation.id])).rows[0];
         demand(row && row.state !== 'expired' && row.digest === digest, 'Artifact reservation lapsed during the upload');
         await db.query("UPDATE validation_artifacts SET state='stored' WHERE id=$1", [reservation.id]);
         const result = { id: reservation.id, requestId: r.id, attemptId: a.id, name: data.name, digest, size: bytes.length, expiresAt: reservation.expiresAt, url: this.artifactUrl(r.id, reservation.id), backend: backend.kind };
         await this.event(db, actor.id, 'artifact-stored', { ...result, capturePolicy: data.capturePolicy }, r.workId);
-        await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result;
-      });
+        return result;
+      }));
     } catch (error) {
       // Authority ended while the bytes were in flight: nothing may publish them now, so the
       // row stays a visible failure and the sweep removes the object with verified deletion.

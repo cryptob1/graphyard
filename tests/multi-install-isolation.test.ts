@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { harnessDecision } from '../src/harness.js';
 import * as herdrModule from '../src/master/herdr.js';
 import { closeHerdrPane, listHerdrAgents, observeHerdrAgents, stopCreatedHerdrTab } from '../src/master/herdr.js';
-import { liveMasterConfig, loadMasterConfig, masterConfigSchema, masterHarness, setupMaster, type MasterConfig } from '../src/master.js';
+import { liveMasterConfig, loadMasterConfig, masterConfigSchema, masterHarness, setupMaster } from '../src/master.js';
 import * as supervisorModule from '../src/supervisor.js';
 import { installLoopSupervisor, loopUnitText } from '../src/supervisor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

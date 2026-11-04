@@ -1,10 +1,17 @@
+import { readlinkSync } from 'node:fs';
+import { writeFile, chmod } from 'node:fs/promises';
+import { resolve, dirname, basename } from 'node:path';
+import { assertOutsideWorktrees } from '../private-file.js';
+import { writeFailure, diskExhaustionMessage, reclaimAdvice } from '../disk-space.js';
+import { forwardTolerant } from '../master/profiles.js';
+import { boundDetail, actionDetailMax } from './text.js';
 // Concern: the daemon cursor — its schema, persistence, bounds and single-writer lock.
 import { randomUUID } from 'node:crypto';
 import { readFile, rename } from 'node:fs/promises';
 import { z } from 'zod';
 import { type MasterConfig } from '../master.js';
 import { emptyProjectMemory, projectMemorySchema } from '../model/project-memory.js';
-import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
+import { emptyMergeWriterState, mergeWriterStateSchema } from './merge-writer-state.js';
 import { continuitySchema } from '../master/conversation.js';
 
 // 'diagnosis' stays a kind a cursor may hold: the diagnostician's rows (GY-439, retired by GY-2186) still load, and nothing new records one.
@@ -13,7 +20,7 @@ const retiredActionKinds: Record<string, string> = { decision: 'judgement', esca
 export const daemonActionKinds = ['close', 'dispatch', 'review', 'refresh', 'proof', 'merge', 'deployment', 'smoke', 'attention', 'config', 'session', 'reclaim', 'judgement', 'scope', 'settle', 'failover', 'capacity', 'human', 'preserve', 'fault', 'diagnosis', 'wake', 'blocker'] as const;
 export type DaemonActionKind = typeof daemonActionKinds[number];
 /** The most an action's detail may carry: daemonActionSchema's bound, which record() enforces. */
-export const actionDetailMax = 2000;
+export { actionDetailMax } from './text.js';
 export const daemonActionSchema = z.object({
   kind: z.preprocess(kind => retiredActionKinds[kind as string] ?? kind, z.enum(daemonActionKinds)),
   work: z.string().nullable().default(null),
@@ -37,21 +44,12 @@ export const daemonActionSchema = z.object({
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
-/** A field a release retired: an older cursor's value still parses. */
-const retired = z.unknown().optional();
 export const cycleMetricsSchema = z.object({
   cycle: z.number().int().min(0), at: z.string(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
-  /** Retired (GY-2877): what the cycle could act on. */
-  actionable: retired,
   /** The steps the cycle ran, in order: snapshot, close, dispatch, merge writer, persist. A cursor written before recorded step costs here, which read as absent. */
   steps: z.preprocess(steps => Array.isArray(steps) && steps.every(step => typeof step === 'string') ? steps : undefined, z.array(z.string().max(40)).max(10).optional()),
-  /** Retired (GY-2876): the cycle's durations and call timings, and the stage, lead-time and post-deploy measurements; a cursor written before still parses. */
-  durationMs: retired, childWaitMs: retired, workMs: retired, planeWaitMs: retired, timings: retired,
-  stages: retired, lead: retired, production: retired, postDeploy: retired, postDeployFailures: retired,
-  /** Retired (GY-1992): the scope-request latency and the idle reading; nothing writes them, and a cursor written before keeps parsing. */
-  idleMs: retired, scope: retired, scopeOpenMs: retired,
-}).strict();
+}).strip();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 
 /**
@@ -172,31 +170,13 @@ export const daemonStateSchema = z.object({
   actions: z.record(z.string(), daemonActionSchema).default({}),
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
-  /** Retired (GY-2877): the deployment observation and the in-loop deploy's release reading; graphyard-deploy.service records what it serves in .graphyard/deploy.json. */
-  deployment: retired, promotion: retired,
-  /** Retired: the main watch (GY-1519) is gone; a cursor written before still carries its state, which nothing reads. */
-  mainWatch: z.unknown().optional(),
-  mergeWriter: z.lazy(() => mergeWriterStateSchema).default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
+  mergeWriter: mergeWriterStateSchema.default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
-  /** Retired (GY-2877): the between-cycles self-upgrade. */
-  upgrade: retired,
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
-  /** Retired (GY-2876): resource reclaim, host memory holds and the latency clocks; a cursor written before parses, and its next write drops them. */
-  reclaim: retired, memory: retired, clocks: retired, latency: retired,
-  /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and a cursor written before keeps parsing. */
-  silence: z.unknown().optional(),
-  /** Retired (GY-1992): the scope requests this loop decided; a cursor written before keeps parsing. */
-  scope: z.unknown().optional(),
-  /** Retired (GY-2874): orphaned supervisors, approver watches, absent sessions and deferred decisions; a cursor written before keeps parsing. */
-  orphans: z.unknown().optional(), approvals: z.unknown().optional(), absences: z.unknown().optional(), decisionsDeferred: z.unknown().optional(),
-  /** Retired (GY-2875): docs-sync sessions and the conflicts the loop routed; a cursor written before keeps parsing. */
-  docsSyncs: z.unknown().optional(), conflicts: z.unknown().optional(),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
-  /** Retired (GY-2877): base failures and the system invariants. */
-  baseFailures: retired, invariants: retired,
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
   personalMasters: z.record(z.string(), masterSessionSchema).default({}),
@@ -204,7 +184,7 @@ export const daemonStateSchema = z.object({
   controlPlane: z.object({ unreachableSince: z.string(), error: z.string().max(1000), restartedAt: z.string().nullable(), restart: z.string().max(1000).nullable(), exitReason: z.string().max(1000).nullable(), freeDisk: z.string().max(500).nullable() }).strict().nullable().default(null),
   /** Shared project memory (GY-1125): recent decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
-}).strict();
+}).strip();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 /**
@@ -223,8 +203,155 @@ export async function archiveDaemonCursor(config: Pick<MasterConfig, 'credential
   return { file: archive, cycle };
 }
 
-// The cursor's persistence, bounds and single-writer lock live in ./state-cursor.ts; these
-// re-export it, so every existing import keeps working.
-import { daemonStatePath, clampCount } from './state-cursor.js';
-export { retainedActions, retainedMetrics, profileCooldownMs, maxProofAttempts, emptyDaemonState, daemonStatePath, besideCursor, readDaemonState, writeDaemonState, pruneDaemonState, clampCount, storeAction, touchStanding, boundDaemonState, pidNamespace, initialPidNamespace, liveProcess, acquireDaemonLock, message } from './state-cursor.js';
+/**
+ * The cursor validates declared fields and preserves unknown fields from newer or retired versions.
+ */
+let tolerated: typeof daemonStateSchema | undefined;
+const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSchema);
+/**
+ * GY-1960: a cursor record the loop rewrites from what it declares (its release, its latest
+ * reload) keeps the fields a newer loop wrote under it. `next` sets every declared field, so only
+ * the undeclared ones of `previous` survive under it; a null `next` clears the record as before.
+ */
+export const carryUndeclared = <T extends object | null>(previous: object | null | undefined, next: T): T => previous && next ? { ...previous, ...next } : next;
+export const retainedActions = 500, retainedMetrics = 100, profileCooldownMs = 600_000, maxProofAttempts = 3;
 
+export function emptyDaemonState(config: MasterConfig): DaemonState {
+  return daemonStateSchema.parse({ version: 1, url: config.url, repository: config.repository });
+}
+
+/** Derived from the coordinator credential, so the cursor lives beside it and never inside a worktree. */
+export function daemonStatePath(config: MasterConfig) {
+  return besideCursor(config, 'daemon');
+}
+/** A file beside the loop's cursor, under the credential's private directory. */
+export const besideCursor = (config: Pick<MasterConfig, 'credentialFile'>, suffix: string) =>
+  resolve(dirname(config.credentialFile), `${basename(config.credentialFile).replace(/\.token$/, '')}.${suffix}.json`);
+
+export async function readDaemonState(root: string, config: MasterConfig): Promise<DaemonState> {
+  const file = daemonStatePath(config);
+  await assertOutsideWorktrees(root, dirname(file), 'Master daemon state directory');
+  let raw: string;
+  try { raw = await readFile(file, 'utf8'); }
+  catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
+  // Preserve unknown cursor fields across reads and writes, including keys retired from the schema.
+  const stored = JSON.parse(raw);
+  for (const action of Object.values<Record<string, unknown>>(stored.actions ?? {})) delete action.faultClass;
+  delete (stored.mergeWriter as Record<string, unknown> | undefined)?.advisory;
+  const state = toleratedStateSchema().parse(stored);
+  if (state.url !== config.url || state.repository.toLowerCase() !== config.repository.toLowerCase()) throw new Error('Master daemon state belongs to another Graphyard server or repository; remove it before running the loop');
+  return state;
+}
+
+export async function writeDaemonState(config: MasterConfig, state: DaemonState) {
+  const file = daemonStatePath(config), temporary = `${file}.${randomUUID()}.tmp`;
+  // The cursor is written twice per external action, so it is usually the first thing a full
+  // volume stops. Saying so is the difference between a disk to reclaim and a mystery.
+  try {
+    await writeFile(temporary, JSON.stringify(toleratedStateSchema().parse(boundDaemonState(state)), null, 2), { mode: 0o600, flag: 'wx' });
+    await rename(temporary, file);
+  } catch (error) { throw writeFailure(error, 'Writing the master daemon cursor'); }
+  await chmod(file, 0o600);
+}
+
+/** Keep the cursor bounded without ever discarding an unresolved action. */
+export function pruneDaemonState(state: DaemonState) {
+  const entries = Object.entries(state.actions);
+  const resolved = entries.filter(([key, action]) => action.state === 'done' || action.state === 'failed' && !key.startsWith('early-exit:'));
+  if (resolved.length > retainedActions) {
+    for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
+  }
+  if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
+  return state;
+}
+
+/**
+ * Fit every bounded field of the cursor to its schema bound, in place (GY-187). The schema is the
+ * cursor's contract, and parsing it is the last step of every write — so a value over its bound
+ * (a delivered list longer than 200, a refusal quoted in full, an attempt counter past 1000) used
+ * to fail that write, and with it the whole cycle, on every cycle until somebody edited the file.
+ * Truncation loses the tail of a long string or the oldest entries of a long list; failing the
+ * write loses the cycle. Counts are clamped, never reset, so a backoff keeps its place.
+ */
+export const clampCount = (value: number, max: number) => Math.min(max, Math.max(0, Math.floor(Number.isFinite(value) ? value : 0)));
+
+/**
+ * Every write of an action goes through here. The detail is bounded here, before the schema sees
+ * it, so a caller that quotes a long error or path list cannot fail every cycle with an over-long
+ * string (GY-179).
+ */
+export function storeAction(state: DaemonState, key: string, action: DaemonAction): DaemonAction {
+  const entry = daemonActionSchema.parse({ ...action, detail: boundDetail(action.detail), attempts: clampCount(action.attempts, 1000) });
+  state.actions[key] = entry;
+  return entry;
+}
+/** A refusal that still stands, observed again with the same detail (GY-1086): its row is not rewritten, but its time moves. */
+export function touchStanding(state: DaemonState, key: string, at: string) {
+  const row = state.actions[key];
+  if (row && row.state === 'failed') row.at = at;
+}
+const cut = <T extends string | null | undefined>(value: T, max: number): T => (typeof value === 'string' && value.length > max ? boundDetail(value, max) : value) as T;
+export function boundDaemonState(state: DaemonState): DaemonState {
+  for (const action of Object.values(state.actions)) {
+    action.detail = boundDetail(action.detail);
+    action.attempts = clampCount(action.attempts, 1000);
+  }
+  for (const profile of Object.values(state.profiles)) profile.reason = cut(profile.reason, 500);
+  if (state.config) state.config = { ...state.config, changed: state.config.changed.slice(0, 100).map(entry => cut(entry, 100)), refused: cut(state.config.refused, 1000) };
+  if (state.controlPlane) state.controlPlane = { ...state.controlPlane, error: cut(state.controlPlane.error, 1000), restart: cut(state.controlPlane.restart, 1000), exitReason: cut(state.controlPlane.exitReason, 1000), freeDisk: cut(state.controlPlane.freeDisk, 500) };
+  if (state.master) {
+    state.master.agentName = cut(state.master.agentName, 200);
+    state.master.pane = cut(state.master.pane, 200);
+    state.master.account = cut(state.master.account, 200);
+    state.master.session = cut(state.master.session, 200);
+    if (state.master.lastEnd) state.master.lastEnd = { ...state.master.lastEnd, cause: cut(state.master.lastEnd.cause, 40), detail: cut(state.master.lastEnd.detail, 500) };
+    if (state.master.lastWake) state.master.lastWake = { ...state.master.lastWake, causes: state.master.lastWake.causes.slice(-20).map(cause => cut(cause, 60)) };
+    state.master.unreleased = state.master.unreleased.slice(-20).map(entry => ({ ...entry, session: cut(entry.session, 200), reason: cut(entry.reason, 300) }));
+  }
+  const failures = state.failures;
+  if (failures.last) Object.assign(failures.last, { call: cut(failures.last.call, 100), reason: cut(failures.last.reason, 1000) });
+  if (failures.lastUnhandled) failures.lastUnhandled.reason = cut(failures.lastUnhandled.reason, 1000);
+  if (state.projectMemory) {
+    state.projectMemory.notes = (state.projectMemory.notes ?? []).slice(0, 50);
+    state.projectMemory.changes = (state.projectMemory.changes ?? []).slice(0, 50);
+  }
+  return state;
+}
+/**
+ * This process's PID namespace (`pid:[4026531836]`), or null where /proc does not say (not Linux).
+ * A pid means something only in the namespace it was taken in (GY-1370): a sandbox with its own
+ * PID namespace sees none of the host's processes, so its probe of a host pid always reads gone.
+ */
+export const pidNamespace = () => { try { return readlinkSync('/proc/self/ns/pid'); } catch { return null; } };
+/** The host's initial PID namespace (the kernel's PROC_PID_INIT_INO), which a lock written before GY-1370 was taken in. */
+export const initialPidNamespace = 'pid:[4026531836]';
+export const liveProcess = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error: any) { return error?.code === 'EPERM'; } };
+
+/**
+ * One loop per repository. A second daemon would duplicate dispatch, so a live lock refuses. A
+ * lock left behind by a killed daemon is reclaimed as soon as its process is demonstrably gone,
+ * which is what makes kill-and-restart resume rather than wait out a timeout.
+ */
+export function acquireDaemonLock(state: DaemonState, identity: { pid: number; host: string }, now: number, intervalMs: number) {
+  const lock = state.lock;
+  const staleAfterMs = Math.max(3 * intervalMs, 120_000);
+  if (lock) {
+    const age = now - Date.parse(lock.heartbeatAt);
+    const sameHost = lock.host === identity.host;
+    const alive = sameHost ? lock.pid !== identity.pid && liveProcess(lock.pid) : !Number.isFinite(age) || age < staleAfterMs;
+    if (alive) throw new Error(`Another Graphyard master loop holds this repository (pid ${lock.pid} on ${lock.host}, last cycle ${lock.heartbeatAt}); stop it before starting a second daemon`);
+  }
+  state.lock = { id: randomUUID(), pid: identity.pid, host: identity.host, startedAt: new Date(now).toISOString(), heartbeatAt: new Date(now).toISOString(), pidNamespace: pidNamespace() };
+  return state.lock;
+}
+
+/**
+ * Every failure the cycle records passes through here. A command that failed because the host
+ * ran out of room keeps its own output and gains the name of the condition, so the action reads
+ * as a disk to reclaim rather than as an unexplained command error.
+ */
+export const message = (error: unknown) => {
+  const text = error instanceof Error ? error.message : String(error), exhausted = diskExhaustionMessage(error);
+  // An error already reported as disk exhaustion is not explained twice.
+  return exhausted && !text.includes(reclaimAdvice) ? `${text} — ${exhausted}` : text;
+};

@@ -130,7 +130,7 @@ test('unit:full-evaluation-interval-stretches — the next full pass is due no s
 
 test('unit:face-move-pass-keeps-the-interval — a pass a moved face drove is not full, so it neither restarts the full-evaluation clock nor stretches it, and no stream of face moves can hold the safety net off', { timeout: 120_000 }, async () => {
   const parent = await create();
-  const fed = await create({ dependencies: [parent.id] });
+  await create({ dependencies: [parent.id] });
   await settle();
 
   // A quick full pass the reset brings; the interval is set past three of its lengths, so its deadline is I from when it began.

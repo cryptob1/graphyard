@@ -215,7 +215,7 @@ test('unit:face-move-readers-match-full-evaluation — the view, the configurati
     const x = await item('Script face', { exclusiveResources: ['res:script'] });
     const byReference = await item('Script reader', { dependencies: [x.id] });
     const sibling = await item('Script sibling');
-    const sharer = await item('Script sharer', { exclusiveResources: ['res:script'] });
+    await item('Script sharer', { exclusiveResources: ['res:script'] });
     const drafter = await item('Script draft');
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{parent}', to_jsonb($2::text)) WHERE id = $1`, [x.id, parent.id]);
     await store.pool.query(`UPDATE work_items SET document = jsonb_set(document, '{parent}', to_jsonb($2::text)) WHERE id = $1`, [sibling.id, parent.id]);

@@ -88,8 +88,7 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   assert.deepEqual(queryTexts(probe).map(({ sql }) => /\bWHERE\b|\bLIMIT\b/i.test(sql.split(/\bFROM\s+work_items\b/i)[1])), [false, false], 'a JOIN, another receiver or a constant does not exempt a whole-board read');
   // Single-item commands use the peer read; graph-wide edits retain the bounded fleet read.
   const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
-  // Five callers remain after GY-3011 removed settleClaimedAction, which also named its item.
-  assert.equal((engineSource.match(/decisionWork\(db, \[id\]/g) ?? []).length, 5, 'single-item commands name their focus in the peer read');
+  assert.equal((engineSource.match(/decisionWork\(db, \[id\]/g) ?? []).length, 3, 'single-item commands name their focus in the peer read');
   assert.equal((engineSource.match(/lockedWork\(db, \[id\]\)/g) ?? []).length, 1, 'only graph and workspace edits retain the fleet read');
   assert.match(engineSource, /const rows = await lockedRows\(db, \[\]\);/, 'a reconciliation pass opens, under the lock, on the bounded read');
   assert.match(engineSource, /else if \(isStandIn\(fleet\.get\(id\)!\.work\)\) await reread\(db, \[id\]\)/, 'a batch reads each of its own items whole as it reaches it, outside the coordination lock');

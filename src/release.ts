@@ -118,8 +118,12 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:dcefbd2e92eecbef78eb75f38e5798adcfaa3a228e7c8e59ddab7f4e95e02627',
   // GY-2986: a person's human: answer stays in the coordination view for its head whatever the base.
   'sha256:72e499b9d63b92e474fa67e9ba27b7b89db644b5f9e18d3adf9b911d4e364e06',
+  // GY-3013: migrate retired document fields once instead of stripping them on reads and writes.
+  'sha256:e9966540eb026ae6f07a7abbd5ceacfc8dd90ffe41f8adbbb1f965aacd70457b',
+  // GY-3017: retire job holds, unused work-index columns and legacy observation tables.
+  'sha256:d1fad9115075e03bf688396b51c2aa4470a2bd66c1e54138787ba0b33b43acbb',
   // GY-3035: indexed decision peers; unchanged peer columns do not lock live coordination writes.
-  'sha256:0e463a41e746e218ae05b971b921330661bc6adc0ac0384df5cc4d640747b1dd',
+  'sha256:718f3640a5d9356b5444e6e949a945fce073e547bb395212a9e745a663e7c2c4',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

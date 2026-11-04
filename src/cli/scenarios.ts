@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { defineCommands } from './registry.js';
 import type { CliContext } from './context.js';
-import { readCredentialFile } from '../master.js';
+import { readCredentialFile } from '../private-file.js';
 import { loadCases, selectCases, syncCases } from '../e2e/case.js';
 import { recordRuns, runCases, summarize, type E2eReport } from '../e2e/runner.js';
 
@@ -73,11 +73,6 @@ export const scenarioCommands = defineCommands([
     name: 'scenarios',
     help: ['  scenarios                    List versioned E2E test-case definitions'],
     run: async ({ api, print }) => print(await api('scenarios')),
-  },
-  {
-    name: 'scenario',
-    help: ['  scenario file.json           Publish a scenario version (operator)'],
-    run: async ({ id, api, print }) => print(await api('scenarios', JSON.parse(await readFile(id!, 'utf8')))),
   },
   {
     name: 'e2e',

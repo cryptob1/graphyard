@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import { accessSync, constants as fsConstants } from 'node:fs';
 import { mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises';
-import { dirname, resolve } from 'node:path';
+import { resolve } from 'node:path';
 import { z } from 'zod';
 import { configHome } from './install/secrets.js';
 import { sessionNameField, suffixedSessionName } from './session-name.js';
@@ -231,26 +231,6 @@ const originBase = (root: string) => {
   try { return execFileSync('git', ['symbolic-ref', '--short', 'refs/remotes/origin/HEAD'], { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().replace(/^origin\//, '') || 'main'; }
   catch { return 'main'; }
 };
-
-/**
- * GY-1480: write the delivery workflow into a checkout whose scan finds no CI of its own; null when
- * it has CI. Unchanged content is left alone, so a rerun is idempotent, and a file that differs from
- * the render — an operator's edit — is kept and reported as drift, never overwritten. The caller
- * publishes the path with the other onboarding files, so the onboarding change carries it.
- */
-export async function writeDeliveryWorkflow(root: string, base = originBase(root)): Promise<{ path: string; state: 'written' | 'unchanged' | 'drift' } | null> {
-  const input = await collectScanInput(root);
-  if (!hasNoCi(input)) return null;
-  const workflow = renderDeliveryWorkflow(detectStack(input), base);
-  const target = resolve(root, workflow.path);
-  let current: string | null = null;
-  try { current = await readFile(target, 'utf8'); } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-  if (current === workflow.content) return { path: workflow.path, state: 'unchanged' };
-  if (current !== null) return { path: workflow.path, state: 'drift' };
-  await mkdir(dirname(target), { recursive: true });
-  await writeFile(target, workflow.content, { mode: 0o644 });
-  return { path: workflow.path, state: 'written' };
-}
 
 /**
  * GY-1901: under the local mode, remove the delivery workflow an earlier mode generated; null when
@@ -580,7 +560,7 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
     environment: topology,
     policy: { checks: policyChecks, review: true, reviewProvider: 'github',
       evidenceExpectations: 'Automated proofs are submitted only by a trusted producer credential in protected CI, for the exact candidate SHA with executed > 0 and skipped = 0. Manual proofs are inspected and submitted by a separate operator session. Implementation workers never hold producer or admin credentials.' },
-    profiles: { workers, reviewer: { provider: 'github', note: 'Reviews are GitHub approvals on the pull request from a reviewer independent of the author; a hosted Codex reviewer can be selected later with reviewpolicy.' } },
+    profiles: { workers, reviewer: { provider: 'github', note: 'An independent reviewer session records its verdict on the submitted code.' } },
     githubApp: options.repository && /^[\w.-]+\/[\w.-]+$/.test(options.repository) ? { name: `Graphyard ${repository.replace('/', '-')}`, repository, flow: 'github-setup' } : null,
     delivery,
   });

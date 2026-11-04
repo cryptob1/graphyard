@@ -15,7 +15,7 @@ import type { ExhaustionSignal } from '../model/capacity.js';
 import { failureText } from './worktrees.js';
 import type { MasterConfig } from './profiles.js';
 import type { Work } from '../model.js';
-import { simplicityParagraph } from '../reviewer.js';
+import { simplicityParagraph } from '../review-prompt.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { adoptConversation, assertConversationRuntime, awaitConversation, captureConversation, continuationContext, conversationArgs, graphyardInput, masterInputs, masterRecords, type Continuity } from './conversation.js';

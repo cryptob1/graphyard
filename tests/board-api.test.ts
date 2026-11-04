@@ -14,7 +14,6 @@ import { classify } from '../web/groups.js';
 import { releaseView } from '../src/model/release.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
-import { whatIsLeft } from '../web/item-page.js';
 // A namespace import, so the proofs fail as test cases, not as a missing export, on a tree without GY-1739.
 import * as plain from '../src/model/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';
@@ -108,7 +107,7 @@ function page(work: Work[], board: Board | null, query = '') {
   const noop = () => {};
   const dashboard = { token: 'fixture', work, board, status: boardStatus('admin'), error: '', connected: true, lastUpdated: null, view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query, setQuery: noop, operatorAgents: [], operatorAgentsError: null,
-    features: {}, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false, queue: [], sessionEpoch: { current: 0 }, api: async () => ({}),
+    features: {}, events: [], editingRequirements: false, setEditingRequirements: noop, queue: [], sessionEpoch: { current: 0 }, api: async () => ({}),
     refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop } as unknown as Dashboard;
   return renderToStaticMarkup(createElement(OverviewPage, dashboard));
 }
@@ -172,7 +171,7 @@ function details(work: Work[], item: Work) {
   const noop = () => {};
   const dashboard = { token: 'fixture', work, status: boardStatus('admin'), error: '', connected: true, lastUpdated: null, view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: item.id, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop, operatorAgents: [], operatorAgentsError: null,
-    features: {}, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false, queue: [], sessionEpoch: { current: 0 }, api: async () => ({}),
+    features: {}, events: [], editingRequirements: false, setEditingRequirements: noop, queue: [], sessionEpoch: { current: 0 }, api: async () => ({}),
     refresh: async () => {}, action: async () => {}, setError: noop, signOut: noop, item } as unknown as Dashboard & { item: Work };
   return renderToStaticMarkup(createElement(WorkDetails, dashboard));
 }

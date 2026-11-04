@@ -56,7 +56,7 @@ The retired `POST /api/production-environment` route returns 404. Configure the 
 
 ## Backup, upgrade, rollback
 
-Back up with `graphyard db backup`, verify with `db verify`, and fence before a move with `db fence`. Restore with `db migrate` then `db restore`.
+Back up with `graphyard db backup`, verify with `db verify`, and fence before a move with `db fence`. Restore with `db migrate` then `db restore`. Older backups still verify after tables are retired; restore skips those tables and reports their names in `tablesRetired`, matching the migration's removal.
 
 [Upgrade](install.md#upgrading-an-existing-installation) installs dependencies in separate `deploy/build/.graphyard/cli-releases/<commit>` worktrees. The existing `install --plan`/apply flow builds and restarts the exact source. Only after `/healthz?strict` passes does an atomic symlink rename publish `deploy/build/.graphyard/cli-published`. Launchers resolve it before loading tsx; the watched checkout and legacy `deploy/build` retain their code and dependencies.
 
@@ -69,3 +69,9 @@ Set the variables, register a read-write deploy key, then run `doctor`. For Comp
 `master setup --apply` sets derivable variables and appends `.graphyard/setup-audit.jsonl`. Agents run host-doable steps; park refuses those asks. Personal sign-in, enrolment and browser profiles remain human.
 
 No main guard, revert approver or reviewer App remains. Old `GRAPHYARD_REVERT_APPROVER_*` and `GRAPHYARD_REVIEWER_APPS` variables are unread. Reviews use control-plane launch tokens.
+
+Startup migrates retired work-item fields once (GY-3013), including queue, planned-file scope,
+escalation, research and lane fields, and clears standing `Scope request refused` blockers.
+The migration preserves stages and event history; evaluations and status reads no longer strip fields.
+Daemon cursors still load retired keys and preserve unknown fields across reads and writes for
+forward compatibility, while validating active fields.

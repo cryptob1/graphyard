@@ -1,6 +1,5 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
 import { evaluate } from '../src/model/gates.js';
 import {
   LANDABILITY_VERSION, evaluateLandability, landabilityRefusals,
@@ -20,7 +19,6 @@ const at = '2026-09-30T12:00:00.000Z';
 const now = new Date(at);
 const sha = (digit: string) => digit.repeat(40);
 const main = sha('b');
-const CI = [1];
 
 /** A file on a head as GitHub lists it against its bound base: this head changed it, the base holds another version. */
 const changed = (path: string, overrides: Partial<ScopeFile> = {}): ScopeFile =>

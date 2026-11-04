@@ -7,7 +7,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import type { NextAction } from '../src/model/action-kinds.js';
-import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction, settleDelivered } from '../src/model/actions.js';
+import { actionId, actionStallMaxMs, claimAction, reconcileActions, settleAction } from '../src/model/actions.js';
 import { nextAction } from '../src/model/next-action.js';
 import { livenessCarry, livenessOf, livenessRetryLimit, livenessWaitBoundMs, type ViolationClass } from '../src/model/liveness.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
