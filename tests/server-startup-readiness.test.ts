@@ -6,6 +6,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { main, refusedBeforeReady } from '../src/server/main.js';
 import { Validation } from '../src/validation.js';
+import { Delivery } from '../src/delivery.js';
 
 const port = Number(process.env.GRAPHYARD_STARTUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1127);
 let database: EmbeddedPostgres;
@@ -252,3 +253,33 @@ test('close during startup validation stops cleanly without launching background
   }
 });
 
+
+test('unit:server-startup-readiness — startup, routes and the reconciliation tick share one Validation and Delivery', async () => {
+  const originalExpire = Validation.prototype.expireArtifacts;
+  const originalReconcile = Validation.prototype.reconcile;
+  const originalSweep = Delivery.prototype.sweep;
+  const validations = new Set<Validation>(), deliveries = new Set<Delivery>();
+  let startup = false, tick = false;
+  try {
+    Validation.prototype.expireArtifacts = async function () { validations.add(this); return 0; };
+    Validation.prototype.reconcile = async function (includeCompleted?: boolean) {
+      validations.add(this);
+      if (includeCompleted) startup = true; else tick = true;
+    };
+    Delivery.prototype.sweep = async function (...args) { deliveries.add(this); return originalSweep.apply(this, args); };
+    const instance = await main({ port: 0 });
+    try {
+      assert.equal(instance.validation, instance.http.services.validation);
+      assert.equal(instance.http.services.delivery.validation, instance.validation);
+      const deadline = Date.now() + 10_000;
+      while ((!tick || !deliveries.size) && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.ok(startup && tick, 'startup and a periodic reconciliation both ran');
+      assert.deepEqual([...validations], [instance.http.services.validation]);
+      assert.deepEqual([...deliveries], [instance.http.services.delivery]);
+    } finally { await instance.close(); }
+  } finally {
+    Validation.prototype.expireArtifacts = originalExpire;
+    Validation.prototype.reconcile = originalReconcile;
+    Delivery.prototype.sweep = originalSweep;
+  }
+});

@@ -1,4 +1,4 @@
-import { readFile, rm } from 'node:fs/promises';
+import { rm } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { availableRuntimes, describeMergeGate, discover, installedOnboarding } from '../onboarding.js';
@@ -6,7 +6,6 @@ import { deliveryModes, type DeliveryMode } from '../model/delivery-policy.js';
 import { applyProposal, loadAppliedSetup, loadProposal, repositoryScanDifference, saveProposal, scanProposal, setupDrift, setupRepository } from '../repository-setup.js';
 import { acquireApplyLock, applyInstall, applyRosterChange, buildPlan, installIdFor, installRequestFromArgs, prepareInstall, repositoryRoot, type InstallDependencies } from '../install/index.js';
 import { importPrincipalToken, installDirectory, readInstallRecord, recordedRoster, removeRosterEntry, rosterEntry, upsertRosterEntry } from '../install/secrets.js';
-import { delegationLimitAssignments } from '../install/limits.js';
 import { defineCommands } from './registry.js';
 import { readSecretFromStdin } from './context.js';
 import { upCommand, upHelpRequested, upUsage } from '../up.js'; import { runDoctor } from './install-doctor.js';
@@ -17,24 +16,6 @@ export function refuseUpAppReuse(args: readonly (string | undefined)[]): void {
   if (args.some(arg => arg === '--reuse-app' || arg?.startsWith('--reuse-app='))) throw new Error(upAppReuseRefusal);
 }
 
-/**
- * The capacity variables that accompany the principals `init --apply` registers: derived from
- * the roster in .graphyard/principals.json, and — when the operator credential reaches the
- * server — compared with what the deployment runs with, so a re-run after the roster grew
- * reports the deployed value that no longer covers it beside the value to set.
- */
-export async function capacityForPrincipals(principalsFile: string, status: () => Promise<any>) {
-  const registry = JSON.parse(await readFile(principalsFile, 'utf8'));
-  let deployed: Record<string, string | null> | null = null, error: string | null = null;
-  try {
-    const live = await status();
-    deployed = live?.delegationLimits?.deployed ?? null;
-    if (!deployed) error = 'the server reports no delegationLimits; deploy main first, then rerun init --scan --apply to compare';
-  } catch (failure: any) { error = `the server could not be read (${failure.message})`; }
-  const limits = delegationLimitAssignments(registry.principals, deployed);
-  return { variables: limits.variables, lines: limits.lines, drift: limits.drift,
-    next: `Set ${limits.lines.join(' ')} beside GRAPHYARD_PRINCIPALS on the Graphyard deployment${limits.drift.length ? ` (drift: ${limits.drift.map(entry => entry.reason).join(' ')})` : error ? `; no drift can be reported because ${error}` : ''}` };
-}
 /**
  * `graphyard principal add|remove` (GY-1879): one entry of this host's installation roster. The
  * install.json record is the roster; `add` judges the entry as the planner judges its own
@@ -186,9 +167,7 @@ export const installCommands = defineCommands([
             const result = await applyProposal(root, stored.proposal, { url, installed });
             return print({ proposal: stored.file, ...result, installed: installed.directory });
           }
-          const result = await applyProposal(root, stored.proposal, { url, writeCredentials: true });
-          if (!result.principalsFile) throw new Error('applyProposal wrote no principals registry');
-          return print({ proposal: stored.file, ...result, capacity: await capacityForPrincipals(result.principalsFile, () => context.api('status')) });
+          return print({ proposal: stored.file, ...await applyProposal(root, stored.proposal, { url }) });
         }
         await saveProposal(root, fresh);
         const applied = await loadAppliedSetup(root);

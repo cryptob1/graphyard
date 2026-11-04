@@ -44,21 +44,12 @@ export const daemonActionSchema = z.object({
 }).strict();
 export type DaemonAction = z.infer<typeof daemonActionSchema>;
 
-/** A field a release retired: an older cursor's value still parses. */
-const retired = z.unknown().optional();
 export const cycleMetricsSchema = z.object({
   cycle: z.number().int().min(0), at: z.string(),
   open: z.number().int().min(0), actions: z.number().int().min(0),
-  /** Retired (GY-2877): what the cycle could act on. */
-  actionable: retired,
   /** The steps the cycle ran, in order: snapshot, close, dispatch, merge writer, persist. A cursor written before recorded step costs here, which read as absent. */
   steps: z.preprocess(steps => Array.isArray(steps) && steps.every(step => typeof step === 'string') ? steps : undefined, z.array(z.string().max(40)).max(10).optional()),
-  /** Retired (GY-2876): the cycle's durations and call timings, and the stage, lead-time and post-deploy measurements; a cursor written before still parses. */
-  durationMs: retired, childWaitMs: retired, workMs: retired, planeWaitMs: retired, timings: retired,
-  stages: retired, lead: retired, production: retired, postDeploy: retired, postDeployFailures: retired,
-  /** Retired (GY-1992): the scope-request latency and the idle reading; nothing writes them, and a cursor written before keeps parsing. */
-  idleMs: retired, scope: retired, scopeOpenMs: retired,
-}).strict();
+}).strip();
 export type CycleMetrics = z.infer<typeof cycleMetricsSchema>;
 
 /**
@@ -179,31 +170,13 @@ export const daemonStateSchema = z.object({
   actions: z.record(z.string(), daemonActionSchema).default({}),
   profiles: z.record(z.string(), z.object({ failures: z.number().int().min(0), reason: z.string().max(500).nullable(), cooldownUntil: z.string().nullable() }).strict()).default({}),
   metrics: z.array(cycleMetricsSchema).default([]),
-  /** Retired (GY-2877): the deployment observation and the in-loop deploy's release reading; graphyard-deploy.service records what it serves in .graphyard/deploy.json. */
-  deployment: retired, promotion: retired,
-  /** Retired: the main watch (GY-1519) is gone; a cursor written before still carries its state, which nothing reads. */
-  mainWatch: z.unknown().optional(),
   mergeWriter: mergeWriterStateSchema.default(() => emptyMergeWriterState()), // GY-1524: the control-plane merge executor's queue, flight, last delivery and refusals
   /** The release the running loop process loaded, recorded by each process at its startup (GY-437). */
   release: loopReleaseSchema.nullable().default(null),
-  /** Retired (GY-2877): the between-cycles self-upgrade. */
-  upgrade: retired,
   /** The last reload of .graphyard/master.json: what the running loop adopted, or why it refused. */
   config: z.object({ at: z.string(), changed: z.array(z.string().max(100)).max(100), refused: z.string().max(1000).nullable() }).strict().nullable().default(null),
-  /** Retired (GY-2876): resource reclaim, host memory holds and the latency clocks; a cursor written before parses, and its next write drops them. */
-  reclaim: retired, memory: retired, clocks: retired, latency: retired,
-  /** Retired (GY-1980): the progress watchdog replaced the silence record; nothing reads or writes it, and a cursor written before keeps parsing. */
-  silence: z.unknown().optional(),
-  /** Retired (GY-1992): the scope requests this loop decided; a cursor written before keeps parsing. */
-  scope: z.unknown().optional(),
-  /** Retired (GY-2874): orphaned supervisors, approver watches, absent sessions and deferred decisions; a cursor written before keeps parsing. */
-  orphans: z.unknown().optional(), approvals: z.unknown().optional(), absences: z.unknown().optional(), decisionsDeferred: z.unknown().optional(),
-  /** Retired (GY-2875): docs-sync sessions and the conflicts the loop routed; a cursor written before keeps parsing. */
-  docsSyncs: z.unknown().optional(), conflicts: z.unknown().optional(),
   /** How the loop itself has been failing, as distinct from the steps it runs (see `cycleFailureSchema`). */
   failures: cycleFailureSchema.default({ consecutive: 0, total: 0, last: null, unhandled: 0, lastUnhandled: null }),
-  /** Retired (GY-2877): base failures and the system invariants. */
-  baseFailures: retired, invariants: retired,
   /** The master session the loop launches, adopts, wakes and rotates (GY-898); see `masterSessionSchema`. */
   master: masterSessionSchema.default(() => emptyMasterSession()),
   personalMasters: z.record(z.string(), masterSessionSchema).default({}),
@@ -211,7 +184,7 @@ export const daemonStateSchema = z.object({
   controlPlane: z.object({ unreachableSince: z.string(), error: z.string().max(1000), restartedAt: z.string().nullable(), restart: z.string().max(1000).nullable(), exitReason: z.string().max(1000).nullable(), freeDisk: z.string().max(500).nullable() }).strict().nullable().default(null),
   /** Shared project memory (GY-1125): recent decisions and merges. */
   projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
-}).strict();
+}).strip();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 
 /**
@@ -231,7 +204,7 @@ export async function archiveDaemonCursor(config: Pick<MasterConfig, 'credential
 }
 
 /**
- * The cursor schema as GY-1960 reads and writes it: declared fields strict, unknown fields kept.
+ * The cursor validates declared fields and preserves unknown fields from newer or retired versions.
  */
 let tolerated: typeof daemonStateSchema | undefined;
 const toleratedStateSchema = () => tolerated ??= forwardTolerant(daemonStateSchema);
@@ -261,16 +234,8 @@ export async function readDaemonState(root: string, config: MasterConfig): Promi
   let raw: string;
   try { raw = await readFile(file, 'utf8'); }
   catch (error: any) { if (error.code === 'ENOENT') return emptyDaemonState(config); throw error; }
-  // GY-1960: the cursor is forward-tolerant. A cursor a newer loop wrote carries fields this
-  // version does not declare; they parse, ride every write, and are written back unchanged, so a
-  // rollback or a held-CLI snapshot neither fails nor silently drops what the newer loop recorded.
-  // Declared fields are still validated: a malformed one refuses the read as before.
-  // GY-2087: the shadow gate's verdicts an older loop kept are dropped, not carried.
-  // GY-2186, GY-2873: records of retired machinery an older loop kept are dropped, not carried, so
-  // they do not ride forward for ever.
-  // GY-3002: the per-merge advisory trial's owed/ran ledger an older cursor kept under the strict
-  // mergeWriter object is dropped with them.
-  const { shadow: _shadow, diagnoses: _diagnoses, faults: _faults, doctor: _doctor, dispatchFailures: _dispatchFailures, stepStalls: _stepStalls, ...stored } = JSON.parse(raw);
+  // Preserve unknown cursor fields across reads and writes, including keys retired from the schema.
+  const stored = JSON.parse(raw);
   for (const action of Object.values<Record<string, unknown>>(stored.actions ?? {})) delete action.faultClass;
   delete (stored.mergeWriter as Record<string, unknown> | undefined)?.advisory;
   const state = toleratedStateSchema().parse(stored);
@@ -297,13 +262,6 @@ export function pruneDaemonState(state: DaemonState) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
   if (state.metrics.length > retainedMetrics) state.metrics = state.metrics.slice(-retainedMetrics);
-  // Retired fields a cursor written before GY-2874 still carries are dropped on its next write.
-  delete state.orphans; delete state.approvals; delete state.absences; delete state.decisionsDeferred;
-  // And those GY-2876 retired: the reclaim, memory, latency and cycle-duration readings.
-  delete state.reclaim; delete state.memory; delete state.clocks; delete state.latency;
-  for (const metric of state.metrics) for (const field of ['durationMs', 'childWaitMs', 'workMs', 'planeWaitMs', 'actionable', 'timings', 'stages', 'lead', 'production', 'postDeploy', 'postDeployFailures', 'idleMs', 'scope', 'scopeOpenMs'] as const) delete metric[field];
-  // And those GY-2877 retired: the deployment and release readings, the self-upgrade, base failures and invariants.
-  delete state.deployment; delete state.promotion; delete state.upgrade; delete state.baseFailures; delete state.invariants;
   return state;
 }
 

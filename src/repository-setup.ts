@@ -7,7 +7,7 @@ import { shellQuote } from './shell-quote.js';
 import { chmod, lstat, mkdir, readdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { assertRepository, buildProposal, canonicalJson, collectScanInput, discover, localDirectory, removeDeliveryWorkflow, saveDiscovery, setupProposalSchema, type SetupProposal } from './onboarding.js';
 import { generatedFilesAssignment } from './install/generated-files.js';
@@ -249,7 +249,7 @@ const appliedStateSchema = z.object({
   server: z.string(),
   artifacts: z.object({
     instructions: z.string(),
-    principals: z.string(),
+    principals: z.string().nullable(),
     profiles: z.array(z.string()),
     githubApp: z.object({ appId: z.number().int().positive(), slug: z.string() }).nullable(),
   }).strict(),
@@ -304,32 +304,21 @@ export function repositoryScanDifference(fresh: SetupProposal, stored: SetupProp
   return repositoryPart(fresh) === repositoryPart(stored) ? [] : ['The repository scan no longer matches the stored proposal'];
 }
 
-const principalsDocumentSchema = z.object({
-  version: z.literal(1), server: z.string(), repository: z.string(), note: z.string(),
-  principals: z.array(z.object({
-    id: z.string().min(1), role: z.enum(['admin', 'coordinator', 'worker', 'producer']),
-    token: z.string().min(32), proofs: z.array(z.string()).optional(),
-  }).strict()).min(1),
-}).strict();
-
 export interface ApplyDependencies {
   url: string;
   now?: () => Date;
-  token?: () => string;
   /**
    * The `graphyard install` that already owns this repository's identities (GY-1413): its install
    * directory and its confirmed App. Apply then commits only the onboarding files — it never writes
    * a second principals registry. Its App is the one a pull-request-era install recorded, else null.
    */
   installed?: { directory: string; githubApp: { appId: number; slug: string } | null };
-  /** Write each worker profile's credential file (GY-1412). Explicit, never implied: only `init --apply` passes it. */
-  writeCredentials?: boolean;
 }
 
 /**
  * Apply an operator-reviewed proposal. Every artifact is written idempotently:
  * unchanged content is left alone, operator-edited files are reported as drift
- * instead of being overwritten, and principal tokens are preserved across runs.
+ * instead of being overwritten. Principals and credentials belong to graphyard install.
  */
 export async function applyProposal(root: string, proposalInput: unknown, dependencies: ApplyDependencies) {
   const proposal = setupProposalSchema.parse(proposalInput);
@@ -360,38 +349,9 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   const staleWorkflow = delivery ? await removeDeliveryWorkflow(root) : null;
   if (staleWorkflow) (staleWorkflow.state === 'removed' ? applied : drift).push(staleWorkflow.state === 'removed' ? `removed ${staleWorkflow.path}: install and CI use no GitHub Actions gates` : `${staleWorkflow.path} is not the generated workflow; delete it so no Actions gate remains`);
 
-  const randomToken = dependencies.token ?? (() => randomBytes(32).toString('base64url'));
-  const grants = proposal.proofs.filter(proof => proof.command).map(proof => proof.name);
-  // Only principals the operator reviewed in the proposal are registered; apply
-  // never mints a credential the proposal does not declare, so a machine without
-  // an agent runtime gets no worker principal rather than an unreviewed one.
+  // Installation owns all identities and credentials; init only writes onboarding files.
   const workerPrincipals = [...new Set(proposal.profiles.workers.map(profile => profile.principal))];
-  const desired = [
-    { id: 'operator', role: 'admin' as const, proofs: ['manual:*'] },
-    { id: 'master', role: 'coordinator' as const, proofs: ['manual:*'] },
-    ...workerPrincipals.map(id => ({ id, role: 'worker' as const })),
-    { id: 'evidence', role: 'producer' as const, proofs: grants },
-  ];
-  const principalsPath = resolve(directory, 'principals.json');
   if (dependencies.installed) unchanged.push(`principal and grant registry (managed by graphyard install in ${dependencies.installed.directory}; not written here)`);
-  const merged = dependencies.installed ? null : await writePrincipals();
-  async function writePrincipals() {
-    let previous: unknown = null;
-    try {
-      const info = await lstat(principalsPath);
-      if (!info.isFile() || info.mode & 0o077) throw new Error('Saved principals must be a regular file with mode 0600');
-      previous = JSON.parse(await readFile(principalsPath, 'utf8'));
-    } catch (error: any) { if (error.code !== 'ENOENT') throw error; }
-    const saved = (previous as any)?.principals ?? [];
-    const merged = desired.map(entry => ({ ...entry, token: saved.find((candidate: any) => candidate.id === entry.id)?.token ?? randomToken() }));
-    const document = { version: 1 as const, server, repository: proposal.repository,
-      note: 'Install this array as GRAPHYARD_PRINCIPALS on the Graphyard deployment before workers connect. One secret per principal. Never give implementation workers the producer or admin entries; the producer holds only the listed proof grants.',
-      principals: merged };
-    if (previous && canonicalJson(previous) === canonicalJson(document)) unchanged.push('principal and grant registry');
-    else { await atomicWrite(principalsPath, JSON.stringify(document, null, 2), 0o600); applied.push(`principal and grant registry (${merged.map(entry => `${entry.id}:${entry.role}`).join(', ')})`); }
-    principalsDocumentSchema.parse(document);
-    return merged;
-  }
 
   const profilesDirectory = resolve(directory, 'profiles');
   await mkdir(profilesDirectory, { recursive: true, mode: 0o700 });
@@ -407,15 +367,6 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
   };
   // An install registered its own worker profiles against its own principals; the proposal's would name identities that do not exist.
   if (!dependencies.installed) for (const profile of proposal.profiles.workers) await writeProfile(profile.name, profile);
-  // Each profile's credential file is written from the registry when absent (GY-1412), outside the
-  // repository with mode 0600, so no profile names a credential that does not exist.
-  if (dependencies.writeCredentials && merged) for (const profile of proposal.profiles.workers) {
-    const file = resolve(profile.credentialFile), token = merged.find(entry => entry.id === profile.principal)?.token;
-    if (!token || file === resolve(root) || file.startsWith(`${resolve(root)}/`)) continue;
-    await mkdir(dirname(file), { recursive: true, mode: 0o700 });
-    try { await writeFile(file, `${token}\n`, { mode: 0o600, flag: 'wx' }); applied.push(`${profile.name} credential file`); }
-    catch (error: any) { if (error.code !== 'EEXIST') throw error; unchanged.push(`${profile.name} credential file`); }
-  }
   await writeProfile('reviewer', { provider: proposal.policy.reviewProvider, note: proposal.profiles.reviewer.note });
 
   const previousState = await loadAppliedSetup(root);
@@ -424,22 +375,19 @@ export async function applyProposal(root: string, proposalInput: unknown, depend
 
   const state = appliedStateSchema.parse({ version: 1, appliedAt: (dependencies.now ?? (() => new Date()))().toISOString(),
     proposalDigest: proposalDigest(proposal), server,
-    artifacts: { instructions: 'AGENTS.md', principals: dependencies.installed ? resolve(dependencies.installed.directory, 'install.json') : '.graphyard/principals.json', profiles: profileNames, githubApp } });
+    artifacts: { instructions: 'AGENTS.md', principals: dependencies.installed ? resolve(dependencies.installed.directory, 'install.json') : null, profiles: profileNames, githubApp } });
   const appliedPath = resolve(directory, appliedFileName);
   const sameState = previousState && canonicalJson({ ...previousState, appliedAt: '' }) === canonicalJson({ ...state, appliedAt: '' });
   if (sameState) unchanged.push('applied setup record');
   else { await atomicWrite(appliedPath, JSON.stringify(state, null, 2), 0o600); applied.push('applied setup record'); }
 
-  const workerStep = workerPrincipals.length
-    ? `${dependencies.writeCredentials ? 'each worker credential is at its profile credentialFile path' : 'place each worker credential at its profile credentialFile path'}, then claim work`
-    : 'no agent runtime was detected on this machine, so the proposal declared no worker profile and no worker principal was registered; install an agent CLI and rerun init --scan --apply to add one';
   return { server, applied, unchanged, drift, githubApp, generatedFiles: generatedFiles?.line ?? null,
     delivery: delivery ? { file: repositoryConfigFile, mode: delivery.policy.mode, requiredChecks: delivery.requiredChecks, workflows: delivery.workflows, serve: delivery.wroteServe, firstCase: delivery.firstCase } : null,
     workerPrincipals,
-    principalsFile: dependencies.installed ? null : principalsPath,
+    principalsFile: null,
     next: dependencies.installed
       ? `The principals are the ones graphyard install deployed from ${dependencies.installed.directory}; nothing needs installing as GRAPHYARD_PRINCIPALS. Commit the onboarding files`
-      : `Install the principals array as GRAPHYARD_PRINCIPALS on the Graphyard deployment${generatedFiles ? `, with ${generatedFiles.line} beside it` : ''}, ${workerStep}` };
+      : 'Run graphyard install --apply to provision installation credentials and the principal roster in install.json, then rerun init --scan --apply' };
 }
 
 // --- Delivery: the merge-gate policy and the release-candidate pipeline (GY-1102) ------------------

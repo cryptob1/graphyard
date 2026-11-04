@@ -8,7 +8,7 @@ import { writeHarnessPermissions } from '../harness.js';
 import type { Work } from '../model.js';
 import { type EnvironmentKind, environmentKinds, type MasterConfig, masterConfigSchema } from './profiles.js';
 import { externalCredential, loadStoredMasterConfig } from './config.js';
-import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, privateFile, readCredentialFile } from '../private-file.js';
+import { assertOutsideWorktrees, atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { setupAgentEnvironments } from './environments.js';
 import { withLaunchedRuntime } from './launch.js';
 import type { HerdrAgent } from './herdr.js';
@@ -99,30 +99,6 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
   if (!criterion || !work.candidate) return {};
   return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against the candidate base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the master confirmed by running it`, result: 'fail' as const, executed: 1 } };
 }
-/**
- * A roster rotation, previewed against the principals the server authenticates now. It may add
- * principals and rotate tokens; it may never drop a live principal or change its role. The
- * operator stays a declared human session (GY-738): no human admin leaves every human-only
- * request unanswerable, and an agent role declared human could answer one itself.
- */
-export function previewPrincipalRotation(live: { id: string; role: string; leases?: string[]; sessionKind?: string | null }[], proposed: { id: string; role: string; sessionKind?: string | null }[]) {
-  const dropped = live.filter(principal => !proposed.some(next => next.id === principal.id)), changed = live.filter(principal => proposed.some(next => next.id === principal.id && next.role !== principal.role));
-  const humans = proposed.filter(next => next.sessionKind === 'human');
-  const refusals = [...dropped.map(principal => `${principal.id} (${principal.role}${principal.leases?.length ? `, holding ${principal.leases.join(', ')}` : ''}) is live and would be dropped`),
-    ...changed.map(principal => `${principal.id} would change role from ${principal.role} to ${proposed.find(next => next.id === principal.id)!.role}`),
-    ...live.filter(principal => principal.sessionKind === 'human' && proposed.some(next => next.id === principal.id && next.sessionKind !== 'human')).map(principal => `${principal.id} would stop being a declared human session`),
-    ...(humans.some(next => next.role === 'admin') ? [] : [`no admin principal is declared "sessionKind": "human"; declare the operator's (${proposed.filter(next => next.role === 'admin').map(next => next.id).join(', ') || 'none'}) so human-only requests can be answered`]),
-    ...humans.filter(next => next.role !== 'admin').map(next => `${next.id} (${next.role}) is an agent role and may not be declared human`)];
-  return { kept: live.filter(principal => !dropped.includes(principal) && !changed.includes(principal)).map(principal => principal.id), added: proposed.filter(next => !live.some(principal => principal.id === next.id)).map(next => `${next.id} (${next.role})`), humans: humans.map(next => next.id), refusals, applicable: !refusals.length };
-}
-/** The roster `master principals --apply` would deploy, read from `.graphyard/credentials.json`; a `sessionKind` is `human` or `ai` and nothing else, so a typo is refused at the preview instead of failing the redeployed server at start-up. */
-export async function readProposedRoster(root: string) {
-  const file = resolve(root, '.graphyard/credentials.json'); await privateFile(file);
-  const parsed = JSON.parse(await readFile(file, 'utf8')); if (!Array.isArray(parsed) || !parsed.every(entry => typeof entry?.id === 'string' && typeof entry?.role === 'string')) throw new Error('.graphyard/credentials.json must be the principal array the deployment runs with');
-  const unknown = parsed.filter(entry => entry.sessionKind !== undefined && entry.sessionKind !== 'human' && entry.sessionKind !== 'ai').map(entry => entry.id);
-  if (unknown.length) throw new Error(`sessionKind is "human" or "ai", as the deployment parses it; ${unknown.join(', ')} would fail the redeployed server at start-up`);
-  return parsed.map(entry => ({ id: entry.id as string, role: entry.role as string, sessionKind: entry.sessionKind === 'human' || entry.sessionKind === 'ai' ? entry.sessionKind as string : null }));
-}
 export { restartMasterLoop } from './loop-restart.js';
 
 /**
@@ -147,7 +123,7 @@ export async function registeredReview<T>(config: MasterConfig, args: string[], 
     withLaunchedRuntime(handle, launch), launched => launched as { pane?: string | null; agentName?: string | null }, pane => herdrAttach(pane, config.herdrWorkspace));
 }
 
-export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'defer', 'requirements', 'rework', 'attest', 'principals', 'restart', 'environments'] as const;
+export const autonomySubcommands = ['autonomy', 'create', 'release', 'unblock', 'defer', 'requirements', 'rework', 'attest', 'restart', 'environments'] as const;
 export interface AutonomyDependencies {
   coordinator: (path: string) => Promise<any>;
   readSecret: () => Promise<string>;
@@ -159,7 +135,7 @@ const words = (args: string[]) => args.join(' ').trim();
 async function jsonArgument(value: string) { return JSON.parse(value.startsWith('@') ? await readFile(value.slice(1), 'utf8') : value); }
 /**
  * The autonomy subcommands of `graphyard master`: onboarding the master identity, the intent it
- * applies at once, roster rotation and the loop restart. Each authenticates as the identity the
+ * applies at once and the loop restart. Each authenticates as the identity the
  * command belongs to, never as another.
  */
 export async function runAutonomyCommand(root: string, config: MasterConfig, id: string, args: string[], deps: AutonomyDependencies) {
@@ -217,13 +193,6 @@ export async function runAutonomyCommand(root: string, config: MasterConfig, id:
     // A manual: proof no producer may run, attested by the master on the exact current head.
     const work = await item(args[0]); if (!args[1]) throw new Error('Use master attest GY-N PROOF REASON');
     return call(await operator(), `work/${work.id}/evidence`, intentInput('attest', work, { proof: args[1] }));
-  }
-  if (id === 'principals') {
-    const live = (await deps.coordinator('principals')).principals;
-    const preview = previewPrincipalRotation(live, await readProposedRoster(root));
-    if (!preview.applicable) throw new Error(`Roster rotation refused: ${preview.refusals.join('; ')}`);
-    // The roster is deployed by the installer, never from here: GRAPHYARD_PRINCIPALS is rendered by graphyard install --apply, one entry at a time by graphyard principal add|remove.
-    return { ...preview, applied: false, next: 'Deploy the roster with graphyard install --apply (one entry at a time: graphyard principal add|remove), then graphyard master status' };
   }
   return restartMasterLoop(root, config, await deps.daemonLock());
 }
