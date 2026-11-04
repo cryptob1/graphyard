@@ -33,6 +33,10 @@ export const operatorAgentRoutes = defineRoutes('operator-agents', [
   { method: 'GET', path: '/api/merger', handle: async () => ({ merger: 'control-plane', mode: 'control-plane', line: 'The control plane is the merge writer' }) },
   // GY-1529: the known-good coordinator's recovery, recorded with an admin credential only.
   { method: 'POST', path: '/api/coordinator/recovered', handle: async context => new CoordinatorRecovery(context.services.engine.store).record(context.actor, await parseJson(context), context.idempotencyKey()) },
+  { method: 'POST', path: '/api/sign-out', handle: async ({ req, services }) => {
+    await humanSignIn(services).signOut(String(req.headers.authorization ?? '').replace(/^Bearer /, ''));
+    return { signedOut: true };
+  } },
   // The operator's own sign-in link (GY-738): only their configured admin credential asks for one.
   { method: 'POST', path: '/api/sign-in-links', handle: async ({ actor, services }) => humanSignIn(services).issue(actor, services.principals.some(entry => entry.actor.id === actor.id && entry.actor.role === 'admin')) },
 ]);

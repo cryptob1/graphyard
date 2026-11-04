@@ -7,6 +7,7 @@ import { join } from 'node:path';
 import { createContext } from '../src/cli/context.js';
 import { loginCommand } from '../src/cli/session-commands.js';
 import { HumanSignIn, signInSessionTtlMs } from '../src/server/auth.js';
+import { signInDatabase } from './helpers/sign-in-database.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-2171: `graphyard login` with no options and no GRAPHYARD_TOKEN_FILE finds the operator credential
@@ -74,15 +75,18 @@ for (const [layout, configHomeOf] of [['GRAPHYARD_CONFIG_HOME at <install>', (ho
   });
 }
 
-test('unit:human-session-30-days a session opened from a sign-in link stays valid for 30 days', () => {
+test('unit:human-session-30-days a session opened from a sign-in link stays valid for 30 days', async () => {
   let now = Date.parse('2026-10-19T00:00:00Z');
-  const table = new HumanSignIn(() => now);
-  const { code } = table.issue({ id: 'operator', role: 'admin', sessionKind: 'human' }, true);
-  const session = table.redeem(code);
-  assert.equal(signInSessionTtlMs, 30 * 86_400_000);
-  assert.equal(session.expiresAt, '2026-11-18T00:00:00.000Z');
-  now += 29 * 86_400_000;
-  assert.equal(table.authenticate(session.token)?.id, 'operator');
-  now += 86_400_000;
-  assert.equal(table.authenticate(session.token), null);
+  const database = await signInDatabase(3077);
+  try {
+    const table = new HumanSignIn(database.store, () => now);
+    const { code } = table.issue({ id: 'operator', role: 'admin', sessionKind: 'human' }, true);
+    const session = await table.redeem(code);
+    assert.equal(signInSessionTtlMs, 30 * 86_400_000);
+    assert.equal(session.expiresAt, '2026-11-18T00:00:00.000Z');
+    now += 29 * 86_400_000;
+    assert.equal((await table.authenticate(session.token))?.id, 'operator');
+    now += 86_400_000;
+    assert.equal(await table.authenticate(session.token), null);
+  } finally { await database.close(); }
 });

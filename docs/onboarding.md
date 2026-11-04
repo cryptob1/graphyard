@@ -55,7 +55,7 @@ Init enables its user unit and lingering. To move hosts: `master init --token-st
 
 ## The dashboard
 
-Default URL: `127.0.0.1:4310`. Up prints a single-use 10-minute sign-in link; `graphyard login` mints another from the operator credential. Sessions last 30 days. Needs you holds human requests; Settings → Agents shows fleet readiness.
+Default URL: `127.0.0.1:4310`. Up prints a single-use 10-minute sign-in link; `graphyard login` mints another from the operator credential. Sessions survive server restarts and last 30 days unless signed out. At 32 active sessions, new sign-ins are refused; sign out an existing session or wait for expiry, then request a new link. Postgres stores only session token digests, with the actor and expiry; sign-out deletes the session. Needs you holds human requests; Settings → Agents shows fleet readiness.
 
 Every dashboard page, including an open work item, names the configured repository prominently at the top, above the release line. The name wraps on narrow screens; item controls and navigation remain available.
 

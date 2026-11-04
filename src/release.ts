@@ -124,6 +124,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:d1fad9115075e03bf688396b51c2aa4470a2bd66c1e54138787ba0b33b43acbb',
   // GY-3035: indexed decision peers; unchanged peer columns do not lock live coordination writes.
   'sha256:718f3640a5d9356b5444e6e949a945fce073e547bb395212a9e745a663e7c2c4',
+  // GY-3076: persist browser sign-in session digests across server restarts.
+  'sha256:a0047ee2fd35c862cfd4e38f8bf33620933ea67ebe26f5092acca63f83eb9a5b',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;
