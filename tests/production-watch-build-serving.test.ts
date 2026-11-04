@@ -90,7 +90,7 @@ test('unit:production-watch-build-serving — the watch observes the serving com
     await watch.tick(true);
     const admin: Principal = { id: 'serving-admin', role: 'admin', sessionKind: 'human' };
     const credential = { ...admin, token: `serving-admin-${'s'.repeat(32)}` };
-    const engine = new Engine(store, 120, 'owner/history'); engine.submissionObserver = null;
+    const engine = new Engine(store, 120, 'owner/history');
     const http = server(engine, [credential], null, { production: watch });
     await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
     try {
