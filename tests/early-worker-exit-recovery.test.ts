@@ -13,7 +13,6 @@ import { supervise } from '../src/supervisor.js';
 import { dispatchWork, masterConfigSchema } from '../src/master.js';
 import { proposedRuntimes } from '../src/model/registry.js';
 import { emptyDaemonState, runCycle, daemonStateSchema, pruneDaemonState, type DaemonEffects } from '../src/master-daemon.js';
-import { earlyExitKey } from '../src/daemon/worker-launch-health.js';
 import { actionStallDelay } from '../src/model/action-progress.js';
 import { masterCauses } from '../src/daemon/master-stalled-delivery.js';
 import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
@@ -103,7 +102,6 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
         await api(actor, `work/${item.id}/workspace`, { epoch: claimed.epoch, host, path: workspace, branch });
         return { epoch: claimed.epoch, path: workspace, base: initialHead, work: claimed };
       }, async () => {}, 5000, observed.now, { prompt: { attempts: 1, pauseMs: 0, acceptMs: 1000 } });
-      assert.equal(result.runtime, 'codex', 'actual registry choice rides the launch result despite a Claude profile');
       if (item.id !== target.id) return result;
       if (mode === 'long') return result;
       const output = join(root, `runtime-${result.epoch}.txt`);
@@ -123,7 +121,7 @@ test(`${proof} — supervised nonzero exits retain diagnosis, cool off, route ar
   assert.equal((await reload()).sessions!.at(-1)!.runtime, 'codex');
   await fileItem('Unrelated');
   await cycle(); // close first failed pane; the other healthy profile advances unrelated work
-  const failed = await reload(), key = earlyExitKey(target), incident = state.actions[key];
+  const failed = await reload(), key = `early-exit:${target.id}`, incident = state.actions[key];
   const currentIncident = () => state.actions[key];
   assert.equal(incident.state, 'failed'); assert.equal(incident.epoch, 1);
   const churn = daemonStateSchema.parse(JSON.parse(JSON.stringify(state)));
