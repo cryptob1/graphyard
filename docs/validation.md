@@ -74,6 +74,8 @@ Graphyard's trial server (`scripts/e2e-serve.mjs`) manages `cryptob1/graphyard`,
 
 Passed, failed, flaky (one retry passes at same SHA), unrun, blocked or pending. Failed/unaccepted flaky required cases block. Pending blocks for shared delivered outcomes or `e2e.pendingOutcomes: blocking`. `e2e/contract.json` binds customer outcomes to required UAT cases.
 
+**pending** (the case's outcome has no delivered item yet): its failure is recorded with the failing step but does not block the candidate, unless the blocking rules above apply.
+
 Legacy `/api/validation/import` requires external-runs:import, is idempotent by producer/runId, accepts only rc-tagged commits and gates nothing. The release-filing operator agent can read `GET /api/validation/import/:sha` and seal released imports with `POST /api/validation/import/:sha/seal`; it cannot import runs. The seal-authority route is removed.
 
 ## Evidence reuse and replay
