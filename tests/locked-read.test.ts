@@ -88,7 +88,8 @@ test('unit:locked-transactions-read-bounded — no transaction client reads ever
   assert.deepEqual(queryTexts(probe).map(({ sql }) => /\bWHERE\b|\bLIMIT\b/i.test(sql.split(/\bFROM\s+work_items\b/i)[1])), [false, false], 'a JOIN, another receiver or a constant does not exempt a whole-board read');
   // Each former call site reads through lockedWork, naming the item it acts on.
   const engineSource = readFileSync(join(src, 'engine.ts'), 'utf8');
-  assert.ok((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length >= 6, 'the engine\'s commands read through the bounded read, naming their item');
+  // Five callers remain after GY-3011 removed settleClaimedAction, which also named its item.
+  assert.equal((engineSource.match(/lockedWork\(db, \[(id|work!?\.id)\]\)/g) ?? []).length, 5, 'the remaining engine commands read through the bounded read, naming their item');
   assert.match(engineSource, /const rows = await lockedRows\(db, \[\]\);/, 'a reconciliation pass opens, under the lock, on the bounded read');
   assert.match(engineSource, /else if \(isStandIn\(fleet\.get\(id\)!\.work\)\) await reread\(db, \[id\]\)/, 'a batch reads each of its own items whole as it reaches it, outside the coordination lock');
   // The locked read itself selects no unsettled document by its stage alone: what it reads whole is named.
@@ -485,6 +486,7 @@ test('a row a reconciliation batch saved stands in as exactly the projection the
     // GY-1779: a loop-owned observation item carries no candidate; the loop's own readings (`reading`) on the serving release are kept, a producer's record on another head is not.
     { ...base, id: randomUUID(), key: 'SHAPE-4', candidate: null, autoDispatch: null as unknown as Work['autoDispatch'],
       evidence: [{ ...evidence[0], id: randomUUID(), sha: sha(6, 's'), baseSha: sha(7, 'm'), reading: { detail: 'the loop read it' } }, { ...evidence[0], id: randomUUID(), sha: sha(6, 's'), baseSha: sha(7, 'm') }] as unknown as Work['evidence'] } as unknown as Work,
+    { ...base, id: randomUUID(), key: 'SHAPE-5', pipeline: { ...base.pipeline!, attempts: [{ epoch: 1, owner: 'worker-a', claimedAt: stamp(0), endedAt: stamp(1), end: 'released', cause: 'the agent process exited (code 1) while its lease was live' }] } },
   ];
   await insert(shapes);
   const fromSql = async (ids: string[]) => new Map((await store.pool.query(`SELECT d.id, x.document::text AS text
@@ -493,6 +495,7 @@ test('a row a reconciliation batch saved stands in as exactly the projection the
   const projected = await fromSql(shapes.map(shape => shape.id));
   for (const shape of shapes) assert.deepEqual(coordinationProjection(JSON.parse(JSON.stringify(shape))), projected.get(shape.id), `${shape.key}'s in-process projection is the SQL one`);
   assert.deepEqual(projected.get(shapes[3].id).evidence.map((entry: { reading?: unknown }) => entry.reading), [{ detail: 'the loop read it' }], 'SHAPE-4 keeps exactly the loop\'s reading');
+  assert.deepEqual(projected.get(shapes[4].id).attemptEnd, { epoch: 1, end: 'released', endedAt: stamp(1), cause: 'the agent process exited (code 1) while its lease was live' }, 'the exact attempt end and exit reason reach the loop through either projection');
   // The attempts made reach worker dispatch through both projections (GY-1746): two ended epochs, no completed rework round.
   for (const shape of shapes.filter(entry => entry.stage !== 'done' && Array.isArray((entry.pipeline as any)?.attempts))) assert.equal(projected.get(shape.id).attemptCount, (shape.pipeline as any).attempts.length, `${shape.key}'s SQL projection keeps its attempt count`);
 

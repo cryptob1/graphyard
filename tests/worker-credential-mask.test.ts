@@ -206,7 +206,7 @@ test('integration:worker-own-credentials-work — under the same confinement the
     // The supported sync, as an integration test runs it inside the worker confinement: the real
     // syncWork flow against this worktree, with the control-plane reads stubbed.
     const checkout = dirname(dirname(fileURLToPath(import.meta.url)));
-    writeFileSync(join(base, 'sync-driver.mjs'), [
+    writeFileSync(join(f.worktree, 'sync-driver.mjs'), [
       `import { syncWork } from ${JSON.stringify(join(checkout, 'src', 'cli', 'workspace.js'))};`,
       'const tree = process.env.WORKER_TREE, key = process.env.WORKER_KEY;',
       'process.chdir(tree);',
@@ -228,7 +228,7 @@ test('integration:worker-own-credentials-work — under the same confinement the
       // runs from this checkout, whose node_modules carry tsx; everything it writes goes to the
       // worktree and its admin directory.
       'cd "$5" || exit 9',
-      'WORKER_TREE="$1" WORKER_KEY=GY-1856 WORKER_BRANCH=graphyard/gy-1856-1 node --import tsx "' + join(base, 'sync-driver.mjs') + '" || echo SYNC-FAILED',
+      'WORKER_TREE="$1" WORKER_KEY=GY-1856 WORKER_BRANCH=graphyard/gy-1856-1 node --import tsx "' + join(f.worktree, 'sync-driver.mjs') + '" || echo SYNC-FAILED',
       // The repository's test command, in the worktree, inside the confinement.
       'cd "$1" || exit 9',
       'HOME="$1/.npm-home" npm_config_cache="$1/.npm-cache" npm_config_update_notifier=false npm_config_fund=false npm_config_audit=false npm test || echo TEST-COMMAND-FAILED',

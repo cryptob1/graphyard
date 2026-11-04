@@ -1,0 +1,14 @@
+{
+  "id": "runtime-launch-real-progress",
+  "title": "Installed terminal runtimes progress past wrapper trust and keep private-root DNS",
+  "description": "Real PTYs start the installed Codex for worker and reviewer requests against a deterministic local provider. A shell startup that shadows PATH reproduces an external mise-style trust dialog; selected runtime environment restores progress without granting trust. A systemd-resolved-style symlink fails getent with masked /run and recovers with only its public resolver read-only, preserving Landlock and host isolation.",
+  "tags": ["runtime", "isolation"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Run actual installed-runtime request and resolver regressions",
+    "run": "node --import tsx --test tests/runtime-launch-real-progress.test.ts tests/runtime-screens.test.ts",
+    "timeoutSeconds": 120
+  }]
+}

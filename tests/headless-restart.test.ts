@@ -265,7 +265,7 @@ test('unit:restart-leaves-runs a confined run keeps its scope and its shell outs
     assert.deepEqual(args.slice(0, separator), ['--user', '--scope', '--quiet', '--collect', `--unit=graphyard-run-${run.id}.scope`]);
     assert.deepEqual(args.slice(separator + 1, separator + 3), ['/bin/sh', '-c'], 'the run\'s shell follows the scope, outside the confinement');
     const script = args[separator + 3];
-    assert.match(script, /'bwrap' '--unshare-pid' .*'--ro-bind' '[^']*coordinator' .*'--' "\$0" "\$@"/, 'the confinement wraps Pi alone, the coordinator read-only');
+    assert.match(script, /'bwrap' '--unshare-pid' .*'--ro-bind' '[^']*coordinator' .*'--' '\/usr\/bin\/python3' '-I' '-S' '-c' .*'--' "\$0" "\$@"/s, 'the mount and socket confinement wrap Pi alone, the coordinator read-only');
     assert.ok(script.includes(`'${cwd}'`), 'the run\'s own checkout is re-exposed');
     assert.match(script, /"\$@" <\/dev\/null >'[^']*\.graphyard\/runs\/[^']*\/stdout\.jsonl'/, 'the shell, outside the confinement, writes the output under the coordinator checkout');
     // A run without its own scope is its shell, with the same confinement inside it.
@@ -275,7 +275,7 @@ test('unit:restart-leaves-runs a confined run keeps its scope and its shell outs
     plain.cancel('the test only inspects the launch');
     await plain.result();
     assert.equal(spawned[0].command, '/bin/sh');
-    assert.match(spawned[0].args[1], /'bwrap' .*"\$0" "\$@"/);
+    assert.match(spawned[0].args[1], /'bwrap' .*"\$0" "\$@"/s);
     // A run that cannot be confined fails instead of starting unconfined.
     spawned.length = 0;
     const refused = await piRunner({ command: 'pi', containment: 'setsid', spawn: capturingSpawn(spawned), confine: runConfinement({ coordinatorRoot: root, bwrap: null }), pollMs: 20 })

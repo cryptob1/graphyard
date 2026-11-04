@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
 import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -361,8 +361,10 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
     assert.ok(!child.cwd.startsWith(`${shared}/`), `the ${outcome} trial's checkout is never made in the poisoned tmp`);
     const near = probe === durable && usable ? `${clean}/${trialCheckoutPrefix}` : `${base}/`;
     assert.ok(child.cwd.startsWith(near) && child.cwd.endsWith('/checkout'), `its checkout is made in ${near}: ${child.cwd}`);
-    // npm, which runs the build, keeps node's compile cache in the tmpdir it is given; nothing else is there.
-    assert.deepEqual(child.tmpEntries.filter(entry => entry !== 'node-compile-cache'), [], 'it is empty when the suite starts: no node_modules, no .git');
+    // When the host allocations live under /tmp, bubblewrap also creates their
+    // mount points in its private /tmp. None is an upward-lookup poison entry.
+    const namespaceEntries = ['node-compile-cache', 'home', 'runtime', basename(repo.root), basename(base)];
+    assert.deepEqual(child.tmpEntries.filter(entry => !namespaceEntries.includes(entry)), [], 'only namespace scratch and allocated mount points exist when the suite starts: no node_modules, no .git');
     assert.equal(existsSync(child.tmpdir), false, `it is removed with the checkout after a ${outcome}`);
     assert.equal(existsSync(tempOwnerMarker(child.tmpdir)), false, `its owner marker goes with it after a ${outcome}`);
     assert.equal(existsSync(child.cwd), false, `the checkout goes with it after a ${outcome}`);
@@ -373,8 +375,21 @@ test('unit:trial-tmpdir-isolated — the trial child gets a fresh, empty, short 
   assert.deepEqual(readdirSync(shared).sort(), ['.git', 'node_modules'], 'the host\'s tmp is left as it was');
   assert.deepEqual(readdirSync(clean), [], 'and nothing of the trials is left in the clean root');
   if (usable) {
-    // A root that gains a package.json while the trial runs may have shadowed its lookups: no verdict, every directory removed.
-    const poisoning = await trial({ 'tests/a.test.ts': 'x\n', 'poison-root': '' }, ['tests/a.test.ts'], 'poisons its root', { retries: 0 });
+    // The candidate sees a private parent. A write there cannot poison the
+    // host's lookup root, even when it succeeds in private temporary scratch.
+    const denied = await trial({ 'tests/a.test.ts': 'x\n', 'poison-root': '' }, ['tests/a.test.ts'], 'cannot poison its root');
+    const refused = await denied.run();
+    // A parent under private /tmp is writable; other private-root ancestors
+    // are read-only. Both keep the host parent unchanged.
+    if (refused.build === 'fail') assert.match(refused.logTail, /EROFS|Read-only file system/);
+    assert.deepEqual(readdirSync(clean), [], 'the ungranted parent stays unchanged');
+    // A separate host process could still contaminate the parent during a trial. Inject that
+    // host write outside the child wrapper; the guard must return no verdict and clean up.
+    const poisoning = await trial({ 'tests/a.test.ts': 'x\n' }, ['tests/a.test.ts'], 'host poisons its root', { retries: 0, run: async (command, args, options) => {
+      const output = await defaultChildRun(command, args, options);
+      if (command === 'npm' && args.join(' ') === 'run build') writeFileSync(join(clean, 'package.json'), '{}');
+      return output;
+    } });
     await assert.rejects(poisoning.run(), (error: unknown) => error instanceof TrialEnvironmentError && error.root === clean && /gained a node_modules, \.git or package\.json/.test(error.message));
     assert.deepEqual(readdirSync(clean), ['package.json'], 'its directories are removed all the same');
     rmSync(join(clean, 'package.json'));

@@ -1,5 +1,5 @@
 // The local provider (GY-1500): the same server and Store code path as every other provider, on
-// this machine, against an embedded Postgres cluster under the install directory — no Docker.
+// this machine, against an embedded Postgres cluster under the install directory — the server and database need no Docker. Merge-trial commands use Docker.
 //
 // Everything it writes lives under ~/.config/graphyard/INSTALL/ like every provider's credentials:
 // postgres/ (0700) holds the cluster, its 0600 password file and its port, and local-server.json
@@ -13,10 +13,11 @@ import { chmod, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:net';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { emptyObservation, httpHealth, variableMarker, type AdapterContext, type ProviderAdapter } from './adapters.js';
+import { emptyObservation, httpHealth, tool, variableMarker, type AdapterContext, type ProviderAdapter } from './adapters.js';
 import { clusterExists, localDatabaseUrl, localPaths, postgresBinaries, postgresPackage, readLocalEnvironment, type LocalPaths } from './local-runtime.js';
 import { loopUnitDirectory, supervisorSupport, testSuiteHomeGuard } from '../supervisor.js';
 import type { EnvValue, PreflightItem } from './types.js';
+import { buildTrialImage, trialImagePlan } from './trial-image.js';
 
 /** How the runtime is kept alive on this machine. A test supervisor runs it in-process. */
 export interface LocalSupervisor {
@@ -171,6 +172,7 @@ export const localAdapter: ProviderAdapter = {
     const major = Number(process.versions.node.split('.')[0]);
     const items: PreflightItem[] = [
       { name: 'Node.js', ok: major >= MINIMUM_NODE_MAJOR, detail: `Node ${process.versions.node}`, fix: `Install Node ${MINIMUM_NODE_MAJOR} or newer (nodejs.org, or nvm install ${MINIMUM_NODE_MAJOR}), then rerun the installer with it` },
+      await tool(ctx, ctx.transport, 'docker', ['version', '--format', '{{.Server.Version}}'], 'Docker Engine for merge trials', 'Start Docker Engine for private-root merge trials, then rerun the installer'),
     ];
     try {
       const binaries = await postgresBinaries();
@@ -209,6 +211,7 @@ export const localAdapter: ProviderAdapter = {
   plan(ctx, observation) {
     const local = settings(ctx);
     return [
+      trialImagePlan(ctx),
       { id: 'provider.provision.database', target: 'provider', state: observation.database ? 'satisfied' : 'create',
         title: `Create the embedded Postgres cluster under ${local.paths.postgres} (directory 0700, password file 0600) on 127.0.0.1:${local.postgresPort}; no Docker`,
         command: `initdb --pgdata=${local.paths.data} --auth=scram-sha-256 --username=graphyard --pwfile=${local.paths.passwordFile}` },
@@ -222,6 +225,7 @@ export const localAdapter: ProviderAdapter = {
     ];
   },
   async provision(ctx) {
+    await buildTrialImage(ctx);
     const { paths } = settings(ctx);
     await mkdir(paths.postgres, { recursive: true, mode: 0o700 });
     await chmod(paths.postgres, 0o700);

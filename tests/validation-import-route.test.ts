@@ -26,7 +26,7 @@ const producer: Principal = { id: 'huck-producer', role: 'producer', grants: ['e
 const otherProducer: Principal = { id: 'ci-collector', role: 'producer', grants: ['external-runs:import'] };
 // A producer with proof authority but no import grant: refused at the import route, naming the grant.
 const ungrantedProducer: Principal = { id: 'unit-collector', role: 'producer', proofs: ['unit:*'] };
-// An operator agent with no capability, as the release-filing identity is: it reads the hold and never imports.
+// An operator agent with no capability, as the release-filing identity is: it reads and seals the hold, and never imports.
 const releaseFiler: Principal = { id: 'graphyard-release-follow-up', role: 'operator-agent', capabilities: [], scope: { repositories: ['owner/project'], workItems: [] } };
 const principals = [operator, worker, reader, producer, otherProducer, ungrantedProducer, releaseFiler];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(40)}`]));
@@ -187,9 +187,10 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
 
   // Sealing closes a released candidate to imports: only an admin or an operator agent seals, and a later import is refused.
   for (const actor of [reader, producer]) assert.equal((await call(`validation/import/${holdSha}/seal`, actor, { candidate: candidates[1].id })).status, 403, `${actor.role} cannot seal`);
-  const sealed = await call(`validation/import/${holdSha}/seal`, operator, { candidate: candidates[1].id });
+  const sealed = await call(`validation/import/${holdSha}/seal`, releaseFiler, { candidate: candidates[1].id });
   assert.equal(sealed.status, 200, JSON.stringify(sealed.body));
   assert.equal(sealed.body.sealed, true, 'a released hold is sealed');
+  assert.deepEqual((await call(`validation/import/${holdSha}/seal`, operator, { candidate: candidates[1].id })).body, sealed.body, 'an admin can replay the seal');
   assert.equal((await call(`validation/import/${holdSha}?candidate=${candidates[1].id}`, reader)).body.sealed, true);
   const late = await call('validation/import', producer, run(holdSha, 'hold-late', [{ id: 'pay', verdict: 'failed', attempts: 1, durationMs: 100, required: true }]));
   assert.equal(late.status, 409, JSON.stringify(late.body));

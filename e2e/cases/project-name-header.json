@@ -1,0 +1,56 @@
+{
+  "id": "project-name-header",
+  "title": "The configured project stays in the dashboard header, including work details",
+  "description": "Checks the served dashboard header against its own configured repository on Work, Workers and a real work item, on desktop and a narrow screen. Keeps branding, release status and Back navigation visible.",
+  "tags": [
+    "dashboard"
+  ],
+  "target": "any",
+  "required": true,
+  "secrets": [],
+  "steps": [
+    {
+      "kind": "http",
+      "name": "create a real item to open",
+      "method": "POST",
+      "path": "/api/work",
+      "body": {
+        "title": "E2E case {{case}} run {{run}}",
+        "description": "Header navigation check",
+        "type": "feature",
+        "priority": 3,
+        "policy": {
+          "checks": [
+            "test"
+          ],
+          "review": true
+        },
+        "criteria": [
+          {
+            "id": "AC-1",
+            "text": "Header remains visible on this item",
+            "proofs": [
+              "e2e:project-name-header"
+            ]
+          }
+        ]
+      },
+      "status": 200,
+      "save": {
+        "itemKey": "key"
+      }
+    },
+    {
+      "kind": "command",
+      "name": "project header and item navigation at 1280px",
+      "run": "node --input-type=module <<'JS'\nimport {chromium,expect} from '@playwright/test';\nconst b=await chromium.launch();\ntry {\nconst p=await b.newPage({viewport:{width:1280,height:900}});\nawait p.goto(process.env.TARGET_URL);\nawait p.getByLabel('Access token').fill('{{token}}');\nawait p.getByRole('button',{name:'Open control plane'}).click();\nconst r=await p.request.get(new URL('/api/status',process.env.TARGET_URL).href,{headers:{Authorization:'Bearer {{token}}'}});\nexpect(r.ok()).toBe(true);\nconst s=await r.json(); expect(s.repository).toBeTruthy();\nconst h=p.locator('.top-bar');\nasync function check(){\nawait expect(h.locator('.project-name')).toHaveText(s.repository);\nawait expect(h.locator('[data-release-line]')).toBeVisible();\nawait expect(p.locator('.brand')).toBeVisible();\nexpect(await h.evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);\n}\nasync function go(name){\nconst m=p.getByRole('button',{name:'Menu',exact:true});\nif(1280<651) await m.click();\nawait p.getByRole('navigation',{name:'Primary',exact:true}).getByRole('button',{name,exact:true}).click();\nawait check();\n}\nawait go('Workers'); await go('Work');\nawait p.locator('details.group-backlog>summary').click();\nawait p.locator('[data-row=\"{{itemKey}}\"] .card-open').click();\nawait expect(p.locator('article.item-page')).toBeVisible(); await check();\nawait p.getByRole('button',{name:'\u2190 Back',exact:true}).click();\nawait expect(p.locator('article.item-page')).toHaveCount(0); await check();\n} finally {await b.close();}\nJS",
+      "timeoutSeconds": 90
+    },
+    {
+      "kind": "command",
+      "name": "project header and item navigation at 390px",
+      "run": "node --input-type=module <<'JS'\nimport {chromium,expect} from '@playwright/test';\nconst b=await chromium.launch();\ntry {\nconst p=await b.newPage({viewport:{width:390,height:900}});\nawait p.goto(process.env.TARGET_URL);\nawait p.getByLabel('Access token').fill('{{token}}');\nawait p.getByRole('button',{name:'Open control plane'}).click();\nconst r=await p.request.get(new URL('/api/status',process.env.TARGET_URL).href,{headers:{Authorization:'Bearer {{token}}'}});\nexpect(r.ok()).toBe(true);\nconst s=await r.json(); expect(s.repository).toBeTruthy();\nconst h=p.locator('.top-bar');\nasync function check(){\nawait expect(h.locator('.project-name')).toHaveText(s.repository);\nawait expect(h.locator('[data-release-line]')).toBeVisible();\nawait expect(p.locator('.brand')).toBeVisible();\nexpect(await h.evaluate(e=>e.scrollWidth<=e.clientWidth)).toBe(true);\n}\nasync function go(name){\nconst m=p.getByRole('button',{name:'Menu',exact:true});\nif(390<651) await m.click();\nawait p.getByRole('navigation',{name:'Primary',exact:true}).getByRole('button',{name,exact:true}).click();\nawait check();\n}\nawait go('Workers'); await go('Work');\nawait p.locator('details.group-backlog>summary').click();\nawait p.locator('[data-row=\"{{itemKey}}\"] .card-open').click();\nawait expect(p.locator('article.item-page')).toBeVisible(); await check();\nawait p.getByRole('button',{name:'\u2190 Back',exact:true}).click();\nawait expect(p.locator('article.item-page')).toHaveCount(0); await check();\n} finally {await b.close();}\nJS",
+      "timeoutSeconds": 90
+    }
+  ]
+}

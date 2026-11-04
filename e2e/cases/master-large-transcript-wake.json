@@ -1,0 +1,13 @@
+{
+  "id": "master-large-transcript-wake",
+  "title": "Large or unreadable native history keeps master operation moving",
+  "description": "Reproduces Node's actual >2 GiB readFile refusal with sparse, bounded-storage fixtures; recovers both native formats and hashes full read-only records. An already-live native runtime receives real incident and heartbeat inputs despite an actual recovery failure, deduplicates across restart, and recovers with automated origins and the pending person input intact. An absent master with an injected native read failure starts one fresh native process with an actionable factual handoff, preserves old provenance and bytes across restart, and can recover after repair. Existing native resume, supersession and confinement suites retain their security requirements.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "large native record recovery, live wakes and absent replacement",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/master-session-resumes.test.ts tests/master-stalled-delivery-wake.test.ts tests/master-large-transcript-wake.test.ts",
+    "timeoutSeconds": 600
+  }]
+}

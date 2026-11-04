@@ -1,46 +1,60 @@
-<!-- page: Build integrations | 4 | release API. -->
+<!-- page: Build integrations | 4 | trials, deploys and recovery -->
 # Releases and delivery
 
-Releases: `admin` sets policy; `builder`s build; `admin`/`promoter` select; `observer`s lease (`POST /api/delivery/lease`).
+## One delivery path
 
-**`graphyard-deploy.service` deploys continuously** (compose/local installs, beside `graphyard-master.service`; `master init` installs both; the loop installs a missing deploy unit): `graphyard upgrade --watch --checkout <install>/deploy/src` fetches origin; each new base tip is checked out there, built, restarted and `/healthz`-checked for its release, then `graphyard-local:<sha12>` images except the serving and previous tips' are removed; failing, it rolls back and waits. `.graphyard/deploy.json` records the served tip and its repository (the watch's first pass names a record an older watcher left unnamed, GY-2957); the loop restarts onto it, and `master status` reads it as release health only when it names that repository (GY-2955). The same unit serves the managed repository's app (GY-2976): a main declaring [`.graphyard/serve.json`](deployment.md#serving-the-managed-repositorys-app) is checked out into the install's serve checkout, built and served on its port, restarting only when it builds; `.graphyard/served.json` records the served commit, URL and last build failure for `master status`, the dashboard and `doctor`. Merge-writer trials run required cases uncredentialed; timeouts re-queue. A running trial reports its step and start in `mergeWriter.inFlight`; a merge reads as stalled once no step advances for 30 minutes or its trial exits with no verdict (GY-2963). A crashed trial's leftover checkout is reclaimed beside the trial's own, and its log records each step's duration (GY-2963). A served commit failing a required case past the last verified commit reverts only the landing that broke it (a merge commit or a fast-forwarded head) — the item whose own `e2e:` proof names the failing case, else the newest when every landing names its item, and a second failing case on the same serve names that culprit — through normal trial and push, and the loop files one `Re-land GY-N` item carrying its criteria plus the failing case (GY-2990). Production and the serve-revert unit tests use the same revert sequence; the loop persists and schedules its trial beside the cycle. A revert that fails its trial is held and named in `master status`; one its trial cannot judge yet — base failure, lost race, thrown trial — waits the base-failure hold unless the tip moves, so the queue's repair goes first. Without `scripts/ci-tests.mjs` the trial runs the `graphyard.json` `delivery.mergeGate.preMerge` commands (else `npm test` / `npm run typecheck`); with none configured, trial, status and `doctor` record `no test check configured` (GY-2958). A failing repository check's refusal names the failing files and first case (`timed out` for time-outs only); the check also runs on the base tip; a failure main already has is held as a `base failure` (GY-2960). A bug item's proofs also run on the base tip; all passing there refuses the head `not reproduced` (GY-2984). `release GY-N EPOCH` leases; `release status` and `graphyard delivery` print ledger and pipeline. Main moves only by the merge writer's push.
+Exact-candidate gates allow merge. The merge writer alone pushes main; a separate deploy supervisor serves it. Done means merged, not live or verified. See [merge ownership](delivery-redesign.md).
+
+The control plane always merges passing heads; Delivery names it as the merge writer. There is no merger-mode or automatic-merging setting. `master init` refuses the retired `--auto-merge`/`--no-auto-merge` flags. `/api/auto-merge` and `POST /api/merge-queue` are removed; `GET /api/merger` remains for the E2E delivery probe. Old policy events remain in history; rewriting old master config drops `autoMerge` and `mergeQueue.rerunFailedChecks`.
+
+## Continuous deployment
+
+`master init` installs loop and deploy user units; the loop restores a missing deploy unit. New names include the repository; legacy names are `graphyard-master.service` and `graphyard-deploy.service`.
+
+The deploy unit runs `graphyard upgrade --watch --checkout <install>/deploy/src`: fetch, build, restart and verify health at the expected commit. It retains serving/previous images. Failed deploys restore when safe; migrations may require roll-forward. `.graphyard/deploy.json` names the serving tip and repository; the loop reloads newly served code. For managed apps, see [serve configuration and live checks](deployment.md#serving-the-managed-repositorys-app).
+
+## Merge trials
+
+Trials run [without credentials](master-agent-reference.md#merge-trial). Commands prefer the running Node installation over host version-manager shims, so the fresh HOME needs no host mise trust setup. A successful merge trials before pushing and schedules no advisory trial afterwards; older cursors discard that retired ledger. `mergeWriter.inFlight` names the step/start; 30 minutes without advancement or exit without verdict reports a stall. Logs include durations; abandoned checkouts are reclaimed.
+
+`scripts/ci-tests.mjs` selects affected/proof tests. Otherwise use `delivery.mergeGate.preMerge`, falling back to npm test/typecheck. Missing checks are explicit in trial/status/doctor. Timeouts requeue. Head failures request rework; failures reproduced on base hold the head as `base failure` so repairs go first. Bug proofs must fail on base or the head refuses as `not reproduced`.
+
+Required live-case failures after the last verified commit can trigger a gated revert. The loop chooses the landing whose proof names the case, else the newest identifiable landing, and files one `Re-land GY-N` with original criteria and failed case. Further failures keep that culprit. Production and serve-revert unit tests share the revert sequence; the loop persists and schedules its trial beside the cycle. A failing revert trial holds; an indeterminate trial waits the base-failure interval unless main moves.
 
 ### E2E record credential
 
-`e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`.
-
-### One delivery path
-
-Exact-head gates merge; the deploy unit deploys. Only Graphyard writes main ([redesign](delivery-redesign.md)). Trial commands prefer the running Node installation over host version-manager shims, so the fresh trial home needs no host mise trust configuration. A successful merge runs its trial before pushing; it schedules no advisory trial afterwards. Older cursors drop the retired advisory run ledger when read.
+`e2e record` uses `GRAPHYARD_E2E_RECORD_TOKEN`. Workers do not receive this trusted producer credential.
 
 ## Managed repositories
 
-`init --scan` splits checks (`delivery.mergeGate`); `--apply` writes the policy to `graphyard.json`. `deploy.adapter`: `railway`|`command`; `install --plan` lists.
+`init --scan` discovers checks; `--apply` writes `delivery.mergeGate` in `graphyard.json`. `deploy.adapter` is `railway` or `command`; `install --plan` lists the setup.
 
-`mode: local` (`control-plane` default): previews local, `command` adapter; `delivery.applications`/`delivery.cases` bind cases to static (published under `/preview/KEY/`) or Compose (isolated) apps.
+`mode: local` uses the command adapter. `delivery.applications`/`delivery.cases` bind static previews (`/preview/KEY/`) or isolated Compose apps. Merger remains control-plane.
 
-An environment registers `{"kind":"environment","services":[…]}`; an observer `{"kind":"registration","role":"observer"}`.
+Repository policy includes `risk.sensitive` entries `{rule,glob}` and `e2e.pendingOutcomes` (`non-blocking` or `blocking`), deployed as `GRAPHYARD_REPOSITORY_POLICY`.
 
-**`graphyard.json` policy**: `risk.sensitive` `{rule,glob}`; `e2e.pendingOutcomes` `non-blocking`/`blocking`; deployed `GRAPHYARD_REPOSITORY_POLICY`.
+## Release API
 
-`POST /api/delivery/build` records a build:
+Registered builders build; admins or promoters select releases; observers acquire `POST /api/delivery/lease`. Environments register as `{"kind":"environment","services":[…]}` and observers as `{"kind":"registration","role":"observer"}`.
+
+`POST /api/delivery/build` records the registered builder, source SHA, input digest and artifacts:
 
 ```json
 {"registration":{"id":"production-builder","revision":1},"sourceSha":"0123456789abcdef0123456789abcdef01234567","buildInputsDigest":"sha256:5b8e0d3a7f21c94e6082d5b1a3f7c0e94d26b8a15f309c7e4b1d02a6f8395c7e","artifacts":[{"service":"api","digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111"}],"provenanceUrl":"https://ci.example.test/builds/812"}
 ```
 
-`POST /api/delivery/release` selects its manifest members (reverted members excluded, noted); `POST /api/delivery/approve` selects the release by `approvalId` and `expectedGeneration`.
+`POST /api/delivery/release` selects manifest members, excluding reverted ones with a note. `POST /api/delivery/approve` selects by `approvalId` and `expectedGeneration`; this API does not add a routine human approval step.
 
 ## Observe and verify
 
-`POST /api/delivery/observe` carries every service's instances with digests measured by host attestation, never a self-report. `POST /api/delivery/observe-sha` marks contained merges Deployed: every service and an exact 40-hex `sha`. Smoke-required work needs an `e2e:deploy-smoke` pass naming that `sha`. Complete listings verify (`POST /api/delivery/notify`); `graphyard delivery sweep` runs per `freshnessSeconds`. `POST /api/validation/result` binds manifest/signature/measurements; mismatches void passes as `attribution-undermined`.
+`POST /api/delivery/observe` carries all service instances with host-attested digests, never self-reports. `observe-sha` marks contained merges Deployed with an exact 40-hex SHA and every service. Smoke-required work also needs an `e2e:deploy-smoke` pass naming that SHA. Complete listings verify through `notify`; `graphyard delivery sweep` runs at `freshnessSeconds`. `/api/validation/result` binds signatures, manifests and measurements; mismatches void passes as `attribution-undermined`.
+
+`release GY-N EPOCH` leases release work. `release status` and `graphyard delivery` show ledger and pipeline.
 
 ## Rollback
 
-Rollback registrations carry `rollback.fencing` (`provider`/`serialized`/`none`, never automatic with `none`); `POST /api/delivery/rollback` requests one, claimed then settled (`applied`/`failed`/`unknown`) by the rollback actor, with `unknown` blocking until `rollback-resolve` names the provider operation and evidence. `"automaticRollback": true` reverts degraded generations.
+Rollback registrations declare fencing: `provider`, `serialized` or `none`; `none` cannot roll back automatically. `POST /api/delivery/rollback` requests an operation. The rollback actor claims and settles it as `applied`, `failed` or `unknown`. Unknown holds further action until `rollback-resolve` supplies the provider operation and evidence. `automaticRollback: true` reverts degraded generations.
 
 ## Coordinator recovery
 
-Self-merge stalled the loop: `graphyard master recover [--to SHA] --admin-token-stdin` repins and restarts it.
-
-The control plane always merges passing heads; the Delivery view identifies it directly as the merge writer without a status setting. There is no merger-mode switch or automatic-merging setting; `master init` no longer accepts `--auto-merge` or `--no-auto-merge`. The retired `/api/auto-merge` and `POST /api/merge-queue` routes are removed. Old policy events remain in the ledger, and old `master.json` files load with `autoMerge` and `mergeQueue.rerunFailedChecks` dropped when rewritten. `GET /api/merger` remains for the end-to-end runner’s delivery probe.
+If self-merge leaves the loop stalled, `graphyard master recover [--to SHA] --admin-token-stdin` repins and restarts it. The AI master diagnoses delivery failures; a cycle watchdog only detects a hung loop.
