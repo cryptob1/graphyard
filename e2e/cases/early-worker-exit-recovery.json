@@ -1,0 +1,15 @@
+{
+  "id": "early-worker-exit-recovery",
+  "title": "Early worker exits become actionable launch failures",
+  "description": "Runs the real cycle, registry selection, supervised failing runtime and temporary Postgres control plane; checks diagnostics, masking, cooldown, fallback, master wake deduplication and useful recovery.",
+  "target": "any",
+  "required": true,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "early worker exit cycle regression",
+      "run": "node --import tsx tests/helpers/run-tests.ts tests/early-worker-exit-recovery.test.ts",
+      "timeoutSeconds": 600
+    }
+  ]
+}
