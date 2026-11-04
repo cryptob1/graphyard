@@ -1,8 +1,7 @@
 import { test, type TestContext } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile, rename, symlink, realpath, rm, chmod, stat } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import { oracleBundleDigest } from '../src/runner-setup.js';
@@ -198,8 +197,12 @@ test('an oracle tree any other account can rewrite is refused before any contain
   // A directory someone else could rename redirects the mount, so the path leading to the
   // approved bytes is held to the same rule. Sticky shared parents such as `/tmp` are the
   // documented exception, since only an entry's owner can rename it there.
-  assert.ok((await stat(tmpdir())).mode & 0o1000, 'the fixture root is a sticky shared directory');
-  await assert.doesNotReject(isolation(plan, { uid: attestorUid }));
+  const sticky = await temporaryDirectory('sticky-oracle-parent', dirname(oracle));
+  await chmod(sticky, 0o1777);
+  const sharedOracle = join(sticky, 'oracle');
+  await rename(oracle, sharedOracle);
+  assert.ok((await stat(sticky)).mode & 0o1000, 'the fixture root is a sticky shared directory');
+  await assert.doesNotReject(isolation({ ...plan, oraclePath: sharedOracle }, { uid: attestorUid }));
 }));
 
 test('a collection boundary whose pathname another account controls is refused, and a replaced one is recorded', async t => attested(t, async ({ collection, output, plan }) => {

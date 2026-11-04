@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { appendFile, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, readFile, readdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { adoptConversation, assertConversationRuntime, captureConversation, conversationArgs, conversationEvents, conversationHandover, graphyardInput, masterInputs, masterRecords, type Conversation } from '../src/master/conversation.js';
@@ -92,4 +92,68 @@ test('unit:master-session-resumes — an adopted pre-upgrade Claude record impor
     prompts: [{ origin: 'launch', text: 'Legacy launcher request' }, { origin: 'wake', text: 'Legacy wake' }] });
   assert.equal(adopted.current.nativeId, 'legacy-native');
   assert.equal(await captureConversation(adopted.current), 'A person still needs an answer');
+});
+
+test('integration:master-large-transcript-wake — actual >2 GiB transcripts recover native events and retain every byte', async () => {
+  const { largeTranscript } = await import('./helpers/large-transcript.js');
+  const { createReadStream } = await import('node:fs');
+  const { createHash } = await import('node:crypto');
+  const { stat } = await import('node:fs/promises');
+  const digest = async (path: string) => {
+    const hash = createHash('sha256');
+    for await (const chunk of createReadStream(path)) hash.update(chunk);
+    return hash.digest('hex');
+  };
+  for (const runtime of ['claude', 'codex']) {
+    const root = await temporaryDirectory('large-native-record'), home = await temporaryDirectory('large-native-home');
+    const folder = runtime === 'claude' ? join(home, 'projects', root.replace(/[^A-Za-z0-9]/g, '-')) : join(home, 'sessions');
+    await mkdir(folder, { recursive: true });
+    const transcript = join(folder, 'native.jsonl');
+    const user = (id: string, text: string) => runtime === 'claude'
+      ? { type: 'user', uuid: id, message: { content: text } }
+      : { id, type: 'event_msg', payload: { type: 'user_message', message: text } };
+    const final = runtime === 'claude' ? { type: 'assistant', uuid: 'final', parentUuid: 'answered', message: { stop_reason: 'end_turn' } }
+      : { type: 'event_msg', payload: { type: 'task_complete' } };
+    await largeTranscript(transcript, [
+      ...(runtime === 'codex' ? [{ type: 'session_meta', payload: { id: 'native', cwd: root, timestamp: new Date().toISOString() } }] : []),
+      user('launch', 'Known launch'), user('answered', 'Already answered'),
+    ], [final, user('pending', 'Exact unanswered question 🦊')]);
+    await assert.rejects(readFile(transcript), (error: any) => error.code === 'ERR_FS_FILE_TOO_LARGE', 'reproduce Node’s actual whole-file size limit');
+    const adopted = await adoptConversation(root, { runtime, account: 'account', environment: runtime === 'claude' ? { CLAUDE_CONFIG_DIR: home } : { CODEX_HOME: home }, prompts: [{ origin: 'launch', text: 'Known launch' }] });
+    assert.equal(adopted.current.nativeId, 'native');
+    assert.equal(await captureConversation(adopted.current), 'Exact unanswered question 🦊');
+    const record = await stat(adopted.current.record);
+    assert.ok(record.size > 2 ** 31);
+    assert.equal(record.mode & 0o777, 0o400);
+    assert.equal(await digest(adopted.current.record), await digest(transcript));
+    // Resolve an inherited original input from the large read-only record too.
+    const successor = { ...adopted.current, transcript: join(root, 'successor.jsonl'), record: join(root, 'successor-record.jsonl'),
+      inherited: { record: adopted.current.record, runtime, event: 'pending', delivery: '' } };
+    await writeFile(successor.transcript, JSON.stringify(user('new', 'A newer person input')) + '\n');
+    assert.equal(await captureConversation(successor), 'A newer person input');
+    await appendFile(transcript, '\n' + JSON.stringify(runtime === 'claude' ? { ...final, uuid: 'pending-final', parentUuid: 'pending' } : final) + '\n');
+    assert.equal(await captureConversation(adopted.current), null, 'native finals beyond the size boundary answer the pending input');
+  }
+});
+
+test('integration:master-large-transcript-wake — a streaming read failure preserves the retained record and retries after repair', async () => {
+  const root = await temporaryDirectory('master-record-read-failure');
+  const transcript = join(root, 'native.jsonl'), record = join(root, 'retained.jsonl');
+  const inherited = join(root, 'predecessor.jsonl');
+  const user = (uuid: string, content: string) => JSON.stringify({ type: 'user', uuid, message: { content } }) + '\n';
+  const conversation: Conversation = { launch: 'launch', runtime: 'claude', account: 'account', nativeId: 'native',
+    transcript, record, origins: join(root, 'origins.jsonl'), predecessor: 'previous', supersededBy: null,
+    inherited: { record: inherited, runtime: 'claude', event: 'person', delivery: '' } };
+  await writeFile(transcript, user('new', 'Current question'));
+  await writeFile(record, 'Previously retained bytes\n', { mode: 0o400 });
+  // A directory can be opened as a stream on Linux, but reading it fails asynchronously.
+  await mkdir(inherited);
+  await assert.rejects(captureConversation(conversation), { code: 'EISDIR' });
+  assert.equal(await readFile(record, 'utf8'), 'Previously retained bytes\n');
+  assert.deepEqual((await readdir(root)).sort(), ['native.jsonl', 'predecessor.jsonl', 'retained.jsonl']);
+  // Repair the reference without changing the retained conversation identity.
+  conversation.inherited!.record = join(inherited, 'repaired.jsonl');
+  await writeFile(conversation.inherited!.record, user('person', 'Original question'));
+  assert.equal(await captureConversation(conversation), 'Current question');
+  assert.equal(await readFile(record, 'utf8'), await readFile(transcript, 'utf8'));
 });

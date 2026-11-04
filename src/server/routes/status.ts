@@ -7,12 +7,12 @@ import { loopPresenceHeader, loopPresenceInterval, loopPanes, loopPanesHeader, l
 import { releaseInfo, schemaVersion } from '../../release.js';
 import { openHumanOnly } from '../../model/human-request.js';
 import { humanOnlySubjects } from '../waits.js';
-import { defineRoutes, parseJson } from '../routes.js';
+import { defineRoutes } from '../routes.js';
 import { coordinationSnapshot, coordinationViewHeader } from '../work-view.js';
 import { executorHost } from './agent-registry.js';
 import { projectDelivery } from '../../project-applications.js';
 import { repositoryPolicy } from '../../model/repository-policy.js';
-import { productionEnvironmentEvent, productionEnvironmentName, resolvedProductionEnvironment } from '../../production-environment.js';
+import { productionEnvironmentFromEnv } from '../../production-environment.js';
 import { managedDeploy, repositoryToplevel, servingReport } from '../../deploy-watch.js';
 import { graphyardRepository } from '../../scenarios.js';
 import { gitRunnerFor } from '../../merge-writer/local-observation.js';
@@ -39,9 +39,9 @@ export const statusRoutes = defineRoutes('status', [
       const visibleWork = operatorVisible(work);
       // What waits on the operator, derived from the human-only rule table (model/human-request.ts)
       // on the read every client polls, so the Needs you page renders that table (GY-102).
-      // The production environment the master publishes (else this process's own setting), so the
-      // dashboard reads a release as live under the same name the production watch uses.
-      const productionEnvironment = await resolvedProductionEnvironment(engine.store.pool);
+      // The production environment this process is configured with (GRAPHYARD_PRODUCTION_ENVIRONMENT,
+      // else `production`), so the dashboard reads a release under the name production watches.
+      const productionEnvironment = productionEnvironmentFromEnv();
       const humanOnly = openHumanOnly(await humanOnlySubjects(services, visibleWork), observedAt.getTime());
       const loop = await reportedLoopMerger(loopRegistry(engine), (text, values) => engine.store.pool.query(text, values), observedAt);
       // The managed repository's own serving (GY-2964), for every install managing a repository other
@@ -92,24 +92,8 @@ export const statusRoutes = defineRoutes('status', [
       const { engine, production } = services;
       const now = ((await engine.store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).getTime();
       const work = operatorVisible(await engine.store.fleet());
-      return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: await resolvedProductionEnvironment(engine.store.pool),
+      return boardFromStatus(work, now, { humanOnly: openHumanOnly(await humanOnlySubjects(services, work), now), productionEnvironment: productionEnvironmentFromEnv(),
         production: actor.role === 'operator-agent' ? null : production?.status() ?? null });
-    },
-  },
-  {
-    // The master loop publishes the production environment it resolves from its own configuration
-    // (`graphyard master config productionEnvironment=…`), which lives only on the master's host.
-    // Recorded once per change in the installation ledger; every status read uses it.
-    method: 'POST', path: '/api/production-environment',
-    async handle(context) {
-      const { actor, services: { engine } } = context;
-      demand(actor.role === 'coordinator' || actor.role === 'admin', 'Coordinator permission required', 403);
-      const environment = productionEnvironmentName((await parseJson(context, 4096, '{}'))?.environment);
-      demand(environment, 'environment must name a deployment-provider environment (1-100 characters)', 400);
-      const latest = (await engine.store.pool.query('SELECT payload->>\'environment\' AS environment FROM events WHERE work_id IS NULL AND kind=$1 ORDER BY seq DESC LIMIT 1', [productionEnvironmentEvent])).rows[0];
-      if (latest?.environment === environment) return { productionEnvironment: environment, recorded: false };
-      await engine.store.pool.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3)', [actor.id, productionEnvironmentEvent, JSON.stringify({ environment, previous: latest?.environment ?? null })]);
-      return { productionEnvironment: environment, recorded: true };
     },
   },
   {

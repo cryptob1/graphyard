@@ -1,49 +1,61 @@
-<!-- page: Agent protocol | 1 | work mutations. -->
+<!-- page: Agent protocol | 1 | claim, submit and report results -->
 # Work commands
 
-All but `/healthz` need `Authorization: Bearer TOKEN` ([roles](../glossary.md#the-roles-at-a-glance)); mutations `Idempotency-Key`, reused only for identical retries. Errors: `{"error":"reason"}`; `409`: refusal, not retried.
+Except `/healthz`, requests need `Authorization: Bearer TOKEN`. Mutations need `Idempotency-Key`, reused only for identical retries. Errors return `{"error":"reason"}`; 409 is a refusal, not a transport retry.
 
-`POST /api/work` ([example](../../examples/work.json)): `title`, `criteria`; optionally `dependencies`, `exclusiveResources`, `producerProofs`. Review uses a recorded reviewer-session verdict; retired `codex` and `agent` policy providers are refused. The UI offers no provider selector. Others: `POST /api/work/KEY/COMMAND`:
+## Create and change work
 
-- `requirements`: document, `expectedPolicyRevision`, `reason`; `admin`, operator agents additively; stale revisions refused first.
-- `ready`, `unblock` `{"reason":…}` (operator agents: `expectedRevision`; `master unblock` retries stale ≤3); loop-owned items refuse them, and owner-held ones (`Owner hold:` title, "until the owner releases it", `manual:owner-schedules…`) refuse all but a human admin session until a provided answer to a human-only request on the item records the owner's decision.
-- `rework`: `{"reason":…,"previousWorkerStopped":true}`, waiting while another candidate stands; `repair` (coordinator/admin) rebuilds a head carrying another item's unlanded commits.
-- `claim` `{}`; `heartbeat`; `release` `{"epoch":1}` (`"cause"` or `"failure":{…}` → `workspace.failed`); `blocked` `{"epoch":1,…}` (reason releases, null clears); `review-launch`/`review-verdict` ([review](../coordination.md#review-gate-verdicts-not-threads)); `workspace` `{epoch, host, path, branch}`.
-- `submit`: `{"epoch":1,"head":SHA}` (`complete GY-N EPOCH --head [SHA]`; nothing is pushed): the control plane, the only [merger](../delivery-redesign.md#the-merger), allocates one change number per head into `candidate.pr`/`submission.pr`; a pull request number is refused. complete first re-runs the failing tests the latest `trial failed: tests …` refusal names, with a fresh writable HOME/XDG home and sticky scratch in an owned short directory under durable `/var/tmp`, outside the checkout; retries and base runs each own and remove these directories on success or failure, without writing to the operator’s home. A failing case of the item's own proofs refuses, the refusal naming that case, its file and line, from this run. A case outside the item's proofs retries once on the head and once on the base: passing on the retry records a flake on the item's history, failing on the base too records a base failure, and only failing the head again while the base passes refuses (GY-2968). Any fault of the rerun itself — the run exceeded its bound, the runner could not start or find a file, the output named no case, the base could not be resolved or run — is no refusal: the submission records `pre-submit rerun could not judge: <reason>` with the run's last 20 lines on the item's history and the merge trial judges the head (GY-2980). `409` if applied retro check fails.
-- `deployment` (coordinator).
+`POST /api/work` takes title/criteria, optionally dependencies, exclusiveResources and producerProofs ([example](../../examples/work.json)). Review uses a recorded reviewer-session verdict; retired `codex` and `agent` policy providers are refused. The UI offers no provider selector. Mutations use `POST /api/work/KEY/COMMAND`:
 
-No endpoint sets lifecycle state.
+| Command | Required data/rule |
+| --- | --- |
+| requirements | Document, expectedPolicyRevision, reason; admin or additive operator-agent changes. Stale revision refuses first. |
+| ready, unblock | Reason; operator agents send expectedRevision. Master unblock retries stale revisions up to three times. |
+| rework | Reason and previousWorkerStopped; waits for another standing candidate. |
+| repair | Coordinator/admin rebuilds a head carrying unlanded commits. |
+| claim | Empty body. |
+| heartbeat, release | Epoch; release cause/failure records workspace.failed. |
+| blocked | Epoch and reason; reason releases, null clears. |
+| workspace | Epoch, host, path, branch. |
+| review-launch, review-verdict | [Candidate binding](../coordination.md#review-gate-verdicts-not-threads). |
+| deployment | Coordinator observation. |
+
+Loop-owned items refuse ready/unblock. Owner-held items (`Owner hold:`, explicit owner release or `manual:owner-schedules…`) need the human admin's recorded answer.
+
+## Submit a commit
+
+`complete GY-N EPOCH --head SHA` submits without pushing and ends the lease. The writer allocates `candidate.pr`/`submission.pr` as change numbers; pull request numbers are refused. No endpoint sets lifecycle state.
+
+Complete reruns cases named by the latest trial-test refusal. Each head retry and base run owns and removes a short directory under durable `/var/tmp`, outside the checkout, with fresh writable HOME/XDG directories and sticky scratch; it never writes to the operator’s home. Own-proof failure refuses with case/file/line. Other failures retry on head and base: retry passes record flakes; base failures are recorded; failing head with passing base refuses. An indeterminate rerun records its cause and last 20 lines and leaves judgment to the merge trial. Failed retro checks return 409.
 
 ## Reads
 
-`GET /healthz` (unauthenticated); `/api/status`: principal, integrations, jobs, `mergeWriter`, clock; `/api/github/*` answers 404. `GET /api/work/ID|KEY`: one item; `/api/work`: the fleet (open items whole, settled deliveries summarized).
+`GET /healthz` is public. `/api/status` reports principal, integrations, jobs, writer and clock. `/api/work/ID|KEY` reads one item; `/api/work` lists full open work and summarized deliveries. `/api/github/*` returns 404.
 
 ## Leases, evidence, pipeline
 
-Claims last 120s, renewed every ≤30s; owner mutations carry epoch. Register branch, path, host first.
+Claims last 120 seconds; renew at least every 30 seconds. Owner mutations need the current epoch. Register assigned host/path/branch before submitting. Stop immediately on lease loss.
 
 `complete GY-N EPOCH` submits the worktree's HEAD, as does a bare `--head`; `--head SHA` names another commit. Head observation happens before the submission transaction; that transaction checks lease expiry, including recorded renewal grace.
 
 ### Watch
 
-`graphyard watch GY-N EPOCH -- COMMAND` strips Graphyard credentials; lease loss SIGTERM→SIGKILLs the process group. Calls ride 5xx/408/429 with backoff; refusals stop at once; on exit `watch` ends the attempt with cause; a dead supervisor's lease lapses and the item is claimable again. Workers get no remote credential and push nothing.
+`watch GY-N EPOCH -- COMMAND` supervises the worker, supplies its identity, removes server/database secrets and terminates its process group on lease loss (SIGTERM then SIGKILL). Transport 5xx/408/429 retry with backoff; refusals stop. Exit records a cause; dead-supervisor leases expire. Workers push nothing.
 
 ### How a lease ends
 
-- `submit`; later heartbeats are told to stop after `complete`.
-- `park` (human-only request naming every human step) or `blocked` releases; coordinator `capacity` (`event: "exhausted"`) frees another account.
-- Expiry classes (`lease.expired`): `blocked-awaiting-operator`, `stopped-by-attestation`, `exhausted-capacity`, `control-plane-stall`, `control-plane-deploy`, `no-submission-bound`; any lapse ends the attempt.
+Submit, park, blocked or expiry ends the attempt. Complete must be the last action. Coordinator capacity/exhausted frees another account. Expiry classes: blocked-awaiting-operator, stopped-by-attestation, exhausted-capacity, control-plane-stall, control-plane-deploy and no-submission-bound.
 
 ### Blocked work
 
-`blocked GY-N EPOCH REASON` commits uncommitted work, releases, and records REASON as the item's blocker: plain text, never probed or classified. `master unblock GY-N REASON` clears it.
+`blocked GY-N EPOCH REASON` commits changes, releases and records plain text. `master unblock GY-N REASON` clears it. For the human's three decisions, read `guide park`.
 
 ### Evidence and pipeline
 
-`POST /api/work/UUID/evidence` (`proof`, `sha`, `baseSha`, `policyRevision`, `result`, `executed`): the server sets identity, time, trust; proofs outside the roster's `--proof` patterns store untrusted; later failures supersede passes; `POST /api/work/:id/revoke` (`admin`) withdraws one tuple's records. Lifecycle commands append to each item's `pipeline`, never moving a gate.
+`POST /api/work/UUID/evidence` takes proof, sha, baseSha, policyRevision, result and executed. The server sets identity/time/trust; out-of-grant proofs are untrusted and later failures supersede passes. Admin revoke withdraws a tuple's records. Commands append history, never set gates. Control-plane acceptance reads trial counts for unit/integration/E2E; producer evidence cannot replace them. Workers supply no trusted evidence for their own work.
 
 ## Other commands and routes
 
-Retired reads (`events/stats`, `actions`, attribution analytics and manifests, validation `seal-authority`, and registry `connect/hosts`) return 404 after authentication. The dashboard uses the surviving board, snapshot and detail routes.
+Retired reads (`events/stats`, `actions`, attribution analytics and manifests, validation `seal-authority`, and registry `connect/hosts`) return 404 after authentication. The dashboard uses board, snapshot and detail routes.
 
-`graphyard help` lists commands. Routes: `/api/assignments/claim`, `/api/agent-registry[/apply|select|observe|document|history|connect]`, `/api/validation/[analytics|capacity|definitions|artifacts|replay|reuse|collection-authority|cancel|settle|retry]`, `/api/delivery/[observations|select|sweep]`, `/api/human-requests`, `/api/intake`, `/api/operator-agents`, `/api/principals`, `/api/production-environment`, `/api/scenarios`, and pattern routes under `/api/work/ID` and `/api/agent-registry`.
+`graphyard help` lists commands. Exact API schemas live under `src/server/routes/` and `src/model/`.

@@ -1,50 +1,56 @@
-<!-- page: Operate Graphyard | 5 | loop -->
+<!-- page: Operate Graphyard | 5 | coordinate work and diagnose stalls -->
 # Master-agent operating mode
 
-The master (`coordinator`) administers access, never implementing, reviewing or proving; it files items itself, and its loop releases backlog to keep the pipeline full ([intent](how-graphyard-works.md#from-intent-to-work-items)). Human-only: goals and priorities, spending money or opening third-party accounts, issuing credentials to people.
+The master is an AI coordinator, not the loop program. It files work, diagnoses failures and applies release, unblock, requirements, rework, close and attest decisions under its operator-agent identity. It never implements, reviews or proves its own work. People keep only goals and priorities, money and accounts, and credentials for people.
 
 ## Operate
 
-Cycle until scoped items are Done or blocked and releases healthy. `master status` prints the serving commit against main, scoped items' stage, worker and human owner, head and blocker, the merge queue, sessions and free profiles. Serving describes the managed repository's deployment, never the control plane's build; without a provider it is `unconfigured`. A repository declaring [`.graphyard/serve.json`](deployment.md#serving-the-managed-repositorys-app) reports its served commit, `atMain`, URL and last build failure. Review, rework and proof setup are not stopping conditions.
+Run `master status` and act until scoped work is Done or blocked and serving is healthy. Review/rework/proof setup are work to advance. Status reports items, queue, sessions and capacity. Serving belongs to the managed repository; no deployment reads `unconfigured`.
 
-Items carry an optional `owner`, a principal with `sessionKind: "human"`, separate from the worker lease. Set it in `master create` or change it through `master requirements`; `null` returns it to the install. Requirements still enforce revisions and active leases. In the install checkout, `master init --for PERSON --token-stdin` registers a personal master without replacing identities or installing another supervisor. The loop launches each person's master and dispatches only their items; the install master dispatches unowned items. Scopes share capacity, backlog release, reconciliation, review/proof dispatch and one merge writer. A personal master's creates default to its person. Signed-in people open Work → Now for exactly their items, stage and next step; Work remains the shared board.
+Optional item `owner` names a human, separate from the worker lease. Set with create/requirements; null returns ownership to the install. `master init --for PERSON --token-stdin` registers a personal master without another supervisor. It creates/dispatches that person's items; the install master handles unowned work. Capacity and merge writer stay shared. Work → Now shows personal work; Work shows all.
 
 ## The loop
 
-`master run` runs one cycle every `run.intervalSeconds`: five steps in order, each under one timeout; a failed step is one log line and runs again next cycle.
+`master run` repeats every `run.intervalSeconds`. Each step has a timeout; a failed step logs its cause and retries next cycle.
 
-1. **snapshot**: the work snapshot and Herdr's session list.
-2. **close**: end sessions whose item left the stage they were launched for; keep what an attempt ended by its lapsed lease had not committed and record it for the redispatch's handoff — whether the lapsed lease is still on the record or the control plane's reconciliation already cleared it (GY-2956); reconcile leases that lapsed unsubmitted; remove ended attempts' worktrees.
-3. **dispatch**: backlog released while the pipeline sits under its concurrency — the highest-priority item whose dependencies are done, oldest first on ties; a parked item never releases; claimable items to free worker profiles; unmergeable heads back to a worker; reviewer and producer requests; the master session, launched when absent.
-4. **merge writer**: trial and merge each submitted head in order ([delivery](delivery.md)).
-5. **persist**: the loop cursor.
+1. **Snapshot:** read work and Herdr sessions.
+2. **Close:** end obsolete sessions, preserve uncommitted work from expired attempts for the next worker, reconcile leases and remove ended worktrees.
+3. **Dispatch:** release eligible backlog up to capacity, highest priority first and oldest on ties. Launch workers, spec checks, reviewers, producers and an absent master session; return unmergeable heads for rework. Parked work stays held.
+4. **Merge writer:** trial and merge submitted heads in order ([delivery](delivery.md)).
+5. **Persist:** save the loop cursor.
 
-A worker launch refused only because live registry sessions fill its role concurrency stays queued, with the capacity reason visible in status. Each cycle retries it; a freed slot launches it without a lease claimed while waiting, a failed-launch cooldown or an incident wake. Real launch and registry failures still wake the master; open-work heartbeats continue.
+A worker launch refused only because live registry sessions fill its role concurrency stays queued, with the capacity reason visible in status. Each cycle retries it; a freed slot launches it without a lease claimed while waiting, a failed-launch cooldown or an incident wake. Real launch and registry failures still wake the master; open-work heartbeats continue. A runtime that starts then exits unsuccessfully within 60 seconds of its observed runtime start (excluding preparation and early handle registration) without committing or submitting is a failed launch: before closing its pane the loop keeps a bounded, credential-masked error excerpt on the session and an exact item/epoch incident. Reporter-finished handles receive the same diagnostic and idempotent pane cleanup. The profile cools off, healthy profiles remain available, and repeated failures back off to at most 30 minutes. Another started pane does not clear the incident; useful or longer-lived work does. Unchanged incidents wake the configured master once, including across retries and loop restarts. Session runtime names come from the selected launch, including registry fallback.
 
-The loop follows the master's live Herdr pane after a move. A weekly limit, session limit or exhausted usage credits holds its account, closes that pane and launches the next account in the same cycle. `master status` names the live pane and reports `screen unreadable` when it cannot read it; missing runtime status reads `unknown`.
+The loop follows the master's live Herdr pane after a move. Weekly/session limits or exhausted credits hold that account, close its pane and launch the next account in the same cycle. Status names the live pane, reports `screen unreadable` on read failure and `unknown` for missing runtime status.
 
-`master restart` restarts `graphyard-master.service`; from the confined master session it files a request the loop serves. The loop restarts itself when [graphyard-deploy.service](delivery.md) serves a commit it did not load.
+`master restart` restarts the install's loop unit; confined masters record a request. The loop reloads newly served code. [Unit names](delivery.md#continuous-deployment) are per install, with legacy aliases.
 
-When merge validation refuses a queued head for a shared base failure, the loop sends the diagnosis (including assertion or crash detail) and next repair action to the registered master, even if Herdr still labels it working. An absent master receives the unresolved cause in its launch handover. The cursor records `lastWake` and subject digests: repeated cycles and restarts do not prompt again for unchanged causes; changed details or base wake again, and resumed delivery clears the subject. Failed delivery stays pending for retry. `master status` separates the coordinator's session state from `delivery`, naming a shared-base stall, its reason and next agent action. The master files or advances the repair without human approval; every test and merge requirement remains in force.
+### Master wake and delivery progress
+
+The systemd watchdog receives a ping after each completed cycle (`src/supervisor.ts`). It restarts a hung loop; it does not prove commits are merging, diagnose failed tests or decide repairs.
+
+Completed cycles and a pane marked `working` alone establish no delivery progress. Diagnose failures with all gates intact.
+
+When merge validation refuses a queued head for a shared base failure, the loop sends the diagnosis (including assertion or crash detail) and next repair action to the registered master, even if Herdr still labels it working. An absent master receives the unresolved cause in its launch handover. The cursor records `lastWake` and subject digests: repeated cycles and restarts do not prompt again for unchanged causes; changed details or base wake again, and resumed delivery clears the subject. Failed prompt delivery stays pending for retry. `master status` separates the coordinator's session state from `delivery`, naming a shared-base stall, its reason and next agent action. The master files or advances the repair without human approval; every test and merge requirement remains in force.
 
 The same handoff includes unresolved worker blockers, failed launch/review/proof operations and abandoned requests, with affected work and the recorded reason. A failed deployment of the managed repository also reaches its master. Resolved causes disappear. While scoped work remains, `run.masterHeartbeatMinutes` (default 30) bounds the fallback re-prompt since the last wake or session start, including stale working labels; successful wakes reset that timer across loop restarts. Routine repair uses typed agent actions without relaxing gates.
 
 ### System-driven items
 
-Unless created `"systemDriven": false`, items refuse hand `dispatch`, `merge`, `review`, loop-owned `rework`. The master attests unproduced `manual:` proofs per head, base and policy revision.
+Items default to `systemDriven: true`. `master dispatch GY-N PROFILE` still uses normal eligibility, ownership and lease checks. Use typed actions without bypassing gates; attest required manual proofs for the exact head/base/policy.
 
 ### File every item with an e2e: proof
 
-Every item carries a criterion with an `e2e:NAME` proof bound to `e2e/cases/NAME.json` — new or existing, run by the merge trial against the served head. There is no chore exemption and no opt-out sentence: `master create` and `master requirements` refuse anything else, naming the case format ([validation](validation.md)). Loop repairs name `e2e:create-work-item`; follow-ups reuse delivered cases (legacy items: `create-work-item`); onboarding names the repository's first case.
+Every item needs an `e2e:NAME` criterion bound to a new or existing `e2e/cases/NAME.json`; there is no chore exemption or opt-out. Create and requirements enforce the [E2E rule](validation.md#every-item-carries-an-e2e-proof). Loop repairs name `e2e:create-work-item`; follow-ups reuse delivered cases (legacy items: `create-work-item`); onboarding names the repository's first case.
 
 ### Session liveness is reconciled, not trusted
 
-Each dispatch reconciles reviewer and producer sessions; a handle closes at the second consecutive miss, and so does the agent-registry session a restarted loop left standing — the ledger record names its pane, and the role's slot frees with it. A completed review (including COMMENTED and post-merge) releases its registry slot on the first readable inventory that shows its pane gone, after launch grace, even when its delivered item is absent from open work. Its verdict and review requirements stay unchanged. `blocked` frees its slot; its [reason](protocol/work-commands.md#blocked-work) stays on the item until the master clears it.
-
-The GY-3052 incidents completed within launch grace: GY-3007 launched at 21:36:42Z and closed at 21:37:15Z; GY-3004 launched at 21:41:44Z and closed at 21:42:24Z. Manual release at 21:41:37Z and 21:47:02Z preceded two eligible missing-pane snapshots. The old second-miss path therefore had not fired; delivered items also lacked an open-work handle for normal close. Completed ledger records now suffice on the first eligible miss, without making COMMENTED an approval.
+Missing panes free role capacity after two consecutive misses, including across loop restarts. Completed reviews (including COMMENTED and post-merge) release their registry slot on the first readable inventory showing the pane gone after launch grace, even for delivered items absent from open work. Verdicts and review requirements stay unchanged; COMMENTED is not approval. `blocked` frees a worker slot; its [reason](protocol/work-commands.md#blocked-work) stays until master clears it.
 
 ## Automatic dispatch at submit
 
-Past the build gate: a producer request per proof group (`unit`, `integration`; `manual` with `producerProofs`), then a review once passed (`run.reviewerProfile`, producer profiles, 4 sessions each; **concurrency is per role**, 1–20, default 1). Unanswered sessions relaunch, then `dispatch.abandoned`.
+The profile named by `run.reviewerProfile` defaults to 4 sessions when its concurrency is unset. An explicit concurrency wins; other profiles default to one session.
 
-Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. An exact-head control-plane approval lets the head proceed to the merge writer's trial immediately. Old settings files still load with `run.awaitReviewers` and `run.awaitReviewersMinutes` ignored; old dispatch cursors load with `botReviewers` discarded.
+Control-plane acceptance reads executed unit/integration/E2E counts from the merge trial, not producer evidence. Sensitive changes also need manual attestations. Review is automatic; unanswered sessions retry, then record `dispatch.abandoned`. Producer APIs remain for integrations, but these candidates launch no producer sessions.
+
+Reviewer requests launch on the first eligible dispatch tick without waiting for GitHub bot reviews. Exact-head control-plane approval lets the head proceed immediately to the merge trial. Settings ignore old `run.awaitReviewers` and `run.awaitReviewersMinutes`; dispatch cursors discard old `botReviewers`.

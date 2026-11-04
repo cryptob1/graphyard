@@ -1,45 +1,53 @@
-<!-- page: Start here | 1 | lifecycle -->
+<!-- page: Start here | 1 | roles and delivery -->
 # How Graphyard works
 
-Graphyard decides whether work advances; runtimes (Herdr) run sessions.
+## Start with the roles
+
+The **master** is an AI coordinator: it reasons and decides. The **loop** is a repeating program (`master run`): it observes state and executes routine actions. **Workers** implement; independent reviewers judge changes.
+
+Graphyard owns leases, append-only history and gates independently of Herdr. Herdr starts sessions and reports liveness; a running session cannot grant itself ownership or advance a gate. The master acts under its operator-agent identity for every decision except the human's three: goals and priorities, money and accounts, and credentials for people. No new human approval is needed for routine action.
 
 ## One trip to Done
 
-1. **Ready**: released, unblocked, criteria name proofs; a feature item waits here for its spec check (below).
-2. **Build**: worker claims lease and worktree, submits the exact commit, pushes nothing.
-3. **Review**: a [sensitive](#the-one-review-rule) commit waits for one independent approval; a feature also waits for its product review.
-4. **Test**: the merge writer trial-merges onto base, runs build and tests.
-5. **Acceptance**: roster producers report the criteria's proofs.
-6. **Done**: Graphyard rechecks gates, pushes base, observes.
+1. **Ready**: released, unblocked work names proofs; features receive a spec check.
+2. **Build**: a worker claims a lease/worktree and submits its exact commit, ending the lease. Workers push nothing.
+3. **Review**: sensitive changes wait for independent approval; every feature also gets product review.
+4. **Test and acceptance**: the writer tests the merged tree and counts proof cases; sensitive changes need required manual attestations.
+5. **Done**: passing gates allow the writer to push main. Done means merged.
+6. **Delivery**: the separate deploy supervisor serves main; required checks establish live verification.
+
+A cycle can complete while every item remains stuck. Check item history, merge ledger, served commit and required case results to measure progress.
 
 ## The spec check before dispatch
 
-Nobody without the filer's context reads an item before a worker spends an attempt on it, so design gaps surface as rework. Before a released feature item dispatches, the loop launches one spec-check session — a reviewer identity, fresh context (the goldfish of Google's [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model), whose two reviewer prompts are vendored under `vendor/egm/`) — that reads only the item and the files and docs it names, and answers in one report: a paraphrase of what will be built and how each criterion is proven, and the implementation-readiness gaps. `ready` dispatches; a first `gaps` holds the item at ready with its report until master requirements revises it, which runs one re-check; the re-check's verdict dispatches, a second `gaps` with the report attached for the worker. Bugs and chores skip it. The report — paraphrase, gaps, verdict — shows on the item.
+A fresh-context reviewer restates each feature's result, proofs and gaps before dispatch. First `gaps` holds for `master requirements`; one re-check follows, then dispatch includes its report even if gaps remain. Bugs and chores skip it. Prompts come from Google's [Elephant-Goldfish Model](https://github.com/google/elephant-goldfish-model), vendored under `vendor/egm/`.
+
+Each tracked pane names its registered launch: only that launch’s liveness can trigger a retry. Closing a stale pane (including a saved action without a launch ID) cannot replace a newer reviewer’s token. A missing or blocked current pane retries; reported or expired launches still close.
 
 ## From intent to work items
 
-The master files items (`master create`); the loop releases backlog itself to keep the pipeline full, and `master release` stays for an out-of-order pull. An item of any size is dispatched whole. Review follow-ups are ordinary backlog items.
+The master files with `master create`; the loop releases eligible backlog by priority and capacity. `master release` pulls out of order. Keep held work blocked; items dispatch whole.
+
+For example, a check fails on both main and a change. The writer holds it as a base failure. The loop prompts the master with the failed check and next repair action. The master diagnoses it and advances repair work; a worker fixes it, then trials resume with gates intact. See [master wakes and delivery progress](master-agent.md#master-wake-and-delivery-progress).
 
 ## The one review rule
 
-A head whose merge delta touches a `graphyard.json` `risk.sensitive` path (generic default; unknown delta: sensitive) waits for one independent approval before the merge writer merges it. Any other head merges on its passing trial and is reviewed after the merge; a blocking finding becomes a follow-up item.
+A delta touching `graphyard.json` `risk.sensitive` needs one independent approval before merge; an unknown delta counts as sensitive. Other changes merge on a passing trial and receive review afterward. A blocking post-merge finding becomes a follow-up item.
 
-A feature also waits for its product review: a reviewer session walks the head's preview — or, where no preview runs, the app as currently served against the head's diff — then approves, requests changes (rework, with the findings), or rejects — a reject is closed by the master, never merged. Bugs and chores skip it; a new head is reviewed afresh unless only non-UI files changed. Its verdict, findings and screenshots show on the item.
+Product review walks every feature's preview (or served app plus diff). Approval advances, changes rework, rejection goes to master for closure. Bugs and chores skip it. New heads get review unless only non-UI files changed. Findings/screenshots stay on the item.
 
 ## Who holds which authority
 
 ![Bootstrap: one supervised worker; normal operation: a fleet.](diagrams/bootstrap-vs-normal.svg)
 
-Text equivalent: in bootstrap the human operator supervises one worker; later master runs a credentialed fleet.
+Text equivalent: in bootstrap the human operator supervises one worker. In normal operation, the master decides, the loop runs routine actions, and independent worker, reviewer and producer sessions act under their own identities.
 
-![Authority of operator, Graphyard, Herdr sessions, reviewer, producer.](diagrams/roles-and-authority.svg)
+![Authority of operator, Graphyard, runtime, reviewer and producer.](diagrams/roles-and-authority.svg)
 
-Text equivalent: operator: goals, money, credentials for people; Herdr hosts master (applies every other decision), slice lead, worker; reviewer, producer hold credentials; guarded path merges. [legend](glossary.md#diagram-legend).
+Each session has its own identity ([legend](glossary.md#diagram-legend)).
 
 ## Correctness rules
 
 ![Control plane: callers, engine, Postgres, loop and merge writer, git remote.](diagrams/control-plane-components.svg)
 
-Text equivalent: mutations and events commit in locked transactions; the merge writer trial-merges passing heads and pushes with its deploy key; no webhook is served.
-
-Gates are deterministic checks of one candidate, `(change number, head SHA, base SHA)`; latest trusted proof wins; merge is not [delivery](delivery.md).
+Gates are deterministic checks of one candidate, bound to its change number, head/base SHA and policy revision. Mutations and history commit in locked transactions without external I/O. Later trusted results supersede earlier ones. Only the writer pushes main; no arbitrary lifecycle-state endpoint exists. See [delivery](delivery.md).

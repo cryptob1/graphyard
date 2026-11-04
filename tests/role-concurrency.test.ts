@@ -1,3 +1,4 @@
+import { startedAtOnce } from './helpers/launch-shell.js';
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
@@ -89,13 +90,10 @@ async function fleet(profiles: { reviewers: unknown[]; producers: { name: string
     calls.push(args);
     if (args[0] === 'tab' && args[1] === 'create') { panes++; return JSON.stringify({ result: { root_pane: { pane_id: `pane-${panes}`, tab_id: `tab-${panes}` } } }); }
     // The typed launch starts its runtime at once; the session is named when Herdr sees it started (GY-121).
-    if (args[0] === 'pane' && args[1] === 'run') return '';
-    if (args[0] === 'pane' && args[1] === 'read') return '';
-    if (args[0] === 'agent' && args[1] === 'get') return JSON.stringify({ result: { agent: { agent: 'claude', agent_status: 'working', pane_id: args[2] } } });
     if (args[0] === 'agent' && args[1] === 'rename') { seen[args[3]] = agents.map(agent => agent.name!); agents.push({ name: args[3], pane_id: args[2], agent_status: 'working' }); return JSON.stringify({ result: {} }); }
     if (args[0] === 'pane' && args[1] === 'close') { const index = agents.findIndex(agent => agent.pane_id === args[2]); if (index >= 0) agents.splice(index, 1); return JSON.stringify({ result: {} }); }
     if (args[0] === 'pane' && args[1] === 'list') return JSON.stringify({ result: { panes: [] } });
-    return JSON.stringify({ result: {} });
+    return startedAtOnce(args, 'working') ?? JSON.stringify({ result: {} });
   };
   const registerLaunch = async () => ({ launch: 'fixture-launch' });
   /** The dispatcher wired to the real launchers, the stubbed Herdr, and a live configuration. */

@@ -16,10 +16,10 @@ import { failureText } from './worktrees.js';
 import type { MasterConfig } from './profiles.js';
 import type { Work } from '../model.js';
 import { simplicityParagraph } from '../reviewer.js';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 import { adoptConversation, assertConversationRuntime, awaitConversation, captureConversation, continuationContext, conversationArgs, graphyardInput, masterInputs, masterRecords, type Continuity } from './conversation.js';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import type { MasterSessionState } from '../daemon/state.js';
 
 /** The registry role and profile name the master session launches under. */
@@ -39,7 +39,8 @@ export function masterHandover(input: { work: Work[]; cliPath: string }) {
   return [
     `Handover from the launcher that started this session: it relaunches the master when the session is gone, so continue from node ${input.cliPath} master status.`,
     `- Needs-you parks (human-only decisions): ${line.length > 480 ? `${line.slice(0, 479)}…` : line}`,
-    `- Your open items: ${input.work.filter(item => item.stage !== 'done').map(item => `${item.key}: ${item.title}`).join('; ').slice(0, 2000) || 'none'}`,
+    `- Pending operator goals: ${input.work.filter(item => item.humanRequest?.kind === 'goals-and-priorities').map(item => `${item.key}: ${item.humanRequest!.needed}${item.humanRequest!.answer ? `; answer ${JSON.stringify(item.humanRequest!.answer)}` : '; pending decision'}`).join('; ').slice(0, 1000) || 'no separate goal recorded on this board; follow its priorities and inspect master status. Goals held only in unread history are unknown'}`,
+    `- Your open items: ${input.work.filter(item => item.stage !== 'done').map(item => `${item.key}: ${item.title} [priority ${item.priority}; ${item.stage}; candidate ${item.candidate?.sha ?? 'none'}; merge ${item.mergeLedger?.state ?? 'not started'}; delivery ${item.delivery?.mergeSha ?? 'pending'}]`).join('; ').slice(0, 2000) || 'none'}`,
   ].join('\n');
 }
 /** The session's first request: the shared master prompt, the simplicity paragraph, then the handover. */
@@ -83,7 +84,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     return failure;
   };
   try {
-    const context = current ? await continuationContext(current) : { handover: 'Previous master conversation: none. Last unanswered person message: none.', input: null };
+    const context = current ? await continuationContext(current) : { handover: 'Previous master conversation: no recovered record supplied. Last unanswered person message: unknown unless established by the handover.', input: null };
     const request = await graphyardInput(origins, 'launch', masterRequest(config, `${handover}\n${context.handover}`));
     // The same harness the human launch writes (master start): the master's own commands, and the
     // deny rules that keep it from borrowing another identity — never a worker or producer credential.
@@ -95,7 +96,7 @@ export async function launchMasterSession(root: string, config: MasterConfig, he
     // Confined exactly as `master start` launches it (GY-1658): the checkout read-only at the OS
     // level, its managed .graphyard state and the shared Git areas writable. A host that cannot
     // apply the confinement refuses the launch; the master is never started unconfined.
-    ({ delivery } = await startAgentSession(name, kind, pane, [...plan.args, ...conversationArgs(kind, nativeId, resume)], request, run, { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master' }));
+    ({ delivery } = await startAgentSession(name, kind, pane, [...plan.args, ...conversationArgs(kind, nativeId, resume)], request, run, { directory: root, coordinatorRoot: root, retry, contract: plan.contract, environment: plan.environment, timeoutMs: launchStartMs(config), confinement: 'master', masterStateDirectory: dirname(config.credentialFile) }));
     const discovered = await awaitConversation(kind, plan.environment, root, since, nativeId, launchStartMs(config), request);
     const conversation = { launch, runtime: kind, account: selected.account.name, ...discovered,
       record: resume ? current!.record : join(masterRecords(root), `${launch}.jsonl`), origins,
@@ -133,8 +134,14 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
     assertConversationRuntime(kind);
     const variable = runtime?.launch.homeVariable ?? (kind === 'claude' ? 'CLAUDE_CONFIG_DIR' : 'CODEX_HOME');
     const environment = { ...runtime?.launch.environment, ...(login?.credential.home ? { [variable]: login.credential.home } : {}) };
-    const request = await readFile(join(root, '.graphyard/launch', `${master.agentName ?? current.masterAgentName}.request`), 'utf8').catch(() => null);
-    return adoptConversation(root, { runtime: kind, account, environment,
+    const request = await readFile(master.launchRequestRecord ?? join(root, '.graphyard/launch', `${master.agentName ?? current.masterAgentName}.request`), 'utf8').catch(() => null);
+    if (request !== null) {
+      const record = join(masterRecords(root), `${createHash('sha256').update(request).digest('hex')}.request`);
+      await mkdir(masterRecords(root), { recursive: true, mode: 0o700 });
+      await writeFile(record, request, { flag: 'wx', mode: 0o400 }).catch(error => { if (error.code !== 'EEXIST') throw error; });
+      master.launchRequestRecord = record;
+    }
+    return adoptConversation(root, { runtime: kind, account, environment, origins: masterInputs(root, current.masterAgentName),
       prompts: [...(request ? [{ origin: 'launch' as const, text: request }] : []), ...prompts.map(text => ({ origin: 'wake' as const, text }))] });
   },
   pendingCauses: async work => {
@@ -142,9 +149,9 @@ export const masterSessionEffects = (root: string, config: () => MasterConfig, r
     const [cursor, serving] = await Promise.all([readDispatchCursor(root, current), servingReport(root, current.repository, current.baseBranch)]);
     return [...dispatchCauses(work, cursor), ...deploymentCauses(serving.failedDeploy)];
   },
-  wake: (target, text, continuity) => deliverPrompt(target, text, run, continuity ? {
-    beforeSubmit: (text, attempt) => graphyardInput(continuity.current.origins, attempt === 1 ? 'wake' : 'retry', text),
-  } : {}),
+  wake: (target, text, continuity) => deliverPrompt(target, text, run, {
+    beforeSubmit: (text, attempt) => graphyardInput(continuity?.current.origins ?? masterInputs(root, config().masterAgentName), attempt === 1 ? 'wake' : 'retry', text),
+  }),
   launch: async (handover, previous) => {
     const { delivery: _, ...launched } = await launchMasterSession(root, config(), await observeHerdrAgents(run), handover, run, {}, previous);
     return launched;

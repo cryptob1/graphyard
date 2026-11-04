@@ -329,7 +329,7 @@ test('invalid login remains on login; whitespace is trimmed and loading never cl
   state.pause = true; await login(page, '  browser-fixture  ');
   await expect(page.getByRole('status')).toContainText('Verifying');
   await expect(workHeading(page)).toBeVisible();
-  await expect(page.getByText('fixture/repository')).toBeVisible();
+  await expect(page.getByRole('main').locator('.top-bar .project-name').getByText('fixture/repository', { exact: true })).toBeVisible();
 });
 
 test('connection loss labels stale data, recovers, and revoked sessions clear the dashboard', async ({ page }) => {

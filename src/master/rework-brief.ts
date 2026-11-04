@@ -12,25 +12,27 @@ export const reworkBriefMax = 4000;
 /** The applied rework whose round this attempt is. */
 export interface AppliedRework { reason: string; at: string }
 
-type BriefWork = Partial<Pick<Work, 'submission' | 'candidate' | 'pipeline' | 'lastRework'>>;
+type BriefWork = Partial<Pick<Work, 'key' | 'submission' | 'candidate' | 'pipeline' | 'lastRework'>>;
 
 /**
  * The last applied rework, when it sent back the item's last hand-in: applied after that hand-in
  * (`pipeline.resubmittedAt`, else `submittedAt`). A rework of an earlier round, already answered by a
- * later hand-in, is not this round's grounds; an item never submitted has none.
+ * later hand-in, is not this round's grounds. Before the first hand-in it is retry guidance.
  */
 export function appliedReworkBrief(work: BriefWork): AppliedRework | null {
   const latest = work.lastRework, reason = latest?.reason.trim();
-  if (!work.submission || !latest || !reason) return null;
+  if (!latest || !reason) return null;
   const handedIn = work.pipeline?.resubmittedAt ?? work.pipeline?.submittedAt ?? null;
   if (handedIn && Date.parse(latest.at) < Date.parse(handedIn)) return null;
   return { reason, at: latest.at };
 }
 
-/** The worker request's section for a rework round: the rework's reason, and that the same head answers nothing. */
+/** The applied reason, with distinct instructions for pre-submit handoffs and submitted rework. */
 export function reworkBriefSection(work: BriefWork, rework: AppliedRework | null | undefined): string {
-  if (!rework || !work.submission) return '';
+  if (!rework) return '';
   const reason = rework.reason.length > reworkBriefMax ? `${rework.reason.slice(0, reworkBriefMax)}… (truncated; read the whole reason in the item's history)` : rework.reason;
+  if (!work.submission) return `Applied master guidance for ${work.key} before its first submission (applied at ${rework.at}), for this attempt: ${reason} `
+    + 'Follow this guidance on the assigned branch; when it asks only to verify preserved work, a new source commit is not required. Submit the resulting head with complete --head. ';
   const head = work.candidate?.sha ? ` at head ${work.candidate.sha.slice(0, 12)}` : '';
   return `This attempt is a rework round of change #${work.submission.pr}${head}. The rework applied at ${rework.at} sent it back for this reason, which is this round's brief: ${reason} `
     + 'Answer every point it names with a new commit on the assigned branch, submitted with complete --head; resubmitting the same head answers nothing, because what sent it back still stands on it. ';

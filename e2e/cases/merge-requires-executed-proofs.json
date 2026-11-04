@@ -1,0 +1,13 @@
+{
+  "id": "merge-requires-executed-proofs",
+  "title": "Required proof cases execute before main changes",
+  "description": "Native private-root command regression uses temporary Git, Postgres, the control plane and real Node spec/TAP runners through both single and batch writers. Successful commands with zero, missing or failing required proof counts cannot push or deliver; positive passing TAP counts pass ordinary gates.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "real required-proof merge regression",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/merge-requires-executed-proofs.test.ts",
+    "timeoutSeconds": 600
+  }]
+}
