@@ -3,6 +3,7 @@ import { z } from 'zod';
 import type pg from 'pg';
 import { advisoryLocks, ledgerOrder, ledgerSeeded, ledgerSequences, ledgerTables } from './store.js';
 import { releaseInfo, schemaVersion } from './release.js';
+import { retiredTables } from './store/schema.js';
 import { retryDeadlocks } from './store/migration-locks.js';
 
 /**
@@ -23,7 +24,7 @@ import { retryDeadlocks } from './store/migration-locks.js';
  * credentials; keep it where the database itself is allowed to be.
  */
 export const backupFormat = 'graphyard-backup-v1';
-const tableName = z.enum(ledgerTables as [string, ...string[]]);
+const tableName = z.enum([...ledgerTables, ...retiredTables]);
 export const backupSchema = z.object({
   format: z.literal(backupFormat),
   takenAt: z.iso.datetime(),
@@ -98,7 +99,8 @@ const restoreDeadlockAttempts = 5;
  * Empty is a requirement, not a default: restoring over a live ledger would resurrect
  * expired ownership beside current assignments and discard evidence submitted since the
  * backup, which is exactly the outcome the deployment guide warns against. Migrate the
- * target with `db migrate` instead. Tables the
+ * target with `db migrate` instead. Retired tables are verified but skipped, as the
+ * migration would drop them, and reported in tablesRetired. Tables the
  * backup does not carry — added by a later migration — stay empty and are reported, and
  * the migration that follows a restore fills in whatever the newer schema needs. A
  * checkpoint the migration itself seeds is not live state: the backup's checkpoint
@@ -130,7 +132,7 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
       if (count) throw new Error(`Restore requires an empty database: ${name} already holds ${count} row(s). Restoring over live state resurrects expired ownership and discards later evidence`);
     }
     for (const table of backup.tables) {
-      if (table.name === 'graphyard_schema') continue;
+      if (table.name === 'graphyard_schema' || retiredTables.some(name => name === table.name)) continue;
       if (ledgerSeeded.includes(table.name)) await db.query(`DELETE FROM ${table.name}`);
       // Chunked so a large ledger does not become one enormous parameter.
       for (let at = 0; at < table.rows.length; at += 500) {
@@ -150,7 +152,7 @@ export async function restoreBackup(pool: pg.Pool, input: unknown) {
     let attempts = 0;
     await retryDeadlocks(() => { attempts++; return restore(); }, () => attempts < restoreDeadlockAttempts, () => db.query('ROLLBACK'));
     const missing = ledgerTables.filter(name => name !== 'graphyard_schema' && !backup.tables.some(t => t.name === name));
-    return { restored, takenAt: backup.takenAt, fromVersion: backup.graphyardVersion, fromSchema: backup.schemaVersion, toSchema: schemaVersion, tablesLeftEmpty: missing };
+    return { restored, takenAt: backup.takenAt, fromVersion: backup.graphyardVersion, fromSchema: backup.schemaVersion, toSchema: schemaVersion, tablesLeftEmpty: missing, tablesRetired: backup.tables.filter(table => retiredTables.some(name => name === table.name)).map(table => table.name) };
   } catch (error) { await db.query('ROLLBACK').catch(() => {}); throw error; }
   finally { db.release(); }
 }
