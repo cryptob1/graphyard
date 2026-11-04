@@ -1,7 +1,7 @@
 import { gitLedger, importRun, readImports, sealImports } from '../../validation-import.js';
 import { gitRunnerFor } from '../../merge-writer/local-observation.js';
 import type { Engine } from '../../engine.js';
-import { Next, Sent, defineRoutes, parseJson } from '../routes.js';
+import { Sent, defineRoutes, parseJson } from '../routes.js';
 
 /** The checkout the plane serves from, as the merge record and head observation read it. */
 const checkoutGit = (engine: Engine) => engine.gitRunner ??= gitRunnerFor(process.env.GRAPHYARD_REPOSITORY_ROOT ?? process.cwd());

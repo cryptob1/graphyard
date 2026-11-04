@@ -5,7 +5,7 @@ import { chmod, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promi
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { delimiter, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { fleetRoleHealth, needsSmoke, selectFleetSession, type FleetClient, type FleetProbe, type FleetSelection } from '../src/fleet.js';
+import { needsSmoke, selectFleetSession, type FleetClient, type FleetProbe, type FleetSelection } from '../src/fleet.js';
 import { inspectProfileAccounts, loadMasterConfig, setupMaster } from '../src/master.js';
 import { RegistryError, applyRegistryMutation, chooseSession, emptyRegistry, endRegistrySession, fleetView, foldObservations, proposedRuntimes, recordRunOutcome, smokeRetestMs, supersededByRequest, unjudgedHoldMs,
   type AgentRegistry, type FleetSession, type RegistryMutation } from '../src/model/registry.js';
@@ -117,7 +117,6 @@ function piFleet(registry: ReturnType<typeof memoryRegistry>, host: string, acco
     reason: 'Producers on Pi',
   });
 }
-
 
 test('unit:pi-account-key-by-reference — a Pi account names its key file and variable; the key is read into a run\'s environment only, and no registry document or ledger event holds the key', async () => {
   const { config } = await installation(), registry = memoryRegistry(config.hostId), key = secret();

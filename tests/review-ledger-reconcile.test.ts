@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { rm, stat } from 'node:fs/promises';
 import { join } from 'node:path';
-import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { loadMasterConfig, sessionHarnessPlan, setupMaster, type MasterConfig } from '../src/master.js';
 import { startedAtOnce } from './helpers/launch-shell.js';

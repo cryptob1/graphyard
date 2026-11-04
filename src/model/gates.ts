@@ -4,7 +4,6 @@ import { leadHoldRefusal } from './delegation.js';
 import { exactApproval } from './review.js';
 import { carriedApproval } from './carry.js';
 import { evaluateLandability, landabilityAudit, landabilityRefusals } from './landability.js';
-import { isDelivered } from './closure.js';
 import { reviewedBeforeMerge, riskOf } from './risk-class.js';
 import { postMergeReviewMark, sensitiveReviewRefusal, type PostMergeReviewState } from './post-merge-review.js';
 import { filingRefusal } from './user-facing.js';

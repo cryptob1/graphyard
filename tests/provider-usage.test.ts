@@ -12,12 +12,10 @@ import {
   parseClaudeUsage,
   parseCodexUsage,
   parseZaiUsage,
-  notReportedUsage,
   getCachedPlanUsage,
   setCachedPlanUsage,
   clearPlanUsageCache,
   deriveAccountPlan,
-  groupAccountsByPlan,
 } from '../src/provider-usage.js';
 import {
   applyRegistryMutation,
@@ -26,8 +24,6 @@ import {
   foldObservation,
   accountIneligibility,
   chooseSession,
-  type AgentRegistry,
-  type FleetSession,
 } from '../src/model/registry.js';
 import { FleetOverview } from '../web/pages/fleet.js';
 

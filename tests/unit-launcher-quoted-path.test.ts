@@ -4,7 +4,7 @@ import { mkdir, writeFile, readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { foreignUnitText, perInstallUnits, type InstallUnits } from '../src/install/units.js';
-import type { UpDependencies, UpEvent, UpRequest } from '../src/up.js';
+import type { UpDependencies, UpRequest } from '../src/up.js';
 
 /**
  * GY-1880: setup words a unit's ExecStart back by systemd's own quoting rules, so a launcher
@@ -131,7 +131,7 @@ test('unit:unit-launcher-quoted-path — a loop unit whose ExecStart quotes a CL
 
   // The repair: `master init --replace-supervisor` writes the unit through the real renderer onto
   // this CLI's quoted path, exactly once, and a later check reports it current.
-  const repaired = world(), events: UpEvent[] = [];
+  const repaired = world();
   const deps = dependencies(await resumedRoot('unit-launcher-quoted-path-repaired'), repaired);
   const outcome = await runUp(request(), { ...deps, loopCode: read, cli: async (args, options = {}) => {
     if (args[0] === 'master' && args[1] === 'init') {

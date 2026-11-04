@@ -14,7 +14,6 @@ import { classify } from '../web/groups.js';
 import { releaseView } from '../src/model/release.js';
 import OverviewPage from '../web/pages/overview.js';
 import WorkDetails from '../web/pages/work-details.js';
-import { whatIsLeft } from '../web/item-page.js';
 // A namespace import, so the proofs fail as test cases, not as a missing export, on a tree without GY-1739.
 import * as plain from '../src/model/plain-status.js';
 import type { Dashboard } from '../web/pages/dashboard.js';

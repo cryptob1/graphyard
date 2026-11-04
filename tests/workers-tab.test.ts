@@ -5,7 +5,7 @@ import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import type { Work } from '../src/model.js';
 import type { SessionHandle } from '../src/model/sessions.js';
-import { localAttachCommand, remoteAttachCommand, sessionRoleKind, sessionStaleThresholdMs, staleSession, workersView } from '../web/workers-view.js';
+import { localAttachCommand, remoteAttachCommand, sessionStaleThresholdMs, staleSession, workersView } from '../web/workers-view.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureWork, NOW, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { views, visibleViews } from '../web/pages/index.js';

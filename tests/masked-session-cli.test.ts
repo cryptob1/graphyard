@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { credentialMaskFor, coordinatorConfinement, sessionMountNamespaceWorks } from '../src/master/profiles.js';
 import { LauncherUnavailableError, loadMasterConfig, masterConfigSchema, setupMaster, type MasterConfig } from '../src/master.js';
