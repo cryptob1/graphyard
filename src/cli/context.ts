@@ -1,6 +1,7 @@
 import { realpath, stat } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { hostname } from 'node:os';
+import { setTimeout as delay } from 'node:timers/promises';
 import { resolve } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -134,7 +135,29 @@ export async function createContext(command: string, id: string | undefined, arg
     await checkRelease();
     const token = await individualToken();
     if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
-    const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(path.endsWith('/worker-verification') ? 60 * 60_000 : cliRequestTimeoutMs) });
+    const url = `${base}/api/${path}`;
+    const request = { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data) };
+    const deadline = Date.now() + 60_000;
+    let response: Response;
+    let retrying = false;
+    for (;;) {
+      try {
+        response = await fetch(url, { ...request, signal: AbortSignal.timeout(path.endsWith('/worker-verification') ? 60 * 60_000 : retrying ? Math.max(1, deadline - Date.now()) : cliRequestTimeoutMs) });
+        break;
+      } catch (error) {
+        // Only a failed connection is replayed, with the original body and idempotency key.
+        // HTTP responses and body-reading failures never enter this retry loop.
+        if (!(error instanceof TypeError && error.message === 'fetch failed')) {
+          if (retrying && Date.now() >= deadline) throw new Error(`Control plane unreachable at ${url} after 60 seconds`, { cause: error });
+          throw error;
+        }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw new Error(`Control plane unreachable at ${url} after 60 seconds`, { cause: error });
+        await delay(Math.min(1_000, remaining));
+        if (Date.now() >= deadline) throw new Error(`Control plane unreachable at ${url} after 60 seconds`, { cause: error });
+        retrying = true;
+      }
+    }
     const body = await response.json();
     if (!response.ok) {
       // 'Invalid input' is what a request this server's schema predates reads as. When the server
