@@ -277,7 +277,7 @@ export function coordinationProjection(document: Work): Work {
   if (isObject(pipeline) && Array.isArray(pipeline.attempts)) {
     out.attemptCount = pipeline.attempts.length;
     const last = pipeline.attempts.at(-1);
-    if (last) out.attemptEnd = { epoch: last.epoch ?? null, end: last.end ?? null };
+    if (last) out.attemptEnd = { epoch: last.epoch ?? null, end: last.end ?? null, ...(last.endedAt ? { endedAt: last.endedAt } : {}), ...(last.cause ? { cause: last.cause } : {}) };
   }
   out.evidence = arrayOf(evidence).filter(relevant).map(entry => { if (!isObject(entry)) return entry; const { artifacts: _a, scopeFiles: _s, provenance: _p, ...kept } = entry; return kept; });
   if ('observation' in doc) out.observation = isObject(observation) ? (({ scopeFiles: _s, ...kept }) => kept)(observation) : observation;
