@@ -1,16 +1,13 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
-import { setTimeout as delay } from 'node:timers/promises';
+import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
 import { Delivery, type EnvironmentDelivery, type Release, type RollbackRequest } from '../src/delivery.js';
-import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
-import type { Principal, Work } from '../src/model.js';
+import type { Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
@@ -38,8 +35,7 @@ const executor: Principal = { id: 'executor', role: 'producer' };
 const secondExecutor: Principal = { id: 'second-executor', role: 'producer' };
 const reader: Principal = { id: 'auditor', role: 'reader' };
 const principals = [operator, worker, runner, ...runners, idleRunner, collector, builder, observer, promoter, executor, secondExecutor, reader];
-const attestationPublicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
-const head = 'a'.repeat(40), base = 'b'.repeat(40), digest = `sha256:${'c'.repeat(64)}`, inputs = `sha256:${'d'.repeat(64)}`;
+const head = 'a'.repeat(40), inputs = `sha256:${'d'.repeat(64)}`;
 const digestOf = (label: string) => `sha256:${label.repeat(64).slice(0, 64)}`;
 const manifests = { one: { api: digestOf('1'), web: digestOf('2') }, two: { api: digestOf('3'), web: digestOf('4') }, three: { api: digestOf('5'), web: digestOf('6') } };
 let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, delivery: Delivery;
@@ -56,7 +52,6 @@ before(async () => {
 after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
 const at = (offsetSeconds: number, from = Date.now()) => new Date(from + offsetSeconds * 1000).toISOString();
-async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
 async function events(kind: string) { return (await store.pool.query('SELECT payload FROM events WHERE kind=$1 ORDER BY seq', [kind])).rows.map(r => r.payload); }
 
 // ---- delivery fixtures: an environment with observer, promoter, builder and rollback executors ----

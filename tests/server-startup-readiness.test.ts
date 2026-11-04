@@ -68,7 +68,7 @@ test('server serves liveness during initialization and gates mutations until pro
   } finally { ProductionWatch.prototype.load = original; }
 });
 
- test('unit:server-startup-readiness — routes and the reconciliation tick share the same services', async () => {
+test('unit:server-startup-readiness — routes and the reconciliation tick share the same services', async () => {
   const originalSweep = Delivery.prototype.sweep;
   const deliveries = new Set<Delivery>();
   try {

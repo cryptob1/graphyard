@@ -1,6 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { readFile, writeFile } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -65,7 +65,6 @@ async function populate(store: Store) {
   const first = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking', steps: ['Book'], expected: ['Booked'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts' }, id());
   const second = await defineScenario(store, operator, { id: 'booking', title: 'Booking', purpose: 'Prove booking and cancellation', steps: ['Book', 'Cancel'], expected: ['Booked', 'Cancelled'], environment: 'preview', runner: 'playwright', testPath: 'tests/booking.spec.ts', expectedRevision: first.revision }, id());
   assert.equal(second.revision, first.revision + 1);
-  const attestationPublicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
   await validation.define(operator, { kind: 'environment', id: 'preview', expectedRevision: 0, repository: 'test/repository', url: 'https://preview.example.test', instance: 'preview-1', immutable: true, services: ['api'], resources: ['test-account-1'] }, id());
   const environment = { id: 'preview', revision: 1 };
   await validation.define(operator, { kind: 'registration', id: 'builder-1', expectedRevision: 0, principalId: builder.id, role: 'builder', environment, adapterVersion: 'test-v1', proofs: [], enabled: true }, id());
@@ -161,7 +160,6 @@ test('the documented backup and restore exercise preserves assignments, history,
   await restored.init();
   assert.deepEqual(await snapshot(restored), before);
   const engine = new Engine(restored.pool ? restored : source, 120, 'test/repository');
-  const validation = new Validation(engine, principals, 'test/repository');
   const item = (await restored.list()).find(w => w.id === seeded.workId)!;
   assert.equal(item.lease, null); assert.equal(item.workspaces[0].path, '/srv/worktrees/booking'); assert.equal(item.submission?.pr, 7);
   const live = (await restored.list()).find(w => w.id === seeded.leasedId)!;

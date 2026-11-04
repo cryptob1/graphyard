@@ -1,11 +1,10 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { generateKeyPairSync, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { Validation } from '../src/validation.js';
 import { server } from '../src/server.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { caseResult, flakiness, scenarioOf, type ScenarioRun } from '../src/model/test-cases.js';
@@ -27,10 +26,8 @@ const builder: Principal = { id: 'builder', role: 'producer' };
 const principals = [operator, worker, producer, runner, collector, builder];
 const tokens = new Map(principals.map(p => [p.id, `${p.id}-${'t'.repeat(32)}`]));
 const head = 'c'.repeat(40), base = 'd'.repeat(40), repository = 'owner/project';
-const attestationPublicKey = generateKeyPairSync('ed25519').publicKey.export({ type: 'spki', format: 'pem' }).toString();
-const bundleDigest = `sha256:${'1'.repeat(64)}`, imageDigest = `sha256:${'2'.repeat(64)}`;
 
-let database: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, http: ReturnType<typeof server>, url: string;
+let database: EmbeddedPostgres, store: Store, engine: Engine, http: ReturnType<typeof server>, url: string;
 let pullRequest = 300, cases = 0;
 
 before(async () => {
@@ -39,7 +36,6 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('test_cases_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/test_cases_test`); await store.init();
   engine = new Engine(store, 120, repository);
-  validation = new Validation(engine, principals, repository);
   http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;

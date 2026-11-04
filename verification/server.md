@@ -28,4 +28,4 @@ For GY-3018, commit, build, then run `graphyard verify GY-3018`. Verification bi
 - A refusal names its reason in the response body; tests match on that text.
 - An `Idempotency-Key` makes a retried mutation replay its result; reusing one with different input is refused.
 
-- Validation runner routes return 404; only external report import/read/seal routes remain. The server startup and tick perform no validation reconciliation or artifact expiry. `tests/validation-import-route.test.ts` and `tests/runner-report.test.ts` cover the surviving report path.
+- Validation runner routes return 404; external report import/read/seal and deployment-definition mutations remain. The server startup and tick perform no validation reconciliation or artifact expiry. `tests/validation-import-route.test.ts` and `tests/runner-report.test.ts` cover the surviving report path.

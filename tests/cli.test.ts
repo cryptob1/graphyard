@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { execFile, spawn, spawnSync } from 'node:child_process';
+import { execFile, spawnSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { chmod, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir, hostname } from 'node:os';
@@ -8,8 +8,6 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createServer } from 'node:http';
 import { setTimeout as delay } from 'node:timers/promises';
-import { createHash, generateKeyPairSync, randomUUID, verify } from 'node:crypto';
-import { realpath } from 'node:fs/promises';
 import { MERGE_PROTOCOL } from '../src/protocol-version.js';
 import { captureTrackedRoot, linuxProcessRecord, signalTrackedProcesses, supervise, systemdContainment } from '../src/supervisor.js';
 import { isConfirmedCoordinationRefusal } from '../src/cli/context.js';
