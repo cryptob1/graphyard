@@ -90,7 +90,7 @@ function App() {
   // One page at a time: an open item replaces the page it was opened from, and "← Back" returns to it.
   return <div className="shell"><Sidebar entries={views.map(entry => primaryEntry(dashboard, entry))} dashboard={dashboard}/>
     <main className="main">{error && <div role="alert" className="notice danger">{error}</div>}
-      {item ? <WorkDetails {...dashboard} item={item}/> : <><TopBar {...dashboard}/>{viewFor(view).render(dashboard)}</>}</main>
+      <TopBar {...dashboard}/>{item ? <WorkDetails {...dashboard} item={item}/> : viewFor(view).render(dashboard)}</main>
     {creating && <CreateWork {...dashboard}/>}
   </div>;
 }

@@ -88,7 +88,7 @@ async function fixture() {
     }
     if (args[0] === 'agent' && args[1] === 'wait') throw Object.assign(new Error('timeout'), { herdrCode: 'timeout' });
     if (args[0] === 'agent' && args[1] === 'read') return 'fixture runtime ready';
-    if (args[0] === 'pane' && args[1] === 'read') return json({ text: 'fixture runtime ready' });
+    if (args[0] === 'pane' && args[1] === 'read') return json({ text: `${panes.get(args[2])!.env.GY_RUNTIME === 'claude' ? 'Claude Code' : 'Codex'} fixture runtime ready` });
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     if (args[0] === 'pane' && args[1] === 'close') { await stop(args[2]); return json({}); }
     throw new Error(`Unexpected fixture Herdr command ${args.join(' ')}`);

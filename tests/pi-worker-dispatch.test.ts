@@ -115,8 +115,8 @@ function world(healthy: Set<string>, refusePi?: string, exitPi = false) {
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });
     const kind = kinds.at(-1);
     if (!kind) return json({});
-    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: kind === 'pi' && exitPi ? { shell_pid: 10, foreground_process_group_id: 10 } : { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: [] } });
-    if (args[0] === 'pane' && args[1] === 'read') return kind === 'pi' && exitPi ? `vish@host ~/code/project ❯ ${typedCommand}\npi: command not found\nvish@host ~/code/project ❯\n` : healthy.has(kind) ? `${kind} ready\n` : `vish@host ~/code/project ❯ ${typedCommand}\n`;
+    if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: kind === 'pi' && exitPi ? { shell_pid: 10, foreground_process_group_id: 10 } : { shell_pid: 10, foreground_process_group_id: 11, foreground_processes: healthy.has(kind) ? [{ argv: [kind] }] : [] } });
+    if (args[0] === 'pane' && args[1] === 'read') return kind === 'pi' && exitPi ? `vish@host ~/code/project ❯ ${typedCommand}\npi: command not found\nvish@host ~/code/project ❯\n` : healthy.has(kind) ? `${kind === 'claude' ? 'Claude Code' : kind} ready\n` : `vish@host ~/code/project ❯ ${typedCommand}\n`;
     if (args[0] === 'agent' && args[1] === 'get') return healthy.has(kind) ? json({ agent: { agent: kind, agent_status: 'idle', pane_id: args[2] } }) : JSON.stringify({ error: { code: 'agent_not_found', message: `agent target ${args[2]} not found` } });
     if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: kind, name: args[3] } });
     return json({});
