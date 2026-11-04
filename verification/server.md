@@ -2,7 +2,7 @@ Paths: src/server/**, src/server.ts
 
 ## Tests
 
-- `tests/signin-session-survives-restart.test.ts` and `browser-tests/signin-session-survives-restart.spec.ts`: real server restart, digest-only storage, expiry and sign-out; `e2e/cases/signin-session-survives-restart.json` runs the browser case.
+- `tests/signin-session-survives-restart.test.ts`: restart persistence, digest-only storage, expiry and sign-out. Browser case: `e2e/cases/signin-session-survives-restart.json`.
 - `tests/board-api.test.ts`: the board's HTTP routes and their principals.
 - `tests/production-watch-build-serving.test.ts`: status ignores historical environment/promotion events; the retired route returns 404.
 - `tests/delivery-observe-sha.test.ts`: serving-commit observations retain authorization, idempotency, bounded continuation and configured-environment checks.
@@ -12,9 +12,9 @@ Paths: src/server/**, src/server.ts
 
 ## Drive
 
-`npm run dev` serves `src/server.ts` against `DATABASE_URL`; tests start the server in-process over an embedded Postgres. Read a route with `node bin/graphyard.mjs status GY-N` from a configured checkout rather than hand-written requests.
+`npm run dev` serves `src/server.ts` against `DATABASE_URL`; tests use embedded Postgres. Read routes with `node bin/graphyard.mjs status GY-N` from a configured checkout.
 
-For GY-3006, commit, build, then run `graphyard verify GY-3006 --preserves unit:delivery-observe-sha`. Verification binds HEAD. The merge trial serves `graphyard.json`’s isolated server for `e2e:create-work-item`, `e2e:board` and `e2e:work-item-detail`; trusted evidence follows `complete`.
+For GY-3006, commit, build, run `graphyard verify GY-3006 --preserves unit:delivery-observe-sha`. Verification binds HEAD. The merge trial uses `graphyard.json`’s isolated server for `e2e:create-work-item`, `e2e:board` and `e2e:work-item-detail`; trusted evidence follows `complete`.
 
 ## Invariants
 
@@ -26,5 +26,5 @@ For GY-3006, commit, build, then run `graphyard verify GY-3006 --preserves unit:
 ## Gotchas
 
 - New routes live in `src/server/routes/`; `src/server/routes.ts` only wires them.
-- A refusal names its reason in the response body; tests match on that text.
+- Refusal responses name their reason; tests match that text.
 - An `Idempotency-Key` makes a retried mutation replay its result; reusing one with different input is refused.
