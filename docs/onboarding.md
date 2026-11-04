@@ -1,4 +1,4 @@
-<!-- page: Start here | 3 | machines -->
+<!-- page: Start here | 3 | connect a repository and fleet -->
 # Onboard a repository
 
 ## 1. Install the control plane

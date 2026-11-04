@@ -1,71 +1,67 @@
-<!-- page: Start here | 0 | setup checklist. -->
+<!-- page: Start here | 0 | set up and diagnose prerequisites -->
 # From zero to a running Graphyard
 
-> set up Graphyard for OWNER/REPO following docs/setup-from-zero.md
-
-The setup agent acts as the **master** identity `install --apply` records; the operator credential stays with the human.
+Setup uses the recorded master identity. The operator credential stays with the human.
 
 ## One command: graphyard up
 
 ```sh
-git clone https://github.com/cryptob1/graphyard.git ~/graphyard && (cd ~/graphyard && npm ci)
-cd /path/to/REPO && node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO   # --provider compose (default) or local
+git clone https://github.com/cryptob1/graphyard.git ~/graphyard
+cd ~/graphyard && npm ci
+cd /path/to/REPO
+node ~/graphyard/bin/graphyard.mjs up --agent --repo OWNER/REPO
 ```
 
-`up` runs: preflight, control plane, host supervisor, Herdr, deploy key and master identities (`master autonomy --apply`; no admin credential: exit 2; `--local` skips them, [supervised](onboarding.md#supervised-mode-up---local)), onboarding, accounts, harness, master loop. The loop merges onboarding's change. Reruns skip `.graphyard/up.json` steps, redoing `master-loop` until the loop runs this CLI's commit.
+Compose is default; `--provider local` uses embedded Postgres. `up` installs the control plane, supervisors, Herdr, deploy key, identities, onboarding and fleet. Reruns resume `.graphyard/up.json`; master-loop repeats until the loop loads this CLI's commit. `master autonomy --apply` needs admin authority; `--local` skips autonomy setup and selects [supervised mode](onboarding.md#supervised-mode-up---local).
 
 ## The Setup page
 
-A step needing a person prints a Setup-page link (`SERVER/#sign-in=CODE&setup`) and waits until green.
+Missing personal accounts or credentials produce a Setup link. Agents handle routine commands without human approval.
 
 ## Agent setup: up --agent
 
-`up --agent` takes `[--url URL]`; exit `0`/`1`/`2`/`3` (green/failed/prerequisite/waiting). The deploy key is the only GitHub access. Missing repo: `gh repo create --source . --push`; preflight refuses `/tmp`, `/var/tmp`.
+`up --agent [--url URL]` exits 0 (ready), 1 (failed), 2 (prerequisite) or 3 (waiting). Authorized agents can create a missing repository with `gh repo create --source . --push`. Installs under `/tmp` and `/var/tmp` refuse.
 
 ## Troubleshooting: manual steps
 
-`graphyard doctor` prints `PASS`/`FAIL` per prerequisite; **HUMAN** marks agent-impossible steps; `FAIL unit-overrides` names each systemd drop-in and its removal command.
+`doctor` prints PASS/FAIL and the checklist step that fixes each failure. HUMAN means a person's prerequisite. `FAIL unit-overrides` names conflicting systemd drop-ins and removal commands. Below, `gy` means `node "$GRAPHYARD_CLI"`.
 
 ## 1. Machine prerequisites
 
+Check Node 24+, repository-admin `gh auth status`, `herdr --version`, and `docker compose version` for Compose. Probe confinement:
+
 ```sh
-node --version          # v24+
-gh auth status          # scope repo (registers the deploy key)
-docker compose version
-herdr --version
 bwrap --ro-bind / / --dev /dev --proc /proc --unshare-all --share-net --die-with-parent -- true
 ```
 
-**HUMAN:** `gh auth login` as a repository admin.
-
 ## 2. Graphyard and the repository
 
-Needs a GitHub `origin` the deploy key pushes to over SSH; `up` sets it (`git remote set-url origin git@github.com:OWNER/REPO.git`) right after `gh repo create` leaves it at https, and a control-plane install preflight refuses another push URL naming that command. **Verify:** doctor readiness `repository` and `test-formats`.
+`up` sets SSH origin. If needed: `git remote set-url origin git@github.com:OWNER/REPO.git`. Verify doctor's `repository` and `test-formats`.
 
 ## 3. Install the control plane
 
-`gy install --provider compose --repo OWNER/REPO --plan`, then `--apply` ([install](install.md)); it records `.graphyard/master.json` with its `0600` credential. **Verify:** `control-plane` passes.
+Follow [install](install.md): plan, then `--apply` records `.graphyard/master.json` with the master credential path. Verify `control-plane` passes.
 
 ### Control-plane merger
 
-`install --apply` (and `up`) creates an ed25519 deploy key and registers it read-write on OWNER/REPO for the [merge writer](delivery-redesign.md#the-merger), which trial-merges each submitted head and pushes through an SSH origin ([deploy key](install.md#step-3-deploy-key)). Nothing else is registered on the remote, and nothing asks for it. **Verify:** `gh repo deploy-key list -R OWNER/REPO` lists `graphyard-merge-writer-HOST`.
+Apply registers the [deploy key](install.md#step-3-deploy-key). Nothing else is registered on the remote.
 
 ## 6. Onboard the checkout
 
-`gy init --scan --apply --url SERVER` writes `AGENTS.md .gitignore graphyard.json`; `up` publishes them as one commit on `graphyard/onboarding` and submits that commit as GY-1, head sha like any worker's. The loop reviews and merges it; no pull request is opened and nothing merges by hand. **Verify:** `setup-proposal` is `ready` and `gy status GY-1` is filed.
+`gy init --scan --apply --url SERVER` writes repository instructions and policy. `up` submits them as GY-1 through normal gates. Verify `setup-proposal` is ready and `gy status GY-1` exists.
 
 ## 8. Agent environments
 
-Connect accounts; host-logged-in accounts register with `gy master registry propose --apply`, profiles with `gy master environments --apply`. **Verify:** one `agent-environment:NAME` line passes per environment.
+[Connect accounts and configure roles](onboarding.md#agent-environments). Each `agent-environment:NAME` should pass.
 
 ## 9. Worker sandbox and harness rules
 
-**Verify:** [`worker-sandbox`](master-agent-sessions.md#worker-sandbox) passes.
+Verify [worker-sandbox](master-agent-sessions.md#worker-sandbox) passes.
 
 ## 10. Start the master
 
-[Start the master](onboarding.md#3-start-the-master): `gy master init --token-stdin < "$(node -p "require('./.graphyard/master.json').credentialFile")"`, then `gy master restart`. **Verify:** `gy master status` shows `setup.supervisor` active.
+Run `gy master init --token-stdin < "$(node -p "require('./.graphyard/master.json').credentialFile")"`, then `gy master restart`. Verify `master status` → `setup.supervisor` is active. [Cycles alone do not prove delivery](master-agent.md#master-wake-and-delivery-progress).
 
 ## 12. First item end to end
 
-`gy master create item.json REASON`. **Verify:** `gy status GY-1` reaches `done`.
+`gy master create item.json REASON`; follow Done, serving commit and required live checks.
