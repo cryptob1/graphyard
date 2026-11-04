@@ -78,10 +78,6 @@ test('integration:worker-reparenting — cache publication, hardlinks and local 
     coordinatorRoot: f.root, sessionDirectory: f.worktree, credentialMask: f.mask,
     secretsBus: null, writable: [f.slots] });
   assert.ok(worker);
-  // Recreate the previous socket domain in the very same mount composition.
-  // Omitting REFER (including from each grant) implicitly denies reparenting.
-  const previous = worker.wrapper.map(word => word.replace('refer = 1 << 13', 'refer = 0'));
-  assert.notDeepEqual(previous, worker.wrapper);
   const operations = `
     const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
     const { spawnSync, execFileSync } = require('node:child_process');
@@ -123,9 +119,15 @@ test('integration:worker-reparenting — cache publication, hardlinks and local 
       assert.equal(git('--git-dir', target, 'show', 'main:payload').trim(), 'new objects');
     }
   `;
-  for (const [mode, wrapper] of [['previous', previous], ['fixed', worker.wrapper]] as const)
-    run(wrapper, f.worktree, process.execPath, ['-e', operations, mode, f.worktree, f.runtime, f.slots, '/tmp', '/var/tmp']);
+  // Exercise the actual policy first: reverting the source must fail on EXDEV,
+  // before any assertion about how the legacy policy is reconstructed.
+  run(worker.wrapper, f.worktree, process.execPath, ['-e', operations, 'fixed', f.worktree, f.runtime, f.slots, '/tmp', '/var/tmp']);
   run(worker.wrapper, f.worktree, process.execPath, ['-e', deniedOperations, f.home, f.unrelated, f.root, f.worktree]);
+  // Recreate the previous socket domain in the very same mount composition.
+  // Omitting REFER (including from each grant) implicitly denies reparenting.
+  const previous = worker.wrapper.map(word => word.replace('refer = 1 << 13', 'refer = 0'));
+  assert.notDeepEqual(previous, worker.wrapper);
+  run(previous, f.worktree, process.execPath, ['-e', operations, 'previous', f.worktree, f.runtime, f.slots, '/tmp', '/var/tmp']);
 });
 
 test('integration:worker-host-filesystem-isolation — all runtimes, terminal roles, headless roles, master and merge trials deny host creation, overwrite, rename and deletion', async () => {
