@@ -2,6 +2,8 @@ import { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, 
 export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, serveRevertsKept, pendingReworkSchema, unconfirmedRecordSchema, mergeWriterStateSchema, emptyMergeWriterState, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
 // Concern: the control-plane merge executor's cycle step (GY-1524) — reconcile open intents, pick the next head, run one merge beside the cycle and record what it did.
 import { randomUUID } from 'node:crypto';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { join } from 'node:path';
 import type { ChildRun } from '../child-runner.js';
 import type { MasterConfig } from '../master.js';
 import type { Work } from '../model.js';
@@ -15,7 +17,7 @@ import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPrevi
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
 import { loadProjectDelivery } from '../project-applications.js';
 import { defaultMergeBatch, mergeBatch, type BatchResult } from '../merge-writer/batch.js';
-import { baseFailureHoldMs, criterionProofs, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { baseFailureHoldMs, criterionProofs, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, requiredProofFailure, trialFailureReason, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent, type MergeTrialRun } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -52,6 +54,11 @@ export { mergeRecordKey } from '../merge-writer/executor.js';
 
 const output = (error: unknown) => { const failed = error as { stdout?: unknown; stderr?: unknown; message?: string }; return `${typeof failed.stdout === 'string' ? failed.stdout : ''}${typeof failed.stderr === 'string' ? failed.stderr : ''}` || String(failed.message ?? error); };
 
+/** The merge writer's own passing trials, newest first, under its trial base so they survive a loop restart. */
+export const passedTrialsFile = 'passed-trials.json', passedTrialsKept = 50;
+type PassedTrial = { tree: string; proofs: string; mergeSha: string; key: string; run: MergeTrialRun };
+const passedTrials = async (base: string): Promise<PassedTrial[]> => { try { return JSON.parse(await readFile(join(base, passedTrialsFile), 'utf8')); } catch { return []; } };
+
 /**
  * The reads over the coordinator checkout `root` (its object store holds every submitted head,
  * GY-1523, and the trial commits). Git writes are the trial ref and the one leased push to
@@ -87,7 +94,14 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}) });
+      // A tree this writer already passed with the same proofs reuses that verdict; only its own passes are recorded, never a failure.
+      const tree = (await git('rev-parse', `${mergeSha}^{tree}`)).trim(), required = [...proofs, ...e2eProofsOf(item), ...(item.type === 'bug' ? ['bug'] : [])].sort().join(',');
+      const passes = await passedTrials(options.base), seen = /^[0-9a-f]{40}$/.test(tree) && passes.find(entry => entry.tree === tree && entry.proofs === required);
+      if (seen) return { ...seen.run, reused: { mergeSha: seen.mergeSha, key: seen.key } };
+      const verdict = await (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}) });
+      if (verdict.build === 'pass' && !verdict.tests.failed.length && !trialFailureReason({ run: verdict }) && !requiredProofFailure(item, verdict))
+        await mkdir(options.base, { recursive: true }).then(() => writeFile(join(options.base, passedTrialsFile), JSON.stringify([{ tree, proofs: required, mergeSha, key: item.key, run: { ...verdict, reused: undefined } }, ...passes].slice(0, passedTrialsKept))));
+      return verdict;
     },
     // GY-1718: a repository naming a static UAT previews every passing trial whose delta is more than docs or tests.
     preview: async (mergeSha, files) => {
