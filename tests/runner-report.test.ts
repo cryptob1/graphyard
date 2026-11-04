@@ -12,13 +12,13 @@ const require = createRequire(import.meta.url);
 const playwrightCli = resolve(require.resolve('playwright'), '..', 'cli.js');
 const inventory = { format: 'graphyard-playwright-v1', declared: [{ id, expected: 'passed', location: { file: 'fixture.spec.ts', line: 1, column: 1 } }], executions: [], steps: [], errors: 0, overflow: false, status: 'passed' };
 const execution = { ...inventory, executions: [{ id, status: 'passed', retry: 0 }] };
-test('report verifier refuses empty, skipped, missing, inconsistent, expected-failing and retry reports', () => {
+test('unit:runner-report — report verifier refuses empty, skipped, missing, inconsistent, expected-failing and retry reports', () => {
   assert.equal(verifyRunnerReport(inventory, execution).passed, true);
   for (const changed of [{ declared: [] }, { executions: [] }, { executions: [{ id, status: 'skipped', retry: 0 }] }, { executions: [{ id, status: 'passed', retry: 1 }] }, { overflow: true }, { errors: 1 }, { status: 'failed' }, { steps: [{ test: 'b'.repeat(64), sequence: 1, durationMs: 1, failed: false }] }]) assert.equal(verifyRunnerReport(inventory, { ...execution, ...changed }).passed, false);
   assert.equal(verifyRunnerReport({ ...inventory, declared: [{ ...inventory.declared[0], expected: 'failed' }] }, execution).passed, false);
   assert.throws(() => verifyRunnerReport(inventory, { ...execution, untrusted: 'extra' }));
 });
-test('real Playwright enumeration/execution produces attributable inventory and excludes seeded secrets', async () => {
+test('unit:runner-report — real Playwright enumeration/execution produces attributable inventory and excludes seeded secrets', async () => {
   // These are locally authored trusted fixtures; no untrusted repository code is executed here.
   const root = await temporaryDirectory('.graphyard-reporter-test', process.cwd());
   try {

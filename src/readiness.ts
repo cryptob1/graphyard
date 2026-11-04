@@ -144,4 +144,3 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
     summary: { ready: items.length - missing.length - unknown.length, missing: missing.length, unknown: unknown.length },
     next: missing[0]?.recovery ?? unknown[0]?.recovery ?? 'Every item is ready: file what you want built.' };
 }
-

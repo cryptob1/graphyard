@@ -299,4 +299,3 @@ test('rollback HTTP routes derive authority from the credential and appear in de
     assert.equal((await call(worker, 'validation/artifacts/migrate', { target: 'postgres' })).status, 404);
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
 });
-

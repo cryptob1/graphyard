@@ -67,7 +67,7 @@ const run = (sha: string, runId: string, cases: readonly Record<string, unknown>
   ({ format: 'graphyard-external-run-v1', producer: 'huck-engineer', runId, sha, cases, ...over });
 const trace = 'https://huck.example/runs/r-1/checkout-guest/trace';
 
-test('unit:validation-import-route-binds-by-sha — POST /api/validation/import refuses a non-producer credential, a producer without external-runs:import, and a sha no candidate holds, and persists a producer run at a candidate head idempotently with every verdict, skipped kept, and its provenance', async () => {
+test('unit:validation-import-route — binds-by-sha: POST /api/validation/import refuses a non-producer credential, a producer without external-runs:import, and a sha no candidate holds, and persists a producer run at a candidate head idempotently with every verdict, skipped kept, and its provenance', async () => {
   const handIn = run(boundSha, 'huck-run-1', [
     { id: 'checkout-guest', verdict: 'passed', attempts: 1, durationMs: 4310, required: true, result: 'PASS', evidence: [trace] },
     { id: 'search-facet', verdict: 'skipped', attempts: 0, durationMs: 0, result: 'SKIPPED_BY_TAG' },
@@ -146,7 +146,7 @@ test('unit:validation-import-route-binds-by-sha — POST /api/validation/import 
 
 });
 
-test('unit:validation-import-feeds-hold — a required failed, blocked or unrun case holds the candidate, an all-passing run releases it, and skipped follows the required-case rule', async () => {
+test('unit:validation-import-route — feeds-hold: a required failed, blocked or unrun case holds the candidate, an all-passing run releases it, and skipped follows the required-case rule', async () => {
   const passing = (id: string) => ({ id, verdict: 'passed', attempts: 1, durationMs: 100, required: true });
   assert.equal((await hold(holdSha)).held, false, 'no import, no hold');
 
@@ -197,7 +197,7 @@ test('unit:validation-import-feeds-hold — a required failed, blocked or unrun 
   assert.match(late.body.error, /sealed for promotion/);
 });
 
-test('unit:validation-import-case-version-not-inferred — catalogCommitSha is stored as provenance only and never read into a case version', async () => {
+test('unit:validation-import-route — case-version-not-inferred: catalogCommitSha is stored as provenance only and never read into a case version', async () => {
   const catalog = 'e'.repeat(40);
   const result = await imported(run(versionSha, 'version-1', [
     { id: 'login', verdict: 'passed', attempts: 1, durationMs: 100, required: true },
@@ -211,7 +211,7 @@ test('unit:validation-import-case-version-not-inferred — catalogCommitSha is s
   }
 });
 
-test('unit:validation-import-unknown-duration-attempts — omitted or null durationMs and attempts are stored as null, never 0, and a report-row count stays apart from attempts', async () => {
+test('unit:validation-import-route — unknown-duration-attempts: omitted or null durationMs and attempts are stored as null, never 0, and a report-row count stays apart from attempts', async () => {
   const result = await imported(run(unknownSha, 'unknown-1', [
     { id: 'login', verdict: 'passed', required: true },
     { id: 'pay', verdict: 'failed', attempts: null, durationMs: null, required: true, reportRows: 3 },
@@ -230,7 +230,7 @@ test('unit:validation-import-unknown-duration-attempts — omitted or null durat
   assert.equal((await hold(unknownSha)).held, true);
 });
 
-test('unit:validation-import-opaque-evidence — opaque evidence pointers and absent evidence are stored as given and never reported as public links', async () => {
+test('unit:validation-import-route — opaque-evidence: opaque evidence pointers and absent evidence are stored as given and never reported as public links', async () => {
   const pointer = { evidenceId: 'ev-41', storageKey: 'huck/runs/r-41/checkout/trace.zip' };
   const actionsRun = 'https://github.com/owner/project/actions/runs/123456';
   const result = await imported(run(pointerSha, 'pointer-1', [
@@ -255,7 +255,7 @@ test('unit:validation-import-opaque-evidence — opaque evidence pointers and ab
   assert.equal((await call('validation/import', producer, run(pointerSha, 'pointer-bad', [{ id: 'c', verdict: 'passed', attempts: 1, durationMs: 1, evidence: [{}] }]))).status, 400, 'a pointer naming nothing is refused');
 });
 
-test('unit:validation-import-bound-producer — the first import binds the candidate to its producer principal; another producer is refused 409, and only the bound producer passing a case clears it', async () => {
+test('unit:validation-import-route — bound-producer: the first import binds the candidate to its producer principal; another producer is refused 409, and only the bound producer passing a case clears it', async () => {
   const first = await imported(run(producerSha, 'bound-1', [
     { id: 'login', verdict: 'passed', attempts: 1, durationMs: 1, required: true },
     { id: 'pay', verdict: 'failed', attempts: 1, durationMs: 1, required: true },
@@ -280,7 +280,7 @@ test('unit:validation-import-bound-producer — the first import binds the candi
   assert.deepEqual(passed.hold, { held: false, cases: [], runs: 3 });
 });
 
-test('retired runner and attestor routes return 404 while import routes remain available', async () => {
+test('unit:validation-import-route — retired runner and attestor routes return 404 while import routes remain available', async () => {
   for (const path of ['validation', 'validation/capacity', 'validation/definitions', 'validation/attempt/retired', 'validation/candidate/retired', 'validation/artifacts/retired/retired', 'validation/reuse', 'validation/replays', 'validation/analytics']) {
     assert.equal((await call(path, operator)).status, 404, path);
   }

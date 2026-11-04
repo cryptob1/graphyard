@@ -171,4 +171,3 @@ test('unit:test-case-repository — flaky means a pass and a fail on one commit,
   const old = [...Array.from({ length: 20 }, (_, i) => at(`s${i}`, 'pass', 100 - i)), at('x', 'fail', 50), at('y', 'pass', 49)];
   assert.equal(flakiness(old).flaky, false, 'changes older than the window are not counted');
 });
-

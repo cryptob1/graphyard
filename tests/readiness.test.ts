@@ -42,7 +42,7 @@ test('unsupported test formats are named with a recovery, and every supported fr
   const cypress = readinessChecklist('through-merge', { repository: 'owner/app', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: ['cypress', 'vitest'] } } });
   const formats = cypress.items.find(i => i.id === 'test-formats')!;
   assert.equal(formats.status, 'missing'); assert.match(formats.detail, /cypress → unsupported/); assert.match(formats.detail, /vitest → junit-xml-v1/);
-  assert.match(formats.recovery!, /cypress: no adapter/); assert.match(formats.recovery!, /graphyard runner adapters/);
+  assert.match(formats.recovery!, /cypress: no adapter/); assert.match(formats.recovery!, /Supported formats:/);
   const none = readinessChecklist('through-merge', { repository: 'owner/app', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: [] } } });
   assert.equal(none.items.find(i => i.id === 'test-formats')!.status, 'missing'); assert.match(none.items.find(i => i.id === 'test-formats')!.recovery!, /never invents coverage/);
   // A scanned repository declaring Playwright and pytest is fully supported.

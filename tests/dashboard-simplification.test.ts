@@ -147,7 +147,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   for (const role of ['admin', 'reader', 'worker', 'coordinator', 'operator-agent']) assert.ok(labels(dashboard({}, role)).length <= 5, role);
   assert.deepEqual(labels(dashboard()), ['Work', 'Workers', 'Shipped', 'Tests', 'Settings']);
   const sectionOf = Object.fromEntries(views.map(view => [view.label, view.section]));
-  for (const page of ['Delivered', 'Validation', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
+  for (const page of ['Delivered', 'Releases']) assert.equal(sectionOf[page], 'shipped', page);
   for (const page of ['Test cases', 'Operator automation', 'Agents']) assert.equal(sectionOf[page], 'settings', page);
 
   // The sidebar renders exactly the primary entries; the pages of a section are sub-page links above the content.
@@ -155,7 +155,7 @@ test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, 
   assert.equal(sidebar.match(/class="nav( active)?"/g)?.length, 5);
   assert.equal(sidebar.match(/class="nav planned"/g), null, 'Tests has shipped (GY-162): no entry is a placeholder');
   const tabs = (d: Dashboard, view: string) => [...markup(createElement(TopBar, { ...d, view })).matchAll(/class="tab(?: active)?"[^>]*>(?:<abbr[^>]*>)?([^<]+)</g)].map(match => match[1]);
-  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Validation', 'Releases']);
+  assert.deepEqual(tabs(dashboard(), 'shipped'), ['Delivered', 'Releases']);
   assert.deepEqual(tabs(dashboard(), 'scenarios'), ['Test cases', 'Operator automation', 'Agents']);
   assert.deepEqual(tabs(dashboard(), 'work'), ['Work', 'Now'], 'a signed-in person has a Now page beside Work');
   const agent = fixtureStatus('admin');
