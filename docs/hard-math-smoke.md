@@ -91,6 +91,16 @@ One fixed seed cannot establish repeatable superiority or parallel speedup.
 
 ## Epoch 4 verification handoff
 
+The assigned worktree is synchronized with delivered main
+`2982438bc640f9c2edae3c93eff0f65dd88c48aa`. The trial stage retains trixie,
+Git >=2.43, ripgrep, immutable installed Chromium, locale normalization,
+linked-dependency handling and durable scratch. The oracle addition installs
+python3-venv and the committed pinned requirements on top of that image; nested
+trials expose the environment read-only. Build, five lifecycle/comparison tests,
+focused seed 1/2/3 oracle/routing checks and documentation checks pass after sync.
+Full scratch integration and container checks await the declared candidate image;
+no full fixture or actual-agent outcome is assumed.
+
 The epoch 2/3 failure at the initial scratch Git push was an inherited Landlock
 REFER restriction (`Invalid cross-device link` during quarantine object migration).
 The operator has recovered its scoped repair and will verify this head in a real
