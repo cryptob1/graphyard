@@ -138,6 +138,8 @@ services:
     image: ${ctx.image}
     restart: unless-stopped
     env_file: [server.env]
+    environment:
+      GRAPHYARD_LOCAL_VIEW_PORT: "${ctx.port}"
 ${serverVolumes.length ? `    volumes: [${serverVolumes.join(', ')}]\n` : ''}    depends_on:
       db: { condition: service_healthy }
     ports: ["127.0.0.1:${ctx.port}:${SERVER_PORT}"]

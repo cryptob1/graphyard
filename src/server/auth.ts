@@ -45,14 +45,17 @@ export async function authenticate(services: Services, authorization: string | u
 export const localViewer: Principal = { id: 'local-viewer', role: 'reader', displayName: 'Local viewer' };
 const loopbackHost = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::(\d+))?$/i;
 /**
- * A read from this machine addressed to the host and port it is served on. Another Host header (a
+ * A read addressed to the loopback host and served (or Compose-published) port. Another Host header (a
  * DNS-rebinding page, the tailnet proxy), a forwarded request or a cross-origin browser request
  * is not one. Headerless local clients and direct browser navigation remain readable.
  */
 export function localRead(req: IncomingMessage) {
   const host = loopbackHost.exec(req.headers.host ?? '');
-  return req.method === 'GET' && !!host && Number(host[1] ?? 80) === req.socket.localPort
-    && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
+  // Compose publishes only on host loopback, but NAT changes both the port and socket peer.
+  // This installer-owned setting declares that boundary; direct servers still require loopback.
+  const publishedPort = process.env.GRAPHYARD_LOCAL_VIEW_PORT;
+  return req.method === 'GET' && !!host && Number(host[1] ?? 80) === (publishedPort ? Number(publishedPort) : req.socket.localPort)
+    && (!!publishedPort || ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? ''))
     && !req.headers.forwarded && !req.headers['x-forwarded-for']
     && (req.headers.origin === undefined || req.headers.origin === new URL(`http://${req.headers.host}`).origin)
     && (req.headers['sec-fetch-site'] === undefined || ['same-origin', 'none'].includes(String(req.headers['sec-fetch-site'])));
