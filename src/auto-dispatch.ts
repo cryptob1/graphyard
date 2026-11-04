@@ -10,7 +10,11 @@ import { runtimeSessionOf, sessionLiveness, sessionRole, sessionVanishGraceMs, s
 import { runtimeEndedStates } from './harness.js';
 import type { DispatchRequest } from './model/dispatch.js';
 import type { AgentRegistry } from './model/registry.js';
-import { assertOutsideWorktrees, inspectProducerCredentials, listHerdrAgents, profileAccount, profileSessions, readCredentialFile, readEnvironmentLog, recordObservedExhaustion, herdrErrorCode, neverStarted, neverStartedReason, selectionKey, sessionAgentName, SessionStartError, sessionWords, withReviewerDefaults, type StartBounds, type EnvironmentLog, type HerdrAgent, type MasterConfig, type ObservedExhaustion, type ProducerProfile, type ReviewerProfile } from './master.js';
+import { assertOutsideWorktrees, inspectProducerCredentials, readCredentialFile } from './master/config.js';
+import { listHerdrAgents, type HerdrAgent } from './master/herdr.js';
+import { profileAccount, readEnvironmentLog, recordObservedExhaustion, selectionKey, type EnvironmentLog, type ObservedExhaustion } from './master/environments.js';
+import { profileSessions, sessionAgentName, withReviewerDefaults, type MasterConfig, type ProducerProfile, type ReviewerProfile } from './master/profiles.js';
+import { herdrErrorCode, neverStarted, neverStartedReason, SessionStartError, sessionWords, type StartBounds } from './master/launch.js';
 import { detectExhaustion, type ExhaustionSignal } from './model/capacity.js';
 import { withLaunchedRuntime } from './master/launch.js';
 import { herdrSubcommand, isHerdrCommand } from './master/herdr.js';

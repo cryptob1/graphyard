@@ -27,6 +27,6 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 
 ## Gotchas
 
-- `src/master.ts` only re-exports; edit the owning module.
+- Only `src/cli/**` may import `src/master.ts` within source code; all other source modules import the owning module directly. Import daemon exports from `src/daemon/*`; `src/master-daemon.ts` is removed. `tests/barrel-imports.test.ts` enforces this boundary.
 - Prompt changes break exact-text assertions across many test files; grep for the sentence first.
 - A generated prompt never names `/tmp`.

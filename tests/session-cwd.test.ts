@@ -13,7 +13,7 @@ import { dirname, join, resolve, sep } from 'node:path';
 import { generateKeyPairSync } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
-import { bwrapOnPath, readOnlyMountWrapper } from '../src/master/profiles.js';
+import { bwrapOnPath, readOnlyMountWrapper } from '../src/master/confinement.js';
 import { dataDirectory, worktreeRoot } from '../src/install/worktree-root.js';
 import { atomicPrivateWrite, dispatchWork, loadMasterConfig, saveProducerProfile, setupMaster, type WorkerProfile } from '../src/master.js';
 import { launchProducer, readProducerLedger } from '../src/producer.js';

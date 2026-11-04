@@ -4,7 +4,9 @@ import { readFile, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { emptyMergeWriterState, type MergeWriterState } from '../src/daemon/cycle-merge-writer.js';
 import { daemonStatePath, readDaemonState } from '../src/daemon/state.js';
 import { diagnosticianSettings } from '../src/runner/payloads.js';
@@ -97,7 +99,7 @@ test('unit:no-flake-items — a test that fails then passes on rerun files no wo
 });
 
 test('unit:loop-files-no-items — the loop exposes no filing effect at all', async t => {
-  const { daemonEffects } = await import('../src/master-daemon.js');
+  const { daemonEffects } = await import('../src/daemon/effects.js');
   const root = await temporaryDirectory('loop-files-no-effects');
   t.after(() => rm(root, { recursive: true, force: true }));
   const deps = { snapshot: async () => ({ work: [], now: iso(0) }), mutate: async () => ({}), executor: { principal: 'coordinator', instance: 'test' } };

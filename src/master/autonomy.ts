@@ -122,7 +122,6 @@ export async function readProposedRoster(root: string) {
   if (unknown.length) throw new Error(`sessionKind is "human" or "ai", as the deployment parses it; ${unknown.join(', ')} would fail the redeployed server at start-up`);
   return parsed.map(entry => ({ id: entry.id as string, role: entry.role as string, sessionKind: entry.sessionKind === 'human' || entry.sessionKind === 'ai' ? entry.sessionKind as string : null }));
 }
-export { restartMasterLoop } from './loop-restart.js';
 
 /**
  * `master review` registers the reviewer session before its runtime starts (GY-172 AC-2), keyed on

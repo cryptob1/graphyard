@@ -16,7 +16,9 @@ import { repositoryClaudeConfig, writeHarnessPermissions } from '../src/harness.
 import { launchReview, readReviewLedger, reconcileReviews, removeReviewerProfile, reviewIdleGraceMs, reviewPrompt, saveReviewerProfile, type ReviewRecord } from '../src/reviewer.js';
 import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger, reconcileProducers, sessionRetry, sessionRetryBaseMs, sessionRetryLimit, unstartedRetryLimit, type ProducerRecord } from '../src/producer.js';
 import { emptyDispatchCursor, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { emptyDaemonState, noteConfigReload, readDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState, readDaemonState } from '../src/daemon/state.js';
+import { noteConfigReload, runDaemon } from '../src/daemon/run.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { readMasterGuide } from './helpers/master-guide.js';
 // Time-bomb allowance (GY-1694): the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, already past) and the 2026-10-09 lock start is only rendered; the launcher runs on the real clock with relative registerLaunch expiries.

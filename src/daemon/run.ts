@@ -1,7 +1,8 @@
 // Concern: the long-running loop — cycle scheduling, config reload, the watchdog, and the restart onto a newly served commit.
 import { setTimeout as delay } from 'node:timers/promises';
 import { existsSync, rmSync } from 'node:fs';
-import type { ConfigReload, MasterConfig } from '../master.js';
+import type { ConfigReload } from '../master/config.js';
+import type { MasterConfig } from '../master/profiles.js';
 import { defaultChildRun } from '../child-runner.js';
 import { carryUndeclared } from './state-cursor.js';
 import { acquireDaemonLock, masterSummary, type DaemonAction, type DaemonState, message, storeAction } from './state.js';

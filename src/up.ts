@@ -420,7 +420,7 @@ const processAlive = (pid: number) => { try { process.kill(pid, 0); return true;
  * the unit stopped, to start again once the cursor is archived.
  */
 export async function stopRecordedLoop(root: string): Promise<{ unit: string | null }> {
-  const { loadStoredMasterConfig } = await import('./master.js');
+  const { loadStoredMasterConfig } = await import('./master/config.js');
   const { supervisingUnit } = await import('./master/loop-restart.js');
   const { loopStopTimeoutSeconds } = await import('./supervisor.js');
   const { defaultChildRun } = await import('./child-runner.js');

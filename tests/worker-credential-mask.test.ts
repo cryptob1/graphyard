@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { credentialMaskFor, credentialMaskWords, coordinatorConfinement, readOnlyMountWrapper, sessionMountNamespaceWorks } from '../src/master/profiles.js';
+import { credentialMaskFor, credentialMaskWords, coordinatorConfinement, readOnlyMountWrapper, sessionMountNamespaceWorks } from '../src/master/confinement.js';
 import { masterConfigSchema, runtimeLoginHomes } from '../src/master/profiles.js';
 import { headlessConfinementWrapper, prepareConfinedGitPaths } from '../src/master/launch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

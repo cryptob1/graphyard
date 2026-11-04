@@ -519,7 +519,3 @@ export function coordinatorCheckoutRefusal(checkout: CoordinatorCheckout, subjec
   const paths = `dirty path(s): ${named}${dirty.length > 8 ? `; and ${dirty.length - 8} more` : ''}`;
   return `${subject} refuses to start, self-upgrade or restart from the coordinator checkout at ${checkout.root}: it holds uncommitted work at ${checkout.commit.slice(0, 12)} — ${checkout.modified.length} modified and ${checkout.untracked.length} untracked source ${paths}. It keeps running the last clean code; clean or stash these paths, then restart ${subject}`;
 }
-
-// The OS-level confinement of the coordinator checkout (GY-888) lives in ./confinement.ts;
-// these re-export it, so every existing import keeps working.
-export { bwrapOnPath, sessionGitAdminDirectory, processLaunchMaskWords, credentialMaskFor, credentialMaskWords, isSocketPath, secretsBusPath, hostProcessLaunchTargets, readOnlyMountWrapper, confinementRefusalText, sessionMountNamespaceWorks, mountNamespaceProbeResult, coordinatorConfinementRefusal, coordinatorConfinement, type CoordinatorConfinement, type ConfinementInput, type CredentialMask } from './confinement.js';

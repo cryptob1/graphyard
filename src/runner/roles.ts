@@ -5,7 +5,7 @@ import { lstatSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { defaultPiModel, piRunner, piSmoke, type SmokeResult } from './pi.js';
 import { headlessConfinementWrapper, launcherCoordinatorRoot } from '../master/launch.js';
-import { bwrapOnPath, type CredentialMask } from '../master/profiles.js';
+import { bwrapOnPath, type CredentialMask } from '../master/confinement.js';
 import type { FleetLaunchAccount } from '../fleet.js';
 import { registryToolsArgs } from '../master/environments.js';
 import { z } from 'zod';

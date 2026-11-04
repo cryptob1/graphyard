@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { ChildRun } from '../child-runner.js';
-import type { MasterConfig } from '../master.js';
+import type { MasterConfig } from '../master/profiles.js';
 import type { Work } from '../model.js';
 import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-ground.js';

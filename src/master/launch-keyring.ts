@@ -10,7 +10,8 @@ import { withAutonomyContract } from '../autonomy.js';
 import { underTestRunner } from '../supervisor.js';
 import type { PartialWork } from '../model/capacity.js';
 import { type ConsentPrompt, detectConsentPrompt, settingsWarning, type ConsentAnswer, sameConsentPrompt } from '../consent-prompt.js';
-import { bwrapOnPath, checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, confinementRefusalText, coordinatorCheckoutRoot, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './profiles.js';
+import { bwrapOnPath, confinementRefusalText, coordinatorConfinement, coordinatorConfinementRefusal, mountNamespaceProbeResult, isSocketPath, readOnlyMountWrapper, secretsBusPath, type CoordinatorConfinement, type ConfinementInput } from './confinement.js';
+import { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory, coordinatorCheckoutRoot } from './profiles.js';
 import type { MasterRun } from './profiles.js';
 import { type HerdrAgent, herdrJson, herdrRun, stopCreatedHerdrTab } from './herdr.js';
 

@@ -15,7 +15,7 @@ import { openReviewConflict, reconcileReviewConflict } from '../src/model/review
 import { loadMasterConfig, setupMaster, sessionAgentName, type HerdrAgent } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, reviewCommand, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects, type DispatchTick } from '../src/auto-dispatch.js';
-import { neededRework, standingVerdict } from '../src/master-daemon.js';
+import { neededRework, standingVerdict } from '../src/daemon/rework.js';
 import { startedAtOnce } from './helpers/launch-shell.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.

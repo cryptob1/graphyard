@@ -12,7 +12,7 @@ import { foldMergeLedger, mergeStallMs } from '../src/model/merge-ledger.js';
 import { mergePipeline, withMergePipeline } from '../src/pipeline-speed.js';
 import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { emptyDaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { firstParentHolds, runTrial, trialCheckoutPrefix, trialMerge } from '../src/merge-writer/trial.js';

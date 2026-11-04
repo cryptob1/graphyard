@@ -5,7 +5,10 @@ import { rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
-import { cycleFailureCeiling, cycleFailureCeilingMs, cycleFailureDelay, daemonStateSchema, daemonSummary, emptyDaemonState, loopLiveness, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { cycleFailureCeiling, cycleFailureCeilingMs, cycleFailureDelay, loopLiveness } from '../src/daemon/liveness.js';
+import { daemonStateSchema, emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { daemonSummary, runDaemon } from '../src/daemon/run.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // Time-bomb allowance (GY-1694): the 2030-01-01 iso() values are the stub snapshot's own now and deployment stamp handed back to the daemon; Date.now() only measures how long the loop waited between retries, or offsets it by the stall hold the backoff test skips.
