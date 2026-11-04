@@ -13,7 +13,9 @@ import { loadMasterConfig, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, updateReviewLedger } from '../src/reviewer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { endRegistrySessionById, orphanedRegistrySessions, registryDocument } from '../src/master/registry-slot.js';
-import { daemonEffects, emptyDaemonState, runCycle } from '../src/master-daemon.js';
+import { daemonEffects } from '../src/daemon/effects.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
 import { fleet as launchFleet, requested } from './helpers/review-fleet.js';
 
 // Keep managed checkouts in the fixture too when verify runs this file directly, without the

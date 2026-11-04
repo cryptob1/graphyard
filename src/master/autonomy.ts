@@ -99,7 +99,7 @@ export function attestationExercise(work: Pick<Work, 'criteria' | 'candidate'>, 
   if (!criterion || !work.candidate) return {};
   return { exercise: { criterion: criterion.id, behaviour: `the diff of candidate ${work.candidate.sha.slice(0, 12)} against the candidate base ${work.candidate.baseSha.slice(0, 12)}; the proof fails on that base, as the master confirmed by running it`, result: 'fail' as const, executed: 1 } };
 }
-export { restartMasterLoop } from './loop-restart.js';
+
 
 /**
  * `master review` registers the reviewer session before its runtime starts (GY-172 AC-2), keyed on

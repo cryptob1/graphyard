@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyRuntimePrompt } from '../src/master.js';
-import { detectRuntimeExhaustion } from '../src/master/environments.js';
+import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
 import { parseResetTime } from '../src/model/capacity.js';
 
 // Time-bomb allowance (GY-1694): the 2026-10-09 `now` is explicit and the Oct 10/12 resets carry no year, so parseResetTime rolls them forward past any real Date.now().
