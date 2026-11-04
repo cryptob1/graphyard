@@ -19,6 +19,8 @@ Trials run [without credentials](master-agent-reference.md#merge-trial). Command
 
 `scripts/ci-tests.mjs` selects affected/proof tests. Otherwise use `delivery.mergeGate.preMerge`, falling back to npm test/typecheck. Missing checks are explicit in trial/status/doctor. Timeouts requeue. Head failures request rework; failures reproduced on base hold the head as `base failure` so repairs go first. Bug proofs must fail on base or the head refuses as `not reproduced`.
 
+Opening (including fallback/retrial) and landing re-read candidate, policy, rework, ownership and build/review gates. Obsolete flights requeue without pushing or disturbing replacement leases; incidental work revisions do not fence a valid flight. Already-pushed reconciliation retains its original intent and proof bindings.
+
 Required live-case failures after the last verified commit can trigger a gated revert. The loop chooses the landing whose proof names the case, else the newest identifiable landing, and files one `Re-land GY-N` with original criteria and failed case. Further failures keep that culprit. Production and serve-revert unit tests share the revert sequence; the loop persists and schedules its trial beside the cycle. A failing revert trial holds; an indeterminate trial waits the base-failure interval unless main moves.
 
 ### E2E record credential
