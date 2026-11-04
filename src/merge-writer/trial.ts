@@ -16,6 +16,7 @@ import { parseFailedTests } from '../model/base-failure.js';
 import { assertIsolatableHostControlEndpoints, bwrapOnPath, credentialMaskWords, hostFilesystemWords, hostProcessLaunchTargets, processLaunchMaskWords } from '../master/confinement.js';
 import { socketConfinementWords } from '../master/socket-confinement.js';
 import { configHome } from '../install/secrets.js';
+import type { GateCheck } from '../model/delivery-policy.js';
 import { containerTrialE2e, trialContainerDependencies, trialContainerWords } from './trial-container.js';
 
 /** One git call in the coordinator's object store: the arguments after `git -C <root>`, the child's stdout. */
@@ -184,8 +185,7 @@ export function trialConfinement(hidden: readonly string[], reexposed: readonly 
 /** What an upward lookup from a fixture resolves first: a directory holding one of these shadows the fixture's own. */
 export const trialLookupEntries = ['node_modules', '.git', 'package.json'] as const;
 /**
- * The suite's own durable temporary root (tests/helpers/run-tests.ts's durableTestTmpdir makes the
- * same one): short and on disk. It is the trial's fallback so the suite never runs under the
+ * The suite's own durable temporary root (shared with its durableTestTmpdir): short and on disk. It is the trial's fallback so the suite never runs under the
  * session directory: a tmpdir three levels deep in the managed root is what pushed unix sockets
  * past the kernel's 108-byte `sun_path` (listen EINVAL) and typed launch lines past
  * `launchCommandLimit`, and that failed main's own fifteen registry and confinement files on every
@@ -210,7 +210,7 @@ export function lookupPoisoned(directory: string, exists: (path: string) => bool
  * The folder the trial's own temporary directory is made in (GY-1565): the first root no stray
  * node_modules, .git or package.json sits in or above, else the trial's session directory. The
  * host's shared /tmp is not CI's empty one: vishrog's /tmp/node_modules is what
- * tests/worktree-reclaim.test.ts's upward install lookup found first, so its dependency mirror
+ * the worktree reclaim test's upward install lookup found first, so its dependency mirror
  * shared nothing. The directory stays short, as CI's is: a socket path or a typed launch line the
  * suite builds under it has a length bound. A root clean when chosen is checked again once the
  * trial ends (`TrialEnvironmentError`): no point-in-time check keeps a shared folder clean.
@@ -308,7 +308,7 @@ export const trialTemporaryPrefix = 'gy-t';
 export const trialCheckoutPrefix = 'gy-c';
 /**
  * The mode of a trial's own temporary directory (GY-1639): sticky, as CI's /tmp is, so a suite that
- * holds `tmpdir()` to the sticky-shared-parent rule (tests/runner-executor.test.ts's attested cases)
+ * holds `tmpdir()` to the sticky-shared-parent rule (the runner executor’s attested cases)
  * sees the parent CI gives it, yet private to this account, so nothing else can plant a lookup entry
  * in it. mkdtemp's own 0700 is not sticky: every merged head failed runner-executor on it.
  */
@@ -364,7 +364,7 @@ export const trialNeedsLog = (run: Pick<TrialRun, 'build' | 'tests' | 'runnerExi
 /**
  * How many test files one runner process of a trial runs at most (GY-1548). A full selection of
  * 486 files in one `node --test` process outgrew the child runner's 16 MiB output capture, so the
- * runner was killed with every file passing and the verdict named only tests/helpers/run-tests.ts.
+ * runner was killed with every file passing and the verdict named only the declared test runner.
  */
 export const trialTestGroupSize = 40;
 /** The groups a selection runs in when a caller fixes the group size: its own order, cut every `size` files, so every file runs once and a failing group is a short list. */
@@ -378,7 +378,7 @@ export const trialShardLanes = (cores: number) => Math.max(1, Math.floor(cores /
 /**
  * The lanes a trial's shards run in and each runner's test concurrency (GY-1832): `trialShardLanes`
  * lanes, never more than the shards, each at its share of the cores. A shard's own
- * `--test-concurrency` overrides tests/helpers/run-tests.ts's memory-derived breadth, so where the
+ * `--test-concurrency` overrides the declared test runner's memory-derived breadth, so where the
  * host's memory is read the files in flight across every lane stay within `affordableFiles` (what
  * that memory affords beyond its floor and recovery margin, `bytesPerSuiteFile` a file): fewer
  * files per runner first, then fewer lanes, never below one of each. An unread host is sized by
@@ -398,7 +398,7 @@ export function trialShardBreadth(cores: number, shards: number, affordableFiles
  * The files the host's memory affords a trial's shards at once (GY-1832), or null when it cannot be
  * read: available memory less the floor and the recovery margin,
  * `bytesPerSuiteFile` a file, less the files runs holding the host's verification slots under
- * `slots` declared and may not yet have allocated — as tests/helpers/run-tests.ts's breadth
+ * `slots` declared and may not yet have allocated — as the runner's breadth
  * deducts them, since the shards' environment carries no slot of their own.
  */
 export async function trialAffordableFiles(read?: () => Promise<HostMemoryReading | null>, slots?: string): Promise<number | null> {
@@ -424,7 +424,7 @@ export async function declareTrialFiles(directory: string, key: string, files: n
  * The shards a selection runs in (GY-1832): as many as the lanes, never more than the files, and
  * never fewer than keep every shard within `size` files (one runner process per shard, so none
  * outgrows the capture, GY-1548). Files go longest first, by the merge's own timing baseline
- * (`durations`, tests/helpers/timing-baseline.json; a file it lacks counts as its median file),
+ * (`durations`, the declared timing baseline; a file it lacks counts as its median file),
  * each onto the shard with the least time so far that has room, as CI's `--shard` does, and each
  * shard keeps its files longest first. Every file runs once; the split is deterministic.
  */
@@ -442,9 +442,9 @@ export function shardTestFiles(files: readonly string[], lanes: number, duration
   return shards.map(shard => shard.files).filter(shard => shard.length);
 }
 /** The merge's own timing baseline in its checkout, `{}` when it has none or it does not parse. */
-const checkoutDurations = (worktree: string): Promise<Record<string, number>> => readFile(join(worktree, 'tests/helpers/timing-baseline.json'), 'utf8')
+const checkoutDurations = (worktree: string, path?: string): Promise<Record<string, number>> => path ? readFile(join(worktree, path), 'utf8')
   .then(text => { const files = (JSON.parse(text) as { files?: unknown } | null)?.files; return files && typeof files === 'object' ? files as Record<string, number> : {}; })
-  .catch(() => ({}));
+  .catch(() => ({})) : Promise.resolve({});
 /** How much of a failing runner child's output its diagnostic record keeps: enough to read the exit, little enough for one daemon action. */
 export const runnerDiagnosticTailLength = 1200;
 /**
@@ -497,66 +497,47 @@ export class TrialEnvironmentError extends Error {
     this.name = 'TrialEnvironmentError';
   }
 }
-/** The paths whose change runs the browser suite in a trial (GY-2092): the dashboard, its tests and tooling, and the server routes it calls. */
-export const dashboardPaths = ['web/', 'browser-tests/', 'src/server/routes/', 'src/server/routes.ts', 'src/model/board.ts', 'scripts/dashboard-fixture.mjs', 'playwright.config.ts', 'vite.config.ts'];
-export const touchesDashboard = (files: readonly string[]) => files.some(file => dashboardPaths.some(path => file === path || (path.endsWith('/') && file.startsWith(path))));
-/** The failing entry a trial records when `npm run test:browser` fails. */
-export const browserSuite = 'browser-tests/';
-/**
- * What a trial, master status and doctor record when a managed repository has no scripts/ci-tests.mjs
- * and no test, typecheck, or test:browser check to run (GY-2958): never a silent pass with zero tests.
- */
+/** A repository without a declared or conventional test check never silently passes. */
 export const noTestCheckConfigured = 'no test check configured';
-/** One repository check a trial runs when scripts/ci-tests.mjs is absent: its gate name and argv. */
-export type RepositoryTrialCheck = { check: string; argv: string[] };
+export type TrialCheckDeclaration = Pick<GateCheck, 'check' | 'command' | 'paths' | 'selection'>;
+export type RepositoryTrialCheck = { check: string; argv: string[]; paths?: string[]; selection?: GateCheck['selection'] };
+const touchesPaths = (files: readonly string[], paths: readonly string[]) =>
+  files.some(file => paths.some(path => file === path || (path.endsWith('/') && file.startsWith(path))));
 /** `npm run test` → `['npm','run','test']`; empty or whitespace-only commands yield null. */
 export const checkCommandArgv = (command: string): string[] | null => {
   const parts = command.trim().split(/\s+/).filter(Boolean);
   return parts.length ? parts : null;
 };
-/**
- * The test and typecheck checks a trial runs when scripts/ci-tests.mjs is absent (GY-2958): every
- * graphyard.json preMerge entry that names a command, except build (already run), else `npm test`
- * and `npm run typecheck` when package.json defines those scripts. `test:browser` is the GY-2092
- * suite (dashboard changes only); it is configured but not listed here so the trial does not run it twice.
- */
+/** Declared checks, with conventional npm scripts as the fallback. Build runs in its own phase. */
 export function repositoryTrialChecks(input: {
-  preMerge?: readonly { check: string; command: string | null }[] | null;
+  preMerge?: readonly TrialCheckDeclaration[] | null;
   scripts?: Record<string, unknown> | null;
 }): RepositoryTrialCheck[] {
   const fromPolicy = (input.preMerge ?? [])
     .filter(entry => entry.command && !/^(?:build|compile)$/i.test(entry.check))
     .flatMap(entry => {
       const argv = checkCommandArgv(entry.command!);
-      return argv ? [{ check: entry.check, argv }] : [];
+      return argv ? [{ check: entry.check, argv, ...(entry.paths ? { paths: entry.paths } : {}), ...(entry.selection ? { selection: entry.selection } : {}) }] : [];
     });
   if (fromPolicy.length) return fromPolicy;
   const scripts = input.scripts ?? {}, fallback: RepositoryTrialCheck[] = [];
   if (typeof scripts.test === 'string') fallback.push({ check: 'test', argv: ['npm', 'test'] });
   if (typeof scripts.typecheck === 'string') fallback.push({ check: 'typecheck', argv: ['npm', 'run', 'typecheck'] });
+  if (typeof scripts['test:browser'] === 'string') fallback.push({ check: 'test:browser', argv: ['npm', 'run', 'test:browser'] });
   return fallback;
 }
-/** True when package.json declares the Playwright suite the trial runs on dashboard changes (GY-2092). */
-export const hasBrowserTestCheck = (scripts?: Record<string, unknown> | null): boolean =>
-  typeof scripts?.['test:browser'] === 'string';
-/**
- * The trial's test gate as master status and doctor surface it for a checkout (GY-2958): ci-tests,
- * the repository's own checks (including test:browser), or an explicit `no test check configured`.
- */
 export function trialTestGateStatus(root: string):
-  | { configured: true; via: 'ci-tests' | 'checks'; checks: string[] }
+  | { configured: true; via: 'checks'; checks: string[] }
   | { configured: false; detail: typeof noTestCheckConfigured } {
-  if (existsSync(join(root, 'scripts/ci-tests.mjs'))) return { configured: true, via: 'ci-tests', checks: ['scripts/ci-tests.mjs'] };
-  let preMerge: { check: string; command: string | null }[] | null = null, scripts: Record<string, unknown> | null = null;
+  let preMerge: TrialCheckDeclaration[] | null = null, scripts: Record<string, unknown> | null = null;
   try {
-    const delivery = (JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8')) as { delivery?: { mergeGate?: { preMerge?: { check: string; command: string | null }[] } } }).delivery;
+    const delivery = (JSON.parse(readFileSync(join(root, 'graphyard.json'), 'utf8')) as { delivery?: { mergeGate?: { preMerge?: TrialCheckDeclaration[] } } }).delivery;
     preMerge = delivery?.mergeGate?.preMerge ?? null;
   } catch { /* absent or unreadable: fall through to package.json */ }
   try { scripts = (JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')) as { scripts?: Record<string, unknown> }).scripts ?? null; }
   catch { /* absent */ }
   const checks = repositoryTrialChecks({ preMerge, scripts });
   if (checks.length) return { configured: true, via: 'checks', checks: checks.map(entry => entry.check) };
-  if (hasBrowserTestCheck(scripts)) return { configured: true, via: 'checks', checks: ['test:browser'] };
   return { configured: false, detail: noTestCheckConfigured };
 }
 export interface RunTrialInput {
@@ -569,6 +550,8 @@ export interface RunTrialInput {
   timeoutMs: number;
   key?: string;
   run?: ChildRun;
+  /** Add criterion files to a declared selector's output before sharding. */
+  selectFiles?: (files: string[], timeoutMs: number) => Promise<string[]>;
   environment?: NodeJS.ProcessEnv;
   now?: () => number;
   /** Removes the trial checkout afterwards; the managed-root removal unless a test injects one. */
@@ -647,26 +630,25 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
     return `${command}${cut}${whole}${end}`;
   }).join('\n').slice(-length);
 }
-const testFile = /tests\/[\w./-]+\.test\.ts/g;
-const testFileLine = /^tests\/[\w./-]+\.test\.ts$/;
+const testFile = /[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?/g;
 /**
  * The failing files a runner log names, for a runner whose records are missing. A file-level
  * failure is a `not ok`/`✖` line carrying the path; a failing case inside a file is reported as
- * `✖ <case title>` and its file only on the `test at tests/x.test.ts:line:col` line that follows,
+ * `✖ <case title>` and its file only on the `test at example.test.ts:line:col` line that follows,
  * so both are read (GY-1549: reading only the first kind counted every such file as passed). Given
  * the files the runner ran, only those count (GY-1645): a name printed inside a test's own output,
- * such as a fixture's `test at tests/c.test.ts:1:1` in an assertion message, is no failing file.
+ * such as a fixture's `test at example.test.ts:1:1` in an assertion message, is no failing file.
  */
 export function failingFilesInLog(out: string, ran?: readonly string[]): string[] {
   const files = new Set<string>();
   for (const line of out.split('\n')) {
     if (/not ok|✖|FAIL/.test(line)) for (const file of line.match(testFile) ?? []) files.add(file);
-    const located = /^\s*test at (tests\/[\w./-]+\.test\.ts):\d+:\d+/.exec(line);
+    const located = /^\s*test at ([\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?):\d+:\d+/.exec(line);
     if (located) files.add(located[1]!);
   }
-  return [...files].filter(file => !ran || ran.includes(file));
+  return [...new Set([...files].flatMap(file => ran ? ran.filter(path => file === path || file.endsWith(`/${path}`)) : [file]))];
 }
-const fileLevelFailure = /^tests\/[\w./-]+\.test\.ts$/;
+const fileLevelFailure = /^[\w./-]+\.(?:test|spec)\.[cm]?[jt]sx?$/;
 const timeoutFailure = /timed?\s*out|Timeout of \d+m?s exceeded/i;
 /**
  * GY-2960: the failing files and cases a repository check's node:test / TAP output names — up to
@@ -690,7 +672,7 @@ export function repositoryCheckFailure(log: string): { files: string[]; cases: s
   });
   return { files, cases, firstCase, timedOut };
 }
-/** The runner's per-file records (`--durations FILE`, tests/helpers/file-durations.mjs): one JSON line per file that ran, with whether it passed. */
+/** The runner's per-file records (`--durations FILE`, the runner records): one JSON line per file that ran, with whether it passed. */
 export function runnerRecords(text: string): { file: string; passed: boolean }[] {
   return text.split('\n').flatMap(line => {
     try { const record = JSON.parse(line) as { file?: unknown; passed?: unknown }; return typeof record.file === 'string' ? [{ file: record.file, passed: record.passed !== false }] : []; }
@@ -742,25 +724,8 @@ export async function runTrial(input: RunTrialInput): Promise<TrialRun> {
   }
 }
 
-/**
- * One attempt of a trial. Check the merge commit out detached as a `trial` checkout (in a short directory beside the trial's
- * temporary one when a clean root is found), run `npm run build`, then either the affected
- * pre-merge selection of scripts/ci-tests.mjs through tests/helpers/run-tests.ts, or — when that
- * selection script is absent — every graphyard.json preMerge check command (else `npm test` /
- * `npm run typecheck` from package.json) under the same deadline and `trialEnvironment` (GY-2958).
- * A repository with neither the selection script nor any test check records `no test check
- * configured` instead of a silent pass. The runner always gets a selected file list when
- * ci-tests runs, so a full selection runs every pre-merge file and never the release-candidate
- * suites, and the verdict counts the files (or checks) that ran. The selection runs in
- * parallel shards sized to the host (GY-1832, `shardTestFiles`: `trialShardLanes(cores)` at once,
- * none over `trialTestGroupSize` files), each its own runner process over the same checkout at a
- * test concurrency of its share of the cores, and with the files in flight across them within what
- * the host's memory affords (`trialShardBreadth`), so they stay near one process's;
- * the verdict's failing files are the union the shards' records name, and `groups` says how each
- * process ended, in shard order. Each phase's time is recorded (`phases`). The checkout is removed
- * afterwards, pass or fail; a removal that fails rejects with TrialCleanupError carrying the
- * verdict. Past the deadline it rejects with TrialTimeoutError, and a runner that ends naming no
- * failing test with TrialRunnerError: neither is a verdict against the merge.
+/** Prepare a detached checkout, scan it, build it, and run its declared checks under one deadline.
+ * Selected files run in bounded shards; cleanup runs for both verdicts and host failures.
  */
 export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   const run = input.run ?? defaultChildRun, now = input.now ?? Date.now, startedAt = now(), deadline = startedAt + input.timeoutMs;
@@ -790,7 +755,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     if (directory === place) return clearTrialCheckout(directory);
     try { await rm(directory, { recursive: true, force: true }); } finally { await rm(tempOwnerMarker(directory), { force: true }).catch(() => {}); }
   };
-  try {
+  const prepare = async () => {
     // GY-2954: the short durable fallback may not exist yet on a host that has not run the suite;
     // make it, or the trial would land its temporary directory in the session directory.
     if (!input.temporaryRoots) await mkdir(durableTemporaryRoot(), { recursive: true }).catch(() => {});
@@ -805,13 +770,8 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
     wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root));
-  }
-  catch (error) {
-    for (const made of [temporary, home, place]) if (made) await clear(made).catch(() => {});
-    await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(() => {});
-    if (typeof error === 'object' && error) attemptContext.set(error, { phase, phases: enter() });
-    throw error;
-  }
+    await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
+  };
   const log: string[] = [];
   // GY-2965: how the item's bound E2E cases ran against the served head, filled once the build has passed and riding every verdict after it.
   const e2e: TrialE2eCase[] = [];
@@ -886,194 +846,200 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       ...(detail?.timedOut ? { timedOut: true } : {}),
       ...(e2e.length ? { e2e } : {}) };
   };
-  const listed = (out: string) => out.split('\n').map(line => line.trim()).filter(line => testFileLine.test(line));
+  const holds = async (path: string) => {
+    try { await run('git', ['-C', input.root, 'cat-file', '-e', `${input.mergeSha}:${path}`], { timeoutMs: remaining() }); return true; }
+    catch { /* absent, or unreadable: the listing below tells them apart */ }
+    let listing: string;
+    try { listing = String(await run('git', ['-C', input.root, 'ls-tree', '--name-only', input.mergeSha, '--', path], { timeoutMs: remaining() })); }
+    catch (error) {
+      const out = output(error);
+      log.push(`$ git ls-tree --name-only ${input.mergeSha} -- ${path}\n${out}\n${ending(error)}`);
+      if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
+      const ended = endedOf(error, out);
+      throw runnerFailure('install', { ...ended, cause: ended.cause ?? `could not read ${path} from ${input.mergeSha.slice(0, 12)}` });
+    }
+    return listing.split('\n').some(line => line.trim() === path);
+  };
+  const scan = async (): Promise<TrialRun | undefined> => {
+    // GY-2009: the merge writer's trial runs the secret scan (formerly the Actions secrets job).
+    const scan = input.secretScan === false ? null
+      : input.secretScan ?? (underTestRunner() ? null : runSecretScan);
+    if (scan) {
+      // The binary is cached under the managed root, so only the first trial on a host downloads it.
+      const scanned = await scan({ worktree, cacheDirectory: secretScanCacheDirectory(input.base), run, timeoutMs: remaining() });
+      if (!scanned.ok) {
+        log.push(`$ ${secretScanArgv(worktree).join(' ')}\n${scanned.detail}`);
+        // A binary the host could not obtain says nothing about the merge: no verdict, tried again.
+        if (scanned.unavailable) throw runnerFailure('install', { ok: false, out: scanned.detail, status: null, signal: null, cause: scanned.detail });
+        // A scan the deadline killed is the trial's timeout, and one a signal, the runner or an error exit ended is
+        // a runner failure: neither is a finding, so neither fails the merge (only gitleaks' findings status does).
+        if (scanned.execution) {
+          if (scanned.execution.timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
+          const ended = endedOf(scanned.execution, scanned.detail);
+          throw runnerFailure('install', { ...ended, cause: ended.cause ?? (ended.signal ? undefined : `gitleaks exited with status ${ended.status ?? 'unknown'}, not its findings status`) });
+        }
+        enter('build');
+        return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
+      }
+    }
+  };
+  let packageScripts: Record<string, unknown> | undefined;
+  let nodePackage = false;
+  const build = async (): Promise<TrialRun | undefined> => {
+    enterStep('install');
+    nodePackage = await holds('package.json');
+    if (nodePackage) {
+      const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
+      const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
+      if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
+      else if (await holds('package-lock.json')) {
+        const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
+        if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
+        if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      }
+      const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
+      // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
+      try { packageScripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
+      if (packageScripts === undefined || packageScripts?.build) {
+        enter('build');
+        enterStep('build');
+        const built = await child('build', 'npm', ['run', 'build']);
+        if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
+        if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
+      }
+    }
+  };
+  const runChecks = async (checks: RepositoryTrialCheck[]): Promise<TrialRun> => {
+    // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
+    if (input.e2eProofs?.length) {
+      enter('tests');
+      const ran = await containerTrialE2e({
+        worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
+        networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
+        scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
+      });
+      // Bounded so the trial record the merge writer posts stays within its schema.
+      e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
+    }
+    if (!checks.length) {
+      if (!nodePackage) return finish('pass', { passed: 0, failed: [], files: 0 });
+      enter('tests');
+      log.push(noTestCheckConfigured);
+      return finish('pass', { passed: 0, failed: [noTestCheckConfigured], files: 0 });
+    }
+    enter('tests');
+    const failed: string[] = [];
+    let passed = 0, files = 0, runnerExit: number | null = 0;
+    const groups: TrialGroup[] = [];
+    let detail: { failingCase?: string | null; timedOut?: boolean } | undefined;
+    let failingOutput: string | undefined;
+    for (const check of checks) {
+      if (check.paths && !touchesPaths(input.changedFiles, check.paths)) continue;
+      if (check.selection) {
+        const selected = await runSelected(check);
+        passed += selected.tests.passed; files += selected.tests.files;
+        failed.push(...selected.tests.failed); groups.push(...(selected.groups ?? []));
+        runnerExit = selected.runnerExit ?? null;
+        if (failed.length) return finish('pass', { passed, failed, files }, runnerExit, groups, selected.logTail);
+        continue;
+      }
+      files++;
+      enterStep(`tests: ${check.check}`);
+      const ran = await child('tests', check.argv[0]!, check.argv.slice(1));
+      if (hostEnded(ran)) throw runnerFailure('tests', ran);
+      if (!ran.ok) {
+        // GY-2960: name the failing test files and first case from the check's output, not only the check.
+        const parsed = repositoryCheckFailure(ran.out);
+        failed.push(...(parsed.files.length ? parsed.files : [check.check]));
+        detail = { failingCase: parsed.firstCase, timedOut: parsed.timedOut };
+        failingOutput = log.at(-1);
+        runnerExit = exitCode({ status: ran.status, signal: ran.signal, cause: ran.cause });
+        break;
+      }
+      passed++;
+    }
+    const logTail = failingOutput && log.join('\n').length > tailLength ? failureTail([failingOutput]) : tail();
+    return finish('pass', { passed, failed, files }, runnerExit, groups.length ? groups : undefined, logTail, detail);
+  };
+  const runSelected = async (check: RepositoryTrialCheck): Promise<Pick<TrialRun, 'tests' | 'runnerExit' | 'groups' | 'logTail'>> => {
+    const result = (tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail = tail()) => ({ tests, runnerExit, groups, logTail });
+    const strategy = check.selection!;
+    const selector = checkCommandArgv(strategy.command)!;
+    enter('selection');
+    enterStep('selection');
+    // A selection child the host killed or could not start is no verdict (GY-1832); only one that exits non-zero fails the selection.
+    const selection = await child('selection', selector[0]!, [...selector.slice(1), ...input.changedFiles]);
+    if (hostEnded(selection)) throw runnerFailure('selection', selection);
+    if (!selection.ok) return result({ passed: 0, failed: [strategy.command], files: 0 });
+    const pattern = new RegExp(strategy.pattern);
+    const selected = selection.out.split('\n').map(line => line.trim()).filter(line => pattern.test(line));
+    let files = selected;
+    try { if (input.selectFiles) files = await input.selectFiles(selected, remaining()); }
+    catch (error) {
+      if ((error as { timedOut?: boolean }).timedOut) throw new TrialTimeoutError('selection', Math.max(0, now() - startedAt), tail());
+      throw runnerFailure('selection', endedOf(error, output(error)));
+    }
+    // An affected selection of nothing runs nothing.
+    if (!files.length) return result({ passed: 0, failed: [], files: 0 });
+    enter('tests');
+    enterStep('tests');
+    // Each shard is one runner process over the same checkout, `lanes` of them at once. Failing per-file
+    // records decide which files failed; the human-readable log is read when those records name none —
+    // including a partial-record run that finished some files and printed a named failure for another
+    // (GY-1548). A shard that ends non-zero naming no failing file is a runner failure, unless another
+    // shard named one: a named failing test is the merge's, and stays a failing verdict.
+    const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
+    const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree, strategy.durations)) : groupTestFiles(files, input.groupSize);
+    const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
+    const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory, slotsDirectory));
+    const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
+    let next = 0, stopped: unknown = null;
+    const lane = async () => {
+      // A lane takes the next shard until none is left or another lane's shard ended the trial; a running shard is always awaited, never orphaned.
+      while (stopped === null && next < shards.length) {
+        const index = next++, group = shards[index]!, entries: string[] = [];
+        try {
+          const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
+          await writeFile(list, `${group.join('\n')}\n`);
+          const tests = await child('tests', check.argv[0]!, [...check.argv.slice(1), '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'], { entries });
+          const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
+          // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
+          const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
+          const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
+          settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries,
+            unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
+        } catch (error) { log.push(...entries); stopped ??= error; }
+      }
+    };
+    // The shards' files stay declared on the host's verification slots until every shard stops, so a suite that starts meanwhile deducts them before they allocate.
+    const release = await declareTrialFiles(slotsDirectory, input.key ?? input.mergeSha.slice(0, 12), lanes * breadth);
+    try { await Promise.all(Array.from({ length: lanes }, lane)); } finally { await release(); }
+    const ran = settledShards.filter(shard => shard !== undefined);
+    for (const shard of ran) log.push(...shard.entries);
+    // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
+    if (stopped instanceof TrialTimeoutError) throw new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail());
+    if (stopped !== null) throw stopped;
+    const groups = ran.map(shard => shard.group), failingOutput = ran.filter(shard => shard.group.failed.length).map(shard => shard.entries.at(-1)!);
+    const unattributed = ran.find(shard => shard.unattributed)?.unattributed ?? null;
+    const failed = [...new Set(groups.flatMap(group => group.failed))];
+    if (!failed.length && unattributed) throw unattributed;
+    const worst = groups.find(group => group.status !== 0);
+    return result({ passed: Math.max(0, files.length - failed.length), failed, files: files.length }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
+      failingOutput.length && log.join('\n').length > tailLength ? failureTail(failingOutput) : tail());
+  };
   const trial = async (): Promise<TrialRun> => {
     try {
-      await run('git', ['-C', input.root, 'worktree', 'add', '--detach', worktree, input.mergeSha], { timeoutMs: remaining() });
-      enterStep('install');
-      // The merge builds against its own dependencies: the coordinator's install when its lockfile is byte-identical to the merge's, else an `npm ci` of the merge's lockfile.
-      // A repository the merge does not make a Node package installs and builds nothing. One without
-      // scripts/ci-tests.mjs runs its graphyard.json preMerge (or package.json test/typecheck) checks
-      // instead (GY-2958). Each path is read from the merge commit itself, never from the trial
-      // checkout, so an unreadable checkout file never skips a phase the merge carries. Only a
-      // listing that answers and names no such path is absence: a probe git could not answer (a timeout,
-      // an unreadable object store) is a runner failure, never a passing trial that skipped its checks.
-      const holds = async (path: string) => {
-        try { await run('git', ['-C', input.root, 'cat-file', '-e', `${input.mergeSha}:${path}`], { timeoutMs: remaining() }); return true; }
-        catch { /* absent, or unreadable: the listing below tells them apart */ }
-        let listing: string;
-        try { listing = String(await run('git', ['-C', input.root, 'ls-tree', '--name-only', input.mergeSha, '--', path], { timeoutMs: remaining() })); }
-        catch (error) {
-          const out = output(error);
-          log.push(`$ git ls-tree --name-only ${input.mergeSha} -- ${path}\n${out}\n${ending(error)}`);
-          if ((error as { timedOut?: boolean }).timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
-          const ended = endedOf(error, out);
-          throw runnerFailure('install', { ...ended, cause: ended.cause ?? `could not read ${path} from ${input.mergeSha.slice(0, 12)}` });
-        }
-        return listing.split('\n').some(line => line.trim() === path);
-      };
-      // GY-2009: the merge writer's trial runs the secret scan (formerly the Actions secrets job).
-      const scan = input.secretScan === false ? null
-        : input.secretScan ?? (underTestRunner() ? null : runSecretScan);
-      if (scan) {
-        // The binary is cached under the managed root, so only the first trial on a host downloads it.
-        const scanned = await scan({ worktree, cacheDirectory: secretScanCacheDirectory(input.base), run, timeoutMs: remaining() });
-        if (!scanned.ok) {
-          log.push(`$ ${secretScanArgv(worktree).join(' ')}\n${scanned.detail}`);
-          // A binary the host could not obtain says nothing about the merge: no verdict, tried again.
-          if (scanned.unavailable) throw runnerFailure('install', { ok: false, out: scanned.detail, status: null, signal: null, cause: scanned.detail });
-          // A scan the deadline killed is the trial's timeout, and one a signal, the runner or an error exit ended is
-          // a runner failure: neither is a finding, so neither fails the merge (only gitleaks' findings status does).
-          if (scanned.execution) {
-            if (scanned.execution.timedOut || now() >= deadline) throw new TrialTimeoutError('install', Math.max(0, now() - startedAt), tail());
-            const ended = endedOf(scanned.execution, scanned.detail);
-            throw runnerFailure('install', { ...ended, cause: ended.cause ?? (ended.signal ? undefined : `gitleaks exited with status ${ended.status ?? 'unknown'}, not its findings status`) });
-          }
-          enter('build');
-          return finish('fail', { passed: 0, failed: ['secret-scan'], files: 0 });
-        }
+      await prepare();
+      const scanned = await scan();
+      if (scanned) return scanned;
+      const built = await build();
+      if (built) return built;
+      let preMerge: TrialCheckDeclaration[] | null = null;
+      if (await holds('graphyard.json')) {
+        const config = JSON.parse(await readFile(join(worktree, 'graphyard.json'), 'utf8'));
+        preMerge = config.delivery?.mergeGate?.preMerge ?? null;
       }
-      let packageScripts: Record<string, unknown> | undefined;
-      let browserSuitePassed = false;
-      if (await holds('package.json')) {
-        const lockfile = (dir: string) => readFile(join(dir, 'package-lock.json'), 'utf8').catch(() => null);
-        const [own, merged] = await Promise.all([lockfile(input.root), lockfile(worktree)]);
-        if (existsSync(join(input.root, 'node_modules')) && own !== null && own === merged) await symlink(join(input.root, 'node_modules'), join(worktree, 'node_modules'));
-        else if (await holds('package-lock.json')) {
-          const installed = await child('install', 'npm', npmCiArgs, { env: npmCiEnvironment(env) });
-          if (hostEnded(installed) || toolchainStartFailed(installed)) throw runnerFailure('install', installed);
-          if (!installed.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
-        }
-        const manifest = await readFile(join(worktree, 'package.json'), 'utf8').catch(() => undefined);
-        // An unreadable package.json builds as before; one the merge broke is its failed build, never the host's (PRRT_kwDOUZby-s6tZsNG); only one that declares no build script skips it.
-        try { packageScripts = manifest === undefined ? undefined : JSON.parse(manifest)?.scripts; } catch { enter('build'); return finish('fail', { passed: 0, failed: [], files: 0 }); }
-        if (packageScripts === undefined || packageScripts?.build) {
-          enter('build');
-          enterStep('build');
-          const built = await child('build', 'npm', ['run', 'build']);
-          if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
-          if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
-        }
-        // GY-2092: dashboard changes run the Playwright suite with the image's pinned Chromium.
-        // The image is read-only; profiles and caches belong to this allocation.
-        if (hasBrowserTestCheck(packageScripts) && touchesDashboard(input.changedFiles)) {
-          enter('tests');
-          enterStep('tests: test:browser');
-          const browser = await child('tests', 'npm', ['run', 'test:browser']);
-          if (hostEnded(browser)) throw runnerFailure('tests', browser);
-          if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });
-          browserSuitePassed = true;
-        }
-      }
-      // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
-      if (input.e2eProofs?.length) {
-        enter('tests');
-        const ran = await containerTrialE2e({
-          worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
-          networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
-          scratch: temporary ?? checkout.directory, budgetMs: remaining(), run, log: line => log.push(line),
-        });
-        // Bounded so the trial record the merge writer posts stays within its schema.
-        e2e.push(...ran.map(entry => entry.failingStep ? { ...entry, failingStep: entry.failingStep.slice(0, 1000) } : entry));
-      }
-      // GY-2958: without Graphyard's own selection script, run the managed repository's preMerge /
-      // package.json test checks; a Node package with none configured records that explicitly.
-      // A Playwright-only package whose browser suite already passed counts that run; one whose
-      // suite is configured but not selected for this change (no dashboard touch) is not "missing".
-      if (!await holds('scripts/ci-tests.mjs')) {
-        if (!(await holds('package.json'))) return finish('pass', { passed: 0, failed: [], files: 0 });
-        let preMerge: { check: string; command: string | null }[] | null = null;
-        if (await holds('graphyard.json')) {
-          try {
-            const delivery = (JSON.parse(await readFile(join(worktree, 'graphyard.json'), 'utf8')) as { delivery?: { mergeGate?: { preMerge?: { check: string; command: string | null }[] } } }).delivery;
-            preMerge = delivery?.mergeGate?.preMerge ?? null;
-          } catch { /* unreadable policy: fall through to package.json scripts */ }
-        }
-        const checks = repositoryTrialChecks({ preMerge, scripts: packageScripts });
-        if (!checks.length) {
-          if (browserSuitePassed) return finish('pass', { passed: 1, failed: [], files: 1 });
-          if (hasBrowserTestCheck(packageScripts)) return finish('pass', { passed: 0, failed: [], files: 0 });
-          enter('tests');
-          log.push(noTestCheckConfigured);
-          return finish('pass', { passed: 0, failed: [noTestCheckConfigured], files: 0 });
-        }
-        enter('tests');
-        const failed: string[] = [];
-        let passed = 0, runnerExit: number | null = 0;
-        let detail: { failingCase?: string | null; timedOut?: boolean } | undefined;
-        let failingOutput: string | undefined;
-        for (const check of checks) {
-          enterStep(`tests: ${check.check}`);
-          const ran = await child('tests', check.argv[0]!, check.argv.slice(1));
-          if (hostEnded(ran)) throw runnerFailure('tests', ran);
-          if (!ran.ok) {
-            // GY-2960: name the failing test files and first case from the check's output, not only the check.
-            const parsed = repositoryCheckFailure(ran.out);
-            failed.push(...(parsed.files.length ? parsed.files : [check.check]));
-            detail = { failingCase: parsed.firstCase, timedOut: parsed.timedOut };
-            failingOutput = log.at(-1);
-            runnerExit = exitCode({ status: ran.status, signal: ran.signal, cause: ran.cause });
-            break;
-          }
-          passed++;
-        }
-        const logTail = failingOutput && log.join('\n').length > tailLength ? failureTail([failingOutput]) : tail();
-        return finish('pass', { passed, failed, files: checks.length }, runnerExit, undefined, logTail, detail);
-      }
-      enter('selection');
-      enterStep('selection');
-      // A selection child the host killed or could not start is no verdict (GY-1832); only one that exits non-zero fails the selection.
-      const selection = await child('selection', 'node', ['scripts/ci-tests.mjs', 'affected', ...input.changedFiles]);
-      if (hostEnded(selection)) throw runnerFailure('selection', selection);
-      if (!selection.ok) return finish('pass', { passed: 0, failed: ['scripts/ci-tests.mjs affected'], files: 0 });
-      const files = listed(selection.out);
-      // An affected selection of nothing runs nothing.
-      if (!files.length) return finish('pass', { passed: 0, failed: [], files: 0 });
-      enter('tests');
-      enterStep('tests');
-      // Each shard is one runner process over the same checkout, `lanes` of them at once. Failing per-file
-      // records decide which files failed; the human-readable log is read when those records name none —
-      // including a partial-record run that finished some files and printed a named failure for another
-      // (GY-1548). A shard that ends non-zero naming no failing file is a runner failure, unless another
-      // shard named one: a named failing test is the merge's, and stays a failing verdict.
-      const cores = Math.max(1, Math.floor(input.cores ?? availableParallelism()));
-      const shards = input.groupSize === undefined ? shardTestFiles(files, trialShardLanes(cores), await checkoutDurations(worktree)) : groupTestFiles(files, input.groupSize);
-      const slotsDirectory = (await import('../master/verification-slots.js')).verificationSlotsDirectory(input.base);
-      const { lanes, breadth } = trialShardBreadth(cores, shards.length, await trialAffordableFiles(input.memory, slotsDirectory));
-      const settledShards: ({ group: TrialGroup; entries: string[]; unattributed: TrialRunnerError | null } | undefined)[] = [];
-      let next = 0, stopped: unknown = null;
-      const lane = async () => {
-        // A lane takes the next shard until none is left or another lane's shard ended the trial; a running shard is always awaited, never orphaned.
-        while (stopped === null && next < shards.length) {
-          const index = next++, group = shards[index]!, entries: string[] = [];
-          try {
-            const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
-            await writeFile(list, `${group.join('\n')}\n`);
-            const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'], { entries });
-            const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
-            // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
-            const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);
-            const failing = [...new Set(namedByRecords.length ? namedByRecords : tests.ok ? [] : failingFilesInLog(tests.out, group))];
-            settledShards[index] = { group: { files: group, status: tests.status, signal: tests.signal, failed: failing }, entries,
-              unattributed: !tests.ok && !failing.length ? runnerFailure('tests', tests, group, recorded.filter(record => group.includes(record.file)).length) : null };
-          } catch (error) { log.push(...entries); stopped ??= error; }
-        }
-      };
-      // The shards' files stay declared on the host's verification slots until every shard stops, so a suite that starts meanwhile deducts them before they allocate.
-      const release = await declareTrialFiles(slotsDirectory, input.key ?? input.mergeSha.slice(0, 12), lanes * breadth);
-      try { await Promise.all(Array.from({ length: lanes }, lane)); } finally { await release(); }
-      const ran = settledShards.filter(shard => shard !== undefined);
-      for (const shard of ran) log.push(...shard.entries);
-      // A shard past the deadline ends the trial as a timeout once every shard has stopped, its log holding what the others printed.
-      if (stopped instanceof TrialTimeoutError) throw new TrialTimeoutError('tests', Math.max(0, now() - startedAt), tail());
-      if (stopped !== null) throw stopped;
-      const groups = ran.map(shard => shard.group), failingOutput = ran.filter(shard => shard.group.failed.length).map(shard => shard.entries.at(-1)!);
-      const unattributed = ran.find(shard => shard.unattributed)?.unattributed ?? null;
-      const failed = [...new Set(groups.flatMap(group => group.failed))];
-      if (!failed.length && unattributed) throw unattributed;
-      const worst = groups.find(group => group.status !== 0);
-      return finish('pass', { passed: Math.max(0, files.length - failed.length), failed, files: files.length }, worst ? exitCode({ status: worst.status, signal: worst.signal, cause: undefined }) : 0, groups,
-        failingOutput.length && log.join('\n').length > tailLength ? failureTail(failingOutput) : tail());
+      return await runChecks(repositoryTrialChecks({ preMerge, scripts: packageScripts }));
     } catch (error) {
       if (error instanceof TrialTimeoutError || error instanceof TrialRunnerError) throw error;
       log.push(`trial checkout failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -1092,7 +1058,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
   // The temporary directory goes with it: a failure to remove any is the cleanup's, naming the directory, and none stops the others.
   // The short checkout's files go first, so the session's removal prunes its registration in the repository.
   const failures: { directory: string; cause: unknown }[] = [];
-  for (const directory of [temporary, home!, ...(place ? [place] : [])]) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
+  for (const directory of [temporary, home, place]) if (directory) await clear(directory).catch(cause => { failures.push({ directory, cause }); });
   await (input.remove ?? removeSessionCheckout)(input.root, input.base, checkout.directory, input.run).catch(cause => { failures.push({ directory: checkout.directory, cause }); });
   const failure = failures[0];
   if (failure) {

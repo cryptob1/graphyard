@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:net';
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createRequire } from 'node:module';
 import { homedir, tmpdir } from 'node:os';
@@ -116,6 +116,7 @@ test('unit:trial-merge-conflict-reported — a head that conflicts with the base
 
 const fixtureFiles = {
   '.gitignore': 'node_modules\n',
+  'graphyard.json': readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8'),
   'package.json': JSON.stringify({ name: 'fixture', scripts: { build: 'node build.js' } }),
   'package-lock.json': '{"lockfileVersion":3}\n',
   // With a `kill-build` marker the build child dies on a signal, as a host out of memory ends it.

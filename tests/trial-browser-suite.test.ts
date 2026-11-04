@@ -1,11 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { defaultChildRun } from '../src/child-runner.js';
-import { browserSuite, runTrial, trialMerge } from '../src/merge-writer/trial.js';
+import { runTrial, trialMerge } from '../src/merge-writer/trial.js';
 import { trialFailureReason } from '../src/merge-writer/executor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -19,6 +19,9 @@ test('unit:trial-runs-browser-suite — a trial of a change touching web/ runs n
   gitIn(root, 'init', '-q', '-b', 'main');
   const write = (path: string, content: string) => { mkdirSync(dirname(join(root, path)), { recursive: true }); writeFileSync(join(root, path), content); };
   write('package.json', JSON.stringify({ name: 'fixture', scripts: { build: 'true', 'test:browser': 'playwright test' } }));
+  const policy = JSON.parse(readFileSync(new URL('../graphyard.json', import.meta.url), 'utf8')).delivery;
+  policy.mergeGate.preMerge = policy.mergeGate.preMerge.filter((check: { paths?: string[] }) => check.paths);
+  write('graphyard.json', JSON.stringify({ delivery: policy }));
   write('web/app.tsx', 'one\n'); write('src/daemon/cycle.ts', 'one\n');
   gitIn(root, 'add', '-A'); gitIn(root, 'commit', '-q', '-m', 'base');
   const base = gitIn(root, 'rev-parse', 'HEAD');
@@ -43,7 +46,7 @@ test('unit:trial-runs-browser-suite — a trial of a change touching web/ runs n
 
   const dashboard = await trialOf('web/app.tsx', true);
   assert.deepEqual(dashboard.npm, ran, 'a change to web/ uses installed Chromium and runs the browser suite after the build');
-  assert.deepEqual(dashboard.verdict.tests.failed, [browserSuite]);
+  assert.deepEqual(dashboard.verdict.tests.failed, ['browser-tests/']);
   assert.match(trialFailureReason({ run: dashboard.verdict })!, /tests browser-tests\//, 'a failing browser test refuses the merge');
   assert.match(dashboard.verdict.logTail, /dashboard\.spec\.ts:12/, 'the failing browser test is in the log');
 
