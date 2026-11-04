@@ -992,7 +992,10 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
     if (variant === 'trial-refusal') await send({ kind: 'refused', head: heads[n]!, reason: `${trialFailurePrefix}: tests tests/recovery.test.ts` });
     if (variant === 'policy') {
       const current = await document(w.id);
-      await engine.execute(admin, 'requirements', w.id, { expectedPolicyRevision: current.policyRevision, reason: 'revised requirements', criteria: current.criteria, dependencies: [] }, randomUUID());
+      await engine.execute(admin, 'requirements', w.id, {
+        expectedPolicyRevision: current.policyRevision, reason: 'revised requirements', owner: current.owner,
+        criteria: current.criteria, dependencies: current.dependencies, exclusiveResources: current.exclusiveResources ?? [], producerProofs: current.producerProofs,
+      }, randomUUID());
     }
     if (variant === 'review' || variant === 'superseded') {
       // Model changed review/candidate facts under the same locking and save path. An HTTP
