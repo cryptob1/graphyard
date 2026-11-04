@@ -11,7 +11,10 @@ import { createRequire } from 'node:module';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { watchPorts, deployHealth } from '../src/cli/upgrade.js';
 import { deployOnce, deployRecordPath, readDeployRecord } from '../src/deploy-watch.js';
-import { defaultChildRun } from '../src/child-runner.js';
+import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
+import { alignLoopUnit, deployUnitText, loopUnitText } from '../src/supervisor.js';
+import { perInstallUnits, deployUnitOf } from '../src/install/units.js';
+import { masterConfigSchema } from '../src/master.js';
 import { restartCause } from '../src/daemon/run.js';
 
 const cliReleasePath = (directory: string, commit: string) => join(directory, 'deploy', 'build', '.graphyard', 'cli-releases', commit);
@@ -72,6 +75,35 @@ function invoke(root: string, url: string) {
   });
 }
 
+// The actual CLI command runs in another process, so replacing its source cannot
+// replace already-loaded predecessor functions. Only host effects cross the IPC bridge.
+function watcher(root: string, run: ChildRun) {
+  const child = spawn(process.execPath, ['--import', createRequire(import.meta.url).resolve('tsx'),
+    join(root, 'src/cli.ts'), 'upgrade', '--watch', '--checkout', root], {
+    cwd: root, env: process.env, stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+  });
+  let stderr = '';
+  let ready!: () => void, deployed!: () => void;
+  const started = new Promise<void>(done => { ready = done; });
+  const serving = new Promise<void>(done => { deployed = done; });
+  child.stderr.on('data', data => { stderr += data; if (stderr.includes('[graphyard-deploy] serving ')) deployed(); });
+  child.on('message', async (message: any) => {
+    if (message.kind !== 'run') return;
+    try {
+      const value = await run(message.command, message.args, message.options);
+      child.send({ id: message.id, value });
+      if (message.command === 'git' && message.args.join(' ') === `-C ${root} rev-parse HEAD`) ready();
+    } catch (error) { child.send({ id: message.id, error: String(error) }); }
+  });
+  const exited = new Promise<void>(done => child.once('exit', () => done()));
+  const unexpected = exited.then(() => { throw new Error(`watcher exited before completing: ${stderr}`); });
+  // Each race consumes the exit rejection, including during normal test cleanup.
+  const startup = Promise.race([started, unexpected]), publication = Promise.race([serving, unexpected]);
+  void startup.catch(() => {}); void publication.catch(() => {});
+  return { started: startup, serving: publication,
+    async stop() { child.kill('SIGTERM'); await exited; }, pid: child.pid };
+}
+
 test('integration:deploy-stable-cli — real CLI loading survives delayed install, failed install, healthy handover and rollback; mismatches remain bounded refusals', async () => {
   const base = await temporaryDirectory('deploy-stable-cli');
   const configHome = join(base, "operator's config");
@@ -79,6 +111,21 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
   await mkdir(checkout); await mkdir(directory, { recursive: true });
   for (const name of ['src', 'bin']) await cp(join(source, name), join(checkout, name), { recursive: true });
   for (const name of ['package.json', 'package-lock.json']) await cp(join(source, name), join(checkout, name));
+  await cp(join(checkout, 'src/child-runner.ts'), join(checkout, 'src/child-runner-real.ts'));
+  await writeFile(join(checkout, 'src/child-runner.ts'), `
+    export * from './child-runner-real.js';
+    import { defaultChildRun as real } from './child-runner-real.js';
+    if (process.send) process.once('SIGTERM', () => process.disconnect());
+    let sequence = 0;
+    const pending = new Map();
+    if (process.send) process.on('message', message => {
+      const call = pending.get(message.id); if (!call) return;
+      pending.delete(message.id); message.error ? call.reject(new Error(message.error)) : call.resolve(message.value);
+    });
+    export const defaultChildRun = (command, args, options) => !process.send ? real(command, args, options) : new Promise((resolve, reject) => {
+      const id = ++sequence; pending.set(id, { resolve, reject }); process.send({ kind: 'run', id, command, args, options });
+    });
+  `);
   await writeFile(join(checkout, '.gitignore'), 'node_modules/\n.graphyard/\n');
   git(checkout, 'init', '-q', '-b', 'main'); git(checkout, 'add', '.'); git(checkout, 'commit', '-qm', 'A');
   const a = git(checkout, 'rev-parse', 'HEAD');
@@ -109,12 +156,13 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
   let waitForBuild = Promise.resolve();
   const installs: string[] = [], restarts: string[] = [], previews: string[] = [];
   let pending: Promise<unknown> | undefined;
-  const secret = join(directory, 'coordinator.token'); await writeFile(secret, 'must-stay-hidden');
+  let oldWatch: ReturnType<typeof watcher> | undefined, newWatch: ReturnType<typeof watcher> | undefined;
+  const secret = join(directory, 'coordinator.token'); await writeFile(secret, 'must-stay-hidden', { mode: 0o600 });
   const sessions = new Map<string, Awaited<ReturnType<typeof maskedSession>>>();
-  sessions.set(legacy, await maskedSession(legacy, checkout, configHome, secret, true));
   const load = (root: string) => sessions.get(root)?.invoke(url) ?? invoke(root, url);
   try {
-    const ports = await watchPorts({ cliRoot: checkout, repoRoot: checkout, repository: 'owner/project', url, run: async (command, args, options) => {
+    sessions.set(legacy, await maskedSession(legacy, checkout, configHome, secret, true));
+    const run: ChildRun = async (command, args, options) => {
       // Recognize the predecessor's shell invocation too, so exercising the base fails
       // on its mutation of the active tree, without installing dependencies over the network.
       const oldInstall = command === 'sh' && /^npm ci --prefix "([^"]+)"$/.exec(args[1] ?? '');
@@ -139,7 +187,8 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
       }
       if (command === 'docker') return '';
       return defaultChildRun(command, args, options);
-    } });
+    };
+    const ports = await watchPorts({ cliRoot: checkout, repoRoot: checkout, repository: 'owner/project', url, run });
     assert.notEqual(typeof ports, 'string'); if (typeof ports === 'string') throw new Error(ports);
     ports.health = deployHealth(checkout, url, 1, 0);
     const file = deployRecordPath(checkout);
@@ -147,11 +196,42 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     const oldLoader = await readFile(join(legacy, 'node_modules/tsx/dist/loader.mjs'));
     const oldSource = await readFile(join(legacy, 'src/cli/context.ts'));
     await check();
+    // Start the real predecessor entry on A, then change its file on disk. Its
+    // loaded functions would still npm-ci deploy/build on the next poll.
+    await mkdir(join(checkout, '.graphyard'), { recursive: true });
+    await writeFile(join(checkout, '.graphyard/master.json'), JSON.stringify(masterConfigSchema.parse({
+      version: 1, url, credentialFile: secret, cliPath: join(checkout, 'bin/graphyard.mjs'),
+      repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'test-host',
+      masterAgentName: 'test-master', workers: [], run: { intervalSeconds: 300 },
+    })));
+    const upgrade = join(checkout, 'src/cli/upgrade.ts');
+    await cp(join(source, 'tests/fixtures/deploy-predecessor/upgrade.ts.txt'), upgrade);
+    oldWatch = watcher(checkout, run); await oldWatch.started;
+    await cp(join(source, 'src/cli/upgrade.ts'), upgrade);
     const b = await commit('B');
     waitForInstall = new Promise(done => { releaseInstall = done; }); installStarted = new Promise(done => { started = done; });
     waitForBuild = new Promise(done => { releaseBuild = done; });
     const building = new Promise<void>(done => { buildStarted = done; });
-    pending = deployOnce(file, ports, () => {}); await installStarted;
+    // Existing unit alignment is the supported migration: even though ExecStart
+    // is unchanged, the implementation marker forces the old process to restart.
+    const home = join(base, 'supervisor'), unitDirectory = join(home, '.config/systemd/user');
+    await mkdir(unitDirectory, { recursive: true });
+    const units = perInstallUnits('owner/project');
+    await writeFile(join(checkout, '.graphyard/units.json'), JSON.stringify(units));
+    const unitInput = { root: checkout, cliPath: join(checkout, 'bin/graphyard.mjs'), repository: 'owner/project', intervalSeconds: 300, installDir: directory };
+    await writeFile(join(unitDirectory, units.master), loopUnitText(unitInput));
+    await writeFile(join(unitDirectory, deployUnitOf(units)), deployUnitText(unitInput).replace(/^# Deploy implementation:.*\n/m, ''));
+    const calls: string[] = [];
+    await alignLoopUnit(unitInput, { home, temporaryDirectories: [], run: (command, args) => {
+      calls.push([command, ...args].join(' '));
+      if (command === 'systemctl' && args.join(' ') === `--user restart ${deployUnitOf(units)}`) {
+        pending = (async () => { await oldWatch!.stop(); newWatch = watcher(checkout, run); await newWatch.serving; await newWatch.stop(); return 'deployed'; })();
+      }
+      return args.includes('is-enabled') ? 'enabled' : args.includes('is-active') ? 'active' : args.includes('show-user') ? 'yes' : '';
+    } });
+    assert.ok(pending, 'alignment must restart the predecessor, even with unchanged ExecStart');
+    assert.equal(calls.filter(call => call.includes(' restart ')).length, 1, 'only the deploy watcher restarts');
+    await installStarted;
     assert.equal(git(legacy, 'rev-parse', 'HEAD'), a, 'the active legacy CLI source stays unchanged throughout install');
     for (let index = 0; index < 3; index++) await check();
     assert.equal(git(legacy, 'rev-parse', 'HEAD'), a); assert.equal(git(checkout, 'rev-parse', 'HEAD'), a);
@@ -199,6 +279,7 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     assert.equal(apiCalls, callsBefore, 'true mismatch never reaches the API');
   } finally {
     releaseInstall?.(); releaseBuild?.();
+    await oldWatch?.stop(); await newWatch?.stop();
     await pending?.catch(() => {});
     for (const session of sessions.values()) await session.close();
     server.closeAllConnections(); await new Promise<void>(done => server.close(() => done()));
