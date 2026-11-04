@@ -1,4 +1,4 @@
-import { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, serveRevertsKept, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
+import { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
 export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, serveRevertsKept, pendingReworkSchema, unconfirmedRecordSchema, mergeWriterStateSchema, emptyMergeWriterState, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
 // Concern: the control-plane merge executor's cycle step (GY-1524) — reconcile open intents, pick the next head, run one merge beside the cycle and record what it did.
 import { randomUUID } from 'node:crypto';
@@ -327,7 +327,7 @@ const serveRevertState = (state: DaemonState) => state.mergeWriter.serveRevert ?
  * status to name, and anything else — a trial that never settled or a push the base move
  * rejected — is tried again.
  */
-function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWriterReads, flight: { key: string; head: string; revert: RevertFlight }, settled: RevertSettled) {
+async function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWriterReads, flight: { key: string; head: string; revert: RevertFlight }, settled: RevertSettled) {
   const { state, performed } = cycle;
   const revert = flight.revert, writer = state.mergeWriter, revertState = serveRevertState(state);
   const at = () => new Date(cycle.now()).toISOString();
@@ -342,16 +342,21 @@ function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWriterRead
     action('failed', `The revert of ${flight.key}'s merge ${short(revert.mergeSha)} was not pushed: ${settled.reason}; it is tried again once the base tip moves or the hold elapses`);
     return;
   }
+  const culprit = cycle.snapshot.work.find(item => item.key === flight.key);
+  if (!culprit) throw new Error(`Missing revert culprit ${flight.key}`);
+  await reads.record(culprit, { kind: 'serve-revert', serve: revert.serve, mergeSha: revert.mergeSha,
+    outcome: settled.ok ? 'reverted' : 'refused', revertSha: settled.ok ? revert.revertSha : null,
+    reason: settled.ok ? null : settled.reason.slice(0, 2000), reland: null,
+    failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason, at: at() });
   if (revertState.retry?.serve === revert.serve) revertState.retry = null;
   if (!settled.ok) {
     revertState.held = { serve: revert.serve, culprit: flight.key, reason: settled.reason.slice(0, 2000), at: at() };
     action('failed', `Held: ${settled.reason}`);
     return;
   }
-  const reverts = [...revertState.reverts, { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland: null,
+  const reverts = [...revertState.reverts.filter(entry => entry.mergeSha !== revert.mergeSha), { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland: null,
     failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason, at: at() }];
-  const forgotten = reverts.length > serveRevertsKept ? reverts.find(entry => entry.reland) : undefined;
-  revertState.reverts = reverts.filter(entry => entry !== forgotten);
+  revertState.reverts = reverts;
   if (revertState.held?.serve === revert.serve) revertState.held = null;
   writer.lastMergeAt = at();
   action('done', `Reverted ${flight.key}'s merge ${short(revert.mergeSha)} from ${reads.baseBranch} as ${short(revert.revertSha)} after served ${short(revert.serve)} failed the required case ${revert.failingCase}`);
@@ -369,8 +374,8 @@ async function reconcileServeRevert(cycle: ServeRevertCycle, reads: MergeWriterR
   if (!inFlight?.revert || flights.has(cycle.state)) return false;
   let pushed: boolean;
   try { await reads.fetch(); pushed = await reads.holds(inFlight.revert.revertSha); } catch { return false; }
+  if (pushed) await settleServeRevertFlight(cycle, reads, { key: inFlight.key, head: inFlight.head, revert: inFlight.revert }, { ok: true });
   writer.inFlight = null;
-  if (pushed) settleServeRevertFlight(cycle, reads, { key: inFlight.key, head: inFlight.head, revert: inFlight.revert }, { ok: true });
   return true;
 }
 
@@ -393,6 +398,9 @@ async function fileOwedRelands(cycle: ServeRevertCycle, reads: MergeWriterReads)
       const adopted = snapshot.work.find(entry => entry.title === expected || entry.title.startsWith(`${expected}:`));
       const reland = adopted?.key ?? (await reads.createWork?.(relandItemFor(culprit, { ...done, baseBranch: reads.baseBranch }), `serve-reland:${done.mergeSha}`))?.key;
       if (!reland) continue;
+      await reads.record(culprit, { kind: 'serve-revert', serve: done.serve, mergeSha: done.mergeSha,
+        outcome: 'reverted', revertSha: done.revertSha, reason: null, reland,
+        failingCase: done.failingCase, failingStep: done.failingStep, failingReason: done.failingReason, at: done.at });
       done.reland = reland;
       performed.push(storeAction(state, key, { kind: 'merge', work: done.culprit, principal: null, state: 'done',
         detail: `Filed ${reland} for the revert of ${done.culprit}'s merge ${done.mergeSha.slice(0, 12)}`.slice(0, 1900), attempts, epoch: null, cycle: state.cycle, at }));
@@ -434,8 +442,7 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   const failing = { serve, failingCase: check.case.slice(0, 500), failingStep: check.step?.slice(0, 2000) ?? null, failingReason: check.reason?.slice(0, 2000) ?? null };
   // One serve reverts once.
   if (revertState.reverts.some(entry => entry.serve === serve)) return false;
-  // Every kept record owes its re-land: a new revert would have to forget one, so it waits for a filing.
-  if (revertState.reverts.filter(entry => !entry.reland).length >= serveRevertsKept) return false;
+  if (snapshot.work.some(item => item.mergeLedger?.serveReverts?.some(entry => entry.serve === serve && entry.outcome === 'refused'))) return false;
   if (revertState.held?.serve === serve || flights.has(state)) return false;
   // A serve the guard already answered reads nothing until the serve or the baseline moves.
   if (revertState.answered?.serve === serve && revertState.answered.lastVerified === revertState.lastVerified) return false;
@@ -488,6 +495,8 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
       return true;
     }
     if (result.outcome === 'held') {
+      await reads.record(result.culprit, { kind: 'serve-revert', ...failing, mergeSha: result.mergeSha,
+        outcome: 'refused', revertSha: null, reason: result.reason.slice(0, 2000), reland: null, at: at() });
       revertState.held = { serve, culprit: result.culprit.key, reason: result.reason.slice(0, 2000), at: at() };
       performed.push(storeAction(state, mergeWriterActionKey(result.culprit.key, result.mergeSha), { kind: 'merge', work: result.culprit.key, principal: null, state: 'failed',
         detail: `Held: ${result.reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: at() }));
@@ -520,6 +529,20 @@ export async function mergeWriterStep(cycle: Cycle) {
     try { await itemPreviewStep(live, snapshot.work, reads.itemPreviews); } catch (error) { console.error(`The item preview step failed: ${error instanceof Error ? error.message : String(error)}`); }
   }
   const writer = state.mergeWriter;
+  // Ledger outcomes survive a cursor archive; these fields are only a display/read cache.
+  const revertCache = serveRevertState(state);
+  const cachedReverts = new Map(revertCache.reverts.map(entry => [entry.mergeSha, entry]));
+  for (const item of snapshot.work) for (const entry of item.mergeLedger?.serveReverts ?? []) {
+    if (entry.outcome === 'reverted' && entry.revertSha) {
+      const existing = cachedReverts.get(entry.mergeSha);
+      if (!existing) revertCache.reverts.push({ serve: entry.serve, mergeSha: entry.mergeSha, revertSha: entry.revertSha, culprit: item.key, reland: entry.reland, failingCase: entry.failingCase, failingStep: entry.failingStep, failingReason: entry.failingReason, at: entry.at });
+      else if (entry.reland) existing.reland = entry.reland;
+    } else if (entry.outcome === 'refused') {
+      revertCache.held = { serve: entry.serve, culprit: item.key, reason: entry.reason ?? '', at: entry.at };
+    }
+  }
+  writer.refusals = snapshot.work.flatMap(item => item.mergeLedger?.state === 'refused' && item.mergeLedger.head && item.mergeLedger.refusal
+    ? [{ key: item.key, head: item.mergeLedger.head, reason: item.mergeLedger.refusal.reason, at: item.updatedAt }] : []).slice(-mergeWriterKeptRefusals);
   writer.timeouts ??= []; // GY-2079: the yields the queue turns over, read plainly below and persisted with the rest.
   const at = () => new Date(now()).toISOString();
   let changed = false, delivered = false;
@@ -528,15 +551,14 @@ export async function mergeWriterStep(cycle: Cycle) {
   if (writer.motionBoundMs !== motionBoundMs) { writer.motionBoundMs = motionBoundMs; changed = true; }
   const flight = flights.get(state);
   if (flight?.settled) {
-    flights.delete(state);
-    writer.inFlight = null; changed = true;
+    changed = true;
     if (flight.revert) {
       // GY-2990: a serve-revert flight settles its pushed revert, holds
       // it, or owes its retrial. A trial that threw settles as an owed retrial too — never as a
       // merge of the culprit's key under the revert sha, which would dirty the culprit's records.
       const revert: RevertSettled = 'revert' in flight.settled ? flight.settled.revert
         : { ok: false, reason: `the revert trial failed before it was recorded: ${message('error' in flight.settled ? flight.settled.error : 'no verdict')}`, retry: true };
-      settleServeRevertFlight(cycle, reads, { key: flight.key, head: flight.head, revert: flight.revert }, revert);
+      await settleServeRevertFlight(cycle, reads, { key: flight.key, head: flight.head, revert: flight.revert }, revert);
     } else {
       // A batch (GY-2088) settles each of its heads as a merge of its own.
       const results: BatchResult[] = 'error' in flight.settled ? [{ work: { key: flight.key, id: flight.id } as Work, error: flight.settled.error }] : (flight.settled as { results: BatchResult[] }).results;
@@ -576,6 +598,7 @@ export async function mergeWriterStep(cycle: Cycle) {
       }
     }
   }
+  if (flight?.settled) { flights.delete(state); writer.inFlight = null; }
   if (await requestPendingReworks(cycle)) changed = true;
   // GY-2990: a served commit that fails live verification reverts only the item that broke it.
   // The attempt runs beside the cycle like a merge (its trial and leased push), so once one is

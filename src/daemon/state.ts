@@ -248,7 +248,14 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
   // The cursor is written twice per external action, so it is usually the first thing a full
   // volume stops. Saying so is the difference between a disk to reclaim and a mystery.
   try {
-    await writeFile(temporary, JSON.stringify(toleratedStateSchema().parse(boundDaemonState(state)), null, 2), { mode: 0o600, flag: 'wx' });
+    const stored = toleratedStateSchema().parse(boundDaemonState(state));
+    // Outcome history belongs to the control plane; keep only the loop's active coordination.
+    stored.mergeWriter.refusals = [];
+    if (stored.mergeWriter.serveRevert) {
+      stored.mergeWriter.serveRevert.reverts = [];
+      stored.mergeWriter.serveRevert.held = null;
+    }
+    await writeFile(temporary, JSON.stringify(stored, null, 2), { mode: 0o600, flag: 'wx' });
     await rename(temporary, file);
   } catch (error) { throw writeFailure(error, 'Writing the master daemon cursor'); }
   await chmod(file, 0o600);
