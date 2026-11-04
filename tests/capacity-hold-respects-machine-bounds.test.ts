@@ -7,7 +7,10 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { Store } from '../src/store.js';
-import { emptyDaemonState, profileHealth, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { profileHealth } from '../src/daemon/sessions.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import {
   masterConfigSchema, observedExhaustions, recordObservedExhaustion,
   reclaimableAgent, selectAccount, type HerdrAgent, type MasterConfig, type WorkerProfile,

@@ -6,7 +6,7 @@ import { mkdir, readFile, readlink, rm, symlink, writeFile } from 'node:fs/promi
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { runChild, type ChildRun } from '../src/child-runner.js';
-import { releaseHeldBranch } from '../src/master/worktrees.js';
+import { releaseHeldBranch } from '../src/master/branch-release.js';
 
 // GY-1215: the follow-up of GY-1059's review. A reused same-epoch path is cleaned, and the clean
 // may delete only what the preserved record holds in full: an untracked file the record merely

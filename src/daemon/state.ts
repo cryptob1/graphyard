@@ -9,7 +9,7 @@ import { boundDetail, actionDetailMax } from './text.js';
 import { randomUUID } from 'node:crypto';
 import { readFile, rename } from 'node:fs/promises';
 import { z } from 'zod';
-import { type MasterConfig } from '../master.js';
+import { type MasterConfig } from '../master/profiles.js';
 import { emptyProjectMemory } from '../model/project-memory.js';
 import { projectMemorySchema } from '../model-boundary/project-memory.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './merge-writer-state.js';

@@ -13,7 +13,9 @@ import { evidenceIndependenceRefusals, type Evidence, type Work } from '../src/m
 import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { type DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
-import { emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { runDaemon } from '../src/daemon/run.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { proofOutcome } from '../src/producer.js';
 import { coordinationHistoryLimit, coordinationViewHeader, coordinationSnapshot as trimInProcess, coordinationWork, type CoordinationRounds } from '../src/server/work-view.js';
 import { assertTiming, minimumSamples, steadyState } from './helpers/timing.js';

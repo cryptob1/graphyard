@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { dispatchWork, loadMasterConfig, setupMaster, type WorkerProfile } from '../src/master.js';
 import type { FleetClient } from '../src/fleet.js';
 import { expandTypedCommand } from './helpers/launch-shell.js';
-import { coordinatorConfinementRefusal } from '../src/master/profiles.js';
+import { coordinatorConfinementRefusal } from '../src/master/confinement.js';
 import { runtimeSandboxes, verifyWorkerSandbox, WorkerSandboxError } from '../src/worker-sandbox.js';
 import { applyRegistryMutation } from '../src/model-boundary/registry.js';
 import { chooseSession, emptyRegistry, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry.js';

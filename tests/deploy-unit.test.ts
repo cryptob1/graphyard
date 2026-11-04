@@ -9,7 +9,7 @@ import { buildPlan, prepareInstall } from '../src/install/index.js';
 import type { LocalSupervisor } from '../src/install/local.js';
 import { gitWatchPorts, pruneImages } from '../src/cli/upgrade.js';
 import { deployRecordPath, readDeployRecord, watchMain, type DeployWatchPorts } from '../src/deploy-watch.js';
-import { cycleSteps } from '../src/master-daemon.js';
+import { cycleSteps } from '../src/daemon/cycle.js';
 import { restartCause } from '../src/daemon/run.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { harness } from './install-harness.js';

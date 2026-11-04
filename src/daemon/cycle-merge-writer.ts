@@ -4,7 +4,7 @@ export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, 
 // Concern: the control-plane merge executor's cycle step (GY-1524) — reconcile open intents, pick the next head, run one merge beside the cycle and record what it did.
 import { randomUUID } from 'node:crypto';
 import type { ChildRun } from '../child-runner.js';
-import type { MasterConfig } from '../master.js';
+import type { MasterConfig } from '../master/profiles.js';
 import type { Work } from '../model.js';
 import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-ground.js';

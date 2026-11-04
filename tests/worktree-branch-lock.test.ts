@@ -11,7 +11,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { pipelineTimeline } from '../src/pipeline-speed.js';
-import { releaseHeldBranch } from '../src/master/worktrees.js';
+import { releaseHeldBranch } from '../src/master/branch-release.js';
 import { runChild } from '../src/child-runner.js';
 import { prepareWorkerLaunch, saveWorkerProfile, setupMaster } from '../src/master.js';
 import { workerCommand } from '../src/master/dispatch.js';

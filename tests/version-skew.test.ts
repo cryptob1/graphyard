@@ -20,7 +20,7 @@ import { loadStoredMasterConfig, masterConfigSchema } from '../src/master.js';
 import { loadConnection, setupRepository } from '../src/repository-setup.js';
 import { daemonStatePath, emptyDaemonState, readDaemonState, writeDaemonState } from '../src/daemon/state.js';
 import { carryUndeclared } from '../src/daemon/state.js';
-import { noteConfigReload } from '../src/master-daemon.js';
+import { noteConfigReload } from '../src/daemon/run.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const exec = promisify(execFile);

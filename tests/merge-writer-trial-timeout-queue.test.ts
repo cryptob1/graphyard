@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { foldMergeLedger } from '../src/model-boundary/merge-ledger.js';
 import { mergeWriterIdle, mergeWriterStep, trialTimeoutReason, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { emptyDaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
 import { masterConfigSchema } from '../src/master.js';
 import { TrialTimeoutError } from '../src/merge-writer/trial.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';

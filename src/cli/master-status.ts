@@ -2,7 +2,9 @@
 import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents, readSessionScreen } from '../master.js';
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
-import { daemonSummary, emptyMasterSession, masterSummary, profileHealth, readDaemonState } from '../master-daemon.js';
+import { daemonSummary } from '../daemon/run.js';
+import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
+import { profileHealth } from '../daemon/sessions.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport } from '../deploy-watch.js';

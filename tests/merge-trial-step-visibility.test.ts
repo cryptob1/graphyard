@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { masterConfigSchema } from '../src/master/profiles.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -15,8 +17,6 @@ import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, type MergeWriterR
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { writeDaemonState, readDaemonState } from '../src/daemon/state.js';
 import { timedMergePorts } from '../src/daemon/trial-timings.js';
-import { emptyDaemonState } from '../src/master-daemon.js';
-import { masterConfigSchema } from '../src/master.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { firstParentHolds, runTrial, trialCheckoutPrefix, trialMerge } from '../src/merge-writer/trial.js';
 import { mergeRecordKinds, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';

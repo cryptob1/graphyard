@@ -11,7 +11,9 @@ import { chooseSession, emptyRegistry, proposedRuntimes, supersededByRequest, ty
 import type { FleetClient } from '../src/fleet.js';
 import { loadMasterConfig, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews } from '../src/reviewer.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { registrySlotOf, endRegistrySlot } from '../src/master/registry-slot.js';
 import { fleet, requested } from './helpers/review-fleet.js';
 
