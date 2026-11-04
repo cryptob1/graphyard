@@ -16,7 +16,7 @@ The human keeps exactly three decisions: goals and priorities, spending money or
    ```
 
    Choose `--provider local` for embedded Postgres, or `--master codex` for Codex. Setup installs services, registers the merge writer's deploy key, and configures agents. Rerun the same command to resume.
-3. Open the printed Setup link. Connect AI coding accounts for worker and reviewer roles (the same account can serve both), using API keys or subscription sign-ins; approve browser logins. Existing host logins are discovered automatically. Wait for the checklist to turn green and onboarding changes to merge.
+3. Open the printed Setup link. Connect AI coding accounts for worker and reviewer roles (the same account can serve both), using API keys or subscription sign-ins; approve browser logins. Host logins are discovered automatically. Wait for the checklist to turn green and onboarding changes to merge.
 4. After “Everything is green”, run `graphyard master status` to inspect sessions and work. Open the final sign-in link within ten minutes.
 5. File your first goal in the dashboard's **New work item** form: give it a title, description, checkable acceptance criteria and required proof names. The master handles planning and dispatch.
 6. Later, preview updates with `graphyard upgrade --plan`, then apply with `graphyard upgrade` on the configured host.
