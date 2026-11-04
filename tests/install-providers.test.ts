@@ -8,12 +8,15 @@ import { harness, type Harness } from './install-harness.js';
 const inputsFor = () => ({ repository: 'owner/project', provider: 'compose' as const });
 const renderEnv = (values: { name: string; value: string }[]) => `${values.map(value => `${value.name}=${value.value}`).join('\n')}\n`;
 
-test('the compose provider produces a complete ordered plan that applies nothing', async () => {
+test('unit:install-providers — the compose provider produces a complete ordered plan that applies nothing', async () => {
   const fixture = await harness({ provider: 'compose' });
   try {
-    const session = await prepareInstall(fixture.root, inputsFor(), fixture.deps, 'plan');
+    const { request } = installRequestFromArgs(['--repo', 'owner/project', '--provider', 'compose', '--plan', '--port', '4317', '--review-policy', 'agent']);
+    const session = await prepareInstall(fixture.root, request, fixture.deps, 'plan');
     const plan = await buildPlan(session);
     assert.equal(plan.provider, 'compose');
+    assert.equal(session.inputs.port, 4317);
+    assert.equal(session.reviewPolicy, 'agent');
     assert.equal(session.materialized, false, 'the plan generated credentials');
     assert.ok(plan.preflight.length >= 2, 'the plan must report preflight');
     assert.ok(plan.preflight.every(item => item.ok || item.fix), 'preflight must say how to fix a gap');
@@ -39,7 +42,7 @@ test('the compose provider produces a complete ordered plan that applies nothing
   } finally { await fixture.cleanup(); }
 });
 
-test('re-planning an existing installation reports it as satisfied instead of proposing duplicates', async () => {
+test('unit:install-providers — re-planning an existing installation reports it as satisfied instead of proposing duplicates', async () => {
   const first = await harness({ provider: 'compose' });
   let second: Harness | undefined;
   try {
@@ -57,7 +60,7 @@ test('re-planning an existing installation reports it as satisfied instead of pr
   } finally { await first.cleanup(); if (second) await second.cleanup(); }
 });
 
-test('a changed value is reported as drift with a redacted comparison, never as a duplicate action', async () => {
+test('unit:install-providers — a changed value is reported as drift with a redacted comparison, never as a duplicate action', async () => {
   const first = await harness({ provider: 'compose' });
   let second: Harness | undefined;
   try {
@@ -87,7 +90,7 @@ test('a changed value is reported as drift with a redacted comparison, never as 
   } finally { await first.cleanup(); if (second) await second.cleanup(); }
 });
 
-test('changing the domain of an existing installation is reported as drift', async () => {
+test('unit:install-providers — changing the domain of an existing installation is reported as drift', async () => {
   const first = await harness({ provider: 'compose' });
   let second: Harness | undefined;
   try {
@@ -103,13 +106,13 @@ test('changing the domain of an existing installation is reported as drift', asy
   } finally { await first.cleanup(); if (second) await second.cleanup(); }
 });
 
-test('an observed value is compared by fingerprint only when it is a credential', () => {
+test('unit:install-providers — an observed value is compared by fingerprint only when it is a credential', () => {
   assert.match(variableMarker('DATABASE_URL', 'postgres://graphyard:secret@db:5432/graphyard'), /^sha:[0-9a-f]{12}$/);
   assert.match(variableMarker('GITHUB_PRIVATE_KEY', 'pem'), /^sha:[0-9a-f]{12}$/);
   assert.equal(variableMarker('HOST', '0.0.0.0'), '0.0.0.0');
 });
 
-test('retired install flags are rejected while remaining compose and local flags parse', () => {
+test('unit:install-providers — retired install flags are rejected while remaining compose and local flags parse', () => {
   for (const provider of ['compose', 'local']) {
     const args = ['--repo', 'owner/project', '--provider', provider, '--plan', '--port', '4317', '--review-policy', 'agent'];
     assert.equal(installRequestFromArgs(args).request.port, 4317);
@@ -120,7 +123,7 @@ test('retired install flags are rejected while remaining compose and local flags
   }
 });
 
-test('an older install.json loads with retired deployment fields stripped', async () => {
+test('unit:install-providers — an older install.json loads with retired deployment fields stripped', async () => {
   const fixture = await harness({ provider: 'compose' });
   try {
     const session = await materializeInstall(await prepareInstall(fixture.root, inputsFor(), fixture.deps));

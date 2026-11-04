@@ -29,7 +29,7 @@ Check `secretsRedacted` and `preflight[].ok`; run each reported fix. Agents appl
 node "$GRAPHYARD_CLI" install --provider PROVIDER --repo OWNER/REPO --apply
 ```
 
-Reruns are idempotent. Verify `/healthz`; use `install --logs` for failures. Compose mounts the checkout at `/repo`.
+Reruns are idempotent. Verify `/healthz`; inspect the provider logs for failures. Compose mounts the checkout at `/repo`.
 
 ## Step 3: deploy key
 

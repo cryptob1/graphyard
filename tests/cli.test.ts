@@ -42,7 +42,7 @@ test('master-only commands ignore an unrelated unavailable worker token file', a
   } finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
-test('github-setup is gone: the CLI registers no GitHub App command, and its help names none (GY-2010)', async () => {
+test('unit:cli — retired commands are absent from help; github-setup is gone: the CLI registers no GitHub App command, and its help names none (GY-2010)', async () => {
   const { stdout } = await exec(process.execPath, [launcher, '--help']);
   assert.doesNotMatch(stdout, /github-setup|update-permissions/, 'no App registration or permission migration command is offered');
   assert.doesNotMatch(stdout, /master merge|master principals|scenario file\.json|--delivery local\|/, 'retired commands and delivery choices are absent');
