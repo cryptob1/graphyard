@@ -13,7 +13,9 @@ root of a nonzero integer polynomial, with reduced rational isolating intervals,
 exact multiplicities and width at most 2^-precisionBits. Ordinary arithmetic
 libraries are allowed; wrapping a CAS root solver is outside the goal. CLI, API
 and browser must agree. The independent SymPy oracle checks completeness as well
-as each interval and multiplicity.
+as each interval and multiplicity. Browser certification compares the complete
+rendered root records in order, including both exact endpoints and each associated
+multiplicity; missing, extra or stale records fail, including for no real roots.
 
 `benchmarks/hard-math/profiles/frozen-v1.json` pins the profile, generator,
 contract and oracle digests. Seeds 1, 2 and 3 cover dense degree-32 polynomials,
@@ -44,6 +46,10 @@ The focused `tests/hard-math-process.test.ts` regression also creates a real Git
 conflict through the real daemon's bounded process adapter and checks native
 refusal, conflicting paths and rework without retrying the refused head. Process
 errors preserve exit status, signal, timeout and captured stdout/stderr.
+The small `tests/hard-math-display.test.ts` Chromium diagnostic exercises the
+same rendered-text verifier with correct layouts and deliberately swapped
+endpoints/multiplicities, extra roots and fraction digits posing as multiplicity.
+Run it in the native image alongside the ordinary smoke checks.
 Fixtures use finite lookup artifacts, never an implementation solver. Missing
 delivery, incorrect artifacts and zero-count proofs must fail. The seed test
 command emits TAP so canonical trials observe positive execution counts.

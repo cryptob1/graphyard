@@ -7,6 +7,7 @@ import { freePort } from '../../src/cli/test-isolation.js';
 import { command } from './process.js';
 import { generate } from './generator.js';
 import { oracle } from './oracle.js';
+import { verifyDisplayedRoots } from './display.js';
 import type { Receipt } from './receipt-schema.js';
 
 /** All artifact code executes behind the ordinary credential-free trial boundary. */
@@ -59,17 +60,16 @@ export async function verifyArtifact(input:{root:string;sha:string;seed:number;p
     const page=await browser.newPage();
     page.setDefaultTimeout(10_000);
     // Real DOM interactions against the delivered server, checked against oracle-certified CLI.
-    for(const index of [2,3,5]) {
-      await page.goto(url);
+    await page.goto(url);
+    for(const index of [2,3,5,4]) {
       await page.locator('#coefficients').fill(requests[index].coefficients.join(' '));
       await page.locator('#precisionBits').fill('64');
       const response=page.waitForResponse(r=>r.url()===`${url}/roots`&&r.request().method()==='POST');
-      await page.locator('#solve').click();await response;
-      for(const root of answers[index].roots) {
-        await page.locator('#results').filter({hasText:`${root.lo.n}/${root.lo.d}`}).waitFor();
-        const text=await page.locator('#results').innerText();
-        if(!text.includes(`${root.hi.n}/${root.hi.d}`) || !text.includes(String(root.multiplicity))) throw new Error('UI omitted interval or multiplicity');
-      }
+      await page.locator('#solve').click();
+      await (await response).finished();
+      // Let the response handler paint, including clearing a previous result.
+      await page.evaluate(()=>new Promise<void>(done=>requestAnimationFrame(()=>requestAnimationFrame(()=>done()))));
+      await verifyDisplayedRoots(page.locator('#results'),answers[index].roots);
     }
     await page.locator('#coefficients').fill('0');await page.locator('#solve').click();
     await page.locator('#error').filter({hasText:'ZERO_POLYNOMIAL'}).waitFor();
