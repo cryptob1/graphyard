@@ -51,7 +51,7 @@ before(async () => {
   await database.initialise(); await database.start(); await database.createDatabase('validation_import_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/validation_import_test`); await store.init();
   const engine = new Engine(store, 120, 'owner/project'); engine.gitRunner = github.run;
-  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
+  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });
@@ -278,4 +278,13 @@ test('unit:validation-import-bound-producer — the first import binds the candi
   assert.deepEqual(omitted.hold.cases.map((entry: any) => [entry.id, entry.runId]), [['pay', 'bound-1']], 'an omitted case stays held by the run that last reported it');
   const passed = await imported(run(producerSha, 'bound-3', [{ id: 'pay', verdict: 'passed', attempts: 1, durationMs: 1, required: true }]));
   assert.deepEqual(passed.hold, { held: false, cases: [], runs: 3 });
+});
+
+test('retired runner and attestor routes return 404 while import routes remain available', async () => {
+  for (const path of ['validation', 'validation/capacity', 'validation/definitions', 'validation/attempt/retired', 'validation/candidate/retired', 'validation/artifacts/retired/retired', 'validation/reuse', 'validation/replays', 'validation/analytics']) {
+    assert.equal((await call(path, operator)).status, 404, path);
+  }
+  for (const command of ['define', 'build', 'candidate', 'request', 'dispatch', 'ack', 'heartbeat', 'collection-authority', 'collection-heartbeat', 'result', 'cancel', 'settle', 'retry', 'artifacts', 'artifacts/migrate', 'reuse', 'replay']) {
+    assert.equal((await call(`validation/${command}`, operator, {})).status, 404, command);
+  }
 });

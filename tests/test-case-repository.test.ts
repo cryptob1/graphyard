@@ -41,7 +41,7 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/test_cases_test`); await store.init();
   engine = new Engine(store, 120, repository);
   validation = new Validation(engine, principals, repository);
-  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })), null);
+  http = server(engine, principals.map(p => ({ ...p, token: tokens.get(p.id)! })));
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });

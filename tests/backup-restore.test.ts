@@ -52,7 +52,7 @@ after(async () => { if (pg) await pg.stop(); });
  * A ledger holding everything the roadmap says an upgrade and restore must preserve: an
  * assignment under a live lease with its registered workspace, a submitted candidate whose
  * lease the submission released, the append-only history behind them, two revisions of one
- * scenario, and a validation request that is still pending. Plus the tables an installation accumulates around them. And the
+ * scenario. Plus the tables an installation accumulates around them. And the
  * delivery side of the same environment: an attested release build, the release selected
  * from it under an approval, the observer's lease and the observation that verified it,
  * then a second release selected over it and a rollback requested back to the first.
@@ -121,7 +121,7 @@ async function snapshot(store: Store) {
   return { work, events, scenarios, definitions, releases, approvals, environments, observations, leases, rulings, intake, rollbacks };
 }
 
-test('the documented backup and restore exercise preserves assignments, history, scenario revisions and pending requests, and the restored ledger keeps ordering', async () => {
+test('the documented backup and restore exercise preserves assignments, history, scenario revisions and delivery state, and the restored ledger keeps ordering', async () => {
   const source = new Store(url('source')); await source.init();
   const seeded = await populate(source);
   const before = await snapshot(source);

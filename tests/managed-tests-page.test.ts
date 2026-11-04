@@ -36,13 +36,13 @@ before(async () => {
   // The managed install: a fixture repository that is not Graphyard's own.
   gameStore = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/managed_tests_game`); await gameStore.init();
   gameEngine = new Engine(gameStore, 120, game);
-  gameHttp = server(gameEngine, [{ ...operator, token: tokens.get(operator.id)! }], null);
+  gameHttp = server(gameEngine, [{ ...operator, token: tokens.get(operator.id)! }]);
   await new Promise<void>(resolve => gameHttp.listen(0, '127.0.0.1', resolve));
   gameUrl = `http://127.0.0.1:${(gameHttp.address() as any).port}`;
   // The control plane for Graphyard's own repository.
   gyStore = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/managed_tests_graphyard`); await gyStore.init();
   gyEngine = new Engine(gyStore, 120, 'cryptob1/graphyard');
-  gyHttp = server(gyEngine, [{ ...operator, token: tokens.get(operator.id)! }], null);
+  gyHttp = server(gyEngine, [{ ...operator, token: tokens.get(operator.id)! }]);
   await new Promise<void>(resolve => gyHttp.listen(0, '127.0.0.1', resolve));
   gyUrl = `http://127.0.0.1:${(gyHttp.address() as any).port}`;
 });

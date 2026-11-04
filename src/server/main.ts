@@ -7,7 +7,6 @@ import { Engine } from '../engine.js';
 import { demand } from '../model.js';
 import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
-import { artifactBackendFromEnv, artifactCapacityFromEnv } from '../artifacts.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, observationLine, productionProvider, startProductionWatch } from '../production-watch.js';
@@ -35,14 +34,13 @@ export async function main(options: MainOptions = {}) {
   mark('store.init'); await store.init(); mark('store.init done');
   const engine = new Engine(store);
   engine.reconcileBatchMs = reconcileBatchMs(process.env.GRAPHYARD_RECONCILE_BATCH_MS);
-  const artifacts = { backend: artifactBackendFromEnv(), capacityBytes: artifactCapacityFromEnv() };
   // The configured roster is the one this installation runs with: an over-limit roster starts with a warning.
   const knownPrincipals = credentials.map(credential => credential.id);
   const build = buildIdentity();
   // Railway's API when a Railway token is set; GitHub deployments are no longer read (GY-2010).
   const provider = productionProvider(process.env, fetch);
   const production = new ProductionWatch(store, { provider, build, baseBranch: process.env.GITHUB_BASE_BRANCH ?? 'main' });
-  const http = server(engine, credentials, artifacts, { knownPrincipals, production });
+  const http = server(engine, credentials, { knownPrincipals, production });
   // The deployed-variables record the status route reports gains the generated-files variable the
   // installers set beside GRAPHYARD_PRINCIPALS, so master status can compare what the deployment
   // runs with against the managed repository's manifest and name the command that fixes it.
@@ -53,7 +51,6 @@ export async function main(options: MainOptions = {}) {
 
   const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), process.env.GITHUB_REPOSITORY ?? '');
   const delivery = new Delivery(validation);
-  console.log(`Artifact storage: ${artifacts.backend?.label ?? 'postgres'}; capacity ${artifacts.capacityBytes} bytes`);
 
   // Serve liveness while loading production state; mutations wait for readiness.
   let ready = false, validating = false, prepared = false, closing = false;

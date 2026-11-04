@@ -9,7 +9,6 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { Validation } from '../src/validation.js';
 import { Delivery, type EnvironmentDelivery, type Release, type RollbackRequest } from '../src/delivery.js';
-import { S3ArtifactBackend } from '../src/artifacts.js';
 import { defineScenario } from '../src/scenarios.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
@@ -48,50 +47,14 @@ let pg: EmbeddedPostgres, store: Store, engine: Engine, validation: Validation, 
 let serial = 0;
 
 /** An S3-compatible object store: path-style, SigV4-authenticated, MD5 ETags, and switches to fail or corrupt the next write. */
-class ObjectStore {
-  objects = new Map<string, { bytes: Buffer; type: string }>();
-  requests: { method: string; path: string }[] = [];
-  failNextPut = false; corruptNextPut = false;
-  http!: Server; endpoint = '';
-  async start() {
-    this.http = createServer((req, res) => {
-      const chunks: Buffer[] = [];
-      req.on('data', chunk => chunks.push(chunk));
-      req.on('end', () => {
-        const body = Buffer.concat(chunks), path = decodeURIComponent(req.url ?? '/');
-        this.requests.push({ method: req.method!, path });
-        const authorization = String(req.headers.authorization ?? '');
-        if (!/^AWS4-HMAC-SHA256 Credential=test-access-key\/\d{8}\/us-east-1\/s3\/aws4_request, SignedHeaders=[a-z0-9;-]+, Signature=[a-f0-9]{64}$/.test(authorization) || req.headers['x-amz-content-sha256'] !== createHash('sha256').update(body).digest('hex')) { res.writeHead(403); return res.end('<Error><Code>SignatureDoesNotMatch</Code></Error>'); }
-        if (req.method === 'PUT') {
-          if (this.failNextPut) { this.failNextPut = false; res.writeHead(500); return res.end('<Error><Code>InternalError</Code></Error>'); }
-          const stored = this.corruptNextPut ? Buffer.from('corrupted bytes that fail their digest') : body; this.corruptNextPut = false;
-          this.objects.set(path, { bytes: stored, type: String(req.headers['content-type'] ?? 'application/octet-stream') });
-          res.writeHead(200, { ETag: `"${createHash('md5').update(body).digest('hex')}"` }); return res.end();
-        }
-        const object = this.objects.get(path);
-        if (req.method === 'DELETE') { this.objects.delete(path); res.writeHead(204); return res.end(); }
-        if (!object) { res.writeHead(404); return res.end(req.method === 'HEAD' ? undefined : '<Error><Code>NoSuchKey</Code></Error>'); }
-        res.writeHead(200, { 'Content-Type': object.type, 'Content-Length': object.bytes.length, ETag: `"${createHash('md5').update(object.bytes).digest('hex')}"` });
-        res.end(req.method === 'HEAD' ? undefined : object.bytes);
-      });
-    });
-    await new Promise<void>(resolve => this.http.listen(0, '127.0.0.1', resolve));
-    this.endpoint = `http://127.0.0.1:${(this.http.address() as any).port}`;
-  }
-  async stop() { await new Promise<void>(resolve => this.http.close(() => resolve())); }
-  backend() { return new S3ArtifactBackend({ endpoint: this.endpoint, bucket: 'graphyard-artifacts', region: 'us-east-1', accessKeyId: 'test-access-key', secretAccessKey: 'test-secret', prefix: 'private' }); }
-}
-const objects = new ObjectStore();
-
 before(async () => {
   const port = Number(process.env.GRAPHYARD_RECOVERY_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 5);
   pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('recovery'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start(); await pg.createDatabase('recovery_test');
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/recovery_test`); await store.init();
   engine = new Engine(store, 120, 'test/repository'); validation = new Validation(engine, principals, 'test/repository'); delivery = new Delivery(validation);
-  await objects.start();
 });
-after(async () => { await objects.stop(); if (store) await store.close(); if (pg) await pg.stop(); });
+after(async () => { if (store) await store.close(); if (pg) await pg.stop(); });
 const id = () => randomUUID();
 const at = (offsetSeconds: number, from = Date.now()) => new Date(from + offsetSeconds * 1000).toISOString();
 async function current(workId: string) { return (await store.list()).find(w => w.id === workId)!; }
@@ -332,17 +295,8 @@ test('rollback HTTP routes derive authority from the credential and appear in de
     const claimed = await call(executor, 'delivery/rollback-claim', { rollbackId: requested.body.id, registration: f.registrations.executor, epoch: f.executorEpoch }); assert.equal(claimed.status, 200);
     assert.equal((await call(executor, 'delivery/rollback-resolve', { rollbackId: requested.body.id, outcome: 'applied', reason: 'no', evidence: 'https://provider.example.test/ops/1' })).status, 403);
     assert.equal((await call(reader, 'delivery')).body.rollbacks.find((r: RollbackRequest) => r.id === requested.body.id).state, 'in-flight');
-    assert.equal((await call(worker, 'validation/capacity')).status, 200);
-    assert.equal((await call(worker, 'validation/artifacts/migrate', { target: 'postgres' })).status, 403);
+    assert.equal((await call(worker, 'validation/capacity')).status, 404);
+    assert.equal((await call(worker, 'validation/artifacts/migrate', { target: 'postgres' })).status, 404);
   } finally { await new Promise<void>(resolve => http.close(() => resolve())); }
 });
 
-test('S3 requests are signed with SigV4 over the payload hash and encoded path', async () => {
-  const backend = new S3ArtifactBackend({ endpoint: 'https://objects.example.test', bucket: 'bucket', region: 'eu-west-1', accessKeyId: 'AKIA', secretAccessKey: 'secret', prefix: 'p' }, fetch, () => new Date('2026-09-18T12:00:00Z'));
-  const signed = backend.sign('PUT', 'owner_repo/req/att/art name', Buffer.from('bytes'), 'application/json');
-  assert.equal(signed.url, 'https://objects.example.test/bucket/p/owner_repo/req/att/art%20name');
-  assert.equal(signed.headers['x-amz-content-sha256'], createHash('sha256').update('bytes').digest('hex')); assert.equal(signed.headers['x-amz-date'], '20260918T120000Z');
-  assert.match(signed.headers.Authorization, /^AWS4-HMAC-SHA256 Credential=AKIA\/20260918\/eu-west-1\/s3\/aws4_request, SignedHeaders=content-length;content-md5;content-type;host;x-amz-content-sha256;x-amz-date, Signature=[a-f0-9]{64}$/);
-  assert.notEqual(signed.headers.Authorization, backend.sign('PUT', 'owner_repo/req/att/art name', Buffer.from('other'), 'application/json').headers.Authorization, 'the signature binds the body');
-  await delay(0);
-});
