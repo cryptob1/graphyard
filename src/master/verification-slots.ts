@@ -1,6 +1,6 @@
 // Concern: host verification slots — the per-host bound on concurrent full suites and type checks, and the PATH wrapper sessions run them through.
 import { closeSync, fstatSync, openSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { spawnSync } from 'node:child_process';
+import { ChildProcessError, runChild } from '../child-runner.js';
 import { randomUUID } from 'node:crypto';
 import { totalmem } from 'node:os';
 import { delimiter, join, resolve } from 'node:path';
@@ -57,11 +57,14 @@ export interface AcquireOptions {
 // flock locks the inherited open file description; this process retains its fd after
 // the short-lived utility exits. The kernel releases it on death, across PID namespaces.
 const identity = randomUUID();
-function lock(fd: number): boolean {
-  const result = spawnSync('flock', ['--exclusive', '--nonblock', '3'], { stdio: ['ignore', 'ignore', 'pipe', fd] });
-  if (result.status === 0) return true;
-  if (result.status === 1) return false;
-  throw result.error ?? new Error(`verification owner lock: ${result.stderr?.toString()}`);
+async function lock(fd: number): Promise<boolean> {
+  try {
+    await runChild('flock', ['--exclusive', '--nonblock', '3'], { extraFds: [fd] });
+    return true;
+  } catch (error) {
+    if (error instanceof ChildProcessError && error.status === 1 && !error.timedOut) return false;
+    throw error;
+  }
 }
 const readOwner = (path: string): SlotOwner | null => { try { return JSON.parse(readFileSync(join(path, 'owner.json'), 'utf8')); } catch { return null; } };
 
@@ -88,19 +91,19 @@ export function declareSlotFiles(held: HeldSlot, files: number, pid: number = pr
 }
 
 /** Reap dead reservations before budgeting, including trial declarations beyond the slot bound. */
-export function othersDeclaredFiles(directory: string, pid: number = process.pid): number {
-  for (const entry of heldSlots(directory)) reclaimStale(join(directory, `slot-${entry.slot}`));
+export async function othersDeclaredFiles(directory: string, pid: number = process.pid): Promise<number> {
+  for (const entry of heldSlots(directory)) await reclaimStale(join(directory, `slot-${entry.slot}`));
   return heldSlots(directory).reduce((sum, entry) => entry.owner && !(entry.owner.identity === identity && entry.owner.pid === pid)
     ? sum + Math.max(0, entry.owner.files ?? 0) : sum, 0);
 }
 
 /** Take the owner's kernel lock before removing its reservation; another reaper cannot take it. */
-function reclaimStale(path: string) {
+async function reclaimStale(path: string) {
   let fd: number;
   try { fd = openSync(join(path, 'owner.json'), 'r+'); }
   catch { return false; }
   try {
-    if (!lock(fd)) return false;
+    if (!await lock(fd)) return false;
     const opened = fstatSync(fd), current = statSync(join(path, 'owner.json'), { throwIfNoEntry: false });
     if (!current || opened.ino !== current.ino || opened.dev !== current.dev) return false;
     const owner = JSON.parse(readFileSync(fd, 'utf8')) as SlotOwner;
@@ -114,7 +117,7 @@ function reclaimStale(path: string) {
   } finally { closeSync(fd); }
 }
 
-function tryTake(directory: string, slots: number, owner: SlotOwner, firstSlot = 0): HeldSlot | null {
+async function tryTake(directory: string, slots: number, owner: SlotOwner, firstSlot = 0): Promise<HeldSlot | null> {
   for (let slot = firstSlot; slot < firstSlot + slots; slot++) {
     const path = join(directory, `slot-${slot}`);
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -123,7 +126,7 @@ function tryTake(directory: string, slots: number, owner: SlotOwner, firstSlot =
       mkdirSync(taking);
       const fd = openSync(join(taking, 'owner.json'), 'wx+');
       try {
-        if (!lock(fd)) throw new Error('new verification owner file is locked');
+        if (!await lock(fd)) throw new Error('new verification owner file is locked');
         writeFileSync(fd, JSON.stringify(owner));
         renameSync(taking, path);
         let released = false;
@@ -142,7 +145,7 @@ function tryTake(directory: string, slots: number, owner: SlotOwner, firstSlot =
         closeSync(fd);
         rmSync(taking, { recursive: true, force: true });
         if (!['EEXIST', 'ENOTEMPTY'].includes((error as NodeJS.ErrnoException).code ?? '')) throw error;
-        if (!reclaimStale(path)) break;
+        if (!await reclaimStale(path)) break;
       }
     }
   }
@@ -162,7 +165,7 @@ export async function acquireVerificationSlot(options: AcquireOptions): Promise<
   const owner: SlotOwner = { identity, locked: true, files: options.files, pid: process.pid, label: options.label, cwd: process.cwd(), at: new Date().toISOString() };
   let told = false;
   for (;;) {
-    const held = tryTake(options.directory, options.slots, owner, options.firstSlot);
+    const held = await tryTake(options.directory, options.slots, owner, options.firstSlot);
     if (held) {
       if (told) options.onWait?.(`graphyard: ${options.label} took host verification slot ${held.slot}`);
       return held;

@@ -403,7 +403,7 @@ export async function trialAffordableFiles(read?: () => Promise<HostMemoryReadin
   const resources = await import('../master/host-memory.js'), { bytesPerSuiteFile, othersDeclaredFiles } = await import('../master/verification-slots.js');
   const reading = await (read ?? resources.readHostMemory)();
   if (!reading) return null;
-  return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile) - (slots ? othersDeclaredFiles(slots) : 0);
+  return Math.floor((reading.availableBytes - resources.hostMemoryFloor(reading.totalBytes) - resources.memoryRecoveryMarginBytes) / bytesPerSuiteFile) - (slots ? await othersDeclaredFiles(slots) : 0);
 }
 /** The first slot index a trial declares at: past any bound a host hands out, so no run ever takes or waits on it. */
 export const trialDeclarationSlot = 1000;

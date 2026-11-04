@@ -44,7 +44,7 @@ test('integration:verification-owner-identity — host release, live safety and 
   const directory = await temporaryDirectory('verification-owner');
   const held = await acquireVerificationSlot({ directory, slots: 1, label: 'live host' });
   declareSlotFiles(held, 4);
-  assert.equal(othersDeclaredFiles(directory), 0, 'own process identity is excluded');
+  assert.equal(await othersDeclaredFiles(directory), 0, 'own process identity is excluded');
   assert.equal(heldSlots(directory).length, 1, 'budget reads preserve live holders');
   held.release();
   assert.equal(heldSlots(directory).length, 0);

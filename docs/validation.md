@@ -91,7 +91,8 @@ Relevant services must cover every service; changed relevant or unknown paths re
 ## Host verification capacity
 
 Host verification reservations hold a kernel `flock` on their existing owner file.
-The owning process retains the descriptor; exit or interruption releases it across
+Lock acquisition uses the bounded asynchronous child runner so checks do not block
+the control-plane loop. The owning process retains the descriptor; exit or interruption releases it across
 PID namespaces, so a reused numeric PID cannot retain capacity. Budget reads reclaim
 unlocked reservations before subtracting declared files, including trial declarations.
 Live locks stay reserved; slot limits and the memory floor remain unchanged. Legacy

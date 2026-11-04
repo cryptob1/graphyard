@@ -20,6 +20,8 @@ import { performance } from 'node:perf_hooks';
  */
 
 export interface ChildRunOptions {
+  /** Open descriptors inherited by the child starting at fd 3. */
+  extraFds?: readonly number[];
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   /** Kill the child after this long; the default is `defaultChildTimeoutMs`. */
@@ -83,7 +85,7 @@ export function runChild(command: string, args: string[], options: ChildRunOptio
   return new Promise<string>((resolve, reject) => {
     let child: ReturnType<typeof spawn>;
     const [file, ...argv] = [...(options.wrapper ?? []), command, ...args];
-    try { child = spawn(file!, argv, { cwd: options.cwd, env: options.env, detached: !!options.group, stdio: ['ignore', options.stdout === 'inherit' ? 'inherit' : 'pipe', options.stderr === 'inherit' ? 'inherit' : 'pipe'] }); }
+    try { child = spawn(file!, argv, { cwd: options.cwd, env: options.env, detached: !!options.group, stdio: ['ignore', options.stdout === 'inherit' ? 'inherit' : 'pipe', options.stderr === 'inherit' ? 'inherit' : 'pipe', ...(options.extraFds ?? [])] }); }
     catch (error) { reject(new ChildProcessError(command, args, { stdout: '', stderr: '', status: null, signal: null, timedOut: false, cause: error })); return; }
     const out: Buffer[] = [], err: Buffer[] = [];
     let outBytes = 0, errBytes = 0, timedOut = false, startupTimedOut = false, settled = false, spawnFailure: unknown;
