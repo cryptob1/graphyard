@@ -1,0 +1,23 @@
+{
+  "id": "loop-wakes-on-event",
+  "title": "The master loop runs its next cycle as soon as another actor records an event",
+  "description": "The command step runs the loop against a ledger on a long interval: a submission or verdict starts a cycle within seconds, a burst is one cycle, and with no events the interval still applies; the HTTP step reads the newest-first event feed the loop polls.",
+  "tags": ["api", "loop"],
+  "target": "uat",
+  "required": false,
+  "steps": [
+    {
+      "kind": "command",
+      "name": "the loop wakes on a ledger event and coalesces a burst",
+      "run": "node --import tsx --test tests/loop-wakes-on-event.test.ts",
+      "timeoutSeconds": 120
+    },
+    {
+      "kind": "http",
+      "name": "the event feed the loop polls answers newest first",
+      "method": "GET",
+      "path": "/api/events?view=rows&order=desc&limit=100&payload=none",
+      "status": 200
+    }
+  ]
+}

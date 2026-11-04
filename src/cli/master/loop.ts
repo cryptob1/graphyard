@@ -45,7 +45,8 @@ export async function loopCommand(session: MasterSession): Promise<unknown> {
     const held = state.lock && state.lock.pid !== process.pid ? state.lock : null;
     const stopping = new AbortController();
     // A run refused on another loop's lock is recorded for master status, which names a holder outside the unit.
-    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload: cycleReload, root }))
+    const daemonRun = recordingLockRefusal(root, held, runDaemon(master, state, effects, { once: values.once, intervalMs: values.interval ? intervalSeconds * 1000 : () => current().run.intervalSeconds * 1000, identity: { pid: process.pid, host: master.hostId }, reload: cycleReload, root,
+      events: { read: () => masterApi('events?view=rows&order=desc&limit=100&payload=none', masterToken), self: coordinator.actor.id } }))
       .finally(() => stopping.abort());
     // GY-409: the loop turns a connect made in Settings › Agents into a registered account on this host, one pass at a time.
     let connecting = false;
