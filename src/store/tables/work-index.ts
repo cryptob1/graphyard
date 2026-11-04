@@ -77,7 +77,12 @@ export const workIndex = defineTable({
   pr numeric, pr_state text, next_action text, due_at timestamptz,
   settled boolean NOT NULL DEFAULT false, summary jsonb, trimmed jsonb
 );
-ALTER TABLE work_index ADD COLUMN IF NOT EXISTS peers jsonb NOT NULL DEFAULT '{}'::jsonb;
+DO $work_index$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_attribute WHERE attrelid = 'work_index'::regclass AND attname = 'peers' AND NOT attisdropped) THEN
+    LOCK TABLE work_items IN SHARE ROW EXCLUSIVE MODE;
+    ALTER TABLE work_index ADD COLUMN peers jsonb NOT NULL DEFAULT '{}'::jsonb;
+  END IF;
+END $work_index$;
 ${projection}
 DO $work_index$ BEGIN
   IF obj_description('work_index'::regclass, 'pg_class') IS DISTINCT FROM '${workIndexDigest}' THEN

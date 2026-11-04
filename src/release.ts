@@ -118,6 +118,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:dcefbd2e92eecbef78eb75f38e5798adcfaa3a228e7c8e59ddab7f4e95e02627',
   // GY-2986: a person's human: answer stays in the coordination view for its head whatever the base.
   'sha256:72e499b9d63b92e474fa67e9ba27b7b89db644b5f9e18d3adf9b911d4e364e06',
+  // GY-3035: indexed decision peers; unchanged peer columns do not lock live coordination writes.
+  'sha256:0e463a41e746e218ae05b971b921330661bc6adc0ac0384df5cc4d640747b1dd',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;
