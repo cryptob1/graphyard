@@ -30,6 +30,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:d1fad9115075e03bf688396b51c2aa4470a2bd66c1e54138787ba0b33b43acbb',
   // GY-3035: indexed decision peers; unchanged peer columns do not lock live coordination writes.
   'sha256:718f3640a5d9356b5444e6e949a945fce073e547bb395212a9e745a663e7c2c4',
+  // GY-3018: retire validation runner and attribution tables after indexed decision peers.
+  'sha256:9d4a955464bdbf4edd43d938a964f4c6e7c3c3472748451dc9a3196f4ec2bede',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

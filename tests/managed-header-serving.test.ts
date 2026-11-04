@@ -52,7 +52,7 @@ before(async () => {
   store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/managed_header_serving`); await store.init();
   engine = new Engine(store, 120, game);
   // The control plane's own build identity, which is never the managed repository's serving commit.
-  http = server(engine, [{ ...operator, token: tokens.get(operator.id)! }], null, { env: { GRAPHYARD_BUILD_SHA: plane } });
+  http = server(engine, [{ ...operator, token: tokens.get(operator.id)! }], { env: { GRAPHYARD_BUILD_SHA: plane } });
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as any).port}`;
 });

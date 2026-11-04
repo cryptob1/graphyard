@@ -7,7 +7,6 @@ import { Validation } from '../validation.js';
 import { Delivery } from '../delivery.js';
 import { OperatorAgents } from '../operator-agent.js';
 import { AgentRegistry } from '../agent-registry.js';
-import { artifactCapacityFromEnv, type ArtifactBackend } from '../artifacts.js';
 import { buildIdentity } from '../protocol-version.js';
 import type { ProductionWatch } from '../production-watch.js';
 import { responderFromEnv, type Responder } from '../closed-question.js';
@@ -188,8 +187,6 @@ export function humanSignIn(services: Services) {
   return table;
 }
 
-/** Where retained validation artifacts live and how much the postgres backend may hold. */
-export interface ArtifactOptions { backend: ArtifactBackend | null; capacityBytes: number }
 
 /**
  * What an embedder tells the control plane about the installation: the principals it already
@@ -199,7 +196,7 @@ export interface ArtifactOptions { backend: ArtifactBackend | null; capacityByte
 export interface ServerOptions { knownPrincipals?: readonly string[]; env?: NodeJS.ProcessEnv; production?: ProductionWatch | null; responder?: Responder | null }
 
 /** Wire the engine, its integrations and the principals into the shared services. */
-export function assembleServices(engine: Engine, credentials: Credential[], artifacts: ArtifactOptions = { backend: null, capacityBytes: artifactCapacityFromEnv() }, options: ServerOptions = {}): Services {
+export function assembleServices(engine: Engine, credentials: Credential[], options: ServerOptions = {}): Services {
   const env = options.env ?? process.env;
   const delegationLimits = assembleDelegationLimits(credentials, env, options.knownPrincipals);
   const principals = credentials.map(({ token, ...actor }) => ({ actor, hash: createHash('sha256').update(token).digest() }));
@@ -209,7 +206,6 @@ export function assembleServices(engine: Engine, credentials: Credential[], arti
   // Mutations authorize against the same canonical binding as authentication; embedders may leave it to the process default.
   engine.repository = repository;
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
-  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);

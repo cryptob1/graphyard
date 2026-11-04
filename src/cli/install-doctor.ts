@@ -2,7 +2,7 @@
 import { parseArgs } from 'node:util';
 import { discover } from '../onboarding.js';
 import { loadProposal, readSetupStatus } from '../repository-setup.js';
-import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
+import { completionProfiles, readinessChecklist, type CompletionProfile } from '../readiness.js';
 import type { CliContext } from './context.js';
 import { doctorRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
@@ -26,16 +26,11 @@ export async function runDoctor(context: CliContext) {
   const stored = await loadProposal(root).catch(() => null);
   // Capacity drift and production lag, which a deploy can break silently: the server reports both.
   const delegationLimits = live?.delegationLimits ?? null, production = live?.production ?? null;
-  // Validation definitions are readable by operators and readers; every other credential
-  // leaves the runner-path items `unknown` with the command that reads them.
-  let definitions: { kind: string; id: string; revision: number; role?: string; enabled?: boolean }[] | null = null;
-  if (live && ['admin', 'reader'].includes(live.actor?.role)) { try { definitions = (await api('validation/definitions')).definitions; } catch { definitions = null; } }
   const readiness = readinessChecklist(profile, {
     repository: discovered.repository ?? null,
     server: { url: base, reachable: !!live, role: live?.actor?.role, failure },
     setup: 'error' in setup ? { proposal: null, appliedAt: null, githubApp: null, drift: [], unreadable: [String(setup.error)] } : { ...setup, unreadable: setup.unreadable.filter((entry): entry is string => typeof entry === 'string') },
     proposal: stored?.proposal ?? null,
-    validation: definitions ? summarizeDefinitions(definitions) : null,
   });
   // The machine-local prerequisites docs/setup-from-zero.md depends on (GY-1352), each naming its step.
   const checks = await setupFromZeroChecks({ root, status: live, failure, reachable: !!live || await planeAnswers(base), masterCredential: master?.file, environments: agentEnvironmentRoot() });

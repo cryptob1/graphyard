@@ -4,7 +4,7 @@ import { relative, isAbsolute } from 'node:path';
 import type { Reporter, FullConfig, Suite, TestCase, TestResult, FullResult, TestStep } from '@playwright/test/reporter';
 
 const identifier = (test: TestCase) => createHash('sha256').update(test.id).digest('hex');
-/** Built into the independently approved oracle image, never loaded from candidate code. */
+/** External graphyard-playwright-v1 report producer fixture; not a packaged runner. */
 export default class GraphyardReporter implements Reporter {
   private declared: { id: string; expected: TestCase['expectedStatus']; location: { file: string; line: number; column: number } }[] = [];
   private executions: { id: string; status: TestResult['status']; retry: number }[] = [];
@@ -35,10 +35,6 @@ export default class GraphyardReporter implements Reporter {
   onEnd(result: FullResult) {
     const path = process.env.GRAPHYARD_REPORT_FILE;
     if (!path) throw new Error('Graphyard reporter output was not configured');
-    // Group-readable, because the attestor and the collector are separate identities that
-    // reach this file through the attempt boundary's group. A private 0600 report would
-    // give both trusted readers EACCES after the run had already exercised the target.
-    // The image's umask must not be stricter than 027 either; `mode` only removes bits.
     writeFileSync(path, JSON.stringify({ format: 'graphyard-playwright-v1', declared: this.declared, executions: this.executions, steps: this.steps, errors: this.errors, overflow: this.overflow, status: result.status }), { flag: 'wx', mode: 0o640 });
   }
 }

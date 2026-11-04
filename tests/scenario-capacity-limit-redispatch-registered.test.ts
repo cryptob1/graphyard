@@ -48,7 +48,7 @@ before(async () => {
   // The shipped scenarios are Graphyard's own repository's cases (GY-2964): this install manages
   // that repository, which is the one whose fresh install materializes them.
   engine = new Engine(store, 120, 'cryptob1/graphyard');
-  http = server(engine, [{ ...operator, token: tokens.get(operator.id)! }], null);
+  http = server(engine, [{ ...operator, token: tokens.get(operator.id)! }]);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
 });
