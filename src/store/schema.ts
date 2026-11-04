@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import type { TableDefinition } from './tables.js';
-import { schemaVersion } from '../release.js';
 import { workTables } from './tables/work.js';
 import { workIndexTables } from './tables/work-index.js';
 import { mergesTables } from './tables/merges.js';
@@ -9,10 +8,8 @@ import { operatorAgentTables } from './tables/operator-agents.js';
 import { validationTables } from './tables/validation.js';
 import { scenarioTables } from './tables/scenarios.js';
 import { deliveryTables } from './tables/delivery.js';
-import { productionTables } from './tables/production.js';
 import { schemaGenerationTables } from './tables/schema-generation.js';
 import { planeLivenessTables } from './tables/plane-liveness.js';
-import { mergerDefaultTables } from './tables/merger-default.js';
 
 /**
  * Every table, in an order a restore can insert without violating references: a table
@@ -20,18 +17,19 @@ import { mergerDefaultTables } from './tables/merger-default.js';
  */
 export const tables: readonly TableDefinition[] = [
   ...workTables, ...mergesTables, ...workIndexTables, ...delegationTables, ...operatorAgentTables,
-  ...validationTables, ...scenarioTables, ...deliveryTables, ...productionTables,
-  ...schemaGenerationTables, ...planeLivenessTables, ...mergerDefaultTables,
+  ...validationTables, ...scenarioTables, ...deliveryTables,
+  ...schemaGenerationTables, ...planeLivenessTables,
 ];
 
-/** Tables a release retired: the flow analytics projection and its deployment observations, and the runtime proof grants (GY-2876). */
-export const retiredTables = ['flow_facts', 'flow_projection', 'flow_projection_state', 'deployment_merge_observations', 'deployment_observations', 'proof_grants', 'proof_grant_history', 'attribution_records', 'attribution_reanchors', 'validation_builds', 'validation_candidates', 'validation_requests', 'validation_artifacts', 'validation_runner_polls', 'validation_resources', 'validation_attempts', 'validation_reuse_decisions', 'validation_replays'] as const;
+/** Tables retired from the schema and logical backups. */
+export const retiredTables = ['flow_facts', 'flow_projection', 'flow_projection_state', 'deployment_merge_observations', 'deployment_observations', 'proof_grants', 'proof_grant_history', 'merger_default_pin', 'production_observation_merges', 'production_observations', 'attribution_records', 'attribution_reanchors', 'validation_builds', 'validation_candidates', 'validation_requests', 'validation_artifacts', 'validation_runner_polls', 'validation_resources', 'validation_attempts', 'validation_reuse_decisions', 'validation_replays'] as const;
 
 /** The startup migration: the append-only trigger function, the retired tables dropped, then each table's DDL. */
 export const migration = `
 CREATE OR REPLACE FUNCTION graphyard_immutable() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN RAISE EXCEPTION 'The event ledger is append-only'; END $$;
 DROP TABLE IF EXISTS ${retiredTables.join(', ')};
+DROP INDEX IF EXISTS events_delivery_repository_instant, events_delivery_first, events_delivery_time, events_delivery_instant;
 ${tables.map(table => table.ddl).join('\n')}
 `;
 
@@ -75,9 +73,6 @@ export const recordedMigrationDigests = (comment: string | null): { migration: s
   }
   return { migration: comment.startsWith('migration sha256:') ? comment : null, prelude: null, tables: null };
 };
-
-/** Refuses to run a release under a database a newer release already migrated. */
-export const newerSchema = (current: number) => new Error(`Database schema generation ${current} is newer than this release supports (${schemaVersion}); deploy the release that migrated it, or restore a backup taken at generation ${schemaVersion} or earlier`);
 
 /** The recorded digests as a comment statement, escaped for SQL. */
 export const migrationDigestComment = (digests: MigrationDigests) => `'${JSON.stringify(digests).replace(/'/g, "''")}'`;

@@ -17,7 +17,7 @@ before(async () => {
   const scratch = await temporaryDirectory('store-init');
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['fresh', 'migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work', 'deadlock']) await postgres.createDatabase(name);
+  for (const name of ['fresh', 'migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work', 'deadlock', 'retired']) await postgres.createDatabase(name);
 });
 after(async () => { if (postgres) await postgres.stop(); });
 
@@ -141,18 +141,18 @@ test('integration:migration-lock-bounded lock waits inside one table\'s DDL shar
   const deployed = new Store(url('statements'));
   await deployed.init();
   await deployed.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
-  // production_observation_merges' DDL drops the guard trigger on production_observations and
-  // then on itself, in one query: a read on each makes those two statements wait in turn.
-  const observations = await liveReplica('statements', async db => { await db.query('SELECT count(*) FROM production_observations'); });
-  const merges = await liveReplica('statements', async db => { await db.query('SELECT count(*) FROM production_observation_merges'); });
+  await deployed.pool.query('COMMENT ON TABLE work_index IS NULL');
+  // The index DDL alters work_index, then locks work_items to rebuild the projection.
+  const observations = await liveReplica('statements', async db => { await db.query('SELECT count(*) FROM work_index'); });
+  const merges = await liveReplica('statements', async db => { await db.query('SELECT count(*) FROM work_items'); });
   let released: Promise<void> | undefined;
   const handoff = setTimeout(() => { released = observations(); }, 1200);
   const next = new Store(url('statements'));
   try {
     const boot = await timed(() => next.init({ lockTimeoutMs: 1500 }));
-    assert.ok(boot.error, 'the migration cannot drop the trigger on production_observation_merges while the read is open');
+    assert.ok(boot.error, 'the migration cannot rebuild work_index while the read is open');
     assert.ok(boot.ms < 2300, `startup failed only after ${boot.ms} ms, past its 1500 ms deadline`);
-    assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} gave up after 1500 ms waiting for a lock on table production_observation_merges`));
+    assert.match(boot.error.message, new RegExp(`Schema migration to generation ${schemaVersion} gave up after 1500 ms waiting for a lock on table work_index`));
   } finally { clearTimeout(handoff); await (released ?? observations()); await merges(); await next.close(); await deployed.close(); }
 });
 
@@ -160,10 +160,11 @@ test('integration:migration-lock-bounded a migration whose watchdog loses its co
   const deployed = new Store(url('watchdog'));
   await deployed.init();
   await deployed.pool.query('COMMENT ON TABLE graphyard_schema IS NULL');
+  await deployed.pool.query('COMMENT ON TABLE work_index IS NULL');
   // As above, lock_timeout alone lets the second statement's wait outlast the deadline; this
   // time the watchdog that would cancel it has lost its connection before the deadline.
-  const observations = await liveReplica('watchdog', async db => { await db.query('SELECT count(*) FROM production_observations'); });
-  const merges = await liveReplica('watchdog', async db => { await db.query('SELECT count(*) FROM production_observation_merges'); });
+  const observations = await liveReplica('watchdog', async db => { await db.query('SELECT count(*) FROM work_index'); });
+  const merges = await liveReplica('watchdog', async db => { await db.query('SELECT count(*) FROM work_items'); });
   let released: Promise<void> | undefined;
   const handoff = setTimeout(() => { released = observations(); }, 1200);
   const cut = setTimeout(() => { void deployed.pool.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE application_name='graphyard migration watchdog'"); }, 300);
@@ -247,3 +248,43 @@ test('integration:migration-deadlock-retried a live writer queued behind the mig
   } finally { await blocker.end(); await live.end(); await next.close(); await deployed.close(); }
 });
 
+test('unit:store-init — a previous-generation database retires unused job and index fields and tables while preserving board rows and jobs', async () => {
+  const store = new Store(url('retired'));
+  try {
+    await store.init();
+    // Reconstitute the previous generation's retired objects, with rows to migrate.
+    await store.pool.query(`
+      ALTER TABLE jobs ADD COLUMN refreshed_until timestamptz, ADD COLUMN held_on text,
+        ADD COLUMN refusals int NOT NULL DEFAULT 0, ADD COLUMN held_until timestamptz, ADD COLUMN held_reason text;
+      ALTER TABLE work_index ADD COLUMN owner text, ADD COLUMN epoch numeric, ADD COLUMN next_action text;
+      CREATE TABLE merger_default_pin (id boolean PRIMARY KEY, pinned boolean);
+      INSERT INTO merger_default_pin VALUES (true, true);
+      CREATE TABLE production_observations (id uuid PRIMARY KEY);
+      CREATE TABLE production_observation_merges (observation_id uuid REFERENCES production_observations(id), merge_sha text);
+      INSERT INTO production_observations VALUES ('00000000-0000-0000-0000-000000000001');
+      INSERT INTO production_observation_merges VALUES ('00000000-0000-0000-0000-000000000001', 'old');
+      CREATE INDEX events_delivery_repository_instant ON events(created_at, work_id, seq);
+      CREATE INDEX events_delivery_first ON events(work_id, seq);
+      INSERT INTO work_items(id, document) VALUES ('00000000-0000-0000-0000-000000000002',
+        '{"id":"00000000-0000-0000-0000-000000000002","key":"GY-1","stage":"build","priority":3,"revision":1}');
+      INSERT INTO jobs(work_id, held_until, held_reason) VALUES ('00000000-0000-0000-0000-000000000002', now()+interval '1 day', 'retired hold');
+      COMMENT ON TABLE work_index IS NULL;
+      COMMENT ON TABLE graphyard_schema IS NULL;
+    `);
+    await store.pool.query('UPDATE graphyard_schema SET version=$1', [schemaVersion - 1]);
+    await store.init();
+    assert.equal(await store.schema(), schemaVersion);
+    const columns = (await store.pool.query("SELECT table_name || '.' || column_name AS name FROM information_schema.columns WHERE table_schema='public'")).rows.map(row => row.name);
+    for (const name of ['jobs.refreshed_until', 'jobs.held_on', 'jobs.refusals', 'jobs.held_until', 'jobs.held_reason', 'work_index.owner', 'work_index.epoch', 'work_index.next_action']) assert.ok(!columns.includes(name), name);
+    for (const name of ['merger_default_pin', 'production_observations', 'production_observation_merges', 'events_delivery_repository_instant', 'events_delivery_first']) {
+      assert.equal((await store.pool.query('SELECT to_regclass($1) AS relation', [name])).rows[0].relation, null, name);
+    }
+    const board = await store.coordinationSnapshot();
+    assert.equal(board.work.length, 1);
+    assert.equal(board.work[0].key, 'GY-1');
+    assert.equal((await store.pool.query('SELECT key, stage FROM work_index')).rows[0].stage, 'build');
+    assert.equal((await store.takeJob())?.work_id, '00000000-0000-0000-0000-000000000002');
+    await store.init();
+    assert.equal((await store.coordinationSnapshot()).work[0].key, 'GY-1');
+  } finally { await store.close(); }
+});
