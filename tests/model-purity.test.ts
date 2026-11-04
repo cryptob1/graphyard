@@ -4,7 +4,7 @@ import { readdir, readFile } from 'node:fs/promises';
 import { dirname, resolve, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
-import { evaluate } from '../src/model/gates.js';
+import { evaluate } from '../src/model-boundary/gates.js';
 import { currentEvidence } from '../src/model/evidence.js';
 import { unexercisedFindings } from '../src/model/mechanical-proofs.js';
 import type { Work, Evidence } from '../src/model.js';
@@ -17,8 +17,6 @@ test('unit:model-purity — model runtime dependencies stay inside the model and
     const path = resolve(root, file), source = await readFile(path, 'utf8');
     const ast = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true);
     const checkImport = (specifier: string) => {
-      // Schema validation and deterministic hashing are the model's library primitives.
-      if (specifier === 'zod' || specifier === 'node:crypto') return;
       assert.ok(specifier.startsWith('.'), `${file}: unexpected runtime dependency ${specifier}`);
       const target = relative(root, resolve(dirname(path), specifier));
       assert.ok(!target.startsWith('..'), `${file}: runtime dependency leaves the model: ${specifier}`);

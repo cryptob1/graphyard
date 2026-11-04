@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import type { Principal, Work } from '../src/model.js';
 import { deliveryState } from '../src/model/delivery.js';
-import { actionAccount, nextActionKinds } from '../src/model/next-action.js';
+import { actionAccount } from '../src/model-boundary/next-action.js';
+import { nextActionKinds } from '../src/model/next-action.js';
 import { openActions } from '../src/model/actions.js';
 import { groupOf, nextCommand } from '../src/model/board.js';
 import { prSteps } from '../src/model/pr-steps.js';
@@ -16,7 +17,7 @@ import { Store } from '../src/store.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-1981: done = merged. An item reaches stage done in the transaction that records its merge, and

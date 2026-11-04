@@ -15,7 +15,7 @@ Typechecking enforces `noUnusedLocals` across source, web, and tests. Remove unu
 | Generated AGENTS.md block | `src/repository-setup.ts` |
 | Protocol guides | `docs/protocol/` |
 
-Model repository imports stay within `src/model/`; server and UI shapes are type-only imports. Pass the caller's clock explicitly through gate evaluation, evidence selection, dispatch and proof previews. `tests/model-purity.test.ts` checks this boundary and evidence expiry. Schema generations live in `src/store/schema-lineage.ts`.
+Every runtime import in `src/model/` stays within that directory, including library imports. Zod schemas, hashing, configuration loaders and the operations that need them live in `src/model-boundary/`; model references to their inferred types are type-only. The `src/model.ts` facade exports both layers for consumers. Pass the caller's clock explicitly through gate evaluation, evidence selection, dispatch and proof previews. `tests/model-purity.test.ts` checks this boundary and evidence expiry. Schema generations live in `src/store/schema-lineage.ts`.
 
 Claim work and use its assigned worktree before editing ([AGENTS.md](../AGENTS.md)).
 

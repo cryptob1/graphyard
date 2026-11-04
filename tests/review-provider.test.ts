@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { evaluate, exhaustedReviewerProfiles, nativeReviewRequired, policySchema, reviewerProfileFor, type ReviewerProfile, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { exhaustedReviewerProfiles, nativeReviewRequired, reviewerProfileFor, type ReviewerProfile, type Work } from '../src/model.js';
+import { policySchema } from '../src/model-boundary/policy.js';
 
 const head = 'a'.repeat(40), base = 'b'.repeat(40), other = 'c'.repeat(40);
 const profiles: ReviewerProfile[] = [

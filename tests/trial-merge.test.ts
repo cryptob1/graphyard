@@ -14,8 +14,9 @@ import { checkoutKinds } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { processPidNamespace, processStartTicks, tempOwnerMarker, writeTempOwner } from '../src/tmp-reclaim.js';
 import type { FilesystemProbe } from '../src/install/worktree-root.js';
-import { evaluate, type Work } from '../src/model.js';
-import { actionAccount } from '../src/model/next-action.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Work } from '../src/model.js';
+import { actionAccount } from '../src/model-boundary/next-action.js';
 import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-ground.js';
 import { trialFailureRework } from '../src/daemon/cycle-merge-writer.js';
 

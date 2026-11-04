@@ -22,7 +22,7 @@ import { plainStage, serveView } from '../../src/model/plain-stage';
 import { groupWithin, nextActor, timedGroups } from '../groups';
 import { checkStates, prSteps, stepHeld } from '../../src/model/pr-steps';
 import { releaseView } from '../../src/model/release';
-import { shownRisk } from '../../src/model/risk-class';
+import { shownRisk } from '../../src/model-boundary/risk-class.js';
 import StatusBadge from '../components/status-badge';
 import { StepsDetail } from '../components/steps-bar';
 import { RequestCard } from './human-requests';

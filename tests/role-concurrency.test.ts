@@ -10,14 +10,14 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { isProfileSession, liveMasterConfig, loadMasterConfig, masterConfigChanges, profileAtLimit, profileConcurrency, profileSessions, reviewerProfileSchema, sessionAgentName, sessionNameLimit, setupMaster, saveProducerProfile, type HerdrAgent, type MasterConfig } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile } from '../src/reviewer.js';
 import { launchProducer, reconcileProducers } from '../src/producer.js';
 import { emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // Time-bomb allowance (GY-1694): the 2026-09-21 `at` stamps the requested() fixtures; the tests stamp items, verdicts and registerLaunch expiry from the real clock alone.

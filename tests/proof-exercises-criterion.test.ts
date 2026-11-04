@@ -5,16 +5,18 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
-import { evaluate, exerciseRefusal, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { exerciseRefusal, type Evidence, type Observation, type Principal, type Work } from '../src/model.js';
 import { producerPrompt, proofOutcome } from '../src/producer.js';
 import { guideText } from '../src/guide.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { openProducerRequest, reconcileAutoDispatch } from '../src/model/dispatch.js';
-import { nextAction } from '../src/model/next-action.js';
+import { openProducerRequest } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
+import { nextAction } from '../src/model-boundary/next-action.js';
 import { neededRework } from '../src/daemon/rework.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // GY-135: a proof that passes against an unchanged tree proves nothing. A pass is trusted only

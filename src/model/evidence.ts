@@ -1,9 +1,7 @@
-import { z } from 'zod';
+import { type ClosedQuestionRecord, reservedForAttestation } from './closed-question.js';
 import type { Work } from './work.js';
 import { evidenceBindsCandidate } from './carry.js';
-import { reservedForAttestation, type ClosedQuestionRecord } from './closed-question.js';
 import { inheritedObligations } from './bootstrap.js';
-
 export type ArtifactKind = 'log' | 'report' | 'screenshot' | 'trace' | 'other';
 export type ArtifactAvailability = 'available' | 'expired' | 'redacted' | 'missing' | 'upload-failed' | 'external';
 export interface EvidenceArtifact {
@@ -216,12 +214,6 @@ export async function evaluateWithRecovery(evaluator: string, attempt: () => Pro
     await sleep(backoffMs * 2 ** (attempts.length - 1));
   }
 }
-
-/** What a producer submits as `exercise`. */
-export const proofExerciseSchema = z.object({
-  criterion: z.string().trim().min(1).max(80).optional(), behaviour: z.string().trim().min(1).max(300),
-  result: z.enum(['pass', 'fail']), executed: z.number().int().min(0),
-}).strict();
 
 /** The criteria a proof is attached to on this item: its own, and any bootstrap obligation it inherited. */
 export function attachedCriteria(work: Work, all: Work[], proof: string): string[] {

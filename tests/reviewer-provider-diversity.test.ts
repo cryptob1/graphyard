@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { chooseSession, emptyRegistry, runtimeSchema, modelSchema, accountSchema, roleSchema, unobservedQuota, type AgentRegistry, type FleetAccount, type FleetRoleName, type FleetSession } from '../src/model/registry.js';
+import { chooseSession, emptyRegistry, unobservedQuota, type AgentRegistry, type FleetAccount, type FleetRoleName, type FleetSession } from '../src/model/registry.js';
+import { runtimeSchema, modelSchema, accountSchema, roleSchema } from '../src/model-boundary/registry.js';
 import type { ReviewDiversity } from '../src/model/review-diversity.js';
 
 /**

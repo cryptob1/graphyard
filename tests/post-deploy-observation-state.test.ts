@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatchable } from '../src/coordination.js';
 import { upNextHold } from '../src/model/board.js';
-import { actionAccount, nextAction } from '../src/model/next-action.js';
+import { actionAccount, nextAction } from '../src/model-boundary/next-action.js';
 import * as model from '../src/model.js';
 import type { Work } from '../src/model.js';
 

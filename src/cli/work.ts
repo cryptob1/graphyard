@@ -6,7 +6,7 @@ import { diagnose, fileConflicts, obligationLedger, proofAuthorization, proofPre
 import { handoff } from '../repository-setup.js';
 import { eventHistoryLimits, parseEventHistoryFlags } from '../events-history.js';
 import { defineCommands } from './registry.js';
-import { withRisk } from '../model/risk-class.js';
+import { withRisk } from '../model-boundary/risk-class.js';
 
 /** Reading work: control-plane status, the ledger, diagnosis, creation and history. */
 export const workCommands = defineCommands([

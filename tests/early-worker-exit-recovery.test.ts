@@ -17,7 +17,7 @@ import { actionStallDelay } from '../src/model/action-progress.js';
 import { masterCauses } from '../src/daemon/master-stalled-delivery.js';
 import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
 import type { Principal, Work } from '../src/model.js';
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { renewWorkerLaunch } from '../src/master/dispatch.js';
 import { observeSessions, reportedHandle } from '../src/model/session-state.js';

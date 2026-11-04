@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { baseRefreshNeeded, pendingBaseRefresh } from '../src/model/base-refresh.js';
-import { evaluate, type Evidence, type Observation, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Evidence, type Observation, type Work } from '../src/model.js';
 import { refusalAction } from '../src/model/next-action.js';
 import { checkStates, prSteps } from '../src/model/pr-steps.js';
 

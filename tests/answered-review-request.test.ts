@@ -5,7 +5,7 @@ import { rm } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import type { Observation, Work } from '../src/model.js';
-import { reconcileAutoDispatch } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
 import { openReviewConflict, reconcileReviewConflict } from '../src/model/review-conflict.js';
 import { loadMasterConfig, setupMaster } from '../src/master.js';
 import { launchReview, readReviewLedger, saveReviewerProfile, updateReviewLedger, type ReviewRecord } from '../src/reviewer.js';

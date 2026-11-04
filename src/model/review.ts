@@ -1,17 +1,9 @@
-import { z } from 'zod';
+import type { z } from 'zod';
+import type { reviewerProfileSchema } from '../model-boundary/review.js';
 import type { Work } from './work.js';
 import type { ApprovalIdentity } from './carry.js';
-
 export const reviewProviders = ['github', 'codex', 'agent'] as const;
 export type ReviewProvider = typeof reviewProviders[number];
-const identifier = z.string().trim().regex(/^[a-z0-9][a-z0-9._-]{0,63}$/);
-// A runtime label is descriptive provenance (which agent produced the review), never authority.
-const runtimeName = z.string().trim().regex(/^[a-z0-9][a-z0-9.+_-]{0,39}$/);
-export const reviewerProfileSchema = z.object({
-  name: identifier, runtime: runtimeName, reviewerApp: identifier,
-  mention: z.string().regex(/^@[A-Za-z0-9][A-Za-z0-9-]{0,38}(?:\[bot\])?$/).optional(),
-  timeoutSeconds: z.number().int().min(60).max(86_400).default(1800),
-}).strict();
 export type ReviewerProfile = z.infer<typeof reviewerProfileSchema>;
 export const distinct = (values: unknown[]) => new Set(values.map(value => JSON.stringify(value))).size === values.length;
 

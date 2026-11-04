@@ -10,7 +10,7 @@ import { assertNoApprovalOptOut } from '../harness.js';
 import { parkedOnHuman, humanDecisionLabel, answerCommand, dispatchHumanWait } from '../model/human-request.js';
 import { supersededByObservation } from '../model/park-withdrawal.js';
 import { loopOwnedRefusal } from '../model/loop-owned.js';
-import { workerPreference } from '../model/worker-preference.js';
+import { workerPreference } from '../model-boundary/worker-preference.js';
 import { loopObservation, loopObservationProofs, observationWindowHold, servingReleaseProof, specCheckRefusal, type Work } from '../model.js';
 import { type ConsentAnswer, type ConsentHold, consentHoldAttention, consentHoldMs, writeConsentHold } from '../consent-prompt.js';
 import type { MasterConfig, WorkerProfile } from './profiles.js';

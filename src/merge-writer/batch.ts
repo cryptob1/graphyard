@@ -1,6 +1,6 @@
 // Concern: merging the next few queued heads together (GY-2088) — one trial and one push for the batch, falling back to one head at a time when the batch fails.
 import type { Work } from '../model.js';
-import { riskOf } from '../model/risk-class.js';
+import { riskOf } from '../model-boundary/risk-class.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { criterionProofs, e2eProofsOf, failureIsBase, mergeOne, requiredProofFailure, trialFailureReason, trialFlaked, type MergeOutcome, type MergePorts } from './executor.js';
 import { previewFailureReason, type PreviewVerdict } from './preview.js';

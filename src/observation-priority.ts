@@ -1,5 +1,5 @@
 import type { Work } from './model.js';
-import { nextAction } from './model/next-action.js';
+import { nextAction } from './model-boundary/next-action.js';
 import { mergeAuthorized } from './model/merge-authorization.js';
 /**
  * How old the reading of a review-requested head may grow (GY-1114): the scheduler's own bound, which

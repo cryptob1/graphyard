@@ -1,10 +1,9 @@
-import { z } from 'zod';
-import { hostDoableAsk, hostDoableRefusal, parkRefusal as classifiedParkRefusal, type HostDoableAsk } from './park-refusal.js';
-import { shortAskIssues } from './human-ask.js';
+import type { z } from 'zod';
+import type { humanChoiceSchema } from '../model-boundary/human-request.js';
+import { hostDoableAsk, hostDoableRefusal, HostDoableAsk, parkRefusal as classifiedParkRefusal } from './park-refusal.js';
 import type { HumanAnswer } from './human-answer.js';
-import { humanProofRows } from './human-proof.js';
 import type { Work } from './work.js';
-
+import { humanProofRows } from './human-proof.js';
 // ------------------------------------------------------------
 // Decisions only a human may make, as typed state (GY-89).
 //
@@ -23,18 +22,6 @@ export const humanDecisionLabel = {
   'money-or-accounts': 'spending money or opening third-party accounts',
   'credentials-for-people': 'issuing credentials to people',
 } as const satisfies Record<HumanDecisionKind, string>;
-
-/**
- * One ready-made answer the requester offers (GY-738): a button on the card. `text` asks for the
- * operator's own words beside it (a different cap); `secret` asks for a value that is sealed to
- * the requesting host's key and never recorded in the clear.
- */
-export const humanChoiceSchema = z.object({
-  id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,39}$/),
-  label: z.string().trim().min(1).max(120),
-  outcome: z.enum(['provided', 'declined']),
-  input: z.enum(['none', 'text', 'secret']).default('none'),
-}).strict();
 export type HumanChoice = z.infer<typeof humanChoiceSchema>;
 const decline: HumanChoice = { id: 'decline', label: 'Decline', outcome: 'declined', input: 'none' };
 /** The choices a request offers when its requester named none: one per kind, always ending with Decline. */
@@ -50,25 +37,6 @@ export function requestChoices(request: { kind: HumanDecisionKind; choices?: Hum
   const named = request.choices?.length ? request.choices : defaultChoices(request.kind, !!request.sealTo);
   return named.some(choice => choice.outcome === 'declined') ? named : [...named, decline];
 }
-
-export const humanRequestSchema = z.object({
-  epoch: z.number().int().positive(),
-  kind: z.enum(humanDecisionKinds),
-  /** Why the item cannot continue without the decision. */
-  reason: z.string().trim().min(1).max(2000),
-  /** The exact thing the human is asked for: the account to open, the priority to set, the credential to issue. */
-  needed: z.string().trim().min(1).max(2000),
-  /** The short note the human reads (GY-1408): one sentence naming their action, a few plain steps, one plain why. NEEDED and REASON are the agents' detail. */
-  ask: z.string().trim().min(1).optional(),
-  steps: z.array(z.string().trim().min(1)).min(1).optional(), why: z.string().trim().min(1).optional(),
-  /** What the requester recommends (GY-1410), shown first: a choice it offers, or the safest way to get a value. `recommendationIssues` requires it and WHY. */
-  recommendation: z.string().trim().min(1).max(600).optional(),
-  /** The buttons the card offers, chosen by the requester; the kind's defaults when omitted. */
-  choices: z.array(humanChoiceSchema).min(1).max(6).refine(choices => new Set(choices.map(choice => choice.id)).size === choices.length, 'Choice ids must be distinct').optional(),
-  /** The requesting host's public key (PEM): a `secret` choice's value is sealed to it. */
-  sealTo: z.string().trim().min(1).max(4000).optional(),
-}).strict().refine(data => data.sealTo || !data.choices?.some(choice => choice.input === 'secret'), 'A secret choice needs sealTo, the requesting host\'s public key')
-  .superRefine((data, context) => { for (const message of shortAskIssues(data)) context.addIssue({ code: 'custom', message }); });
 /** What a request's recommendation misses (GY-1410), naming the field; empty when it has one: the choice recommended or the safest way to obtain a value, plus WHY. A request with choices names one by its label; a value request may advise freely. */
 export function recommendationIssues(data: { kind?: HumanDecisionKind; choices?: HumanChoice[] | null; sealTo?: string | null; recommendation?: string; why?: string }): string[] {
   const choices = data.kind ? requestChoices({ kind: data.kind, choices: data.choices, sealTo: data.sealTo }) : [];

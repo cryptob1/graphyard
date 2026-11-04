@@ -1,6 +1,6 @@
 // Concern: the control-plane merge executor (GY-1524) — the serial queue, one merge's steps against the ledger, the leased deploy-key push and the reconcile of intents a crash left open.
 import type { Work } from '../model.js';
-import { riskOf } from '../model/risk-class.js';
+import { riskOf } from '../model-boundary/risk-class.js';
 import { mergeLedgerKinds, type MergeLedgerState } from '../model/merge-ledger.js';
 import { trialFailurePrefix } from '../model/rework-ground.js';
 import { parseFailedTests } from '../model/base-failure.js';

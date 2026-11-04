@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createSchema, evaluate, type Observation, type Work } from '../src/model.js';
+import { createSchema } from '../src/model-boundary/work.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Observation, type Work } from '../src/model.js';
 
 // GY-406 gave the control-plane App a ruleset bypass the main guard still lands its reverts with.
 // GY-1234 removed the repair lane built on it: under GitHub delivery GitHub merges on its own

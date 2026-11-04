@@ -12,7 +12,8 @@ import { currentEvidence, type Observation, type Principal } from '../src/model.
 import { server } from '../src/server.js';
 import { candidateManifest, compatibilitySignature, digestHash, signatureDifferences, targetIdentity, type AttributionRecord } from '../src/attribution.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 // GY-2965: the fixtures create items carrying e2e: proofs, so this process declares the serve the trial would use.
 setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 

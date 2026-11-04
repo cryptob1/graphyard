@@ -10,7 +10,8 @@ import { Store, storeConnectionTimeoutMs, storeStatementTimeoutMs } from '../src
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { evidenceIndependenceRefusals, type Evidence, type Work } from '../src/model.js';
-import { reconcileAutoDispatch, type DispatchRequest } from '../src/model/dispatch.js';
+import { reconcileAutoDispatch } from '../src/model-boundary/dispatch.js';
+import { type DispatchRequest } from '../src/model/dispatch.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { emptyDaemonState, runDaemon, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { proofOutcome } from '../src/producer.js';

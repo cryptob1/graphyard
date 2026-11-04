@@ -1,6 +1,7 @@
 import type pg from 'pg';
 import { demand, operatorScopeIncludes, type Principal, type Work } from '../model.js';
-import { closeRefusal, closeSchema, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
+import { closeRefusal, closureRefRefusal, commitRef, itemRef, type Closure } from '../model/closure.js';
+import { closeSchema } from '../model-boundary/closure.js';
 import { deliveredObservationRefusal } from '../model/loop-observation.js';
 import { dispatchHistoryLimit, type DispatchRequest } from '../model/dispatch.js';
 import { humanRequestBlocker, retainedHumanRequests, type HumanRequest } from '../model/human-request.js';

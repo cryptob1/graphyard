@@ -152,7 +152,7 @@ function work(reviews: Observation['reviews'], author = 'graphyard-worker[bot]')
 
 test('unit:supervised-review-gate-human — review stays required: no approval never merges, an approval of the exact head passes; the loop launches the control-plane reviewer; master status names the promotion command', async () => {
   const { exactApproval } = await import('../src/model.js');
-  const { evaluate } = await import('../src/model/gates.js');
+  const { evaluate } = await import('../src/model-boundary/gates.js');
   const { withRoleDefaults } = await import('../src/master/profiles.js');
   const { selectReviewerProfile } = await import('../src/auto-dispatch.js');
   const reviewGate = (item: Work) => evaluate(item, [item], new Date('2026-10-08T00:05:00.000Z')).gates.find(gate => gate.name === 'review')!;

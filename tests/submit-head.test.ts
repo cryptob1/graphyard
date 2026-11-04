@@ -11,13 +11,14 @@ import { operatorAgentRoutes } from '../src/server/routes/operator-agents.js';
 import { matchRoute } from '../src/server/routes.js';
 import { allocateChangeNumber } from '../src/merge-writer/change-numbers.js';
 import { absentHeadRefusal, gitRunnerFor, observeHead, type GitRunner } from '../src/merge-writer/local-observation.js';
-import { evaluate, mergeLedgerRefusals, pushRefusal, trialRefusal, type Observation, type Principal, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { mergeLedgerRefusals, pushRefusal, trialRefusal, type Observation, type Principal, type Work } from '../src/model.js';
 import { completeCommand, completionBody } from '../src/cli/complete.js';
 import { syncWork } from '../src/cli/workspace.js';
 import type { CliContext } from '../src/cli/context.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // Time-bomb allowance (GY-1694): the 2026-10-08 observation at and the 12:30 evaluate now are past and handed explicitly to observeHead/evaluate; new Date() only stamps a GitHub observation of a live DB item.

@@ -11,7 +11,8 @@ import { DeliveryDefaults } from '../web/components/delivery-slices.js';
 import { Store, save } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server as controlPlane } from '../src/server.js';
-import { evaluate, type Principal, type Work } from '../src/model.js';
+import { evaluate } from '../src/model-boundary/gates.js';
+import { type Principal, type Work } from '../src/model.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { mergeRecordKey, mergeWriterIdle, mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { daemonSummary } from '../src/daemon/run.js';
@@ -24,7 +25,7 @@ import { reconcileReviews, saveReviewLedger } from '../src/reviewer.js';
 import { neededRework } from '../src/daemon/rework.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
-import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
 
 // Time-bomb allowance (GY-1694): the 2030-05-01 instant is the loop's injected clock and the explicit

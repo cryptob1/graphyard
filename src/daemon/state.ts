@@ -3,7 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { readFile, rename } from 'node:fs/promises';
 import { z } from 'zod';
 import { type MasterConfig } from '../master.js';
-import { emptyProjectMemory, projectMemorySchema } from '../model/project-memory.js';
+import { emptyProjectMemory } from '../model/project-memory.js';
+import { projectMemorySchema } from '../model-boundary/project-memory.js';
 import { emptyMergeWriterState, mergeWriterStateSchema } from './cycle-merge-writer.js'; // lazy: it imports this module
 import { continuitySchema } from '../master/conversation.js';
 

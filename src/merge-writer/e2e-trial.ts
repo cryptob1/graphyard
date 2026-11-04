@@ -9,8 +9,10 @@ import type { E2eReport } from '../e2e/runner.js';
 import { confinedSession } from '../e2e/steps.js';
 import { serveStaticSite } from './preview.js';
 import { composeBounds, composeProjectName, composeStack, dockerEnvironment } from '../compose-preview.js';
-import { checkoutRepositoryPolicy, type E2eServe } from '../model/repository-policy.js';
-import { loadProjectDelivery, type Application } from '../project-applications.js';
+import { checkoutRepositoryPolicy } from '../model-boundary/repository-policy.js';
+import { type E2eServe } from '../model/repository-policy.js';
+import { loadProjectDelivery } from '../model-boundary/project-applications.js';
+import { type Application } from '../project-applications.js';
 
 /** How one bound case came out of the trial's run against the served head. */
 export interface TrialE2eCase {

@@ -1,31 +1,12 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname, resolve } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import {
-  emptyProjectMemory,
-  projectMemorySchema,
-  updateProjectMemoryFromWork,
-  type ProjectMemory,
-} from './model/project-memory.js';
+import { emptyProjectMemory, updateProjectMemoryFromWork, type ProjectMemory } from './model/project-memory.js';
+import { projectMemorySchema } from './model-boundary/project-memory.js';
 import type { Work } from './model/work.js';
 
-export {
-  emptyProjectMemory,
-  isNoteRoleRelevant,
-  projectMemoryDigest,
-  projectMemorySchema,
-  projectMemoryWordBudget,
-  recentChangesWindowMs,
-  recordChangeInMemory,
-  recordNoteInMemory,
-  retainedMemoryChanges,
-  retainedMemoryNotes,
-  updateProjectMemoryFromWork,
-  type MemoryChange,
-  type MemoryNote,
-  type ProjectMemory,
-  type SessionRole,
-} from './model/project-memory.js';
+export { emptyProjectMemory, isNoteRoleRelevant, projectMemoryDigest, projectMemoryWordBudget, recentChangesWindowMs, recordChangeInMemory, recordNoteInMemory, retainedMemoryChanges, retainedMemoryNotes, updateProjectMemoryFromWork, type MemoryChange, type MemoryNote, type ProjectMemory, type SessionRole } from './model/project-memory.js';
+export { projectMemorySchema } from './model-boundary/project-memory.js';
 
 export const projectMemoryPath = (root: string) => resolve(root, '.graphyard', 'project-memory.json');
 

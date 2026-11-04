@@ -4,7 +4,7 @@ import { discover } from '../onboarding.js';
 import { loadProposal, readSetupStatus } from '../repository-setup.js';
 import { completionProfiles, readinessChecklist, summarizeDefinitions, type CompletionProfile } from '../readiness.js';
 import type { CliContext } from './context.js';
-import { doctorRepositoryPolicy } from '../model/repository-policy.js';
+import { doctorRepositoryPolicy } from '../model-boundary/repository-policy.js';
 import { agentEnvironmentRoot } from '../master/environments.js';
 import { masterCredential, planeAnswers, planeRequest, setupFromZeroChecks, setupLine, setupNext } from '../setup-from-zero.js';
 import { trialTestGateStatus } from '../merge-writer/trial.js';

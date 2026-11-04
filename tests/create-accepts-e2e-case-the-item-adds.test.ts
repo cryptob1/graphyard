@@ -15,7 +15,8 @@ import { trialMerge } from '../src/merge-writer/trial.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import type { Principal, Work } from '../src/model.js';
-import { defaultRepositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
+import { defaultRepositoryPolicy } from '../src/model/repository-policy.js';
+import { setRepositoryPolicy } from '../src/model-boundary/repository-policy.js';
 import { defineScenario } from '../src/scenarios.js';
 
 // GY-2973: an item may carry an e2e: proof whose case it adds itself; create and requirements

@@ -11,7 +11,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
-import { evaluate } from '../src/model/gates.js';
+import { evaluate } from '../src/model-boundary/gates.js';
 import { neededRework } from '../src/daemon/rework.js';
 import { sensitiveReviewRefusal, postMergeReviewMark } from '../src/model/post-merge-review.js';
 import { postReview, readReviewBinding, reviewBindingFile, reviewBindingSchema, ReviewPostRefusal, screenshotUploads, writeReviewBinding, type ReviewPostBinding } from '../src/review-post.js';

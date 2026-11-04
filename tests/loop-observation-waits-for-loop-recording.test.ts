@@ -1,10 +1,11 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { dispatchable } from '../src/coordination.js';
-import { actionAccount, nextAction } from '../src/model/next-action.js';
-import { reconcileActions } from '../src/model/actions.js';
-import { livenessFallback } from '../src/model/liveness.js';
-import { closeSchema, closureRefRefusal } from '../src/model/closure.js';
+import { actionAccount, nextAction } from '../src/model-boundary/next-action.js';
+import { reconcileActions } from '../src/model-boundary/actions.js';
+import { livenessFallback } from '../src/model-boundary/liveness.js';
+import { closeSchema } from '../src/model-boundary/closure.js';
+import { closureRefRefusal } from '../src/model/closure.js';
 import * as model from '../src/model.js';
 import type { Work } from '../src/model.js';
 
