@@ -388,6 +388,7 @@ export function supervisorArgv(argv: string[]) {
  * by argv alone; its known screen can still identify it.
  */
 export function runsProgram(argv: string[], program: string) {
+  program = program.split('/').at(-1) ?? program;
   return [...argv, ...wrappedWords(argv)].some(word => { const base = word.split('/').at(-1) ?? ''; return base === program || base.replace(/\.[cm]?js$/, '') === program; });
 }
 /**
@@ -411,8 +412,8 @@ export async function paneForeground(pane: string, run?: ChildRun, program?: str
     if (!program || !argvs.some(argv => argv.length)) return 'command';
     // A real runtime alongside its watch supervisor counts as the runtime. A
     // supervisor or mount wrapper merely naming it in later arguments does not.
-    const direct = (argv: string[]) => runsProgram(argv.slice(0, 1), program)
-      || /^(?:node|nodejs|bun|deno|python\d*(?:\.\d+)?)$/.test(argv[0]?.split('/').at(-1) ?? '') && runsProgram(argv.slice(1, 2), program);
+    const direct = (argv: string[]) => !supervisorArgv(argv) && (runsProgram(argv.slice(0, 1), program)
+      || /^(?:node|nodejs|bun|deno|python\d*(?:\.\d+)?)$/.test(argv[0]?.split('/').at(-1) ?? '') && runsProgram(argv.slice(1, 2), program));
     if (argvs.some(direct)) return 'runtime';
     if (argvs.some(supervisorArgv)) return 'supervisor';
     if (argvs.some(argv => runsProgram(argv, program))) return 'command';
@@ -472,6 +473,7 @@ export async function observeStart(pane: string, kind: string, command: string, 
   // Herdr's idle counts.
   if (agent?.agent === kind && showing && readyStates.includes('working')) return { state: 'ready', agent, detail: `the ${kind} runtime is on screen while Herdr reports it ${agent.agent_status ?? 'unknown'}`, line };
   if (agent?.agent === kind) return { state: 'starting', agent, detail: `the ${kind} runtime process exists under the pane, Herdr reports it ${agent.agent_status ?? 'unknown'}${showing ? ', its screen showing' : ''}`, line };
+  if (agent?.agent && agent.agent !== kind) return { state: 'absent', agent: null, detail: `the pane holds ${agent.agent}, not ${kind}`, line };
   if (showing) return { state: 'starting', agent: null, detail: `the ${kind} banner is on screen`, line };
   // The launch command is on screen and still holds the pane's foreground: its supervisor is
   // setting up — containment calls to a control plane that may be slow under load — before it

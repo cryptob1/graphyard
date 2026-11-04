@@ -5,7 +5,7 @@ import { promisify } from 'node:util';
 import { mkdir, readFile, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { awaitRuntimeStart, observeStart, SessionStartError } from '../src/master/launch.js';
+import { awaitRuntimeStart, observeStart, paneForeground, SessionStartError } from '../src/master/launch.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 test('integration:runtime-launch-real-progress — named idle/working shells and external trust dialogs are not live agent runtimes', async () => {
@@ -57,6 +57,44 @@ test('integration:runtime-launch-real-progress — an unknown-banner runtime alo
       foreground_processes: [{ argv: ['/usr/bin/node', '/opt/claude/cli.js'] }] } });
   };
   assert.equal((await observeStart('pane', 'claude', 'claude', nodeRuntime)).state, 'ready', 'a known runtime screen identifies an interpreter script whose basename differs');
+});
+
+test('integration:runtime-launch-real-progress — a different runtime identity refuses despite a stale requested-runtime banner', async () => {
+  const run = (_command: string, args: string[]) => {
+    const json = (result: unknown) => JSON.stringify({ result });
+    if (args[0] === 'agent') return json({ agent: { agent: 'codex', agent_status: 'working' } });
+    if (args[1] === 'read') return 'Claude Code\nRan 1 shell command';
+    if (args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200,
+      foreground_processes: [{ argv: ['codex'] }] } });
+    throw new Error(`Unexpected ${args}`);
+  };
+  const observation = await observeStart('pane', 'claude', 'claude', run);
+  assert.equal(observation.state, 'absent');
+  assert.equal(observation.detail, 'the pane holds codex, not claude');
+  let now = 0;
+  await assert.rejects(awaitRuntimeStart('pane', 'claude', 'claude', run, {
+    timeoutMs: 1000, ceilingMs: 2000, pollMs: 100, clock: () => now, wait: ms => { now += ms; },
+  }), (error: unknown) => error instanceof SessionStartError && error.startCase === 'never started' && /the pane holds codex, not claude/.test(error.message));
+  assert.ok(now <= 1000, 'the stale banner never extends the wrong runtime to the ceiling');
+});
+
+test('integration:runtime-launch-real-progress — an absolute executable identifies the runtime but never its node watch supervisor', async () => {
+  const program = '/usr/local/bin/node';
+  const runtime = [program, '/opt/custom-agent.mjs'];
+  const supervisor = [program, '/repo/bin/graphyard.mjs', 'watch', 'GY-1', '7', '--', ...runtime];
+  for (const processes of [[runtime], [supervisor], [supervisor, runtime]]) {
+    const run = (_command: string, args: string[]) => {
+      const json = (result: unknown) => JSON.stringify({ result });
+      if (args[0] === 'agent') return json({ agent: { agent: program, agent_status: 'working' } });
+      if (args[1] === 'read') return 'custom-agent request in progress';
+      if (args[1] === 'process-info') return json({ process_info: { shell_pid: 100, foreground_process_group_id: 200,
+        foreground_processes: processes.map(argv => ({ argv })) } });
+      throw new Error(`Unexpected ${args}`);
+    };
+    const present = processes.includes(runtime);
+    assert.equal(await paneForeground('pane', run, program), present ? 'runtime' : 'supervisor');
+    assert.equal((await observeStart('pane', program, program, run)).state, present ? 'ready' : 'starting');
+  }
 });
 
 test('integration:runtime-launch-real-progress — real PTY worker/reviewer requests and systemd resolver failure/recovery keep the sandbox', { timeout: 90_000 }, async () => {
