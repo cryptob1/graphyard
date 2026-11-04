@@ -10,6 +10,8 @@ import type { z } from 'zod';
 import { withAutonomyContract } from './autonomy.js';
 import { assertLaunchable, nonInteractiveLaunch, requestPlaceholder, type RegisteredLaunch } from './harness.js';
 import { launchProgram, sessionConfinement } from './master/launch.js';
+import { detectRuntimeExhaustion } from './master/runtime-prompt.js';
+import type { ExhaustionSignal } from './model/capacity.js';
 import type { CredentialMask } from './master/confinement.js';
 import { endRun, registerRun } from './runner/registry.js';
 import { runEnvironment } from './runner/pi.js';
@@ -45,7 +47,7 @@ export function headlessArgs(kind: string, args: readonly string[], prompt: stri
 
 /** The answer's text is bounded: what the run printed past this is ignored. */
 const outputLimit = 1024 * 1024;
-/** One child, stdin closed, its output collected; a non-zero exit, a signal or the bound is a failure naming the last of its standard error. */
+/** One child, stdin closed, its output collected; a non-zero exit, a signal or the bound is a failure naming the last of its standard error, carrying what it printed as `output`. */
 export const spawnHeadless: HeadlessExec = (command, args, options) => new Promise((resolve, reject) => {
   const child = spawn(command, args, { cwd: options.cwd, env: options.env, stdio: ['ignore', 'pipe', 'pipe'], signal: options.signal, timeout: options.timeoutMs, killSignal: 'SIGKILL' });
   let stdout = '', stderr = '';
@@ -53,7 +55,7 @@ export const spawnHeadless: HeadlessExec = (command, args, options) => new Promi
   child.stderr!.on('data', (chunk: Buffer) => { stderr = (stderr + chunk.toString('utf8')).slice(-4000); });
   child.on('error', reject);
   child.on('close', (code, signal) => code === 0 ? resolve(stdout)
-    : reject(new Error(`${command} exited ${signal ? `on ${signal}` : `with code ${code}`}${stderr.trim() ? `: ${stderr.trim().slice(-400)}` : ''}`)));
+    : reject(Object.assign(new Error(`${command} exited ${signal ? `on ${signal}` : `with code ${code}`}${stderr.trim() ? `: ${stderr.trim().slice(-400)}` : ''}`), { output: `${stdout.slice(-4000)}\n${stderr}` })));
 });
 /** The launcher's exec: the host's, except under the test runner, where only a test's fake runs and launches keep their pane path. */
 export const defaultHeadlessExec = (): HeadlessExec | null => underTestRunner() ? null : spawnHeadless;
@@ -92,6 +94,8 @@ export interface HeadlessSession<T> {
   /** Posts what the run printed; a throw refuses the answer and names why. */
   answer: (output: string) => Promise<T>;
   exec: HeadlessExec;
+  /** Holds the run's account until the notice's reset, as a pane launch's limit-notice exit does (auto-dispatch.ts `holdAccount`), so the request's next launch takes the next account. */
+  holdAccount?: (notice: ExhaustionSignal) => Promise<unknown>;
 }
 
 /**
@@ -120,9 +124,18 @@ export async function startHeadlessSession<T>(input: HeadlessSession<T>): Promis
     for (let attempt = 1; ; attempt++) {
       const prompt = attempt === 1 ? request : `${request}\n\nYour previous answer was not accepted: ${refused}. Answer again with the one JSON object asked for.`;
       const argv = [...wrapper, launchProgram(input.kind), ...headlessArgs(input.kind, args, prompt)];
-      try { return await input.answer(await input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env: runEnvironment(process.env, input.environment), timeoutMs: headlessRunMs, signal: controller.signal })); }
-      catch (error) {
+      let output: string | null = null;
+      try {
+        output = await input.exec(argv[0]!, argv.slice(1), { cwd: input.directory, env: runEnvironment(process.env, input.environment), timeoutMs: headlessRunMs, signal: controller.signal });
+        return await input.answer(output);
+      } catch (error) {
         refused = (error instanceof Error ? error.message : String(error)).split('\n')[0]!.slice(0, 400);
+        // The provider's limit notice, read as a pane's is: the account is spent, so it is held and not run again.
+        const notice = detectRuntimeExhaustion(output ?? (error as { output?: string })?.output ?? String((error as Error)?.message ?? error), input.kind, Date.now());
+        if (notice) {
+          await input.holdAccount?.(notice);
+          throw new Error(`the headless run stopped on its provider's limit notice: ${notice.reason}; its account is held until ${notice.resetsAt ?? 'its reset'}`);
+        }
         if (controller.signal.aborted || attempt >= headlessAttempts) throw new Error(`no answer accepted after ${attempt} run${attempt === 1 ? '' : 's'}: ${refused}`);
       }
     }

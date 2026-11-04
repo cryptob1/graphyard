@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { z } from 'zod';
 import { consentAnswerSchema } from './consent-prompt.js';
 import { defaultChildRun, type ChildRun } from './child-runner.js';
-import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, loadStoredMasterConfig, markReprompted, onSelectedSession, prepareSessionHarness, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerProfile } from './master.js';
+import { closeFailedLaunch, launchStartMs, withLaunchClose, accountLaunch, acknowledgeLaunch, acknowledgementMs, agentLaunchPlan, allocateManagedCheckout, autonomousSession, createdHerdrTab, deliverPrompt, herdrJson, holdRepeatedLimitAccount, loadMasterConfig, profileAccount, recordObservedExhaustion, loadStoredMasterConfig, markReprompted, onSelectedSession, prepareSessionHarness, profileAtLimit, profileConcurrency, registrySessionOf, profileSessions, readSessionScreen, reviewerProfileSchema, closeHerdrPane, selectAccount, sessionAgentName, settleCheckout, settlementDue, settlementReason, sharedGitDirectory, startAgentSession, stopCreatedHerdrTab, writeFailure, type HerdrAgent, type PromptDelivery, type StartBounds, type MasterConfig, type RequestDelivery, type ReviewerProfile } from './master.js';
 import { atomicPrivateWrite, readCredentialFile, privateFile } from './private-file.js';
 import { sessionSlotsGrant } from './master/harness.js';
 import { sessionConfinement } from './master/launch.js';
@@ -1002,6 +1002,7 @@ export async function launchReview(root: string, work: Work, profileName: string
           delivery = 'request';
           ({ settled: answered } = await startHeadlessSession({ name: agentName, work: binding.key, subject: id, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
             contract: launch.contract, credentialMask, role: harness.role, exec: runHeadless,
+            holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: now().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: binding.key }, now().getTime(), {}),
             prompt: request(`${await reviewDiff(root, binding.baseSha, binding.sha, dependencies.run)}\n${headlessReviewAnswer(binding.key, product)}`),
             answer: output => postReview({ ...headlessVerdictPost(jsonAnswer(output, headlessVerdictSchema)), cliPath: config.cliPath ?? launcherPath, environment },
               { run: (command, args) => (dependencies.run ?? defaultChildRun)(command, args, { cwd: root }) }) }));

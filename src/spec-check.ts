@@ -14,7 +14,7 @@ import type { FleetProbe } from './fleet.js';
 import type { SandboxExec } from './worker-sandbox.js';
 import {
   accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane, createdHerdrTab,
-  herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, prepareSessionHarness, readCredentialFile,
+  herdrJson, launchStartMs, loadMasterConfig, onSelectedSession, profileAccount, recordObservedExhaustion, prepareSessionHarness, readCredentialFile,
   profileAtLimit, profileSessions, selectAccount, sessionAgentName, startAgentSession,
   type PromptDelivery, type StartBounds,
 } from './master.js';
@@ -143,6 +143,7 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       if (runHeadless) {
         const { settled } = await startHeadlessSession({ name: agentName, work: work.key, subject: registered.launch, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
           contract: launch.contract, credentialMask, role: harness.role, exec: runHeadless,
+          holdAccount: notice => recordObservedExhaustion(config, selected.account?.name ?? profileAccount(profile.name), { at: new Date().toISOString(), resetsAt: notice.resetsAt, reason: notice.reason, role: 'reviewer', profile: profile.name, work: work.key }, Date.now(), {}),
           prompt: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip, headlessSpecCheckAnswer),
           answer: async output => postSpecCheck({ ...jsonAnswer(output, headlessSpecCheckSchema), cliPath: config.cliPath, environment }) });
         // The binding and the registry slot go with the run, whatever it answered.

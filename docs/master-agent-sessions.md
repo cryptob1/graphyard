@@ -99,7 +99,7 @@ Claude records session ID, runtime, account and worktree in `.graphyard/dispatch
 
 ### Verdicts and registry slots
 
-Reviews and spec checks run headless: one confined child gets item, criteria and diff, printing JSON posted with the launch token as the profile. Malformed answers retry once, then relaunch; runtimes without one-shot forms keep panes. `master reviewer add|remove` manages profiles; no reviewer App needed.
+Reviews and spec checks run headless: one confined child gets item, criteria and diff, printing JSON posted with the launch token as the profile. Malformed answers retry once, then relaunch; limit notices hold the account. Runtimes lacking one-shot forms keep panes; `master reviewer add|remove` manages profiles.
 
 `review-binding.json` (0600, launcher-held) binds head, base, policy and verdictToken; moved heads refuse. Workers run `review self GY-N` before complete.
 

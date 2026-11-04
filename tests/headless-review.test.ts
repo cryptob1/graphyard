@@ -10,7 +10,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import type { Principal, Work } from '../src/model.js';
-import { loadMasterConfig, setupMaster } from '../src/master.js';
+import { loadMasterConfig, observedExhaustions, setupMaster } from '../src/master.js';
 import { launchReview, readReviewLedger, reconcileReviews, saveReviewerProfile, unpostedVerdict } from '../src/reviewer.js';
 import { launchSpecCheck } from '../src/spec-check.js';
 import { reviewBindingFile } from '../src/review-post.js';
@@ -215,4 +215,28 @@ test('integration:headless-review — each runtime runs its one-shot form, and t
   const options = { cwd: root, env: { PATH: process.env.PATH ?? '' }, timeoutMs: 10_000, signal: new AbortController().signal };
   assert.equal(await spawnHeadless(process.execPath, ['-e', 'process.stdin.on("data", () => process.exit(3)); process.stdin.on("end", () => console.log("{}"))'], options), '{}\n', 'stdin is closed: nothing waits on a person');
   await assert.rejects(spawnHeadless(process.execPath, ['-e', 'console.error("limit reached"); process.exit(2)'], options), /exited with code 2: limit reached/);
+});
+
+test('integration:headless-review — a run that stops on its provider\'s limit notice holds the account as a pane launch does, and is not run again on it', async () => {
+  const config = await loadMasterConfig(root);
+  // The earlier tests' answered sessions settle first, so the profile's one slot is free.
+  const pending = (await readReviewLedger(root)).reviews.filter(entry => entry.state === 'pending').map(entry => entry.key);
+  const items = (await store.pool.query('SELECT document FROM work_items')).rows.map(row => row.document as Work).filter(item => pending.includes(item.key));
+  await reconcileReviews(root, config, { run, work: items, agents: [] });
+  const work = await insert(reviewItem('GY-9107'));
+  const resetsAt = new Date(Date.now() + 3 * 3_600_000);
+  const runs: string[][] = [];
+  // The runtime exits non-zero with the notice on its output, as `claude -p` does on a spent account.
+  const exec: HeadlessExec = async (command, args) => { runs.push([command, ...args]); throw Object.assign(new Error('claude exited with code 1'), { output: `You've hit your session limit · resets ${resetsAt.toISOString()}\n` }); };
+  const launched = await launchReview(root, work, 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-7' });
+  const record = await settled(launched.review);
+  assert.equal(runs.length, 1, 'a spent account is not run again');
+  assert.equal(record.state, 'failed');
+  assert.match(record.resolution!, /stopped on its provider's limit notice: You've hit your session limit/);
+  const held = (await observedExhaustions(config))['profile:reviewer-claude'];
+  assert.ok(held, 'the account is held');
+  assert.deepEqual([held.role, held.work, held.until], ['reviewer', 'GY-9107', resetsAt.toISOString()]);
+  // The next launch skips the held account: with no other account on the profile it is refused before anything runs.
+  await assert.rejects(launchReview(root, await stored(work.id), 'reviewer-claude', [], now(), { run, headless: exec, requestId: 'headless-request-7' }), /No healthy agent account for reviewer profile reviewer-claude/);
+  assert.equal(runs.length, 1);
 });
