@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { herdrWorkspaceHealth, liveMasterConfig, loadMasterConfig, masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { reresolveHerdrWorkspace } from '../src/master/config.js';
 import { herdrJson, herdrWorkspaceRefused, liveHerdrWorkspace } from '../src/master/herdr.js';
-import { emptyDaemonState, noteConfigReload } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { noteConfigReload } from '../src/daemon/run.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // Each test is named for the proof it produces (GY-2600): unit:herdr-workspace-reconfigured-when-gone,

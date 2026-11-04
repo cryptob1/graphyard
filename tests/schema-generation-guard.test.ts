@@ -5,6 +5,7 @@ import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { schemaGenerations, schemaVersion } from '../src/release.js';
 import { currentSchemaCode, runStartupMigration, schemaGenerationDigest, type SchemaCode } from '../src/store/migration-locks.js';
+import { retiredTables } from '../src/store/schema.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-1961: the schema generation follows the table definitions, so a release whose definitions are
@@ -47,7 +48,11 @@ test('unit:schema-generation-guard — a release whose table definitions are old
   const store = new Store(url('guard'));
   try {
     // Same definitions start as today, again and again.
+    // An upgraded install removes the retired protocol tables in the same generation.
+    const retired = retiredTables.filter(name => name.startsWith('validation_') || name.startsWith('attribution_'));
+    for (const name of retired) await store.pool.query(`CREATE TABLE ${name} (id uuid PRIMARY KEY)`);
     await store.init(); await store.init();
+    for (const name of retired) assert.equal((await store.pool.query('SELECT to_regclass($1) AS relation', [name])).rows[0].relation, null, name);
     assert.equal(await store.schema(), schemaVersion);
     // Code with a newer definition migrates forward over it and records its generation and release.
     await runStartupMigration(store.pool, { code: newer });

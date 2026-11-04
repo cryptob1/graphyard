@@ -12,12 +12,14 @@ import { fileURLToPath } from 'node:url';
 import type { ChildRun } from './child-runner.js';
 import type { FleetProbe } from './fleet.js';
 import type { SandboxExec } from './worker-sandbox.js';
-import {
-  accountLaunch, allocateManagedCheckout, autonomousSession, closeHerdrPane,
-  launchStartMs, loadMasterConfig, onSelectedSession, prepareSessionHarness, readCredentialFile,
-  profileAtLimit, profileSessions, selectAccount, sessionAgentName, launchSession,
-  type PromptDelivery, type StartBounds,
-} from './master.js';
+import { accountLaunch, onSelectedSession, selectAccount } from './master/environments.js';
+import { allocateManagedCheckout } from './master/worktrees.js';
+import { autonomousSession } from './master/dispatch.js';
+import { closeHerdrPane } from './master/herdr.js';
+import { launchStartMs, launchSession, type PromptDelivery, type StartBounds } from './master/launch.js';
+import { loadMasterConfig, readCredentialFile } from './master/config.js';
+import { prepareSessionHarness } from './master/harness.js';
+import { profileAtLimit, profileSessions, sessionAgentName } from './master/profiles.js';
 import { selectReviewerProfile } from './auto-dispatch.js';
 import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, LauncherUnavailableError, readReviewLedger, reviewerCredentialDirectory, sessionWritable, verifySessionSandbox } from './reviewer.js';
 import { withVerificationPath } from './master/verification-slots.js';

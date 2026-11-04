@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema, type WorkerProfile } from '../src/master.js';
 import { authorizedForProof, unauthorizedProofs, type Principal, type Work } from '../src/model.js';
 import { readySpecCheck } from './helpers/spec-check.js';

@@ -1,8 +1,9 @@
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
-import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
-import { assertDispatchable } from '../master.js';
+import type { MasterConfig, WorkerProfile } from '../master/profiles.js';
+import type { HerdrAgent } from '../master/herdr.js';
+import { assertDispatchable } from '../master/dispatch.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';

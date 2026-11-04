@@ -1,6 +1,8 @@
 // Concern: launched sessions — worker profile health.
 import type { Work } from '../model.js';
-import { agentAssignment, finishedAgentStates, reclaimableAgent, type WorkerProfile, type HerdrAgent } from '../master.js';
+import { agentAssignment, finishedAgentStates, reclaimableAgent } from '../master/dispatch-reservation.js';
+import { type WorkerProfile } from '../master/profiles.js';
+import { type HerdrAgent } from '../master/herdr.js';
 import { type DaemonAction, type DaemonState, profileCooldownMs } from './state.js';
 
 export interface ProfileHealth { profile: WorkerProfile; healthy: boolean; busy: boolean; reason: string | null }

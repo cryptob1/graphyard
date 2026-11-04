@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { detectRuntimeExhaustion } from '../src/master/environments.js';
+import { detectRuntimeExhaustion } from '../src/master/runtime-prompt.js';
 import { accountHeldForRole, providerLimit } from '../src/model/capacity.js';
 import { masterConfigSchema, observedExhaustions, recordObservedExhaustion, selectAccount, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

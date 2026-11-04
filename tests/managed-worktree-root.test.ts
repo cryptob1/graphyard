@@ -10,7 +10,9 @@ import { fileURLToPath } from 'node:url';
 import type { Work } from '../src/model.js';
 import { allocateManagedCheckout, assertOutsideWorktrees, diskExhaustion, diskExhaustionMessage, loadMasterConfig, managedRootStatus, masterRunSchema, reclaimAdvice, saveProducerProfile, sessionHarnessPlan, setupMaster, sharedGitDirectory, writeFailure, type MasterConfig, type MasterRun } from '../src/master.js';
 import { expandTypedCommand, startedAtOnce } from './helpers/launch-shell.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { acquireVerificationSlot, defaultVerificationSlots, heavyCommand, heldSlots, verificationBin, verificationEnvironment, verificationSlotsDirectory, withVerificationPath } from '../src/master/verification-slots.js';
 import { sessionSlotsGrant } from '../src/master/harness.js';
 import { accountLaunch } from '../src/master/environments.js';
@@ -171,9 +173,9 @@ test('integration:managed-worktree-root — producer and reviewer checkouts are 
       reviewPrompt(config, binding, elsewhere), reviewPrompt(config, binding)]) assert.equal(generated(text).includes('/tmp'), false, 'a generated prompt never names /tmp');
     assert.ok(producerPrompt({ repository: 'owner/project', cliPath: launcher }, binding, { principal: 'proof-runner' }).includes(join(dataDirectory(process.env), 'worktrees')), 'a previewed prompt names the default root the environment configures');
     const sources = fileURLToPath(new URL('../src/', import.meta.url));
-    // master.ts and master-daemon.ts re-export their modules under master/ and daemon/ (GY-177).
+    // Include every owning module under master/ and daemon/.
     const split = async (directory: string) => (await readdir(join(sources, directory))).filter(name => name.endsWith('.ts')).map(name => `${directory}/${name}`);
-    for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', ...await split('master'), 'master-daemon.ts', ...await split('daemon'), 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {
+    for (const file of ['producer.ts', 'reviewer.ts', 'master.ts', ...await split('master'), ...await split('daemon'), 'auto-dispatch.ts', 'harness.ts', 'install/worktree-root.ts']) {
       const code = (await readFile(join(sources, file), 'utf8')).split('\n').filter(line => !/^\s*(\/\/|\*|\/\*)/.test(line)).join('\n');
       assert.doesNotMatch(code, /tmpdir\(\)/, `${file} never allocates from the host temporary directory`);
       if (!['master/confinement.ts', 'master/socket-confinement.ts'].includes(file))
