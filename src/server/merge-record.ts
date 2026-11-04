@@ -14,7 +14,7 @@ import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.
 import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
 import { defaultMergeBatch } from '../merge-writer/batch.js';
 import { recordScenarioRun } from '../test-runs.js';
-import { mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { mergeCandidateObsolete, mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
 import type { Services } from './routes.js';
@@ -158,16 +158,21 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     const receipt = async (result: unknown) => { await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result; };
     const answer = () => ({ recorded: true, key: work!.key, kind: data.kind, stage: work!.stage, mergeLedger: work!.mergeLedger ?? null, delivery: work!.delivery ?? null });
+    if (data.kind === 'intent') {
+      demand(work!.stage !== 'done' && !work!.reworkRequested && !work!.lease && work!.submission?.epoch === work!.epoch,
+        `${work!.key}: merge intent needs the current submitted implementation, without rework or replacement ownership`, 409);
+    }
     const candidate = work!.candidate?.sha.toLowerCase() ?? null;
     // Every record is about the item's own submitted head (AC-4): an intent, a trial or a refusal
     // names it; a push or a reconciliation names the merge commit the item's open intent of that
     // head intends. Main holding some commit never delivers an item whose ledger did not intend it.
     // GY-3039: an open intent on a superseded head still settles. The reconcile records the old
     // head refused so the ledger leaves its blocking state and the current candidate queues; only
-    // a refusal naming the ledger's own open head is accepted, anything else is still another head.
+    // a refusal or late trial naming the ledger's own open head is retained as history.
+    // A late obsolete trial cannot supply evidence for the replacement below.
     if ('head' in data) {
       if (data.head !== candidate) {
-        demand(data.kind === 'refused', otherHeadRefusal(work!.key, data.head, candidate), 409);
+        demand(data.kind === 'refused' || data.kind === 'trial' || data.kind === 'trial-step', otherHeadRefusal(work!.key, data.head, candidate), 409);
         const ledger = await foldItemLedger(db, work!, data);
         demand(ledger !== null && (ledger.state === 'intent' || ledger.state === 'pushed') && ledger.head?.toLowerCase() === data.head, otherHeadRefusal(work!.key, data.head, candidate), 409);
       }
@@ -193,7 +198,9 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     // item as trusted evidence bound to the merge commit it ran against — a pass and a fail both keep their
     // run in the case's Tests-page history; only a pass can stand behind the proof, and only through the
     // trial counts the acceptance gate reads.
-    if (data.kind === 'trial' && data.outcome === 'verdict' && data.e2e?.length) {
+    const original = data.kind === 'trial' && data.outcome === 'verdict' && data.e2e?.length
+      ? (await db.query(`SELECT ${eventWorkSql()} AS work FROM events WHERE work_id=$1 AND kind='merge-writer.intent' ORDER BY seq DESC LIMIT 1`, [work!.id])).rows[0]?.work as Work | undefined : undefined;
+    if (data.kind === 'trial' && data.outcome === 'verdict' && data.e2e?.length && original && !mergeCandidateObsolete(work!, original)) {
       for (const entry of data.e2e) {
         if (entry.executed === 0) continue;
         const evidence: Evidence = { id: randomUUID(), proof: entry.proof, sha: data.mergeSha, baseSha: data.baseTip, policyRevision: work!.policyRevision,

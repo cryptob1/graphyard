@@ -34,7 +34,7 @@ test('unit:retired-merge-queue-keys — unknown merge-queue keys are kept and wr
 test('unit:master-config-retired-keys — old App and merge settings load and githubAppId is optional', async () => {
   const old = masterConfigSchema.parse({ ...base, mergeMethod: 'squash' });
   assert.equal(old.githubAppId, 1234);
-  assert.equal(old.mergeMethod, 'squash');
+  assert.equal((old as unknown as Record<string, unknown>).mergeMethod, 'squash');
   const { githubAppId, ...withoutApp } = base;
   assert.equal(masterConfigSchema.parse(withoutApp).githubAppId, undefined);
   const directory = await temporaryDirectory('retired-master-config');
@@ -49,7 +49,7 @@ test('unit:master-config-retired-keys — old App and merge settings load and gi
     await writeFile(file, JSON.stringify(config), { mode: 0o600 });
     const loaded = await loadMasterConfig(root);
     assert.equal(loaded.githubAppId, 1234);
-    assert.equal(loaded.mergeMethod, 'squash');
+    assert.equal((loaded as unknown as Record<string, unknown>).mergeMethod, 'squash');
     const { githubAppId: _retired, ...current } = config;
     await writeFile(file, JSON.stringify(current));
     assert.equal((await loadMasterConfig(root)).githubAppId, undefined);

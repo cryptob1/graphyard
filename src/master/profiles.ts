@@ -4,7 +4,7 @@ import { dirname, isAbsolute, resolve, sep } from 'node:path';
 import { z } from 'zod';
 import { defaultChildRun } from '../child-runner.js';
 import { temporaryDirectories, underTestRunner } from '../supervisor.js';
-import { diagnosticianSettingsSchema, narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
+import { narrowRoleRuntimeSchema, piRuntimeSchema } from '../runner/payloads.js';
 import { candidateSettingsSchema, mergeWriterSettingsSchema } from './merge-writer-settings.js';
 import { sessionNameField, sessionNameLimit, assertSessionName, sessionNameDigestLength, SessionNameRefusedError } from '../session-name.js';
 export { checkoutGitDirectory, checkoutGitProblem, checkoutWorktreeAdminDirectory } from './checkout-git.js';
@@ -327,9 +327,8 @@ export const masterRunSchema = z.object({
   pi: piRuntimeSchema.optional(),
   research: z.unknown().optional(), decomposition: z.unknown().optional(), // research and splitting, retired by GY-2875; parsed so an older master.json loads
   doctor: z.unknown().optional(), // the pipeline doctor, retired by GY-2873; parsed so an older master.json loads
-  // The diagnostician (GY-439): headless Pi session turning each recurring-fault item into its root
-  // cause and fix item — its model, fallback, time limit, bound and log-reading commands.
-  diagnostician: diagnosticianSettingsSchema.optional(),
+  // Retired diagnostician settings remain readable without validating their old shape.
+  diagnostician: z.unknown().optional(),
   mergeWriter: mergeWriterSettingsSchema.optional(), // the control-plane merge executor's deploy key and re-trial bound (GY-1524)
   candidates: candidateSettingsSchema.optional(), // unused since GY-1983; parsed so an older master.json loads
 }).strict();
@@ -370,7 +369,6 @@ export const masterConfigSchema = forwardTolerant(z.object({
   autoMerge: z.unknown().optional(), // Retired: every passing candidate merges.
   // Retired (GY-2874): no review round is capped; an existing master.json still loads.
   reviewRoundCap: z.unknown().optional(),
-  mergeMethod: z.enum(['merge', 'squash', 'rebase']).default('merge'),
   workers: z.array(workerProfileSchema).max(100).default([]),
   reviewer: z.unknown().optional(), // Retired reviewer App binding; old configs still load.
   reviewers: z.array(reviewerProfileSchema).max(20).default([]),

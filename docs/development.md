@@ -72,3 +72,5 @@ Use the release's checkout, one release at a time. Each run creates/removes a sc
 Edit handwritten guides and their `<!-- page: Section | order | summary -->` metadata. `npm run docs:check -- --write` generates `docs/README.md` and `docs/protocol.md`; `npm run docs:check` validates relative links and anchors. The [generated-file policy](coordination.md#generated-files) keeps sync from hand-merging indexes.
 
 Diagram specs live in `scripts/render-docs-diagrams.mjs`. The opening video has a separate HTML source and renderer under `scripts/walkthrough/`; [rendering instructions](walkthrough.md) cover both committed media assets.
+
+Schema generation 13 retires job holds and their status fields, the unused work-index owner, epoch and next-action columns, and the legacy merger pin and production observation tables. Startup migrates existing databases and rebuilds the work index; fresh databases omit those fields. Repeating the migration skips column removal when the index projection is unchanged, so live writers do not block startup. Job scheduling still uses wake generations, due times and lease tokens.
