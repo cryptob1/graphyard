@@ -1,20 +1,20 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { join } from 'node:path';
 import { createContext } from '../src/cli/context.js';
-import { loginCommand } from '../src/cli/session-commands.js';
+import { loginCommand, openCommand } from '../src/cli/session-commands.js';
 import { HumanSignIn, signInSessionTtlMs } from '../src/server/auth.js';
 import { signInDatabase } from './helpers/sign-in-database.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-2171: `graphyard login` with no options and no GRAPHYARD_TOKEN_FILE finds the operator credential
-// the install recorded under the config home, and the human session its link opens lasts 30 days.
+// the install recorded under the config home, and the human session its link opens lasts until 90 days unused.
 
 // Mints a link with no credential named, against a stub server, and returns the credential it sent and what it printed.
-async function loginWithNoOptions(root: string, configHome: string) {
+async function loginWithNoOptions(root: string, configHome: string, command = loginCommand, env: Record<string, string> = {}) {
   const seen: (string | undefined)[] = [];
   const server = createServer((request, response) => {
     if (request.url === '/api/sign-in-links') seen.push(request.headers.authorization);
@@ -22,14 +22,14 @@ async function loginWithNoOptions(root: string, configHome: string) {
     response.end(request.url === '/api/sign-in-links' ? JSON.stringify({ code: 'one-time-code-0123456789', principal: 'acme-widget-operator', expiresAt: '2026-10-19T00:10:00Z' }) : '{}');
   });
   await new Promise<void>(done => server.listen(0, '127.0.0.1', done));
-  const names = ['GRAPHYARD_URL', 'GRAPHYARD_CONFIG_HOME', 'GRAPHYARD_REPOSITORY_ROOT', 'GRAPHYARD_TOKEN', 'GRAPHYARD_TOKEN_FILE'] as const;
+  const names = ['GRAPHYARD_URL', 'GRAPHYARD_CONFIG_HOME', 'GRAPHYARD_REPOSITORY_ROOT', 'GRAPHYARD_TOKEN', 'GRAPHYARD_TOKEN_FILE', 'PATH'] as const;
   const saved = Object.fromEntries(names.map(name => [name, process.env[name]]));
   try {
-    for (const name of names) delete process.env[name];
-    Object.assign(process.env, { GRAPHYARD_URL: `http://127.0.0.1:${(server.address() as { port: number }).port}`, GRAPHYARD_CONFIG_HOME: configHome, GRAPHYARD_REPOSITORY_ROOT: root });
+    for (const name of names) if (name !== 'PATH') delete process.env[name];
+    Object.assign(process.env, env, { GRAPHYARD_URL: `http://127.0.0.1:${(server.address() as { port: number }).port}`, GRAPHYARD_CONFIG_HOME: configHome, GRAPHYARD_REPOSITORY_ROOT: root });
     const printed: any[] = [];
     const context = await createContext('login', undefined, [], false);
-    await loginCommand.run({ ...context, print: value => printed.push(value) }, undefined);
+    await command.run({ ...context, print: value => printed.push(value) }, undefined);
     return { seen, printed: printed[0], base: process.env.GRAPHYARD_URL! };
   } finally {
     for (const name of names) if (saved[name] === undefined) delete process.env[name]; else process.env[name] = saved[name];
@@ -75,18 +75,38 @@ for (const [layout, configHomeOf] of [['GRAPHYARD_CONFIG_HOME at <install>', (ho
   });
 }
 
-test('unit:human-session-30-days a session opened from a sign-in link stays valid for 30 days', async () => {
+test('unit:signin-session-renews-on-use — a session used within 90 days stays valid, and one left unused for 90 days is refused', async () => {
   let now = Date.parse('2026-10-19T00:00:00Z');
   const database = await signInDatabase(3077);
   try {
     const table = new HumanSignIn(database.store, () => now);
     const { code } = table.issue({ id: 'operator', role: 'admin', sessionKind: 'human' }, true);
     const session = await table.redeem(code);
-    assert.equal(signInSessionTtlMs, 30 * 86_400_000);
-    assert.equal(session.expiresAt, '2026-11-18T00:00:00.000Z');
-    now += 29 * 86_400_000;
+    assert.equal(signInSessionTtlMs, 90 * 86_400_000);
+    assert.equal(session.expiresAt, '2027-01-17T00:00:00.000Z');
+    const expiry = async () => (await database.store.pool.query('SELECT expires_at FROM human_sign_in_sessions')).rows[0].expires_at.toISOString();
+    // Used every 80 days, the session outlives its first 90.
+    for (let use = 0; use < 3; use++) { now += 80 * 86_400_000; assert.equal((await table.authenticate(session.token))?.id, 'operator'); }
+    assert.equal(await expiry(), new Date(now + signInSessionTtlMs).toISOString());
+    // A use within the hour does not write again.
+    now += 30 * 60_000;
     assert.equal((await table.authenticate(session.token))?.id, 'operator');
-    now += 86_400_000;
+    assert.equal(await expiry(), new Date(now - 30 * 60_000 + signInSessionTtlMs).toISOString());
+    now += signInSessionTtlMs;
     assert.equal(await table.authenticate(session.token), null);
   } finally { await database.close(); }
+});
+
+test('unit:open-command — graphyard open opens the one-time link in the default browser, and prints it when no opener runs', async () => {
+  const root = await checkout(), home = await temporaryDirectory('open-config'), bin = await temporaryDirectory('open-bin'), seen = join(bin, 'opened');
+  for (const opener of ['xdg-open', 'open']) { await writeFile(join(bin, opener), `#!/bin/sh\nprintf '%s' "$1" > '${seen}'\n`); await chmod(join(bin, opener), 0o755); }
+  const env = { GRAPHYARD_TOKEN: 'operator-admin-credential-0123456789abcdef' };
+  const opened = await loginWithNoOptions(root, home, openCommand, { ...env, PATH: bin });
+  assert.deepEqual(opened.printed, { opened: true, principal: 'acme-widget-operator' });
+  let url = '';
+  for (let wait = 0; !url && wait < 100; wait++) url = await readFile(seen, 'utf8').catch(() => new Promise<string>(done => setTimeout(() => done(''), 50)));
+  assert.equal(url, `${opened.base}/#sign-in=one-time-code-0123456789`);
+  const printed = await loginWithNoOptions(root, home, openCommand, { ...env, PATH: await temporaryDirectory('open-empty-bin') });
+  assert.equal(printed.printed.opened, false);
+  assert.equal(printed.printed.signIn, `${printed.base}/#sign-in=one-time-code-0123456789`);
 });

@@ -245,7 +245,7 @@ test('unit:e2e-runner-results — browser steps open, fill, click and expect tex
   const health = (async () => new Response('{}')) as typeof fetch;
   const ok = await runCases(signIn, { url: 'https://uat.example.test', token: 'uat-token', launcher: launcher('nothing'), fetcher: health });
   assert.equal(ok.cases[0].outcome, 'pass', JSON.stringify(ok.cases[0].failingStep));
-  assert.deepEqual(actions, ['open https://uat.example.test/', 'fill Access token=uat-token', 'click button:Open control plane:false', 'see navigation:Primary:true', 'see heading:Work:true']);
+  assert.deepEqual(actions, ['open https://uat.example.test/?sign-in', 'fill Access token=uat-token', 'click button:Open control plane:false', 'see navigation:Primary:true', 'see heading:Work:true']);
   assert.equal(launches, 1);
   const bad = await runCases(signIn, { url: 'https://uat.example.test', token: 'uat-token', launcher: launcher('heading:Work'), fetcher: health });
   assert.deepEqual(bad.cases[0].failingStep, { index: 4, name: 'expect heading "Work"', reason: 'Timeout waiting for heading:Work:true' });

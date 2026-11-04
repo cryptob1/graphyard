@@ -16,6 +16,7 @@ import { attachCommand, runningSessions, sessionHandleLimit, sessionSummary } fr
 import { dispatchEffects, launchedSessionHandle, runDispatchTick, runWorkerPull, workerPullIntervalMs, emptyDispatchCursor, type DispatchEffects } from '../src/auto-dispatch.js';
 import { masterConfigSchema } from '../src/master.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { localRequest } from './helpers/local-request.js';
 // @ts-expect-error Dependency-free worker entry point.
 import { pullOnce, transportRetries } from '../scripts/graphyard-pull.mjs';
 import WorkDetails from '../web/pages/work-details.js';
@@ -773,6 +774,6 @@ test('unit:board-api — unused reads return 404 and still require authenticatio
     '/api/validation/import/seal-authority', '/api/agent-registry/connect/hosts',
   ]) {
     assert.equal((await fetch(`${url}${path}`, { headers: { Authorization: `Bearer ${'x'.repeat(32)}` } })).status, 404, path);
-    assert.equal((await fetch(`${url}${path}`)).status, 401, path);
+    assert.equal((await localRequest(url, path, { headers: { Host: 'graphyard.example' } })).status, 401, path);
   }
 });

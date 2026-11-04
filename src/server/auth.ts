@@ -1,4 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
+import type { IncomingMessage } from 'node:http';
 import { demand, operatorScopeIncludes, type Principal } from '../model.js';
 import { laneOnlyProducer, type Credential, type PrincipalGrant } from './principals.js';
 import { readImports } from '../validation-import.js';
@@ -23,11 +24,14 @@ import { signinClaimFromEnv } from './routes/signin.js';
  * one-time sign-in link opened (GY-738, `HumanSignIn` below), a live operator-agent credential,
  * then an unused durable reviewer/spec-check launch. A lease command (`method` and `pathname`)
  * authenticates on the lease pool (GY-558), so an exhausted
- * general pool cannot stop a renewal before it reaches its own connections.
+ * general pool cannot stop a renewal before it reaches its own connections. A tokenless `localRead`
+ * request is the local viewer.
  */
-export async function authenticate(services: Services, authorization: string | undefined, repository: string, method?: string, pathname = ''): Promise<Principal> {
+export async function authenticate(services: Services, authorization: string | undefined, repository: string, method?: string, pathname = '', localRead = false): Promise<Principal> {
   const lease = leaseCommandRequest(method, pathname);
-  const token = String(authorization ?? '').replace(/^Bearer /, '');
+  // A browser trims the empty token's "Bearer " to "Bearer".
+  const token = String(authorization ?? '').replace(/^Bearer\s*/, '');
+  if (!token && localRead) return localViewer;
   const hash = createHash('sha256').update(token).digest();
   const configured = configuredCredential(services, hash);
   if (configured) await services.operatorAgents.assertConfiguredPrincipalSafe({ id: configured.actor.id, tokenHash: hash.toString('hex') }, { lease });
@@ -35,6 +39,21 @@ export async function authenticate(services: Services, authorization: string | u
   demand(actor, 'A valid Graphyard bearer token is required', 401);
   if (actor.role === 'operator-agent') demand(actor.scope?.repositories.includes(repository), 'Repository is outside operator-agent scope', 403);
   return actor;
+}
+
+/** Whoever reads the dashboard on this machine without signing in: a reader, so every action and human-only decision still needs a signed-in session. */
+export const localViewer: Principal = { id: 'local-viewer', role: 'reader', displayName: 'Local viewer' };
+const loopbackHost = /^(?:localhost|127\.0\.0\.1|\[::1\])(?::(\d+))?$/i;
+/**
+ * A read from this machine addressed to the host and port it is served on. Another Host header (a
+ * DNS-rebinding page, the tailnet proxy) or a forwarded request is not one, and no CORS header is
+ * ever sent, so another website cannot read the answer.
+ */
+export function localRead(req: IncomingMessage) {
+  const host = loopbackHost.exec(req.headers.host ?? '');
+  return req.method === 'GET' && !!host && Number(host[1] ?? 80) === req.socket.localPort
+    && ['127.0.0.1', '::1', '::ffff:127.0.0.1'].includes(req.socket.remoteAddress ?? '')
+    && !req.headers.forwarded && !req.headers['x-forwarded-for'];
 }
 
 const configuredCredential = (services: Services, hash: Buffer) => services.principals.find(p => timingSafeEqual(p.hash, hash));
@@ -117,13 +136,15 @@ export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', rou
  * run with the operator's own admin credential, asks for a one-time link; opening it in a browser
  * redeems it for a short-lived session bound to that principal and declared human, so the
  * decisions only a human may make are answered in that browser with one click. A link is single
- * use and expires in minutes; the session it opens lasts 30 days (GY-2171). Session digests, actors and expiry
+ * use and expires in minutes; the session it opens expires 90 days after its last use. Session digests, actors and expiry
  * are persisted in Postgres; pending link digests stay in memory. Both
  * tables are bounded: links evict the oldest entry, while session capacity refuses new
  * sign-ins until an existing session expires or signs out.
  */
 export const signInLinkTtlMs = 10 * 60_000;
-export const signInSessionTtlMs = 30 * 86_400_000;
+export const signInSessionTtlMs = 90 * 86_400_000;
+/** A used session's expiry moves forward at most this often, so reads do not write on every request. */
+export const signInRenewalMs = 3_600_000;
 export const maxSignInLinks = 16;
 export const maxSignInSessions = 32;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -168,10 +189,13 @@ export class HumanSignIn {
     return { token, actor, expiresAt: new Date(now + signInSessionTtlMs).toISOString() };
   }
 
-  /** The principal a session token stands for, or null once it has expired or was never issued. */
+  /** The principal a session token stands for, or null once it has expired or was never issued. Use renews it: its expiry is its last use plus the session lifetime. */
   async authenticate(token: string): Promise<Principal | null> {
     if (!token.startsWith('gyh_')) return null;
-    const { rows } = await this.store.pool.query('SELECT actor FROM human_sign_in_sessions WHERE token_hash=$1 AND expires_at > $2', [digest(token), new Date(this.clock())]);
+    const now = this.clock(), key = digest(token), expiresAt = new Date(now + signInSessionTtlMs);
+    const { rows } = await this.store.pool.query('SELECT actor, expires_at FROM human_sign_in_sessions WHERE token_hash=$1 AND expires_at > $2', [key, new Date(now)]);
+    if (rows[0] && rows[0].expires_at.getTime() <= expiresAt.getTime() - signInRenewalMs)
+      await this.store.pool.query('UPDATE human_sign_in_sessions SET expires_at=$2 WHERE token_hash=$1', [key, expiresAt]);
     return rows[0]?.actor ?? null;
   }
 

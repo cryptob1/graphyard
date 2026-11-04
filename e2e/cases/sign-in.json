@@ -6,7 +6,7 @@
   "target": "uat",
   "required": true,
   "steps": [
-    { "kind": "browser", "action": "open", "path": "/" },
+    { "kind": "browser", "action": "open", "path": "/?sign-in" },
     { "kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}" },
     { "kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false },
     { "kind": "browser", "action": "expectText", "role": "navigation", "text": "Primary" },
