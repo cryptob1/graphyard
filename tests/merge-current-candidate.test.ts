@@ -14,7 +14,7 @@ import { server } from '../src/server.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { daemonEffects } from '../src/daemon/effects-production.js';
 import { mergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { mergeCandidateHold, reconcileIntents, runMergeTrial, type MergeRecordEvent } from '../src/merge-writer/executor.js';
+import { reconcileIntents, runMergeTrial, type MergeRecordEvent } from '../src/merge-writer/executor.js';
 import { masterConfigSchema } from '../src/master.js';
 import { mergeBatch } from '../src/merge-writer/batch.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
@@ -135,7 +135,7 @@ test('unit:declared', () => assert.ok(!(fs.existsSync('change-0.txt') && fs.exis
           await reads.record(target, { kind: 'trial-step', head: target.candidate!.sha, step: 'tests', at: new Date().toISOString() });
           const current: Work = (await store.workDocument(target.id))!;
           assert.ok(current.revision > target.revision);
-          assert.equal(mergeCandidateHold(current, target), null, 'incidental revisions do not invalidate a candidate');
+          assert.equal(await production.mergeWriter!.hold?.(target), null, 'incidental revisions do not invalidate a candidate');
         }
       } finally { release(); }
       const results = await running;
