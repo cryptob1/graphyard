@@ -6,10 +6,10 @@ type Trial = NonNullable<MergeWriterState['trials']>[number];
 
 /** One record per trial invocation, including batch fallbacks and rejected-push retrials. */
 export function timedMergePorts(ports: MergePorts, writer: MergeWriterState, persist: () => Promise<void>): MergePorts {
-  let current: Trial | undefined;
+  const trials = new Map<string, Trial>();
   const save = () => { void persist().catch(() => {}); };
-  const timed = async <T>(step: string, run: () => Promise<T>): Promise<T> => {
-    const trial = current, started = ports.now();
+  const timed = async <T>(mergeSha: string, step: string, run: () => Promise<T>): Promise<T> => {
+    const trial = trials.get(mergeSha), started = ports.now();
     try { return await run(); }
     finally {
       if (trial) {
@@ -23,7 +23,7 @@ export function timedMergePorts(ports: MergePorts, writer: MergeWriterState, per
     trial: async (mergeSha, files, item, baseTip, onStep, onTiming, heads, share) => {
       const startedAt = new Date(ports.now()).toISOString();
       const trial: Trial = { mergeSha, startedAt, finishedAt: startedAt, heads: heads ?? [], steps: [] };
-      current = trial;
+      trials.set(mergeSha, trial);
       const record = (step: string, durationMs: number) => { trial.steps.push({ step, durationMs }); onTiming?.(step, durationMs); };
       try {
         return await ports.trial(mergeSha, files, item, baseTip, onStep, record, heads, share);
@@ -33,8 +33,8 @@ export function timedMergePorts(ports: MergePorts, writer: MergeWriterState, per
         save();
       }
     },
-    ...(ports.preview ? { preview: (...args: Parameters<NonNullable<MergePorts['preview']>>) => timed('preview', () => ports.preview!(...args)) } : {}),
-    push: (...args) => timed('push', () => ports.push(...args)),
+    ...(ports.preview ? { preview: (...args: Parameters<NonNullable<MergePorts['preview']>>) => timed(args[0], 'preview', () => ports.preview!(...args)) } : {}),
+    push: (...args) => timed(args[0], 'push', () => ports.push(...args)),
   };
 }
 
