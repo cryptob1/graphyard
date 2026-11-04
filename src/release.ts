@@ -122,6 +122,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:e9966540eb026ae6f07a7abbd5ceacfc8dd90ffe41f8adbbb1f965aacd70457b',
   // GY-3017: retire job holds, unused work-index columns and legacy observation tables.
   'sha256:d1fad9115075e03bf688396b51c2aa4470a2bd66c1e54138787ba0b33b43acbb',
+  // GY-3076: persist browser sign-in session digests across server restarts.
+  'sha256:4e8704f64d1e354ca4807dd459011cebccc8eb266aa06d85951ec74e1fc69f1a',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

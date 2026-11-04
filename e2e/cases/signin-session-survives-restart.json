@@ -1,0 +1,14 @@
+{
+  "id": "signin-session-survives-restart",
+  "title": "Dashboard login survives a control-plane restart and sign-out revokes the session",
+  "description": "A real browser opens a login link against an isolated Postgres-backed control plane, reloads after replacing the server process, then signs out and verifies the saved token is refused.",
+  "tags": ["dashboard", "authentication"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Exercise browser login across a real server restart",
+    "run": "npm run test:browser -- browser-tests/signin-session-survives-restart.spec.ts",
+    "timeoutSeconds": 180
+  }]
+}

@@ -2,6 +2,7 @@ Paths: src/server/**, src/server.ts
 
 ## Tests
 
+- `tests/signin-session-survives-restart.test.ts` and `browser-tests/signin-session-survives-restart.spec.ts`: real server restart, digest-only storage, expiry and sign-out; `e2e/cases/signin-session-survives-restart.json` runs the browser case.
 - `tests/board-api.test.ts`: the board's HTTP routes and their principals.
 - `tests/production-watch-build-serving.test.ts`: status ignores historical environment/promotion events; the retired route returns 404.
 - `tests/delivery-observe-sha.test.ts`: serving-commit observations retain authorization, idempotency, bounded continuation and configured-environment checks.

@@ -44,7 +44,14 @@ function App() {
     const response = await fetch(`/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey() }, body: data === undefined ? undefined : JSON.stringify(data) });
     const body = await response.json(); if (!response.ok) throw new Error(body.error + (body.issues ? `: ${body.issues.map((i: any) => i.message).join(', ')}` : '')); return body;
   }
-  function signOut() { sessionEpoch.current++; setBusy(false); sessionStorage.removeItem(HUMAN_SESSION_KEY); localStorage.removeItem(HUMAN_SESSION_KEY); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
+  async function signOut() {
+    if (token.startsWith('gyh_')) {
+      try {
+        const response = await fetch('/api/sign-out', { method: 'POST', headers: { Authorization: `Bearer ${token}` } });
+        if (!response.ok && response.status !== 401) throw new Error('Unable to sign out. Please retry.');
+      } catch { setError('Unable to sign out. Check your connection and retry.'); return; }
+    }
+    sessionEpoch.current++; setBusy(false); sessionStorage.removeItem(HUMAN_SESSION_KEY); localStorage.removeItem(HUMAN_SESSION_KEY); setToken(''); setDraftToken(''); setStatus(null); setBoard(null); setWork([]); setJobs([]); setView('work'); setEditingRequirements(false); setObservedAt(Number.NaN); setSelected(null); setEvents([]); setCreating(false); setConnected(false); setLastUpdated(null); setError(''); }
   /** The sign-in page's first read: once the status reply accepts the token, the work snapshot, then the dashboard. */
   async function firstLoad(system: any, signal: AbortSignal) {
     const epoch = sessionEpoch.current, headers = { Authorization: `Bearer ${token}` }, response = await fetch('/api/work-snapshot', { headers, signal });
