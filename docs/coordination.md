@@ -15,6 +15,8 @@ Only exclusiveResources lock dispatch. Sync and merge trials integrate path over
 
 ## Review gate: verdicts, not threads
 
+Only reviewer-session verdicts supply review approval. The stored `reviewProvider` name remains `github` (also the default); create refuses `codex`, `agent`, and their reviewer profiles.
+
 Graphyard reads exact-head verdicts, not remote review threads. Pre-merge review judges implementation and bound E2E coverage: missing later trusted results do not block approval; missing or inadequate tests can. The writer must pass every required exact-head E2E proof before updating main; workers never submit trusted evidence. Sensitive changes need approval before merge. Normal changes receive post-merge review; blocking findings become follow-up bugs. Pre-merge `BLOCKING:` findings cause rework once per submission, without a round cap.
 
 Review launch and retry briefs retain the launch snapshot’s criterion IDs, proof names, E2E case IDs/paths and available scenario revision, environment and hash. Reviewers read cases with `git show HEAD:PATH` and procedures with `graphyard guide review`, without worker/coordinator credentials. For a guessed path or command failure, use `rg --files` or CLI `--help` and correct the read, including on retries. Only unavailable inputs after authorized equivalent reads, or real permission, identity, binding or runtime failures, warrant blockers. Briefs include discovery and recovery; `guide review` classifies findings. Reviewers stay read-only and post one verdict.

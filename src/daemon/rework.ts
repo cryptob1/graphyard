@@ -1,5 +1,5 @@
 // Concern: the loop's routine rework — a head nothing can carry forward goes back to a worker at once, under the master's own identity.
-import { type Work, type AgentReview, reviewProviderOf } from '../model.js';
+import { type Work } from '../model.js';
 import { baseRefreshConflict, pendingBaseRefresh } from '../model/base-refresh.js';
 import { mechanicalFailure, mechanicalProof, mechanicalVerdicts, producerManualFailure, producerManualFailures } from '../model/mechanical-proofs.js';
 import { unactedProducerAttempts, unexercisedFindings } from '../auto-dispatch.js';
@@ -16,22 +16,7 @@ function controlPlaneReworkDetail(review: { blocking?: string[]; body?: string }
   if (!text) return '';
   return text.length > reworkBriefMax ? `${text.slice(0, reworkBriefMax)}…` : text;
 }
-/**
- * The binding `exactApproval` demands of an approval, demanded of a change request too: the verdict
- * answers the request Graphyard recorded for this candidate, base and policy revision, under the
- * provider the policy names. A verdict left over from an earlier request is not the head's.
- */
-function agentVerdictBindsRequest(work: Work, agent: AgentReview): boolean {
-  const candidate = work.candidate!, request = work.reviewRequest;
-  return agent.provider === reviewProviderOf(work.policy) && !!request && request.commentId === agent.requestId
-    && request.sha === candidate.sha && request.baseSha === candidate.baseSha && request.policyRevision === work.policyRevision;
-}
-/**
- * The change request standing against the exact current candidate. Observations keep one review
- * per reviewer, so a CHANGES_REQUESTED entry on the head is the reviewer's latest word on it; an
- * agent provider records `verdict: 'changes-requested'` on the head instead. `approved: false` alone
- * is never a verdict: the observers report it for a review not yet dispatched or still running.
- */
+/** The change request standing against the exact current candidate. */
 export function standingVerdict(work: Work): StandingVerdict | null {
   const candidate = work.candidate, observation = work.observation;
   if (!work.submission || work.reworkRequested || !candidate || !observation) return null;
@@ -41,9 +26,6 @@ export function standingVerdict(work: Work): StandingVerdict | null {
     const detail = controlPlaneReworkDetail(review);
     return { reviewer: review.reviewer, at: review.submittedAt ?? observation.at, reason: `${review.reviewer} requested changes on ${review.sha.slice(0, 12)}${detail ? `: ${detail}` : ''}` };
   }
-  const agent = observation.agentReview;
-  if (agent && agent.sha === candidate.sha && !agent.approved && agent.verdict === 'changes-requested' && agentVerdictBindsRequest(work, agent))
-    return { reviewer: agent.profile ?? agent.provider, at: agent.completedAt ?? observation.at, reason: `${agent.profile ?? agent.provider} requested changes on ${agent.sha.slice(0, 12)}: ${agent.reason}` };
   // A product review's change request reworks the head exactly as a code review's does (GY-2989),
   // its findings riding the rework brief.
   const product = work.productReview;

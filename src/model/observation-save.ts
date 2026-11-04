@@ -4,14 +4,14 @@ import type { Work } from './work.js';
 /**
  * What a GitHub observation of an item is derived from (GY-1310): the GitHub adapter's `observe`
  * reads the submission and the workspace it names, the candidate and last observation it compares
- * against, the policy, review request and rework request, the base refresh that
+ * against, the policy and rework request, the base refresh that
  * holds a base, and whether the item is done. Everything else the
  * observation's save applies to the item as it stands when saved, and re-evaluates the gates on.
  */
 function observationInputs(work: Work) {
   return stableJson({
     submission: work.submission ?? null, workspaces: work.workspaces, candidate: work.candidate ?? null, observation: work.observation ?? null,
-    policy: work.policy, policyRevision: work.policyRevision, reviewRequest: work.reviewRequest ?? null,
+    policy: work.policy, policyRevision: work.policyRevision,
     reworkRequested: work.reworkRequested ?? null, baseRefresh: work.baseRefresh ?? null, done: work.stage === 'done',
   });
 }
