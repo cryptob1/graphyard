@@ -122,8 +122,10 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:e9966540eb026ae6f07a7abbd5ceacfc8dd90ffe41f8adbbb1f965aacd70457b',
   // GY-3017: retire job holds, unused work-index columns and legacy observation tables.
   'sha256:d1fad9115075e03bf688396b51c2aa4470a2bd66c1e54138787ba0b33b43acbb',
-  // GY-3018: retire the unused validation runner and attribution tables.
-  'sha256:759ad3aa5923770afd630ade9ce26fbb364ad297f29bd6fcd92be44b030e4b05',
+  // GY-3035: indexed decision peers; unchanged peer columns do not lock live coordination writes.
+  'sha256:718f3640a5d9356b5444e6e949a945fce073e547bb395212a9e745a663e7c2c4',
+  // GY-3018: retire validation runner and attribution tables after indexed decision peers.
+  'sha256:9d4a955464bdbf4edd43d938a964f4c6e7c3c3472748451dc9a3196f4ec2bede',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

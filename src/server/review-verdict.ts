@@ -9,7 +9,7 @@ import { blockingFindings } from '../review-cap.js';
 import { productVerdicts, type ProductReview } from '../model/product-review.js';
 import { isRecheck, needsSpecCheck, specVerdicts, type SpecCheck, type SpecCheckLaunch } from '../model/spec-check.js';
 import { save } from '../store.js';
-import { lockedWork } from '../store/locked-read.js';
+import { decisionWork } from '../store/decision-read.js';
 import type { Services } from './routes.js';
 
 /**
@@ -131,7 +131,7 @@ export async function recordReviewLaunch(services: Services, actor: Principal, i
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const receiptInput = { id, data };
   const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
-    const all = await lockedWork(db, [id]);
+    const all = await decisionWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     if (data.postMerge) {
       demand(!data.product, 'A product review is of a candidate head, never of a delivered merge commit', 409);
@@ -165,7 +165,7 @@ export async function recordReviewVerdict(services: Services, actor: Principal, 
   const receiptInput = { id, data };
   const engine = services.engine;
   const judged: Judged = await engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async (): Promise<Judged> => {
-    const all = await lockedWork(db, [id]);
+    const all = await decisionWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     const launch = work!.reviewLaunch;
     demand(launch, `${work!.key} has no registered reviewer launch; a control-plane verdict is posted only by the session Graphyard launched`, 409);
@@ -245,7 +245,7 @@ export async function recordProductReviewByHand(services: Services, actor: Princ
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const receiptInput = { id, data };
   return services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
-    const all = await lockedWork(db, [id]);
+    const all = await decisionWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(!implementerIdentities(work!).includes(data.reviewer), independenceRefusal(data.reviewer, 'implemented', work!.key), 403);
     if (work!.candidate) demand(work!.candidate.sha.toLowerCase() === data.sha, `${work!.key}'s candidate is ${work!.candidate.sha.slice(0, 12)}, not ${data.sha.slice(0, 12)}; a product review names the head it judged`, 409);
@@ -289,7 +289,7 @@ export async function recordSpecCheckLaunch(services: Services, actor: Principal
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const receiptInput = { id, data };
   const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
-    const all = await lockedWork(db, [id]);
+    const all = await decisionWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', `${work!.key} is done; a spec check launches for released work`, 409);
     demand(needsSpecCheck(work!), `${work!.key} owes no spec check: bugs and chores skip it`, 409);
@@ -309,7 +309,7 @@ export async function recordSpecCheck(services: Services, actor: Principal, id: 
   demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
   const receiptInput = { id, data };
   const result = await services.engine.store.transaction(async (db: pg.PoolClient, now: Date) => once(db, actor, key, receiptInput, async () => {
-    const all = await lockedWork(db, [id]);
+    const all = await decisionWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     demand(work!.stage !== 'done', `${work!.key} is done; its spec check is history`, 409);
     let reviewer: string, policyRevision = work!.policyRevision;
