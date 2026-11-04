@@ -139,7 +139,7 @@ export function proofRework(work: Work): Rework | null {
   if (human) return { reason: `${work.key}: ${human.proof} failed a person's check on ${candidate.sha.slice(0, 12)}: ${human.answer!.note}. Only a new head is asked again, so the item returns to a worker.`, binding: `${candidate.sha}:human:${human.proof}` };
   const now = new Date();
   const failed = [...mechanicalVerdicts(work, [work], now).filter(verdict => verdict.outcome === 'failed'), ...producerManualFailures(work, [work], now)];
-  const unexercised = unexercisedFindings(work).filter(entry => !entry.proof.startsWith('manual:'));
+  const unexercised = unexercisedFindings(work, now).filter(entry => !entry.proof.startsWith('manual:'));
   if (!failed.length && !unexercised.length) return null;
   const findings = [
     ...(failed.length ? [`a trusted proof failed: ${failed.map(verdict => mechanicalProof(verdict.proof) ? mechanicalFailure(verdict, candidate.sha) : producerManualFailure(verdict, candidate.sha)).join('; ')}`] : []),

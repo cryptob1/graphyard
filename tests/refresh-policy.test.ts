@@ -104,5 +104,5 @@ test('unit:queue-validation-is-merge-substate — a candidate the merge writer h
   const failed = evaluated(work('GY-1', commit('c1'), {}, 'refused'), []);
   assert.equal(failed.stage, 'test');
   assert.deepEqual(gate(failed, 'test').reasons, [`merge writer has not trialled ${commit('c1').slice(0, 12)} on ${main.slice(0, 12)}`]);
-  assert.equal(refusalAction(failed, 'test', gate(failed, 'test').reasons[0]), 'merge', 'the merge writer answers it: its refused trial requests the rework itself');
+  assert.equal(refusalAction(failed, 'test', gate(failed, 'test').reasons[0], undefined, new Date()), 'merge', 'the merge writer answers it: its refused trial requests the rework itself');
 });

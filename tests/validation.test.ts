@@ -485,11 +485,11 @@ test('proof previews reject generic and superseded validation passes just like g
   const f = await fixture();
   let w = await current(f.w.id);
   w = await engine.execute(collector, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, result: 'pass', executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, scenarioRevision: 1, environment: f.environment.id }, id());
-  assert.equal(proofPreview(w)[0].status, 'unmeasured');
+  assert.equal(proofPreview(w, [], new Date())[0].status, 'unmeasured');
   const command = await start(f); await validation.result(collector, report(f, command), id());
-  w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'passed');
+  w = await current(f.w.id); assert.equal(proofPreview(w, [], new Date())[0].status, 'passed');
   await validation.createRequest(operator, { ...f.requestInput, expectedWorkRevision: w.revision }, id());
-  w = await current(f.w.id); assert.equal(proofPreview(w)[0].status, 'unmeasured');
+  w = await current(f.w.id); assert.equal(proofPreview(w, [], new Date())[0].status, 'unmeasured');
   assert.equal(proven(w, f.proof), false); await cleanup(f);
 });
 

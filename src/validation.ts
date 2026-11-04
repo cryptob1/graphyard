@@ -637,7 +637,7 @@ export class Validation {
       }
       read.at = (this.evaluationRecovery.now?.() ?? new Date()).toISOString();
       return read.error ? { error: read.error } : 'pass';
-    }, this.evaluationRecovery);
+    }, { ...this.evaluationRecovery, now: this.evaluationRecovery.now ?? (() => new Date()) });
     return reads;
   }
   private async retainedBytes(row: ArtifactRow) {

@@ -128,16 +128,16 @@ test('unit:plain-status-copy — every stage and every gate reason reads as one 
     ['merge', 'Slice lead lead-1 ruled hold under rule R-2; delivery is blocked until the authorized recovery: redo the migration'],
   ];
   for (const [gate, reason] of reasons) {
-    const plain = plainReason(reason, gate);
+    const plain = plainReason(reason, gate, Date.now());
     assert.ok(plain.known, `${gate}: no plain reading for "${reason}"`);
     assert.deepEqual(jargonIn(plain.text), [], `${reason} → ${plain.text}`);
     const status = plainStatus(withGates({ submission: { epoch: 1, pr: 7 }, candidate: { ...find('GY-15').candidate!, pr: 7 }, blocker: gate === 'ready' && !/^(Not released|Dependency)/.test(reason) ? reason : null, lease: null }, gate, [reason]), NOW);
     assert.deepEqual(jargonIn(status.sentence), [], `${reason} → ${status.sentence}`);
   }
   // The live evaluator's reasons for every fixture item are all recognised.
-  for (const item of work) for (const gate of evaluate(item, work, new Date(NOW)).gates) for (const reason of gate.reasons) assert.ok(plainReason(reason, gate.name).known, `${item.key} ${gate.name}: ${reason}`);
+  for (const item of work) for (const gate of evaluate(item, work, new Date(NOW)).gates) for (const reason of gate.reasons) assert.ok(plainReason(reason, gate.name, Date.now()).known, `${item.key} ${gate.name}: ${reason}`);
   // An unanticipated reason never leaks: it reads as its step.
-  assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge').text, 'Waiting to merge');
+  assert.equal(plainReason('Internal epoch lease candidate mismatch', 'merge', Date.now()).text, 'Waiting to merge');
 });
 
 test('integration:dashboard-navigation — one sidebar (Work, Workers, Shipped, Tests, Settings); every other page sits under one entry; admin-only and unconfigured pages hidden', async () => {

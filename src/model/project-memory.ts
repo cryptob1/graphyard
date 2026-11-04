@@ -35,7 +35,7 @@ export const projectMemorySchema = z.object({
 }); // not strict: a memory written before GY-2873 carries `pitfalls`, and one before GY-2874 its retired records, which parsing drops
 export type ProjectMemory = z.infer<typeof projectMemorySchema>;
 
-export function emptyProjectMemory(now: string = new Date().toISOString()): ProjectMemory {
+export function emptyProjectMemory(now: string): ProjectMemory {
   return { version: 1, updatedAt: now, notes: [], changes: [] };
 }
 
@@ -74,7 +74,7 @@ export function recordChangeInMemory(memory: ProjectMemory, change: { key: strin
 }
 
 /** Update project memory from operator answers and merges in work. Never from an agent's claim. */
-export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonly Work[], now: number = Date.now()): ProjectMemory {
+export function updateProjectMemoryFromWork(memory: ProjectMemory, work: readonly Work[], now: number): ProjectMemory {
   // 1. Operator answers: an answered request moves to `humanRequests` and the open one is cleared, so
   // the retained history is where a provided answer lives. A declined one answered nothing. Settled
   // snapshot items are summaries without humanRequests/researchBrief (GY-1125), so answers enter

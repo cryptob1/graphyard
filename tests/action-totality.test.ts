@@ -120,7 +120,7 @@ test('integration:no-failing-gate-without-action — an item whose review gate r
     const dispatching = { ...state.work, autoDispatch: undefined } as Work;
     reconcileAutoDispatch(dispatching, [dispatching], now);
     assert.equal(dispatching.autoDispatch!.review, null, `${state.name}: no review request stands`);
-    assert.equal(reviewNeed(state.work).needed, false, `${state.name}: no launched reviewer can answer this head`);
+    assert.equal(reviewNeed(state.work, undefined, new Date()).needed, false, `${state.name}: no launched reviewer can answer this head`);
 
     const account = actionAccount(state.work, [state.work], now);
     assert.equal(account.defect, null, `${state.name}: the control plane accounts for the state`);
@@ -223,8 +223,8 @@ test('integration:action-mapping-total-over-states — every refusal the engine 
       produced.set(`${gate}\u0000${refusal}`, seen);
       // Every refusal, not only the first of the first refusing gate: the mapping is a function
       // of (gate, refusal, record) and every one of them has to land somewhere nameable.
-      const kind = refusalAction(work, gate, refusal);
-      assert.equal(refusalAction(work, gate, refusal), kind, 'the mapping is a function of its inputs');
+      const kind = refusalAction(work, gate, refusal, undefined, new Date());
+      assert.equal(refusalAction(work, gate, refusal, undefined, new Date()), kind, 'the mapping is a function of its inputs');
     }
     // And the account for the whole item: an action an executor can complete, an action that is a
     // judgment somebody owes, an explicit dependency, or a recorded human need. Never nothing.

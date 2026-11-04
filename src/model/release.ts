@@ -1,4 +1,4 @@
-import type { Work } from '../model.js';
+import type { Work } from './work.js';
 
 const defaultProductionEnvironment = 'production';
 const time = (value: string | null | undefined) => { const parsed = Date.parse(value ?? ''); return Number.isFinite(parsed) ? parsed : null; };

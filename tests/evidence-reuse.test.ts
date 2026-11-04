@@ -116,7 +116,7 @@ async function newRequest(f: Fixture, candidateId: string) {
   return await validation.createRequest(operator, { candidateId, expectedWorkRevision: w.revision, runner: f.runnerRef, collector: f.collectorRef, deadline: new Date(Date.now() + 600_000).toISOString(), maxAttempts: 3 }, id()) as ValidationRequest;
 }
 /** Whether the proof stands proven on the item: proofs gate no merge since GY-1235, so its current evidence is read directly. */
-const proven = (w: Work, proof: string) => { const evidence = currentEvidence(w, proof); return !!evidence && evidenceProves(proof, evidence); };
+const proven = (w: Work, proof: string) => { const evidence = currentEvidence(w, proof, new Date()); return !!evidence && evidenceProves(proof, evidence); };
 const playwrightDocument = (executions: boolean) => ({ format: 'graphyard-playwright-v1', declared: [{ id: 'a'.repeat(64), expected: 'passed', location: { file: 'tests/behavior.spec.ts', line: 1, column: 1 } }, { id: 'b'.repeat(64), expected: 'passed', location: { file: 'tests/behavior.spec.ts', line: 9, column: 1 } }],
   executions: executions ? [{ id: 'a'.repeat(64), status: 'passed', retry: 0 }, { id: 'b'.repeat(64), status: 'passed', retry: 0 }] : [], steps: [], errors: 0, overflow: false, status: 'passed' });
 const upload = (command: { requestId: string; attemptId: string; epoch: number }, name: string, document: unknown) => ({ ...command, name, mediaType: 'application/json', bytes: Buffer.from(JSON.stringify(document)).toString('base64'), capturePolicy: 'approved-test-data-only' });
@@ -145,7 +145,7 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   assert.equal(dependency.of?.sequence, 1); assert.equal(dependency.candidateId, null);
   let w = await current(f.w.id);
   assert.equal(proven(w, f.proof), false, 'the pass for the previous head does not carry over by itself');
-  assert.equal(currentEvidence(w, f.proof), undefined);
+  assert.equal(currentEvidence(w, f.proof, new Date()), undefined);
   // A configuration change on the same head: refused as configuration, whatever the ignorable docs beside it.
   const configuration = await decide(f, heads.two, [...filesOne, file('config/app.yaml', 'y'), file('docs/guide.md', 'h')]);
   assert.match(configuration.reasons.join('\n'), /config\/app\.yaml \(added\) is a relevant configuration change/);
@@ -156,7 +156,7 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   assert.deepEqual(granted.applicability.changed, [{ path: 'docs/guide.md', change: 'modified', classification: 'ignorable', category: null }]);
   assert.equal(granted.applicability.artifactsIdentical, true); assert.equal(granted.applicability.buildInputsIdentical, true);
   w = await current(f.w.id);
-  const evidence = currentEvidence(w, f.proof)!;
+  const evidence = currentEvidence(w, f.proof, new Date())!;
   assert.ok(evidence, 'the reused pass is current for the new head');
   assert.equal(evidence.sha, heads.two); assert.equal(evidence.producer, collector.id); assert.equal(evidence.trusted, true);
   assert.equal(evidence.reuse?.decisionId, granted.id); assert.equal(evidence.reuse?.sourceSha, heads.one); assert.equal(evidence.reuse?.sequence, 1);
@@ -171,7 +171,7 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   assert.deepEqual(Object.entries(derived.signatureComponents!).filter(([k, v]) => f.c.signatureComponents![k as keyof typeof f.c.signatureComponents] !== v).map(([k]) => k).sort(), ['manifest', 'source']);
   // Reconciliation keeps the reused selection: the derived candidate's pins are current.
   await validation.reconcile(true);
-  w = await current(f.w.id); assert.ok(currentEvidence(w, f.proof), 'reuse survives reconciliation');
+  w = await current(f.w.id); assert.ok(currentEvidence(w, f.proof, new Date()), 'reuse survives reconciliation');
   assert.equal((await events('validation.reuse-granted')).filter(e => e.details.decision.id === granted.id).length, 1);
   assert.equal((await events('validation.reuse-refused')).length >= 2, true);
   // The same decision with the same key returns the receipt; a retry of the executed request is refused.
@@ -194,10 +194,10 @@ test('D6-1 relevant dependency and configuration changes invalidate reuse; an ig
   f.policy = { id: f.policy.id, revision: 2 };
   const scoped = await decide(f, heads.three, [file('src/app.ts', 'a'), file('docs/guide.md', 'i')], { artifact: otherArtifact });
   assert.equal(scoped.outcome, 'granted', scoped.reasons.join('; ')); assert.equal(scoped.applicability.artifactsIdentical, false);
-  assert.equal(currentEvidence(await current(f.w.id), f.proof)?.sha, heads.three);
+  assert.equal(currentEvidence(await current(f.w.id), f.proof, new Date())?.sha, heads.three);
   // Revoking the executed pass withdraws every record derived from it: the reused evidence for the later heads falls with it.
   w = await engine.execute(operator, 'revoke', f.w.id, { proof: f.proof, sha: heads.one, baseSha: base, policyRevision: 1, reason: 'Attributed to the wrong artifact' }, id());
-  assert.equal(currentEvidence(w, f.proof), undefined);
+  assert.equal(currentEvidence(w, f.proof, new Date()), undefined);
   assert.ok(w.evidence.filter(e => e.reuse).every(e => e.revocation?.reason === 'Attributed to the wrong artifact'), 'every derived record is annotated, not deleted');
   assert.equal(proven(w, f.proof), false);
 });
@@ -307,10 +307,10 @@ test('D6-3 newer blocked, timed-out, unmeasured or incomplete attempts prevent f
   assert.equal(proven(await current(g.w.id), g.proof), true);
   const live = await newRequest(g, granted.candidateId!);
   w = await current(g.w.id); assert.equal(proven(w, g.proof), false, 'a newer queued attempt withdraws the reused pass');
-  assert.equal(currentEvidence(w, g.proof), undefined);
+  assert.equal(currentEvidence(w, g.proof, new Date()), undefined);
   const liveCommand = await start(g, live.id);
   const failed: any = await validation.result(collector, report(g, liveCommand, { behavior: 'failed' }), id()); assert.equal(failed.passed, false);
-  w = await current(g.w.id); assert.equal(proven(w, g.proof), false); assert.equal(currentEvidence(w, g.proof)?.result, 'fail');
+  w = await current(g.w.id); assert.equal(proven(w, g.proof), false); assert.equal(currentEvidence(w, g.proof, new Date())?.result, 'fail');
   const again = await decide(g, heads.two, ignorable);
   assert.equal(again.outcome, 'refused'); assert.match(again.reasons.join('\n'), /not passed/);
   assert.equal(again.of?.sequence, (await request(live.id)).attempts[0].sequence);

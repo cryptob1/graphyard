@@ -144,7 +144,7 @@ export class ArtifactReplay {
         judged = { artifacts, bytesRead, verification: null, cause };
         return { error: cause };
       }
-    });
+    }, { now: () => new Date() });
     const final = judged!;
     const { artifacts } = final;
     const verification = final.verification;

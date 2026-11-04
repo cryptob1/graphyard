@@ -176,7 +176,7 @@ export const daemonStateSchema = z.object({
   /** The control plane the snapshot could not reach (GY-2966): since when, and on a compose install the loop's last `docker compose up -d` with the server's last exit and the free disk space; null while it answers. */
   controlPlane: z.object({ unreachableSince: z.string(), error: z.string().max(1000), restartedAt: z.string().nullable(), restart: z.string().max(1000).nullable(), exitReason: z.string().max(1000).nullable(), freeDisk: z.string().max(500).nullable() }).strict().nullable().default(null),
   /** Shared project memory (GY-1125): recent decisions and merges. */
-  projectMemory: projectMemorySchema.default(() => emptyProjectMemory()),
+  projectMemory: projectMemorySchema.default(() => emptyProjectMemory(new Date().toISOString())),
 }).strip();
 export type DaemonState = z.infer<typeof daemonStateSchema>;
 

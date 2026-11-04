@@ -187,10 +187,10 @@ test('integration:exact-target-validation', async () => {
   assert.equal(evidence.attribution?.manifestHash, f.c.manifestHash); assert.equal(evidence.attribution?.signature, f.c.signature);
   assert.equal(evidence.attribution?.targetState, 'matched'); assert.deepEqual(evidence.attribution?.targetObservationIds, [seen.id]);
   assert.equal((await records(f.w.id, 'evidence-bound')).length, 1);
-  assert.ok(currentEvidence(w, f.proof), 'the attributed pass is current evidence');
+  assert.ok(currentEvidence(w, f.proof, new Date()), 'the attributed pass is current evidence');
   // A pass is never reused: a fresh request for the same candidate needs fresh execution.
   const again = await validation.createRequest(operator, await requestInput(f, f.c.id), id()) as ValidationRequest;
-  assert.equal(currentEvidence(await current(f.w.id), f.proof), undefined, 'the earlier pass does not carry to the new request');
+  assert.equal(currentEvidence(await current(f.w.id), f.proof, new Date()), undefined, 'the earlier pass does not carry to the new request');
   assert.equal(again.attempts.length, 0);
   await cleanup(f);
 
@@ -323,7 +323,7 @@ test('integration:safe-automatic-reanchor', async () => {
   // The fresh request executes and passes against the observed target.
   const command = await start(f, fresh);
   const passed: any = await validation.result(collector, report(f, command, B), id()); assert.equal(passed.passed, true, passed.reasons.join('; '));
-  w = await current(f.w.id); assert.ok(currentEvidence(w, f.proof), "currentEvidence(w, f.proof)");
+  w = await current(f.w.id); assert.ok(currentEvidence(w, f.proof, new Date()), "currentEvidence(w, f.proof)");
   // A delayed observation of the execution window that measured manifest A undermines the pass; nothing is edited, the pass simply stops counting and the request is re-anchored.
   // The observer's newest sample still shows B, so the delayed one is history about the window, not the current identity.
   await observe(f, B);
@@ -332,7 +332,7 @@ test('integration:safe-automatic-reanchor', async () => {
   const delayed = await observe(f, A, { now: dispatchedAt, validFrom: 0, validTo: 0.001, observedAt: 0.001 });
   assert.equal(delayed.authoritative, true);
   w = await current(f.w.id);
-  assert.equal(currentEvidence(w, f.proof), undefined, 'the undermined pass is no longer current');
+  assert.equal(currentEvidence(w, f.proof, new Date()), undefined, 'the undermined pass is no longer current');
   assert.equal(w.evidence.length, 1, 'the evidence record is preserved, not edited or removed'); assert.equal(w.evidence[0].result, 'pass');
   const undermined = await records(f.w.id, 'attribution-undermined'); assert.equal(undermined.length, 1); assert.equal(undermined[0].attemptId, attempt.id); assert.equal(undermined[0].details.evidenceId, w.evidence[0].id);
   assert.equal((await request(fresh.id)).state, 'superseded');
@@ -445,11 +445,11 @@ test('integration:attribution-security-regressions', async () => {
   const passed: any = await validation.result(collector, report(f, command), id()); assert.equal(passed.passed, true, passed.reasons.join('; '));
   const attempt = (await request(live.id)).attempts.at(-1)!;
   await observe(f, B, { now: Date.parse(attempt.dispatchedAt), validFrom: 0, validTo: 0.001, observedAt: 0.001 });
-  w = await current(f.w.id); assert.equal(currentEvidence(w, f.proof), undefined);
+  w = await current(f.w.id); assert.equal(currentEvidence(w, f.proof, new Date()), undefined);
   const replacement = await request(w.validation![f.proof].requestId!); assert.equal(replacement.attempts.length, 0);
   const late: any = await validation.result(collector, report(f, command), id()); assert.equal(late.accepted, false, 'a late report on the superseded attempt is recorded, never accepted');
   const generic = await engine.execute({ ...collector, proofs: [f.proof] }, 'evidence', w.id, { proof: f.proof, sha, baseSha: base, policyRevision: 1, executed: 1, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 }, result: 'pass', scenarioRevision: 1, environment: f.environment.id }, id());
-  assert.equal(currentEvidence(generic, f.proof), undefined, 'generic evidence cannot stand in for the pinned attempt');
+  assert.equal(currentEvidence(generic, f.proof, new Date()), undefined, 'generic evidence cannot stand in for the pinned attempt');
   // Idempotent reschedule under a race is covered by integration:reanchor-races; here the fence itself is checked to be one row per superseded request.
   const fences = (await store.pool.query("SELECT superseded_request_id, count(*)::int AS n FROM attribution_reanchors GROUP BY superseded_request_id")).rows; assert.ok(fences.every(row => row.n === 1), "fences.every(row => row.n === 1)");
   // Paid-run avoidance and cost are accounted; signature invalidation and regeneration are ledgered.

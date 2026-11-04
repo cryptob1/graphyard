@@ -1,6 +1,6 @@
 // Concern: GY-3037 — every item owes an end-to-end proof, bound to a case the merge trial runs.
 import { repositoryPolicy } from './repository-policy.js';
-import { projectDelivery } from '../project-applications.js';
+import { projectDelivery } from './project-applications.js';
 
 /** The case file an `e2e:NAME` proof binds to, on the head. */
 export const e2eCasePath = (name: string) => `e2e/cases/${name}.json`;

@@ -35,7 +35,7 @@ export async function readProjectMemory(root: string): Promise<ProjectMemory> {
     const raw = await readFile(file, 'utf8');
     return projectMemorySchema.parse(JSON.parse(raw));
   } catch (error: any) {
-    if (error.code === 'ENOENT') return emptyProjectMemory();
+    if (error.code === 'ENOENT') return emptyProjectMemory(new Date().toISOString());
     throw error;
   }
 }
@@ -61,7 +61,7 @@ export async function syncProjectMemory(
   }
 ): Promise<ProjectMemory> {
   const now = options.now ?? Date.now();
-  let memory = options.existing ?? (options.root ? await readProjectMemory(options.root).catch(() => emptyProjectMemory()) : emptyProjectMemory());
+  let memory = options.existing ?? (options.root ? await readProjectMemory(options.root).catch(() => emptyProjectMemory(new Date(now).toISOString())) : emptyProjectMemory(new Date(now).toISOString()));
 
   // 1. Update from work items (operator answers and merges)
   if (options.work?.length) {

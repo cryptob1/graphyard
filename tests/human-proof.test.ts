@@ -107,7 +107,7 @@ test('unit:human-proof-request-and-answer — the head waits at its gate with on
   assert.equal(passed.status, 200, JSON.stringify(passed.body));
   const proven = await stored(work.id);
   assert.deepEqual(reasons(proven), [], 'the gate passes');
-  assert.equal(proofPreview(proven).find(entry => entry.proof === proof)?.status, 'passed');
+  assert.equal(proofPreview(proven, [], new Date()).find(entry => entry.proof === proof)?.status, 'passed');
   const [evidence] = proven.evidence;
   assert.deepEqual([evidence.sha, evidence.trusted, evidence.result, evidence.producer], [H, true, 'pass', human.id]);
   assert.equal(proven.humanProofs![0].answer!.note, answer.note);
@@ -122,7 +122,7 @@ test('unit:human-proof-request-and-answer — the head waits at its gate with on
   for (const read of [await stored(work.id), locked, snapshot]) {
     const judged = { ...read, ...evaluate(read, [read], new Date()) } as Work;
     assert.deepEqual(reasons(judged), [], 'the pass binds the commit, not the base tip');
-    assert.equal(proofPreview(read).find(entry => entry.proof === proof)?.status, 'passed');
+    assert.equal(proofPreview(read, [], new Date()).find(entry => entry.proof === proof)?.status, 'passed');
   }
 });
 

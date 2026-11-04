@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import type { TableDefinition } from './tables.js';
-import { schemaVersion } from '../release.js';
+import { schemaVersion } from './schema-lineage.js';
 import { workTables } from './tables/work.js';
 import { workIndexTables } from './tables/work-index.js';
 import { mergesTables } from './tables/merges.js';

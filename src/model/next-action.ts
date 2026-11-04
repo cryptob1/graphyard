@@ -318,7 +318,7 @@ const refusalRules: { gate: string | null; match: RegExp; kind: NextActionKind }
  * reviews a session answers — so this mapping is exhaustive over `ReviewState` and the only state
  * it leaves to `request-review` is the one a launched reviewer can actually answer.
  */
-export function reviewStandstill(work: Work, all: Work[] = [work], now = new Date()): { kind: NextActionKind; reason: string } | null {
+export function reviewStandstill(work: Work, all: Work[] = [work], now: Date): { kind: NextActionKind; reason: string } | null {
   if (!work.candidate || !work.observation) return null;
   const need = reviewNeed(work, all, now);
   switch (need.state) {
@@ -347,7 +347,7 @@ export function reviewStandstill(work: Work, all: Work[] = [work], now = new Dat
  * pull-request-era CI refusal, a merge-gate refusal raised by a lead hold rather than by the merge writer,
  * and a review refusal standing over a head no review can be asked for (`reviewStandstill`).
  */
-export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now = new Date()): NextActionKind {
+export function refusalAction(work: Work, gate: string, refusal: string, all: Work[] = [work], now: Date): NextActionKind {
   if (gate === 'review') {
     const standstill = reviewStandstill(work, all, now);
     if (standstill) return standstill.kind;

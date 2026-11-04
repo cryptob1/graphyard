@@ -1,9 +1,9 @@
-import type { EvidenceArtifact } from '../model.js';
+import type { EvidenceArtifact } from './evidence.js';
 import type { Work } from './work.js';
 import { deliveryState } from './delivery.js';
 import { formatAge } from './duration.js';
 
-export function age(time: string) { return formatAge(time, Date.now()); }
+export function age(time: string, now: number) { return formatAge(time, now); }
 /** How many characters of a commit SHA the dashboard shows (the operator's review of PR #156). */
 export const shaChars = 8;
 /**

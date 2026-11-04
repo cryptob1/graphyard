@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { applicationProblems, projectDeliveryShape } from '../project-applications.js';
+import { applicationProblems, projectDeliveryShape } from './project-applications.js';
 
 // ---------------------------------------------------------------------------
 // The delivery model every installed repository gets (GY-1102).

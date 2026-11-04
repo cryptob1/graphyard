@@ -4,7 +4,7 @@ import { classifyRisk, riskRules } from './risk-class.js';
 import { globSurface, repositoryPolicy, type RepositoryPolicy } from './repository-policy.js';
 import { namedPaths, pathScope, pathScopesOverlap } from './documentation-glob.js';
 import { liveSessions } from './registry-sessions.js';
-import { deriveAccountPlan } from '../provider-usage.js';
+import { deriveAccountPlan } from './provider-usage.js';
 
 /**
  * The order a role's accounts are tried in (GY-1746). Only the worker role has a preference: `fast`

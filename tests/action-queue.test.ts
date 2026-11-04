@@ -103,7 +103,7 @@ test('integration:typed-next-action — the control plane names one typed action
   let item = await created();
   assert.equal(item.nextAction, null);
   assert.deepEqual(item.actionQueue!.actions, []);
-  assert.equal(refusalAction(item, 'ready', 'Not released from backlog'), 'attention');
+  assert.equal(refusalAction(item, 'ready', 'Not released from backlog', undefined, new Date()), 'attention');
 
   // Ready and unassigned: a dispatch, carrying what a launcher needs to choose a profile.
   item = await release(item);
@@ -139,7 +139,7 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(item.nextAction!.llmRole, 'judge-rework', 'a new head is a judgment owed, not a step an executor runs');
   assert.match(inputs(item).detail, /reviewer requested changes on [0-9a-f]{12}; the next head is reviewed afresh/);
   assert.equal(item.autoDispatch!.review, null, 'and the control plane asks nobody to review a head nobody may review');
-  assert.equal(refusalAction(item, 'review', item.nextAction!.refusal!), 'request-rework', 'the refusal maps there too, so the queue and the gate agree');
+  assert.equal(refusalAction(item, 'review', item.nextAction!.refusal!, undefined, new Date()), 'request-rework', 'the refusal maps there too, so the queue and the gate agree');
 
   // A head that does not contain the base tip and conflicts with it (GY-191: behind alone is
   // reviewed as it stands) is answered by a fresh reading and a sync, not a review.
@@ -160,7 +160,7 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.equal(conflictAction.gate, 'build');
   assert.equal(conflictAction.refusal, conflict);
   assert.equal(conflictAction.kind, 'request-rework', 'a conflict the control plane cannot resolve needs a new head, not a re-read');
-  assert.equal(refusalAction(conflicted, 'build', conflict), 'request-rework');
+  assert.equal(refusalAction(conflicted, 'build', conflict, undefined, new Date()), 'request-rework');
   assert.match((conflictAction.inputs as any).detail, new RegExp(`Run graphyard sync ${item.key}, resolve it and push`), 'and the detail carries the instruction the worker follows');
 
   // The same mistake, one provider over. A `codex` or `agent` review is dispatched by the control
@@ -185,7 +185,7 @@ test('integration:typed-next-action — the control plane names one typed action
     const action = nextAction(probe, [probe], new Date())!;
     assert.equal(action.gate, 'review', `${provider}: the review gate is the one refusing`);
     assert.ok(answerable.includes(action.kind), `${provider}: ${action.kind} is an action an executor runs or an escalation, not one nothing can complete`);
-    assert.equal(refusalAction(probe, 'review', action.refusal!), action.kind, `${provider}: the refusal maps to the same kind, so the queue and the gate agree`);
+    assert.equal(refusalAction(probe, 'review', action.refusal!, undefined, new Date()), action.kind, `${provider}: the refusal maps to the same kind, so the queue and the gate agree`);
     reconcileAutoDispatch(probe, [probe], new Date());
     if (provider === 'github') {
       assert.equal(action.kind, 'request-review', 'a GitHub approval is the one review a launched session answers');
@@ -193,7 +193,7 @@ test('integration:typed-next-action — the control plane names one typed action
       assert.equal((nextAction(probe, [probe], new Date())!.inputs as any).requestId, probe.autoDispatch!.review!.id, 'and the action names it');
     } else {
       assert.equal(action.kind, 'resync', `${provider}: the fresh reading that wakes the observation job is what requests the review and reads its verdict`);
-      assert.equal(reviewNeed(probe).needed, false, `${provider}: no launched reviewer is asked for`);
+      assert.equal(reviewNeed(probe, undefined, new Date()).needed, false, `${provider}: no launched reviewer is asked for`);
       assert.equal(probe.autoDispatch!.review, null, `${provider}: and none is requested, so no executor could answer a request-review`);
       assert.match(action.reason, new RegExp(`control plane dispatches ${provider} review`));
     }
@@ -211,7 +211,7 @@ test('integration:typed-next-action — the control plane names one typed action
   assert.match(spentAction.reason, /no executor step answers it: every configured reviewer profile is exhausted for [0-9a-f]{12} \(claude\)/);
   assert.match((spentAction.inputs as any).detail, /adding reviewer capacity or selecting another review provider is the operator's decision/);
   assert.equal(spentAction.refusal, 'Every configured reviewer profile is exhausted for this candidate (claude); add reviewer capacity or select another review provider', 'and the refusal it classified is carried verbatim');
-  assert.equal(refusalAction(spent, 'review', spentAction.refusal!), 'attention');
+  assert.equal(refusalAction(spent, 'review', spentAction.refusal!, undefined, new Date()), 'attention');
 
   // A change request answers a head under every provider as well: an agent reviewer records its
   // verdict against the dispatched request rather than as a GitHub review, and either way the
@@ -250,24 +250,24 @@ test('integration:typed-next-action — the control plane names one typed action
   ];
   const seen = new Map<string, NextActionKind>();
   for (const probe of probes) for (const gate of probe.gates) for (const refusal of gate.reasons) {
-    const kind = refusalAction(probe, gate.name, refusal);
+    const kind = refusalAction(probe, gate.name, refusal, undefined, new Date());
     assert.ok(nextActionKinds.includes(kind), `${gate.name}: ${refusal} mapped to ${kind}`);
-    assert.equal(refusalAction(probe, gate.name, refusal), kind, 'the mapping is a function of its inputs');
+    assert.equal(refusalAction(probe, gate.name, refusal, undefined, new Date()), kind, 'the mapping is a function of its inputs');
     seen.set(`${gate.name}:${refusal}`, kind);
   }
   assert.ok(seen.size >= 10, `the battery covered ${seen.size} distinct refusals`);
   assert.deepEqual([...new Set(probes.flatMap(probe => probe.gates.map(gate => gate.name)))].sort(), ['acceptance', 'build', 'merge', 'ready', 'review', 'test'], 'every gate contributed a refusal');
   // The named mappings, one per gate, and the catch-all that makes the function total.
-  assert.equal(refusalAction(all[0], 'ready', 'Not released from backlog'), 'attention');
-  assert.equal(refusalAction(all[0], 'ready', 'Dependency GY-9 is unfinished'), 'dispatch');
-  assert.equal(refusalAction(all[0], 'build', 'Worker has not submitted implementation for this attempt'), 'dispatch');
-  assert.equal(refusalAction(all[0], 'build', 'Pull request has not been independently observed'), 'resync');
-  assert.equal(refusalAction(all[0], 'review', 'Independent approval of the current commit is required'), 'request-review');
-  assert.equal(refusalAction(all[0], 'nowhere', 'A refusal nobody has written a rule for yet'), 'attention', 'an unmapped refusal escalates rather than vanishing');
+  assert.equal(refusalAction(all[0], 'ready', 'Not released from backlog', undefined, new Date()), 'attention');
+  assert.equal(refusalAction(all[0], 'ready', 'Dependency GY-9 is unfinished', undefined, new Date()), 'dispatch');
+  assert.equal(refusalAction(all[0], 'build', 'Worker has not submitted implementation for this attempt', undefined, new Date()), 'dispatch');
+  assert.equal(refusalAction(all[0], 'build', 'Pull request has not been independently observed', undefined, new Date()), 'resync');
+  assert.equal(refusalAction(all[0], 'review', 'Independent approval of the current commit is required', undefined, new Date()), 'request-review');
+  assert.equal(refusalAction(all[0], 'nowhere', 'A refusal nobody has written a rule for yet', undefined, new Date()), 'attention', 'an unmapped refusal escalates rather than vanishing');
   // The merge writer's trial and push are its own merge step (GY-2010), whatever GitHub check a pull-request-era observation carries.
   const failing = { ...all[0], observation: { ...observation(item), checks: [{ name: 'test', result: 'failure', appId: 15368 }] } } as Work;
-  assert.equal(refusalAction(failing, 'test', `merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}`), 'merge');
-  assert.equal(refusalAction(failing, 'merge', `merge writer has not pushed ${head.slice(0, 12)}`), 'merge');
+  assert.equal(refusalAction(failing, 'test', `merge writer has not trialled ${head.slice(0, 12)} on ${base.slice(0, 12)}`, undefined, new Date()), 'merge');
+  assert.equal(refusalAction(failing, 'merge', `merge writer has not pushed ${head.slice(0, 12)}`, undefined, new Date()), 'merge');
 });
 
 // ---- AC-2: durable rows, leased claims, idempotency ------------------------------------------
@@ -785,7 +785,7 @@ test('integration:typed-next-action — the gate evaluator and the action comput
     const failing = probe.gates.find(gate => !gate.passed)!;
     assert.equal(action!.gate, failing.name);
     assert.equal(action!.refusal, failing.reasons[0]);
-    assert.equal(action!.kind, refusalAction(probe, failing.name, failing.reasons[0]));
+    assert.equal(action!.kind, refusalAction(probe, failing.name, failing.reasons[0], undefined, new Date()));
   }
   // An unfinished dependency belongs to the other item: this one names no action at all. Both
   // fixtures here carry the e2e proof the filing rule owes, so the dependency is the ready gate's

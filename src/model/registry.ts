@@ -313,4 +313,4 @@ export * from './registry-keys.js';
 export * from './registry-sessions.js';
 export * from './account-quota.js';
 export * from './registry-proposal.js';
-export * from '../provider-usage.js';
+export * from './provider-usage.js';

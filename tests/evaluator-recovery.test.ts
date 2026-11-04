@@ -132,15 +132,15 @@ async function storedAttempt(requestId: string) { return (await store.pool.query
 test('unit:evaluator-error-retried — an evaluator-error is retried against the same retained evidence at most twice, a fail is never retried, and a pass on retry is the result', async () => {
   // The rule itself, without a database: exactly two retries at most, with the widening backoff.
   const ruleWaits: number[] = [];
-  const exhausted = await evaluateWithRecovery('graphyard-playwright-v1', async () => ({ error: 'the evaluator crashed' }), { sleep: async ms => { ruleWaits.push(ms); } });
+  const exhausted = await evaluateWithRecovery('graphyard-playwright-v1', async () => ({ error: 'the evaluator crashed' }), { now: () => new Date(), sleep: async ms => { ruleWaits.push(ms); } });
   assert.equal(exhausted.attempts.length, evaluationRetries + 1, 'the first attempt plus at most two retries');
   assert.deepEqual(ruleWaits, [evaluationRetryBackoffMs, evaluationRetryBackoffMs * 2]);
   let judged = 0;
-  const failed = await evaluateWithRecovery('graphyard-playwright-v1', async () => { judged++; return 'fail'; }, { sleep: async () => assert.fail('a fail is never retried') });
+  const failed = await evaluateWithRecovery('graphyard-playwright-v1', async () => { judged++; return 'fail'; }, { now: () => new Date(), sleep: async () => assert.fail('a fail is never retried') });
   assert.equal(failed.outcome, 'fail'); assert.equal(failed.attempts.length, 1); assert.equal(judged, 1); assert.equal(failed.fault, null);
-  const recovered = await evaluateWithRecovery('graphyard-playwright-v1', async () => judged++ === 1 ? { error: 'once' } : 'pass', { sleep: async () => {} });
+  const recovered = await evaluateWithRecovery('graphyard-playwright-v1', async () => judged++ === 1 ? { error: 'once' } : 'pass', { now: () => new Date(), sleep: async () => {} });
   assert.equal(recovered.outcome, 'pass'); assert.equal(recovered.attempts.length, 2); assert.equal(recovered.fault, null);
-  const crashed = await evaluateWithRecovery('graphyard-playwright-v1', () => { throw new Error('the evaluator crashed'); }, { retries: 0, sleep: async () => {} });
+  const crashed = await evaluateWithRecovery('graphyard-playwright-v1', () => { throw new Error('the evaluator crashed'); }, { now: () => new Date(), retries: 0, sleep: async () => {} });
   assert.equal(crashed.outcome, 'evaluator-error'); assert.equal(crashed.attempts.length, 1); assert.equal(crashed.attempts[0].cause, 'the evaluator crashed');
 
   // Against a real attempt: a host fault on the first read is an evaluator-error, and the retry
@@ -186,7 +186,7 @@ test('unit:evaluator-error-retried — an evaluator-error is retried against the
   waits.length = 0;
   const { result: recoveredResult } = await retain(p, pCommand, playwrightDocument(true), { failures: 1 });
   assert.equal(recoveredResult.passed, true);
-  const proven = currentEvidence(await current(p.w.id), p.proof)!;
+  const proven = currentEvidence(await current(p.w.id), p.proof, new Date())!;
   assert.equal(proven.result, 'pass', 'the pass on retry is the proof’s result');
   assert.equal(proven.trusted, true);
   assert.equal(proven.evaluation?.outcome, 'pass');
@@ -205,7 +205,7 @@ test('unit:evaluator-error-retried — an evaluator-error is retried against the
   const qCommand = await start(q);
   const { result: failedResult } = await retain(q, qCommand, playwrightDocument(true), { skipped: 1, expect: false, failures: Number.MAX_SAFE_INTEGER });
   assert.equal(failedResult.passed, false); assert.equal(failedResult.fault, undefined);
-  const refuted = currentEvidence(await current(q.w.id), q.proof)!;
+  const refuted = currentEvidence(await current(q.w.id), q.proof, new Date())!;
   assert.equal(refuted.result, 'fail');
   assert.equal((await current(q.w.id)).validation?.[q.proof]?.fault, undefined);
   assert.deepEqual(refuted.evaluation?.attempts.map(x => x.outcome), ['fail'], 'a fail is judged once');
@@ -223,7 +223,7 @@ test('unit:evaluator-error-retried — an evaluator-error is retried against the
   } });
   assert.equal(mixedResult.passed, false); assert.equal(mixedResult.fault, undefined);
   assert.match(mixedResult.reasons.join('\n'), /Private artifact inventory bytes fail the digest recorded at upload/);
-  const mixed = currentEvidence(await current(m.w.id), m.proof)!;
+  const mixed = currentEvidence(await current(m.w.id), m.proof, new Date())!;
   assert.equal(mixed.result, 'fail', 'the established digest fail is the proof’s result');
   assert.deepEqual(mixed.evaluation?.attempts.map(x => x.outcome), ['fail'], 'the digest fail is judged once, never retried');
   assert.equal((await current(m.w.id)).validation?.[m.proof]?.fault, undefined);
@@ -274,7 +274,7 @@ test('unit:evaluation-attempts-kept — every attempt is kept with its outcome, 
   const hAfter = await current(h.w.id);
   // No evidence at all: the errors are a fault of the evaluation, never a failed proof.
   assert.equal(hAfter.evidence.length, hBefore.evidence.length);
-  assert.equal(currentEvidence(hAfter, h.proof), undefined);
+  assert.equal(currentEvidence(hAfter, h.proof, new Date()), undefined);
   const fault = hAfter.validation?.[h.proof]?.fault;
   assert.ok(fault, 'the item reports the evaluator errors as a fault on its proof selection');
   assert.equal(fault.kind, 'evaluator-error');

@@ -1187,7 +1187,7 @@ async function dispatchTick(config: MasterConfig, cursor: DispatchCursor, effect
         for (const request of item.autoDispatch!.producers.filter(entry => entry.state === 'requested')) {
           // Evidence recorded as not exercising its criterion goes back to the worker as a rework the
           // loop requests (master-daemon.ts); no producer is launched for the head again (GY-193 AC-3).
-          const unexercised = unexercisedFindings(item, request.sha, request.proofs);
+          const unexercised = unexercisedFindings(item, new Date(now()), request.sha, request.proofs);
           if (unexercised.length) { tick.skipped++; wait('producer', item, request, `evidence does not exercise its criterion (${unexercised.map(entry => entry.proof).join(', ')}); the head returns to its worker through the loop's rework, and no producer is launched for it again`); continue; }
           if (!session('producer', item, request, producers)) continue;
           if (!herdr) { wait('producer', item, request, 'Herdr session inventory is unavailable'); continue; }
