@@ -135,7 +135,7 @@ await t.test('integration:launch-prompt-is-a-request — a producer, a reviewer 
   try {
     const herdr = new FakeHerdr();
     // Reviewer on Claude Code: the request rides after the approval flag; no `agent prompt` follows.
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     const reviewed = await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, registerLaunch, requestId: 'review-request' });
     assert.equal(reviewed.delivery, 'request');
     const reviewer = herdr.named('review-claude-1');
@@ -195,7 +195,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
 
   const { root, token, cleanup } = await installed();
   try {
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
     const config = await loadMasterConfig(root);
     const ackMs = acknowledgementMs(config);
     assert.equal(ackMs, defaultAcknowledgementSeconds * 1000);
@@ -284,7 +284,7 @@ await t.test('integration:never-started-vs-failed — a session that ends withou
 
     // The reviewer ledger judges the same way: its one reminder carries the request, and a
     // session that never took it up settles as never started.
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: (_command, args) => startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { root_pane: { pane_id: 'pane-r', tab_id: 'tab-r' } } : {} }), registerLaunch, requestId: 'review-request', now: () => new Date(clock) });
     const reviewPrompts: string[] = [];
     const review = async (status: string, screen: string, offsetMs: number) => (await reconcileReviews(root, config, { run: (_command, args) => args[0] === 'agent' && args[1] === 'read' ? screen : JSON.stringify({ result: args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }), observe: () => null, work: [work()], agents: [{ name: 'review-claude-1', pane_id: 'pane-r', agent_status: status }], now: () => new Date(clock + offsetMs), retry: (_record, message) => { reviewPrompts.push(message); } })).reviews[0];
@@ -404,7 +404,7 @@ await t.test('integration:unacknowledged-session-recovery — the loop detects a
 
   const { root, token, cleanup } = await installed();
   try {
-    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
+    await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', agentArgs: ['--setting-sources', 'user'], credentialFile: await token('producer'), concurrency: 1 }, producerVerify('proof-runner'));
     // The interval is the master's own setting, adopted like every other owned run field.
     assert.ok((masterOwnedRunFields as readonly string[]).includes('acknowledgementSeconds'));
     await saveMasterSettings(root, { acknowledgementSeconds: 120 });
@@ -480,7 +480,7 @@ await t.test('manual:launch-authorization-onboarding-review — a Claude Code ro
     assert.deepEqual([codex.args, codex.role], [[], null], 'Codex reads AGENTS.md from the repository; no Claude flag rides its command line');
     // Launched under the role file, a Claude session loads the authorization from that file.
     const herdr = new FakeHerdr();
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     await launchReview(root, work(), 'reviewer-claude', [], new Date().toISOString(), { run: herdr.run, registerLaunch, requestId: 'review-request' });
     const launched = herdr.named('review-claude-1');
     assert.equal(launched.role, launchAuthorization.replace(/\s+/g, ' '));
