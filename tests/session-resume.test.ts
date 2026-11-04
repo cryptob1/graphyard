@@ -213,6 +213,7 @@ test('unit:rework-resumes-with-findings-and-falls-back — a CHANGES_REQUESTED r
     // The resume launch's `watch` supervisor: a runtime exiting in its first minute surrenders nothing, so the
     // launcher's relaunch holds the same lease; any other launch's early exit still releases it.
     const { resumeExitWindowMs } = await import('../src/master/session-resume.js');
+    // Process-group containment exercises lease surrender without the host's user systemd bus.
     const exitAtOnce = async (earlyExitKeepsLeaseMs?: number) => {
       const surrendered: string[] = [];
       await supervise(process.execPath, ['-e', 'process.exit(1)'], 2, async () => ({ updatedAt: new Date().toISOString(), lease: { epoch: 2, expiresAt: new Date(Date.now() + 120_000).toISOString() } }) as never,

@@ -18,12 +18,12 @@ import { runRecord, runRecordSchema, type Run, type RunOptions, type RunRecord, 
  * detached from the process that started it, so a restart leaves it running; the restarted process
  * adopts every run still live there (`adoptRuns`), keeps waiting on it, and applies its result once.
  */
-export type RunRole = 'producer' | 'research';
+export type RunRole = 'producer';
 export interface RegisteredRun {
   name: string;
   role: RunRole;
   work: string;
-  /** The producer ledger record id, or the research revision, the run answers. */
+  /** The producer ledger record id the run answers. */
   subject: string;
   run: Run<unknown>;
   /** The managed directory the run works in, when it was given one (GY-391). */
@@ -35,7 +35,7 @@ export interface RegisteredRun {
 
 const retentionMs = 30 * 60_000;
 const runs = new Map<string, RegisteredRun>();
-/** Every run this process watches until it ends, research runs included. */
+/** Every run this process watches until it ends. */
 const watched = new Set<Run<unknown>>();
 
 const prune = (now = Date.now()) => { for (const [name, entry] of runs) if (entry.endedAt !== null && now - entry.endedAt > retentionMs) runs.delete(name); };
@@ -57,9 +57,9 @@ export const liveRun = (name: string) => { const entry = registeredRun(name); re
 /** Every registered run this process is watching that has not ended. */
 export const liveRuns = () => { prune(); return [...runs.values()].filter(entry => entry.endedAt === null); };
 
-/** The live runs as Herdr-shaped sessions: no pane, and a working status. A research run is no session. */
+/** The live runs as Herdr-shaped sessions: no pane, and a working status. */
 export function runnerAgents(): { name: string; agent: string; agent_status: string }[] {
-  return liveRuns().filter(entry => entry.role !== 'research').map(entry => ({ name: entry.name, agent: 'pi', agent_status: 'working' }));
+  return liveRuns().map(entry => ({ name: entry.name, agent: 'pi', agent_status: 'working' }));
 }
 /** The Herdr inventory with this process's runs beside it; a name Herdr lists wins. */
 export function withRunnerAgents<A extends { name?: string }>(agents: A[]): (A | ReturnType<typeof runnerAgents>[number])[] {
@@ -87,7 +87,7 @@ export function detachRuns() {
 
 export const runsDirectory = (root: string) => resolve(root, '.graphyard', 'runs');
 export const runOwnerSchema = z.object({
-  version: z.literal(1), name: z.string().min(1).max(200), role: z.enum(['producer', 'research']), work: z.string().min(1).max(200), subject: z.string().min(1).max(200),
+  version: z.literal(1), name: z.string().min(1).max(200), role: z.enum(['producer']), work: z.string().min(1).max(200), subject: z.string().min(1).max(200),
   /** What the role needs to apply the run's result after a restart: never a credential, only where to read one. */
   context: z.record(z.string(), z.unknown()).default({}),
   startedAt: z.string().max(40),
@@ -207,7 +207,7 @@ const failure = (error: unknown) => error instanceof Error ? error.message : Str
 export function superviseRun<T>(input: { runner: Pick<Runner, 'name'>; run: Run<T>; name: string; role: RunRole; work: string; subject: string; startedAt: string; checkout?: string;
   apply: (result: RunResult<T>) => Promise<Applied[]> }) {
   const { run } = input;
-  if (input.role !== 'research') registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown>, ...(input.checkout ? { checkout: input.checkout } : {}) });
+  registerRun({ name: input.name, role: input.role, work: input.work, subject: input.subject, run: run as Run<unknown>, ...(input.checkout ? { checkout: input.checkout } : {}) });
   watched.add(run as Run<unknown>);
   const settled = run.result().then(async result => {
     watched.delete(run as Run<unknown>);
@@ -254,7 +254,7 @@ export async function adoptRuns(root: string, adopters: Partial<Record<RunRole, 
   const adopted: AdoptedRun[] = [];
   for (const { directory, owner, record } of listRunDirectories(runsRoot)) {
     if (record || !adopters[owner.role] || !runner.adopt) continue;
-    if (owner.role !== 'research' && liveRun(owner.name)) continue;
+    if (liveRun(owner.name)) continue;
     // Another live process — the loop, or an executor on this host — is watching it already.
     if (!claimRunWatch(directory)) continue;
     let plan: Awaited<ReturnType<RunAdopter>>;

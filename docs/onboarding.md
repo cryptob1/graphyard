@@ -9,6 +9,8 @@ Follow [install](install.md), starting with one worker and a previewed plan.
 
 Connect each worker identity and host with `init --url https://YOUR-HOST --herdr --host-id NAME --token-stdin`. Commit `AGENTS.md`, `.gitignore` and `graphyard.json`; local `.graphyard/` state stays ignored. `init --scan --apply` writes delivery policy. `up` submits onboarding's commit on `graphyard/onboarding` as GY-1 through normal gates; no pull request opens.
 
+Principals and credentials belong to `graphyard install --apply`; its `install.json` is the only roster. Init never writes a principals file or mints credentials, even before an install. Use `principal add|remove` for roster edits.
+
 Without a master, supervise work with [watch](protocol/work-commands.md#watch).
 
 ### What the generated instructions authorize
