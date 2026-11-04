@@ -481,9 +481,9 @@ async function launchWorker(root: string, config: MasterConfig, work: Work, prof
  * recorded blocker that names the exact command that was blocked; a session that stops to ask for
  * confirmation or offers a menu of options is waiting on input, and the loop records it as failed.
  */
-export function autonomousSession(outcome: string, blocker: string) {
+export function autonomousSession(outcome: string, blocker: string, failureException = '') {
   return `Decide and act on your own: ${outcome}. Never stop to ask a human for confirmation, never end your turn with a question, and never offer a menu of options to choose from; choose what the criteria and these instructions support and carry it out. `
-    + `If a command you need is refused or cannot succeed, ${blocker}, naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.`;
+    + `If a command you need is refused or cannot succeed${failureException}, ${blocker}, naming the exact command that was blocked and its error, then stop. A session that ends waiting on input is recorded as failed with that reason.`;
 }
 /**
  * A runtime keeps some prompts beyond every approval flag it takes — Claude Code asks before an `rm`
@@ -534,7 +534,7 @@ export function workerPrompt(
     + `If the item cannot continue without a decision only a human may make — ${humanOnlyDecisions.join('; ')} — park it with node ${config.cliPath} park ${work.key} ${epoch} (guide park names the fields) and stop; parking ends your lease. Do not wait and do not write it as a blocker. `
     // GY-1987: the worker judges its own diff by the reviewer's standard (graphyard review self) before it submits, so a blocking finding costs a push, not a review round.
     + `Before complete, run node ${config.cliPath} review self ${work.key}, judge your diff by what it prints and fix each BLOCKING finding first. `
-    + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`);
+    + autonomousSession('implement the item, commit it and submit the head with complete --head', `record a blocker with node ${config.cliPath} blocked ${work.key} ${epoch} REASON`, ', other than a test failing only for the sandbox limitations described above');
 }
 
 /**

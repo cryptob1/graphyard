@@ -123,6 +123,23 @@ class FakeHerdr {
   named(name: string) { const session = this.find(name); assert.ok(session, `${name} is a launched session`); return session; }
 }
 
+test('e2e:worker-request-trial-only-tests — dispatched worker receives the trial exception and genuine-failure instructions', async () => {
+  const { root, token, cleanup } = await installed();
+  try {
+    const herdr = new FakeHerdr();
+    const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'trial-worker', mode: 'launch', kind: 'opencode', credentialFile: await token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
+    await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000);
+    const request = herdr.named('trial-worker').request!;
+    assert.match(request, /required test fails only because your sandbox lacks Docker, unnested bubblewrap or a trial-image fixture, do not record a blocker/);
+    assert.match(request, /name the command and environment error in the commit message, submit with complete and leave the verdict to the merge trial/);
+    assert.match(request, /This exception also applies to your own criteria's tests/);
+    assert.match(request, /Assertion failures, build errors and refusals of your own writes must still be fixed or recorded as blockers/);
+    assert.match(request, /cannot succeed, other than a test failing only for the sandbox limitations described above, record a blocker/);
+    assert.match(request, /complete GY-93 4 --head as your last action/);
+    assert.doesNotMatch(request, /a failure of your own criteria's tests always blocks/);
+  } finally { await cleanup(); }
+});
+
 test('integration:launch-prompt-is-a-request — a producer, a reviewer and a worker launched through the real launchers begin their first tool call on their own request, without any pasted input', async () => {
   // The request contracts: a positional prompt after the flags, or the runtime's own interactive
   // prompt flag; a runtime without one is refused at launch rather than pasted into (GY-184).

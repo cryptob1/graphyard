@@ -115,3 +115,14 @@ test('unit:worker-submits-sandbox-failures-to-ci — every worker runtime\'s lau
   assert.equal(submissionPolicyRule.trim().length > 0, true);
   assert.match(submissionPolicyRule, /full test suite is CI's gate/);
 });
+
+
+test('unit:worker-request-trial-only-tests — trial-environment failures permit submission without excusing implementation failures', () => {
+  const prompt = workerPrompt({ cliPath: '/graphyard/bin/graphyard.mjs' }, { key: 'GY-3078', title: 'Trial-only tests' }, { principal: 'worker' }, 1);
+  assert.match(prompt, /If a required test fails only because your sandbox lacks Docker, unnested bubblewrap or a trial-image fixture, do not record a blocker/);
+  assert.match(prompt, /name the command and environment error in the commit message, submit with complete and leave the verdict to the merge trial, which runs the test/);
+  assert.match(prompt, /This exception also applies to your own criteria's tests/);
+  assert.match(prompt, /Assertion failures, build errors and refusals of your own writes must still be fixed or recorded as blockers/);
+  assert.match(prompt, /If a command you need is refused or cannot succeed, other than a test failing only for the sandbox limitations described above, record a blocker with node .* blocked GY-3078 1 REASON/);
+  assert.doesNotMatch(prompt, /a failure of your own criteria's tests always blocks/);
+});

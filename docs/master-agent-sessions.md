@@ -21,6 +21,8 @@ Outer trials inherit no host filesystem Landlock domain, which would forbid desc
 
 ### Worker sandbox
 
+Workers run the build and their criteria's tests. A required test failing only because the sandbox lacks Docker, unnested bubblewrap or a trial-image fixture does not block submission: record its command and environment error in the commit message and submit with `complete`; the merge trial runs it and decides the verdict. Assertion failures, build errors and refused worker writes still require a fix or blocker.
+
 Confined Codex uses `--sandbox danger-full-access` inside Graphyard's mount and socket boundary. A second runtime sandbox would fail because Landlock denies later mounts. Standalone probes keep native workspace policy; confined probes exercise the outer boundary. OS writable grants and credential masks still apply to every command.
 
 The outer boundary grants writable common `.git` for `packed-refs` locking/replacement, plus assigned worktree administration, objects, remote refs, graphyard branch refs and logs. Native Codex sandbox probes grant these through `--add-dir` too. Inside the mount, coordinator index/HEAD/config/hooks, other refs and shared worktree administration remain read-only. Directory locks cannot replace protected files.
