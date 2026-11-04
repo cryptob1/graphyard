@@ -47,7 +47,12 @@ test('integration:vite-private-cache — actual project config starts cold and w
             }
           }
         }
-      } finally { await server?.close(); }
+      } finally {
+        // Pending import transforms can add watched files after watcher.close(),
+        // reopening filesystem handles. Drain Vite's crawl before closing it.
+        await server?.waitForRequestsIdle();
+        await server?.close();
+      }
     }
     await assert.rejects(start('vite.previous.config.ts'), { code: 'EROFS' });
     await start('vite.config.ts');
