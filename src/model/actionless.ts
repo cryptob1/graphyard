@@ -87,7 +87,8 @@ export function mergeQueuePositions(work: Work[], now: number): Map<string, Queu
   const flight = queue.blockedBy ? work.find(item => item.key === queue.blockedBy) : undefined;
   const step = flight && currentMergeStep(flight, now);
   if (!flight || !step) return new Map();
-  const waiting = queue.queue.filter(entry => entry.key !== flight.key);
+  const flying = new Set(work.filter(item => currentMergeStep(item, now)).map(item => item.id));
+  const waiting = queue.queue.filter(entry => !flying.has(entry.id));
   return new Map(waiting.map((entry, index) => [entry.id, { position: index + 1, of: waiting.length, ahead: flight.key, step: step.step }]));
 }
 /** The plain sentence for a queued head. */

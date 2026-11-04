@@ -27,7 +27,7 @@ const alone = async (ports: MergePorts, items: readonly Work[]) => {
  * holds every head's own merge commit once the last is pushed. A head the queue's chain cannot merge (a
  * conflict) is refused as `mergeOne` refuses it and the rest still batch; a held head is left
  * queued. The chain's tip is trialled once (the build and the tests its combined change affects,
- * with every head's proofs) and previewed; when it passes, every head is recorded intent and trial,
+ * with every head's proofs) and previewed; every head records its intent before the trial and its verdict afterward,
  * the tip is pushed once with a lease on the tip it was tested on, and every head is recorded pushed
  * and reconciled at its own merge commit. A rejected push, or a stacked trial whose tip did not
  * land (`lands`), trials the batch again on the tip as it now stands, `retrials` times at most. A failing trial or preview, a hold that arrives during the
@@ -60,6 +60,9 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[], retr
   const works = batch.map(entry => entry.work);
   if (batch.length < 2) return [...results, ...await alone(ports, works)];
   try {
+    // Publish every in-flight head before awaiting the trial, as mergeOne does.
+    for (const { work, head, baseTip: parent, mergeSha } of batch)
+      await ports.record(work, { kind: 'intent', head, baseTip: parent, mergeSha, risk: riskOf(work).risk, at: at() });
     // A batch trial that times out is trialled one head at a time, so a timeout counts only on the head it is its own (GY-2079).
     const run = await ports.trial(tip, [...files], { key: works[0]!.key, criteria: works.flatMap(work => work.criteria) }, baseTip, ports.onStep).catch(error => { if (error instanceof TrialTimeoutError) return null; throw error; });
     if (!run) return [...results, ...await alone(ports, works)];
@@ -72,11 +75,10 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[], retr
     if (!proofFailure && (failed || previewFailureReason(preview, trialFailurePrefix))) return [...results, ...await alone(ports, works)];
     for (const work of works) if (ports.hold && await ports.hold(work)) return [...results, ...await alone(ports, works)];
     const flaked = run.flaked ? trialFlaked(run.flaked, at()) : null;
-    for (const [index, { work, head, baseTip: parent, mergeSha }] of batch.entries()) {
+    for (const [index, { work, head, baseTip: parent }] of batch.entries()) {
       // Every head's proofs (unit, integration and the bound e2e cases) were counted on the batch's one trial; each head's record carries only the runs of its own e2e cases.
       const own = e2eProofsOf(work), e2e = run.e2e?.filter(entry => own.includes(entry.proof)) ?? [];
       const proofs = Object.fromEntries([...criterionProofs(work), ...own].filter(proof => run.proofs[proof]).map(proof => [proof, run.proofs[proof]!]));
-      await ports.record(work, { kind: 'intent', head, baseTip: parent, mergeSha, risk: riskOf(work).risk, at: at() });
       await ports.record(work, { kind: 'trial', head, baseTip: parent, mergeSha: tip, outcome: 'verdict', build: run.build, tests: recordedTests(run.tests), files: run.files, proofs, durationMs: run.durationMs,
         ...(run.phases ? { phases: run.phases } : {}), attempts: run.retried ?? [], ...(e2e.length ? { e2e } : {}), ...(preview ? { preview } : {}), ...(flaked && index === 0 ? { flaked } : {}) });
     }

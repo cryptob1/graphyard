@@ -75,7 +75,7 @@ test('unit:merge-batch-fallback — a batch whose trial fails is trialled one he
   assert.deepEqual(failing.calls.filter(call => call.startsWith('trial:')), ['trial:GY-1+GY-2+GY-3+GY-4', 'trial:GY-1', 'trial:GY-1+GY-2', 'trial:GY-1+GY-2+GY-3', 'trial:GY-1+GY-2+GY-4'], 'the batch, then each head alone on the tip the last landed');
   const outcomes = Object.fromEntries(results.map(entry => [entry.work.key, 'outcome' in entry ? entry.outcome.outcome : 'error']));
   assert.deepEqual(outcomes, { 'GY-1': 'merged', 'GY-2': 'merged', 'GY-3': 'refused', 'GY-4': 'merged' }, 'only the failing head is refused');
-  assert.deepEqual(failing.kinds('GY-3'), ['intent', 'trial', 'refused']);
+  assert.deepEqual(failing.kinds('GY-3'), ['intent', 'intent', 'trial', 'refused']);
   const refusal = failing.records.find(entry => entry.key === 'GY-3' && entry.event.kind === 'refused')!.event;
   assert.ok(refusal.kind === 'refused' && refusal.reason.startsWith(trialFailurePrefix), 'the refusal grounds the head\'s rework');
 
