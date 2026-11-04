@@ -1,6 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import { test, expect, type Page } from '@playwright/test';
-import { applyRegistryMutation, emptyRegistry, fleetView, foldObservation, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetView, foldObservation, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry';
 import { NOW, boardApi } from './ui-board';
 
 // GY-1325 AC-5: Settings › Agents over a production-sized fleet — 17 accounts, 6 roles, six of them

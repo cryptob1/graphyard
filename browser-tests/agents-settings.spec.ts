@@ -1,5 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
-import { applyRegistryMutation, emptyRegistry, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry';
+import { applyRegistryMutation } from '../src/model-boundary/registry.js';
+import { emptyRegistry, fleetView, proposedRuntimes, type AgentRegistry, type FleetSession } from '../src/model/registry';
 
 // GY-170 AC-3: Settings › Agents lists, from the agent registry, every runtime; every account with
 // its host, credential home, login, quota state and reset time; the role mapping and each role's
