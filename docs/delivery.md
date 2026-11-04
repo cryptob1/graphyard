@@ -49,7 +49,7 @@ Registered builders build; admins or promoters select releases; observers acquir
 
 ## Observe and verify
 
-`POST /api/delivery/observe` carries all service instances with host-attested digests, never self-reports. `observe-sha` marks contained merges Deployed with an exact 40-hex SHA and every service. Smoke-required work also needs an `e2e:deploy-smoke` pass naming that SHA. Complete listings verify through `notify`; `graphyard delivery sweep` runs at `freshnessSeconds`. `/api/validation/result` binds signatures, manifests and measurements; mismatches void passes as `attribution-undermined`.
+`POST /api/delivery/observe` carries all service instances with host-attested digests, never self-reports. `observe-sha` marks contained merges Deployed with an exact 40-hex SHA and every service. Smoke-required work also needs an `e2e:deploy-smoke` pass naming that SHA. Complete listings verify through `notify`; `graphyard delivery sweep` runs at `freshnessSeconds`.
 
 `release GY-N EPOCH` leases release work. `release status` and `graphyard delivery` show ledger and pipeline.
 

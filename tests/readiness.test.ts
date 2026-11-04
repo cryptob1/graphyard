@@ -1,14 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
-import { completionProfiles, frameworkReportFormats, readinessChecklist, summarizeDefinitions } from '../src/readiness.js';
+import { completionProfiles, frameworkReportFormats, readinessChecklist } from '../src/readiness.js';
 import { reportFormats } from '../src/report-adapters.js';
 import { buildProposal } from '../src/onboarding.js';
 
 const example = JSON.parse(await readFile('examples/setup-proposal.json', 'utf8'));
 const connected = { url: 'https://graphyard.example.test', reachable: true, role: 'admin' };
 const applied = { proposal: '.graphyard/setup-proposal.json', appliedAt: '2026-09-18T10:00:00.000Z', githubApp: { appId: 1, slug: 'graphyard-orders' }, drift: [], unreadable: [] };
-const runnerPath = { environments: 1, runners: 1, collectors: 1, builders: 1, bundles: 1 };
 
 test('a fully configured through-merge repository is ready, and every missing item names its recovery', () => {
   const ready = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: example });
@@ -43,44 +42,29 @@ test('unsupported test formats are named with a recovery, and every supported fr
   const cypress = readinessChecklist('through-merge', { repository: 'owner/app', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: ['cypress', 'vitest'] } } });
   const formats = cypress.items.find(i => i.id === 'test-formats')!;
   assert.equal(formats.status, 'missing'); assert.match(formats.detail, /cypress → unsupported/); assert.match(formats.detail, /vitest → junit-xml-v1/);
-  assert.match(formats.recovery!, /cypress: no adapter/); assert.match(formats.recovery!, /graphyard runner adapters/);
+  assert.match(formats.recovery!, /cypress: no adapter/); assert.match(formats.recovery!, /Supported formats:/);
   const none = readinessChecklist('through-merge', { repository: 'owner/app', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: [] } } });
   assert.equal(none.items.find(i => i.id === 'test-formats')!.status, 'missing'); assert.match(none.items.find(i => i.id === 'test-formats')!.recovery!, /never invents coverage/);
   // A scanned repository declaring Playwright and pytest is fully supported.
   const scanned = buildProposal({ files: ['package.json', 'tests/app.spec.ts', '.github/workflows/ci.yml'], contents: { 'package.json': JSON.stringify({ scripts: { test: 'playwright test' }, devDependencies: { '@playwright/test': '1.63.0', vitest: '3.0.0' } }), '.github/workflows/ci.yml': 'on: [pull_request]\njobs:\n  test:\n    runs-on: ubuntu-latest\n' } }, { repository: 'owner/app' });
-  const supported = readinessChecklist('preview-validation', { repository: 'owner/app', server: connected, setup: applied, proposal: scanned, validation: runnerPath });
+  const supported = readinessChecklist('preview-validation', { repository: 'owner/app', server: connected, setup: applied, proposal: scanned });
   assert.equal(supported.items.find(i => i.id === 'test-formats')!.status, 'ready');
   assert.equal(supported.items.find(i => i.id === 'e2e-suite')!.status, 'ready');
 });
 
-test('preview validation adds the runner path, and production verification stays honest about D3', () => {
+test('preview validation checks the suite without the retired runner registrations, and production verification stays honest about D3', () => {
   const merge = readinessChecklist('through-merge', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: example });
   assert.ok(!merge.items.some(i => ['runner-registration', 'approved-bundle', 'e2e-suite'].includes(i.id)));
   const preview = readinessChecklist('preview-validation', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: example });
   const ids = preview.items.map(i => i.id);
-  for (const id of ['e2e-suite', 'validation-environment', 'runner-registration', 'collector-registration', 'builder-registration', 'approved-bundle', 'deploy-target']) assert.ok(ids.includes(id), id);
+  for (const id of ['e2e-suite', 'deploy-target']) assert.ok(ids.includes(id), id);
   assert.equal(preview.items.find(i => i.id === 'e2e-suite')!.status, 'missing', 'the example declares vitest only');
-  assert.ok(preview.items.filter(i => i.id.endsWith('-registration')).every(i => i.status === 'unknown' && /validation definitions/.test(i.recovery!)));
-  const registered = readinessChecklist('preview-validation', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: ['@playwright/test'] } }, validation: { ...runnerPath, bundles: 0 } });
-  assert.equal(registered.ready, false);
-  const bundle = registered.items.find(i => i.id === 'approved-bundle')!;
-  assert.equal(bundle.status, 'missing'); assert.match(bundle.recovery!, /bundle-digest/); assert.match(bundle.recovery!, /reportFormat/);
-  assert.equal(readinessChecklist('preview-validation', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: ['@playwright/test'] } }, validation: runnerPath }).ready, true);
-  const production = readinessChecklist('production-verification', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: ['@playwright/test'] } }, validation: runnerPath });
+  assert.equal(readinessChecklist('preview-validation', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: ['@playwright/test'] } } }).ready, true);
+  const production = readinessChecklist('production-verification', { repository: 'owner/orders-api', server: connected, setup: applied, proposal: { ...example, stack: { ...example.stack, frameworks: ['@playwright/test'] } } });
   assert.equal(production.ready, false);
   const observation = production.items.find(i => i.id === 'production-observation')!;
   assert.equal(observation.status, 'missing'); assert.match(observation.detail, /not shipped/); assert.match(observation.recovery!, /manual proof/);
   assert.throws(() => readinessChecklist('done' as any, {}), /Unknown completion profile/);
   assert.deepEqual([...completionProfiles], ['through-merge', 'preview-validation', 'production-verification']);
-});
-
-test('definition summaries count only the current, enabled revision of each definition', () => {
-  const counts = summarizeDefinitions([
-    { kind: 'environment', id: 'preview', revision: 1 }, { kind: 'environment', id: 'preview', revision: 2 },
-    { kind: 'registration', id: 'runner-1', revision: 1, role: 'runner', enabled: true }, { kind: 'registration', id: 'runner-1', revision: 2, role: 'runner', enabled: false },
-    { kind: 'registration', id: 'collector-1', revision: 1, role: 'collector', enabled: true }, { kind: 'registration', id: 'builder-1', revision: 1, role: 'builder', enabled: true },
-    { kind: 'bundle', id: 'bundle-1', revision: 1 },
-  ]);
-  assert.deepEqual(counts, { environments: 1, runners: 0, collectors: 1, builders: 1, bundles: 1 });
 });
 

@@ -11,7 +11,7 @@ export const completionProfiles = ['through-merge', 'preview-validation', 'produ
 export type CompletionProfile = (typeof completionProfiles)[number];
 export const profileMeaning: Record<CompletionProfile, string> = {
   'through-merge': 'A verified, authorized merge completes the configured workflow: required checks, independent review, trusted proofs and the merge gate.',
-  'preview-validation': 'Through merge, plus a pinned preview candidate exercised by the packaged runner with independently collected behavioural proof.',
+  'preview-validation': 'Through merge, plus a preview exercised by repository e2e cases with independently collected behavioural proof.',
   'production-verification': 'Preview validation, plus expected artifacts independently observed running across every required production service.',
 };
 
@@ -33,8 +33,7 @@ export interface ReadinessFacts {
     /** GY-1859: what the host's loop and executor units run against this CLI's code; absent from an older reader. */
     loopCode?: LoopCodeReading | null } | null;
   proposal?: Pick<SetupProposal, 'stack' | 'ci' | 'checks' | 'proofs' | 'deploy' | 'environment' | 'profiles'> | null;
-  /** Counts of enabled validation definitions the server holds, by kind and role. */
-  validation?: { environments: number; runners: number; collectors: number; builders: number; bundles: number } | null;
+
 }
 
 /**
@@ -43,7 +42,7 @@ export interface ReadinessFacts {
  * recovery, instead of letting a scan imply coverage the collector would later refuse.
  */
 export const frameworkReportFormats: Record<string, { format: ReportFormat; via: string }> = {
-  '@playwright/test': { format: 'graphyard-playwright-v1', via: 'the packaged runner image and its built-in reporter' },
+  '@playwright/test': { format: 'junit-xml-v1', via: 'playwright test --reporter=junit' },
   vitest: { format: 'junit-xml-v1', via: 'vitest --reporter=junit' },
   jest: { format: 'junit-xml-v1', via: 'jest-junit' },
   mocha: { format: 'junit-xml-v1', via: 'mocha --reporter xunit or mocha-junit-reporter' },
@@ -80,7 +79,7 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
   item({ id: 'credential-role', title: 'Credential can perform setup', profiles: all,
     status: !server?.reachable ? 'unknown' : ['admin', 'coordinator'].includes(server.role ?? '') ? 'ready' : 'missing',
     detail: !server?.reachable ? 'depends on the control plane' : `credential role is ${server.role ?? 'unknown'}`,
-    recovery: !server?.reachable ? scanFirst.server : ['admin', 'coordinator'].includes(server?.role ?? '') ? null : 'Setup and proof configuration need an operator (admin) credential; workers cannot revise requirements or register runners. Use the operator entry from GRAPHYARD_PRINCIPALS, and keep it away from implementation agents' });
+    recovery: !server?.reachable ? scanFirst.server : ['admin', 'coordinator'].includes(server?.role ?? '') ? null : 'Setup and proof configuration need an operator (admin) credential; workers cannot revise requirements. Use the operator entry from GRAPHYARD_PRINCIPALS, and keep it away from implementation agents' });
 
   const setup = facts.setup ?? null;
   item({ id: 'setup-proposal', title: 'Delivery workflow proposed, reviewed and applied', profiles: all,
@@ -114,11 +113,11 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
   item({ id: 'test-formats', title: 'Detected test frameworks have a supported report format', profiles: all,
     status: proposal === null ? 'unknown' : !frameworks.length ? 'missing' : unsupported.length ? 'missing' : 'ready',
     detail: proposal === null ? 'no proposal to read' : !frameworks.length ? 'no test framework was detected' : frameworks.map(f => frameworkReportFormats[f] ? `${f} → ${frameworkReportFormats[f].format} via ${frameworkReportFormats[f].via}` : `${f} → unsupported`).join('; '),
-    recovery: proposal === null ? scanFirst.proposal : !frameworks.length ? 'Add an executable test suite first; a scan proposes proofs only for tests that exist, and the runner never invents coverage' : unsupported.length ? `${unsupported.join(', ')}: no adapter accepts this framework's reports. Emit JUnit XML from it (most runners can) so the junit-xml-v1 adapter applies, or use Playwright for the end-to-end path. Supported formats: ${reportFormats.join(', ')}; see \`graphyard runner adapters\`` : null });
-  item({ id: 'e2e-suite', title: 'Playwright suite for the packaged runner', profiles: beyondMerge,
+    recovery: proposal === null ? scanFirst.proposal : !frameworks.length ? 'Add an executable test suite first; a scan proposes proofs only for tests that exist, and the runner never invents coverage' : unsupported.length ? `${unsupported.join(', ')}: no adapter accepts this framework's reports. Emit JUnit XML from it (most runners can) so the junit-xml-v1 adapter applies, or use Playwright for the end-to-end path. Supported formats: ${reportFormats.join(', ')}` : null });
+  item({ id: 'e2e-suite', title: 'Playwright end-to-end suite', profiles: beyondMerge,
     status: proposal === null ? 'unknown' : e2e.includes('@playwright/test') ? 'ready' : 'missing',
     detail: proposal === null ? 'no proposal to read' : e2e.includes('@playwright/test') ? '@playwright/test is declared' : e2e.length ? `${e2e.join(', ')} is not a supported end-to-end runner` : 'no end-to-end framework was detected',
-    recovery: proposal === null ? scanFirst.proposal : e2e.includes('@playwright/test') ? null : 'The packaged runner executes an approved Playwright bundle. Add a Playwright suite (with package-lock.json beside it), then `graphyard runner inspect` to propose its inputs' });
+    recovery: proposal === null ? scanFirst.proposal : e2e.includes('@playwright/test') ? null : 'Add repository e2e cases and configure e2e.serve in graphyard.json; graphyard e2e run executes those cases against the served application' });
 
   const workers = proposal?.profiles.workers.length ?? null;
   item({ id: 'worker-profiles', title: 'At least one worker profile with its own credential', profiles: all,
@@ -129,22 +128,6 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
     status: proposal === null ? 'unknown' : proposal.profiles.reviewer.provider ? 'ready' : 'missing',
     detail: proposal === null ? 'no proposal to read' : `review provider: ${proposal.profiles.reviewer.provider}`,
     recovery: proposal === null ? scanFirst.proposal : null });
-
-  const validation = facts.validation ?? null;
-  const runnerPath: [string, keyof NonNullable<ReadinessFacts['validation']>, string, string][] = [
-    ['validation-environment', 'environments', 'Immutable preview environment defined', 'Define the preview environment as an operator: `graphyard validation define environment.json` with `immutable: true`, its HTTPS URL, instance and protected resources'],
-    ['runner-registration', 'runners', 'Runner registration pins host, attestor key and network', 'Register the runner (worker principal) with `graphyard validation define runner.json`: a local unix:// Docker socket, the attestor\'s Ed25519 public key and a dedicated isolated network; see docs/runner-setup.md'],
-    ['collector-registration', 'collectors', 'Separately trusted collector registered', 'Register the collector under its own producer principal, scoped to the e2e proof, with `graphyard validation define collector.json`'],
-    ['builder-registration', 'builders', 'Build producer registered for candidate provenance', 'Register the build attestor (producer principal) with `graphyard validation define builder.json`; candidates without trusted provenance cannot be validated'],
-    ['approved-bundle', 'bundles', 'Executable oracle bundle approved by digest', 'Build the bundle, measure it with `graphyard runner bundle-digest DIR`, and pin digest, runnerImageDigest and reportFormat against the scenario revision with `graphyard validation define bundle.json`'],
-  ];
-  for (const [id, key, title, recovery] of runnerPath) {
-    const count = validation?.[key] ?? null;
-    item({ id, title, profiles: beyondMerge,
-      status: count === null ? 'unknown' : count > 0 ? 'ready' : 'missing',
-      detail: count === null ? 'validation definitions were not read' : `${count} enabled`,
-      recovery: count === null ? 'Read definitions with an operator credential: `graphyard validation definitions`' : count > 0 ? null : recovery });
-  }
 
   const deploy = proposal?.deploy ?? null;
   item({ id: 'deploy-target', title: 'Deployment target detected with SHA verification', profiles: beyondMerge,
@@ -160,17 +143,4 @@ export function readinessChecklist(profile: CompletionProfile, facts: ReadinessF
   return { profile, meaning: profileMeaning[profile], ready: !missing.length && !unknown.length, items,
     summary: { ready: items.length - missing.length - unknown.length, missing: missing.length, unknown: unknown.length },
     next: missing[0]?.recovery ?? unknown[0]?.recovery ?? 'Every item is ready: file what you want built.' };
-}
-
-/** Count the current revision of each validation definition the server lists. */
-export function summarizeDefinitions(definitions: { kind: string; id: string; revision: number; role?: string; enabled?: boolean }[]): NonNullable<ReadinessFacts['validation']> {
-  const latest = new Map<string, { kind: string; role?: string; enabled?: boolean; revision: number }>();
-  for (const d of definitions) { const key = `${d.kind}/${d.id}`; if ((latest.get(key)?.revision ?? 0) < d.revision) latest.set(key, d); }
-  const counts = { environments: 0, runners: 0, collectors: 0, builders: 0, bundles: 0 };
-  for (const d of latest.values()) {
-    if (d.kind === 'environment') counts.environments++;
-    else if (d.kind === 'bundle') counts.bundles++;
-    else if (d.kind === 'registration' && d.enabled) { if (d.role === 'runner') counts.runners++; else if (d.role === 'collector') counts.collectors++; else if (d.role === 'builder') counts.builders++; }
-  }
-  return counts;
 }
