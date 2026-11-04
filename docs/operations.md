@@ -25,7 +25,7 @@ Workers hold no admin/coordinator/producer credentials. AI cannot hold admin. On
 
 ## Deeper references
 
-[Loop](#master-coordination-loop), [delivery](delivery.md), [deployment recovery](deployment.md#backup-upgrade-rollback).
+[Loop](#master-coordination-loop), [lost worker](#lost-worker-before-submission), [delivery](delivery.md), [deployment recovery](deployment.md#backup-upgrade-rollback).
 
 ## Resources and disk
 
