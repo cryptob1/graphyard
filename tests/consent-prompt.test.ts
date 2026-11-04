@@ -81,7 +81,7 @@ class ConsentPane {
     if (args[0] === 'tab' && args[1] === 'create') return json({ root_pane: { pane_id: 'w1V:pC1', tab_id: 'w1V:tC1' } });
     if (args[0] === 'pane' && args[1] === 'run') { this.kind = expandTypedCommand(args[3]).kind; return ''; }
     if (args[0] === 'pane' && args[1] === 'send-keys') { this.keys.push(args.slice(3)); if (this.accepts && args.slice(3).join(' ') === this.accepts.join(' ')) this.answered = true; return ''; }
-    if (args[0] === 'pane' && args[1] === 'read') return this.answered ? workingScreen : this.screen;
+    if (args[0] === 'pane' && args[1] === 'read') return this.answered ? `${this.kind === 'gemini' ? 'Gemini\n' : ''}${workingScreen}` : this.screen;
     if (args[0] === 'agent' && args[1] === 'get') return json({ agent: { agent: this.kind, agent_status: this.answered ? 'working' : 'idle', pane_id: args[2] } });
     if (args[0] === 'agent' && args[1] === 'rename') { this.renamed = args[3]; return json({ agent: { agent: this.kind, name: args[3] } }); }
     if (args[0] === 'pane' && args[1] === 'list') return json({ panes: [] });

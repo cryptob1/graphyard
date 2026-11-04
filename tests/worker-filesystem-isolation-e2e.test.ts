@@ -9,13 +9,14 @@ import { trialContainerDependencies, trialContainerWords } from '../src/merge-wr
 import { trialEnvironment } from '../src/merge-writer/trial.js';
 import { confinedSession } from '../src/e2e/steps.js';
 
-test('e2e:worker-filesystem-isolation — the bound command case runs the real host-write, deletion and socket regressions', { timeout: 180_000 }, async () => {
+for (const id of ['worker-filesystem-isolation', 'worker-reparenting'])
+test(`e2e:${id} — the bound command case runs the real composed worker regressions`, { timeout: 180_000 }, async () => {
   const root = join(import.meta.dirname, '..');
-  const file = 'e2e/cases/worker-filesystem-isolation.json';
+  const file = `e2e/cases/${id}.json`;
   const definition = parseCase(file, readFileSync(join(root, file), 'utf8'));
   const scratch = await temporaryDirectory('fs-container', root);
   const environment = { ...trialEnvironment(), HOME: scratch, TMPDIR: '/tmp', PATH: '/usr/local/bin:/usr/bin:/bin' };
-  const session = confinedSession(trialContainerWords([root, scratch], trialContainerDependencies(root)), environment);
+  const session = confinedSession(trialContainerWords([scratch, root], trialContainerDependencies(root)), environment);
   let report;
   try { report = await runCases([{ file, definition }], {
     root, url: 'http://unused.invalid', token: 'fixture-token',

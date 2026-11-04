@@ -9,6 +9,8 @@ import { currentMergeStep, type CurrentMergeStep } from './model/merge-ledger.js
  */
 export interface PipelineAttempt {
   epoch: number; owner: string; claimedAt: string; endedAt: string | null;
+  /** The watch supervisor's release reason, retained with the attempt. */
+  cause?: string;
   /** How the attempt ended: the worker submitted, released, let the lease lapse, or was reworked. */
   end: 'submitted' | 'released' | 'expired' | 'reworked' | null;
 }
@@ -70,13 +72,14 @@ export function beginAttempt(work: Work, attempt: { epoch: number; owner: string
   timeline.attempts.push({ epoch: attempt.epoch, owner: attempt.owner, claimedAt: now.toISOString(), endedAt: null, end: null });
 }
 /** Close the attempt of `epoch` if it is still open; a second end for the same attempt is ignored. */
-export function endAttempt(work: Work, epoch: number, end: NonNullable<PipelineAttempt['end']>, at: Date | string) {
+export function endAttempt(work: Work, epoch: number, end: NonNullable<PipelineAttempt['end']>, at: Date | string, cause?: string) {
   const timeline = pipelineTimeline(work);
   const attempt = timeline.attempts.find(entry => entry.epoch === epoch && entry.endedAt === null);
   if (!attempt) return;
   const ended = typeof at === 'string' ? Date.parse(at) : at.getTime();
   attempt.endedAt = new Date(Math.max(Date.parse(attempt.claimedAt), Number.isFinite(ended) ? ended : Date.parse(attempt.claimedAt))).toISOString();
   attempt.end = end;
+  if (cause) attempt.cause = cause;
 }
 /**
  * A lapsed lease ends its attempt at the lease's own deadline: the worker was entitled to run

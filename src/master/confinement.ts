@@ -241,8 +241,11 @@ export function hostFilesystemWords(scratch: string, environment: NodeJS.Process
     const value = environment[name];
     return ['--setenv', name, value && isAbsolute(value) && writable.some(path => value === path || withinCheckout(value, path)) ? value : fallback];
   };
+  // /etc/resolv.conf commonly points into the otherwise hidden /run tree. Bind
+  // only that public resolver file back, never systemd's directory or sockets.
+  const resolver = existsSync('/etc/resolv.conf') ? realpathSync('/etc/resolv.conf') : null;
   return ['--unshare-pid', '--ro-bind', '/', '/', '--dev', '/dev', '--proc', '/proc',
-    '--tmpfs', '/run', '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
+    '--tmpfs', '/run', ...(resolver?.startsWith('/run/') ? ['--ro-bind', resolver, resolver] : []), '--bind', scratch, '/tmp', '--bind', scratch, '/var/tmp',
     ...variable('TMPDIR', '/tmp'), ...variable('TMP', '/tmp'), ...variable('TEMP', '/tmp'),
     '--dir', '/tmp/home', ...variable('HOME', '/tmp/home'),
     '--dir', '/tmp/runtime', ...variable('XDG_RUNTIME_DIR', '/tmp/runtime'),
