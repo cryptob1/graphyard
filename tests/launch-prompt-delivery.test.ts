@@ -180,7 +180,7 @@ test('integration:launch-prompt-is-a-request — a producer, a reviewer and a wo
     const busy = new FakeHerdr();
     const adopted = await startAgentSession('review-busy', 'claude', 'pane-x', ['--permission-mode', 'bypassPermissions', '--setting-sources', 'user'], 'Review #93 now', busy.run, { directory: root });
     assert.equal(adopted.delivery, 'request'); assert.equal(adopted.started.detail, 'Herdr reports the claude runtime working');
-    assert.deepEqual(busy.calls.slice(-3).map(call => call.slice(0, 2)), [['pane', 'run'], ['agent', 'get'], ['agent', 'rename']]);
+    assert.deepEqual(busy.calls.slice(-3).map(call => call.slice(0, 2)), [['pane', 'read'], ['pane', 'process-info'], ['agent', 'rename']]);
     assert.equal(busy.named('review-busy').toolCalls.length, 1);
     const stranger = new FakeHerdr({ occupant: () => 'codex' });
     const bounds = { clock: () => stranger.calls.length * 1000, wait: () => {} };
