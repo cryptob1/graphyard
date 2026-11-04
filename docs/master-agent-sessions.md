@@ -115,4 +115,4 @@ Claude and Codex masters resume their current native conversation on the same ac
 
 Use `node $GRAPHYARD_CLI guide TOPIC` for the procedure named by the brief; standing rules remain in AGENTS.md.
 
-All terminal roles use the same `launchSession` operation: pane creation, first request on the runtime command line, and confirmed pane cleanup on startup failure. Role-specific account reservations, harnesses and sandbox probes run before opening the pane. A failed spec check closes its pane before releasing its account claim and removes its one-time credential directory. Worker cleanup must confirm shutdown before releasing the work lease.
+All terminal roles use the same `launchSession` operation: pane creation, first request on the runtime command line, and confirmed pane cleanup on startup failure. Role-specific account reservations, harnesses and sandbox probes run before opening the pane. A failed spec check closes its pane before releasing its account claim and removes its one-time credential directory. Worker cleanup must confirm shutdown before releasing the work lease. Headless review and spec-check runs keep their detached lifecycle and open no pane.

@@ -76,7 +76,7 @@ async function fleet(profiles: { reviewers: unknown[]; producers: { name: string
   execFileSync('git', ['init', '-q', root]); execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'wC' }, coordinatorStatus as typeof fetch);
-  for (const profile of profiles.reviewers) await saveReviewerProfile(root, profile);
+  for (const profile of profiles.reviewers) await saveReviewerProfile(root, { agentArgs: ['--setting-sources', 'user'], ...profile });
   for (const profile of profiles.producers) {
     const credentialFile = join(credentialDirectory, `${profile.name}.token`); await writeFile(credentialFile, `${profile.principal}-token-`.padEnd(40, 'x'), { mode: 0o600 });
     await saveProducerProfile(root, { ...profile, kind: 'claude', credentialFile }, async () => ({ actor: { id: profile.principal, role: 'producer', proofs: ['unit:*', 'integration:*', 'manual:*'] } }));

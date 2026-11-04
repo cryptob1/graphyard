@@ -15,7 +15,7 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 
 ## Drive
 
-`node bin/graphyard.mjs master status` reads the loop's view; tests inject preparers, probes and Herdr runners, never real panes. `master restart` uses `systemctl --user restart` for this install's unit (ExecStart: `master run`) when up, stopping or restart-queued; it never starts a second loop.
+`node bin/graphyard.mjs master status` reads loop state. Tests inject preparers, probes and Herdr runners. `master restart` restarts the install's systemd unit, never a second loop.
 
 ## Invariants
 
@@ -27,6 +27,6 @@ Paths: src/master/**, src/master.ts, src/reviewer.ts
 
 ## Gotchas
 
-- Only `src/cli/**` may import `src/master.ts` within source code; all other source modules import the owning module directly. Import daemon exports from `src/daemon/*`; `src/master-daemon.ts` is removed. `tests/barrel-imports.test.ts` enforces this boundary.
+- `tests/barrel-imports.test.ts` enforces direct owning-module imports outside `src/cli/**`; daemon imports use `src/daemon/*`.
 - Prompt changes break exact-text assertions across many test files; grep for the sentence first.
 - A generated prompt never names `/tmp`.

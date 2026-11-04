@@ -401,7 +401,7 @@ test('unit:disk-exhaustion-message — a write that failed for want of room is r
     const config = await loadMasterConfig(root), asked = request();
     const exhausted = (_command: string, args: string[]) => { if (args[0] === 'pane' && args[1] === 'run') throw Object.assign(new Error('Command failed: herdr pane run'), { stderr: 'write error: No space left on device\n' }); return herdr()(_command, args); };
     await assert.rejects(launchProducer(root, producing('GY-88', asked), asked, config.producers[0], [], new Date().toISOString(), { run: exhausted, filesystem: durable }), (error: Error) => {
-      assert.match(error.message, new RegExp(`^Launching the GY-88 producer session \\(Command failed: herdr pane run\\) failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}: `));
+      assert.match(error.message, new RegExp(`^Launching the GY-88 producer session \\(Command failed: herdr pane run; its Herdr pane pane-1 was closed\\) failed because the volume is full \\(ENOSPC\\) at ${managed}/graphyard-proof-gy-88-aaaaaaa-[0-9a-f]{8}: `));
       assert.ok(error.message.endsWith(reclaimAdvice)); return true;
     });
     await assert.rejects(launchReview(root, work('GY-88'), 'reviewer-a', [], new Date().toISOString(), { run: exhausted, registerLaunch: async () => ({ launch: 'fixture-launch' }), filesystem: durable }),
