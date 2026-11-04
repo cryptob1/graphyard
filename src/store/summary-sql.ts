@@ -13,7 +13,7 @@ import { detoasted } from './coordination-sql.js';
  * The loop has read settled items in exactly that form since GY-203.
  *
  * The summary is that stored form, without the prose no snapshot reader renders (the description,
- * the research brief, answered human requests), and with the three things the readers derive
+ * answered human requests), and with the three things the readers derive
  * figures from, each bounded:
  *
  * - `pipeline`: the timeline reduced to what the speed report measures (each attempt's claim and
@@ -27,7 +27,7 @@ import { detoasted } from './coordination-sql.js';
  */
 export const summarySessionWindowMs = 24 * 3_600_000;
 /** What the stored settled form carries that no snapshot reader renders, left out of the summary. */
-export const summaryOmitted = ['description', 'researchBrief', 'humanRequests', 'sessions', 'pipeline'] as const;
+export const summaryOmitted = ['description', 'humanRequests', 'sessions', 'pipeline'] as const;
 
 const array = (path: string) => `(CASE WHEN jsonb_typeof(${path}) = 'array' THEN ${path} ELSE '[]'::jsonb END)`;
 /** The timeline `p` as the item summary reads it (src/pipeline-speed.ts). */

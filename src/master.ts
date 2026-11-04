@@ -20,6 +20,6 @@ export { assertClaimDeadline, describeOverlap, assertDispatchable, dispatchWork,
 export { sessionAccount, holdRepeatedLimitAccount, repeatedLimitAccount, repeatedLimitWindowMs, repeatedLimitLaunches, sessionSelectionKey, type SessionIdentity } from './master/launch-account.js';
 export { dispatchReservationMs, dispatchReservationDirectory, DispatchReservedError, dispatchReserved, watchSupervisorRunning, finishedAgentStates, agentAssignment, reclaimableAgent, launchedSinceSnapshot } from './master/dispatch-reservation.js';
 // GitHub merges (docs/delivery.md): the guarded merge is gone; the merge writer's record delivers.
-export { setupAutonomy, agentToken, intentInput, attestationExercise, previewPrincipalRotation, readProposedRoster, registeredReview, autonomySubcommands, runAutonomyCommand, type AutonomyDependencies } from './master/autonomy.js';
+export { setupAutonomy, agentToken, intentInput, attestationExercise, registeredReview, autonomySubcommands, runAutonomyCommand, type AutonomyDependencies } from './master/autonomy.js';
 export { restartMasterLoop } from './master/loop-restart.js';
 export { promoteCommand, promotionReason, promotionAuditFile, promotionPreconditions, PromotionRefusedError, promoteToAutonomy, assertPromotionRoute, ghLogin, type PromotionStep, type PromotionDependencies } from './master/promotion.js';

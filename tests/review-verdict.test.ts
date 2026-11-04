@@ -160,7 +160,7 @@ test('unit:review-post-control-plane-api — the binding gains mode, head, baseT
     execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
     const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
     await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     assert.equal((await loadMasterConfig(root)).reviewer, undefined, 'no reviewer App is bound');
     const calls: string[][] = [], registered: unknown[] = [];
     const herdr = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-review', tab_id: 'tab-review' }, tab: { tab_id: 'tab-review' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
@@ -286,7 +286,7 @@ test('unit:review-request-names-merge-base — the reviewer request, the session
     try {
       const coordinatorStatus = async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 }));
       await setupMaster(repo.root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory, herdrWorkspace: 'workspace-graphyard' }, coordinatorStatus as typeof fetch);
-      await saveReviewerProfile(repo.root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+      await saveReviewerProfile(repo.root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
       const calls: string[][] = [], registered: unknown[] = [];
       const herdr = (_command: string, args: string[]) => { calls.push(args); return startedAtOnce(args) ?? JSON.stringify({ result: args[0] === 'tab' ? { type: 'tab_created', root_pane: { pane_id: 'pane-merge-base', tab_id: 'tab-merge-base' }, tab: { tab_id: 'tab-merge-base' } } : args[0] === 'pane' && args[1] === 'list' ? { panes: [] } : {} }); };
       await launchReview(repo.root, movedBaseItem('GY-2948', repo), 'reviewer-claude', [], now(), { run: herdr, registerLaunch: async (_work, launch) => { registered.push(launch); return { launch: 'launch-merge-base' }; } });
@@ -527,7 +527,7 @@ async function reviewerMaster(label: string) {
     execFileSync('git', ['init', '-q', root]);
     execFileSync('git', ['remote', 'add', 'origin', `https://github.com/${repository}.git`], { cwd: root });
     await setupMaster(root, { url, token: tokenOf(coordinator), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'workspace-graphyard', run: { worktreeRoot: await temporaryDirectory('review-checkouts', join(process.cwd(), '.graphyard')) } });
-    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude' });
+    await saveReviewerProfile(root, { name: 'reviewer-claude', agentName: 'review-claude-1', kind: 'claude', agentArgs: ['--setting-sources', 'user'] });
     return { root, credentials };
   } catch (error) { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); throw error; }
 }
@@ -546,7 +546,7 @@ test('integration:control-plane-reviewer-profile-launch — without a reviewer A
     assert.equal(record!.launch, launched.launch, 'the session record carries the launch the route allocated');
     const registered = await stored(work.id);
     assert.deepEqual([registered.reviewLaunch!.reviewer, registered.reviewLaunch!.requester, registered.reviewLaunch!.head, registered.reviewLaunch!.baseTip, registered.reviewLaunch!.verdict], [reviewerIdentity, coordinator.id, H, B, null]);
-    assert.ok(await tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), 'the launch token authenticates the bot identity');
+    assert.ok(await tokenRegistered(http.services, registered.reviewLaunch!.tokenHash), 'the launch token authenticates the reviewer identity');
     // The widening is the `[bot]` suffix alone: every other shape stays a refusal, so independent
     // review is not weakened to let the launch through.
     for (const bad of ['review claude', 'reviewer[deputy]', 'sla[bot]ug', `${reviewerIdentity} extra`])
@@ -594,7 +594,7 @@ test('integration:control-plane-reviewer-profile-independence — the launched r
     const wrongHead = await request(token, `work/${work.id}/review-verdict`, verdict(token, 'APPROVE', undefined, M));
     assert.deepEqual([wrongHead.status, wrongHead.body.error], [409, headRefusal(M, H)]);
     assert.deepEqual((await stored(work.id)).observation!.reviews, [], 'nothing recorded for the refused verdicts');
-    // The session's own verdict, with its own launch token, lands under the bot identity.
+    // The session's own verdict, with its own launch token, lands under the reviewer identity.
     const approved = await request(token, `work/${work.id}/review-verdict`, verdict(token, 'APPROVE'));
     assert.equal(approved.status, 200, JSON.stringify(approved.body));
     assert.equal(approved.body.reviewer, reviewerIdentity);
@@ -629,7 +629,7 @@ test('integration:control-plane-reviewer-profile-independence — the launched r
 test('unit:review-launch-bot-identity — the launch body takes the configured App\'s bot login (SLUG[bot]) beside principal names and refuses every other shape', () => {
   const base = { head: H, baseTip: B, tokenHash: 'e'.repeat(64), expiresAt: now() };
   assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: 'review-claude-1' }).reviewer, 'review-claude-1');
-  assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: reviewerIdentity }).reviewer, reviewerIdentity);
+  assert.equal(reviewLaunchBodySchema.parse({ ...base, reviewer: 'graphyard-reviewer[bot]' }).reviewer, 'graphyard-reviewer[bot]');
   for (const bad of ['', 'review claude', '[bot]', 'reviewer[deputy]', 'sla[bot]ug', `${reviewerIdentity} extra`])
     assert.throws(() => reviewLaunchBodySchema.parse({ ...base, reviewer: bad }), Error, bad);
 });

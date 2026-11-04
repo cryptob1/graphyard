@@ -46,7 +46,7 @@ test('unit:setup-checks-consistent — install preflight needs only the repo sco
   assert.equal(githubCliPreflight('compose', { code: 0, stdout: 'Logged in to github.com account pilot' }, 'owner/scratch').ok, true, 'a login whose scopes gh does not list is not refused for them');
 });
 
-test('unit:setup-checks-consistent — onboarding puts worker credentials under GRAPHYARD_CONFIG_HOME and init --apply creates the files its profiles name', async () => {
+test('unit:setup-checks-consistent — onboarding proposes credential paths under GRAPHYARD_CONFIG_HOME and leaves credentials to install', async () => {
   const root = await repository({ 'package.json': JSON.stringify({ scripts: { test: 'node --test' } }) });
   const configHome = await temporaryDirectory('setup-checks-config');
   const previous = process.env.GRAPHYARD_CONFIG_HOME;
@@ -57,15 +57,8 @@ test('unit:setup-checks-consistent — onboarding puts worker credentials under 
     assert.equal(file, join(configHome, 'workers', 'codex-primary.token'));
 
     await applyProposal(root, proposal, { url: 'http://127.0.0.1:4310' });
-    await assert.rejects(stat(file), /ENOENT/, 'a library caller that did not ask writes no credential');
-
-    const first = await applyProposal(root, proposal, { url: 'http://127.0.0.1:4310', writeCredentials: true });
-    assert.ok(first.applied.includes('codex-primary credential file'));
-    const registry = JSON.parse(await readFile(join(root, '.graphyard/principals.json'), 'utf8'));
-    assert.equal((await readFile(file, 'utf8')).trim(), registry.principals.find((entry: any) => entry.id === 'worker-1').token);
-    assert.equal((await stat(file)).mode & 0o777, 0o600);
-    const second = await applyProposal(root, proposal, { url: 'http://127.0.0.1:4310', writeCredentials: true });
-    assert.ok(second.unchanged.includes('codex-primary credential file'), 'an existing credential is kept');
+    await assert.rejects(stat(file), { code: 'ENOENT' }, 'init never mints credentials');
+    await assert.rejects(stat(join(root, '.graphyard/principals.json')), { code: 'ENOENT' });
   } finally { if (previous === undefined) delete process.env.GRAPHYARD_CONFIG_HOME; else process.env.GRAPHYARD_CONFIG_HOME = previous; }
 });
 
