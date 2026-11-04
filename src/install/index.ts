@@ -884,7 +884,7 @@ async function performInstall(session: InstallSession, plan: InstallPlan): Promi
   const url = await adapter.url(context);
   log(`Service URL: ${url}`);
   const health = await waitForHealth(session, url);
-  if (!health) throw new Error(`The service at ${url} did not become healthy. Inspect: graphyard install --provider ${context.provider} --repo ${session.inputs.repository} --logs`);
+  if (!health) throw new Error(`The service at ${url} did not become healthy. Inspect the ${context.provider} provider logs.`);
 
   let record = session.record ?? emptyRecord(session, url);
   record = { ...record, url, domain: context.domain, service: context.service, provider: context.provider, baseBranch: session.inputs.baseBranch, reviewPolicy: session.reviewPolicy, merger: session.delivery.merger ?? record.merger, herdrInstance: session.inputs.herdr && session.inputs.herdr !== 'skip' ? session.inputs.herdr === 'instance' : record.herdrInstance, principals: principalRecords(session.principals, session.tokens), updatedAt: new Date(deps.now()).toISOString() };
