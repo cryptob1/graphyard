@@ -158,7 +158,9 @@ export function recordSession(work: Work, input: SessionHandleInput, principal: 
     attach: input.attach ?? runtimeFacts?.attach ?? null,
     transcript: input.transcript ?? runtimeFacts?.transcript ?? null,
     subject: input.subject,
-    startedAt: reopened ? at : existing?.startedAt ?? at, updatedAt: at,
+    startedAt: reopened ? at : existing?.startedAt ?? at,
+    // A report refreshes liveness, not worker activity. Closing or reopening still updates the handle.
+    updatedAt: existing && input.state === existing.state && input.observedAt !== undefined ? existing.updatedAt : at,
     endedAt: input.state === 'finished' ? existing?.endedAt ?? at : null,
     // A running session may carry an outcome too — "waiting on input" is a fact about a session
     // that has not ended — so the note is kept rather than dropped for want of an end.

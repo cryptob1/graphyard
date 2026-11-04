@@ -308,6 +308,8 @@ async function attemptBoundStep(cycle: Cycle, item: Work, session: NonNullable<W
       // The write names no epoch: a session write under the live lease is the holder's alone (engine.ts), and the handle's id already carries it.
       await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'running',
         workTree: { ...reading, at: new Date(clock).toISOString() } });
+      // The stall check below uses this snapshot too; progress in this cycle counts immediately.
+      session.updatedAt = new Date(clock).toISOString();
     } catch { /* the reading stands for the next cycle */ }
   }
   const age = clock - Date.parse(claimedAt), bound = attemptBoundMs(config.run), ceiling = attemptCeilingMs(config.run);
@@ -348,7 +350,7 @@ async function attemptBoundStep(cycle: Cycle, item: Work, session: NonNullable<W
  */
 async function stallStep(cycle: Cycle, item: Work, session: NonNullable<Work['sessions']>[number]) {
   const { config, state, effects, clock, herdr } = cycle;
-  if (!effects.endStall || !effects.promptSession || session.kind !== 'implementation') return;
+  if (!herdr.available || !effects.endStall || !effects.promptSession || session.kind !== 'implementation') return;
   const agent = herdr.agents.find(candidate => (session.pane && candidate.pane_id === session.pane) || (!!session.agentName && candidate.name === session.agentName));
   const reject = `reject:${item.id}:${session.id}`;
   if (agent?.agent_status === 'blocked') return blockedPromptStep(cycle, item, session, reject, effects.endStall);
