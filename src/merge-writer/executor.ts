@@ -227,6 +227,17 @@ export function trialFailureReason(trial: { conflict?: readonly string[]; run?: 
   if (run.notReproduced) return `${trialFailurePrefix}: not reproduced: ${run.notReproduced.proofs.join(', ')} ${run.notReproduced.proofs.length > 1 ? 'pass' : 'passes'} on the base tip ${run.notReproduced.tip}`;
   return null;
 }
+/** The declared executable proofs must satisfy the acceptance rule before main can change. */
+export function requiredProofFailure(work: Pick<Work, 'criteria'>, run: Pick<MergeTrialRun, 'proofs'>): string | null {
+  for (const criterion of work.criteria.filter(entry => !entry.bootstrap)) for (const proof of criterion.proofs) {
+    if (!/^(unit|integration|e2e):/.test(proof)) continue;
+    const counts = run.proofs[proof];
+    if (counts && counts.executed > 0 && counts.failed === 0) continue;
+    const seen = counts ? `the trial ran ${counts.executed} and ${counts.failed} failed` : 'the trial counted none of its cases';
+    return `${trialFailurePrefix}: ${criterion.id}: ${proof} needs executed > 0 and failed = 0; ${seen}`;
+  }
+  return null;
+}
 /**
  * GY-1834: the refusal of a head whose every failing test file fails on the base tip too. It grounds
  * no rework (it does not start `trialFailurePrefix`) and leaves the head queued, held
@@ -783,7 +794,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
     }
     // GY-1834: a failure every file of which fails on the base tip too is the base's: held, never reworked.
     const baseHeld = failureIsBase(run) ? baseFailureReason(run.base!) : null;
-    const trialFailure = baseHeld ?? trialFailureReason({ run });
+    const trialFailure = baseHeld ?? trialFailureReason({ run }) ?? requiredProofFailure(item, run);
     // A preview that throws (a host failure, not the merge's) is recorded and refused as one that could not run, never left as an open intent.
     const preview = !trialFailure && ports.preview ? await ports.preview(mergeSha, merged.files, item).catch((error: unknown): PreviewVerdict =>
       ({ result: 'error', mergeSha, cases: [], failed: [], detail: (error instanceof Error ? error.message : String(error)).slice(0, 900), durationMs: 0 })) : null;

@@ -12,6 +12,7 @@ import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/
 import { cliUnreachableRefusal } from '../reviewer.js';
 import type { CoordinationRounds } from '../server/work-view.js';
 import { masterCauses, masterCausePrompt } from './master-stalled-delivery.js';
+import { captureConversation } from '../master/conversation.js';
 import { masterHandover } from '../master/master-session.js';
 import { paneAlreadyGone } from '../request-settlement.js';
 import { cycleMetricsSchema, emptyMasterSession, type DaemonAction, type DaemonActionKind, type DaemonState, message, pruneDaemonState, touchStanding } from './state.js';
@@ -23,9 +24,11 @@ import { settledPurpose } from '../model/session-state.js';
 import { loopOwnedRefusal, ownerHoldRefusal } from '../model/loop-owned.js';
 import { attemptClaimedAt, attemptProgressFresh, attemptProgressWindowMs } from '../model/attempt-bound.js';
 import { attemptBoundMs, attemptCeilingMs, boundMinutes } from '../master/attempt-bound.js';
-import { profileHealth, clearProfileFailure, recordProfileFailure } from './sessions.js';
+import { profileHealth, recordProfileFailure } from './sessions.js';
 import { type DaemonEffects, record } from './effects.js';
 import { mergeWriterStep } from './cycle-merge-writer.js';
+import { workerLaunchHealth, earlyExitKey } from './worker-launch-health.js';
+import { actionStallDelay, actionStallThreshold } from '../model/action-progress.js';
 import { syncProjectMemory } from '../project-memory.js';
 
 /** How many session launches the launcher runs at once when master.json sets no `run.launchConcurrency` (GY-616). */
@@ -205,15 +208,20 @@ export function endedAttemptWorktrees(work: Work[], hostId: string, now: number)
  */
 async function closeStep(cycle: Cycle) {
   const { config, state, effects, snapshot, clock } = cycle;
+  for (const item of snapshot.work) if (item.stage === 'done') delete state.actions[earlyExitKey(item)];
   for (const item of snapshot.work) for (const session of item.sessions ?? []) {
-    if (session.state !== 'running' || session.host !== config.hostId) continue;
-    const reason = sessionEnded(item, session, clock);
+    if (session.host !== config.hostId) continue;
+    const key = `close:${item.id}:${session.id}`;
+    if (session.state !== 'running' && (item.stage === 'done' || state.actions[key]?.state === 'done')) continue;
+    const failure = item.stage === 'done' ? null : await workerLaunchHealth(cycle, item, session);
+    // A reporter-finished handle can still own a pane. Diagnose it before the same idempotent close.
+    if (session.state !== 'running' && !failure) continue;
+    const reason = sessionEnded(item, session, clock) ?? (session.state !== 'running' ? failure : null);
     if (reason) {
-      const key = `close:${item.id}:${session.id}`;
       try {
         if (session.pane) await Promise.resolve(effects.closeSession(session.pane)).catch(error => { if (!paneAlreadyGone(error)) throw error; });
-        await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: `closed by the loop: ${reason}`.slice(0, 500) });
-        await note(cycle, key, 'close', item.key, 'done', `Closed ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: ${reason}`, session.principal);
+        await effects.recordSession?.(item, { id: session.id, kind: session.kind, principal: session.principal, runtime: session.runtime, host: session.host, subject: session.subject, state: 'finished', outcome: failure ?? `closed by the loop: ${reason}`.slice(0, 500) });
+        await note(cycle, key, 'close', item.key, 'done', `Closed ${session.id}${session.pane ? ` (pane ${session.pane})` : ''}: ${failure ?? reason}`, session.principal);
       } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not close ${session.id}: ${message(error)}`, session.principal); }
       continue;
     }
@@ -440,6 +448,8 @@ async function dispatchStep(cycle: Cycle) {
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
   for (const item of claimable) {
+    const incident = state.actions[earlyExitKey(item)];
+    if (incident?.state === 'failed' && incident.attempts >= actionStallThreshold && clock - Date.parse(incident.at) < actionStallDelay(incident.attempts)) continue;
     const key = dispatchKey(item);
     if (launcher.busy(key) || state.actions[key]?.state === 'done') continue;
     const free = health.find(entry => entry.healthy && !taken.has(entry.profile.name));
@@ -579,12 +589,13 @@ async function launchWorker(cycle: Cycle, item: Work, key: string, profile: Work
   const entry = (outcome: DaemonAction['state'], detail: string) => record(state, key, { kind: 'dispatch', work: item.key, principal: profile.principal, epoch: item.epoch, state: outcome, detail, attempts, cycle: state.cycle }, now(), effects.persist);
   await entry('started', `Dispatching ${item.key} to ${profile.name}`);
   try {
-    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot) as { pane?: string | null; epoch?: number } | undefined;
+    const launched = await effects.dispatch(item, profile, herdr.agents, snapshot) as { pane?: string | null; epoch?: number; runtime?: string | null; initialHead?: string | null; runtimeStartedAt?: string | null } | undefined;
     // The session's handle is what the close step reads to end it once its attempt does.
     const pane = launched?.pane ?? null, attach = pane ? `herdr pane attach ${pane}${config.herdrWorkspace ? ` --workspace ${config.herdrWorkspace}` : ''}` : null;
-    await effects.recordSession?.(item, { id: `${profile.principal}:${launched?.epoch ?? item.epoch + 1}`, kind: 'implementation', principal: profile.principal, runtime: profile.kind ?? profile.mode, host: config.hostId,
+    await effects.recordSession?.(item, { id: `${profile.principal}:${launched?.epoch ?? item.epoch + 1}`, kind: 'implementation', principal: profile.principal, runtime: launched?.runtime ?? profile.kind ?? profile.mode, host: config.hostId,
+      ...(launched?.runtimeStartedAt ? { runtimeStartedAt: launched.runtimeStartedAt } : {}),
+      ...(launched?.initialHead ? { initialHead: launched.initialHead } : {}),
       ...(config.herdrWorkspace ? { workspace: config.herdrWorkspace } : {}), ...(pane && attach ? { pane, attach } : {}), subject: `${item.key}: ${item.title}`.slice(0, 300), state: 'running' })?.catch(() => undefined);
-    clearProfileFailure(state, profile);
     sink.push(await entry('done', `Dispatched ${item.key} to ${profile.name}; the worker launcher claimed under ${profile.principal}`));
   } catch (error) {
     const full = capacityRefusal(error);
@@ -615,23 +626,31 @@ async function masterSession(cycle: Cycle, open: Work[]) {
   for (const key of Object.keys(state.master.subjects)) if (!current.has(key)) delete state.master.subjects[key];
   const master = state.master;
   const handle = herdr.agents.find(agent => agent.name === (master.agentName ?? config.masterAgentName));
-  if (!master.continuity && sessions.initialize && (handle || master.startedAt || master.account)) {
+  const recoveryKey = config.forPerson ? `master:continuity:${config.forPerson}` : 'master:continuity';
+  let recoveryFailed = false;
+  let recoveryError: string | undefined;
+  if ((!master.continuity && sessions.initialize && (handle || master.startedAt || master.account)) || (!handle && master.continuity)) {
     try {
-      master.continuity = await sessions.initialize(master, handle, Object.values(state.actions).filter(action => action.kind === 'wake' && action.state === 'done').map(action => action.detail));
+      if (master.continuity) await captureConversation(master.continuity.current);
+      else master.continuity = await sessions.initialize!(master, handle, Object.values(state.actions).filter(action => action.kind === 'wake' && action.state === 'done').map(action => action.detail));
+      if (state.actions[recoveryKey]?.state === 'failed') await note(cycle, recoveryKey, 'session', null, 'done', 'Master continuity recovery succeeded');
       await effects.persist(state);
     } catch (error) {
-      await note(cycle, config.forPerson ? `${masterLaunchKey}:${config.forPerson}` : masterLaunchKey, 'session', null, 'failed', `Master continuity recovery failed: ${message(error)}`);
-      return;
+      recoveryFailed = true;
+      recoveryError = message(error);
+      const detail = `Master continuity recovery failed; retrying next cycle and retaining its state: ${message(error)}`;
+      if (state.actions[recoveryKey]?.detail !== detail) await note(cycle, recoveryKey, 'session', null, 'failed', detail);
+      else touchStanding(state, recoveryKey, new Date(cycle.now()).toISOString());
     }
   }
   if (!handle) {
-    submitMasterLaunch(cycle, open);
+    submitMasterLaunch(cycle, open, recoveryError);
     return;
   }
   if (!master.agentName) state.master = { ...master, agentName: handle.name ?? config.masterAgentName, pane: handle.pane_id ?? null, startedAt: cycle.snapshot.now, adopted: true };
   if (handle.pane_id) state.master.pane = handle.pane_id;
   if (!state.master.startedAt) state.master.startedAt = cycle.snapshot.now;
-  if (await masterPaneFailover(cycle, handle, open)) return;
+  if (!recoveryFailed && await masterPaneFailover(cycle, handle, open)) return;
   const changed = causes.filter(cause => state.master.subjects[cause.key] !== cause.digest);
   const target = handle.pane_id ?? state.master.pane ?? handle.name;
   const since = Date.parse(state.master.lastWake?.at ?? state.master.startedAt ?? cycle.snapshot.now);
@@ -650,7 +669,7 @@ async function masterSession(cycle: Cycle, open: Work[]) {
 }
 
 /** The launch the absent or failed-over master session owes, handed to the launcher so a slow pane creation never stalls the cycle. The registry session the previous pane ran under is ended first, so the role's one slot frees for this launch. */
-function submitMasterLaunch(cycle: Cycle, open: Work[]) {
+function submitMasterLaunch(cycle: Cycle, open: Work[], recoveryError?: string) {
   const { config, state, effects, launcher } = cycle;
   const sessions = effects.masterSession!;
   const launchKey = config.forPerson ? `${masterLaunchKey}:${config.forPerson}` : masterLaunchKey;
@@ -659,10 +678,13 @@ function submitMasterLaunch(cycle: Cycle, open: Work[]) {
     try {
       if (state.master.session && sessions.end) await sessions.end(state.master.session, 'the master session it recorded is gone from Herdr; the loop launches its replacement').catch(() => undefined);
       const causes = [...masterCauses(open, state.actions), ...(await sessions.pendingCauses?.(open) ?? [])];
-      const previous = state.master.continuity;
-      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(causes.length ? [masterCausePrompt(causes)] : [])].join('\n'), previous);
+      const { recoveryFailures, ...oldMaster } = state.master;
+      const failures = recoveryError ? [...recoveryFailures, { at: new Date(cycle.now()).toISOString(), error: recoveryError, master: oldMaster }] : recoveryFailures;
+      const previous = recoveryError ? null : state.master.continuity;
+      const recoveryHandoff = recoveryError ? `Previous native history is unreadable and has NOT been recovered. Recovery error: ${recoveryError}. Its history and original session provenance are retained in master.recoveryFailures; retry recovery from those references when readable. Continue current authoritative work without waiting for human approval.` : '';
+      const launched = await sessions.launch([masterHandover({ work: open, cliPath: config.cliPath }), ...(recoveryError ? [recoveryHandoff] : []), ...(causes.length ? [masterCausePrompt(causes)] : [])].join('\n'), previous);
       const at = new Date(cycle.now()).toISOString();
-      state.master = { ...emptyMasterSession(), ...launched, continuity: launched.continuity ?? previous, startedAt: at,
+      state.master = { ...emptyMasterSession(), ...launched, continuity: launched.continuity ?? previous, recoveryFailures: failures, startedAt: at,
         subjects: Object.fromEntries(causes.map(cause => [cause.key, cause.digest])),
         lastWake: causes.length ? { at, causes: causes.map(cause => cause.key).slice(0, 20), heartbeat: false } : null };
       sink.push(await record(state, launchKey, { kind: 'session', work: null, principal: null, state: 'done', detail: `Launched the master session ${launched.agentName} in pane ${launched.pane}`, attempts: 1, cycle: state.cycle }, cycle.now(), effects.persist));

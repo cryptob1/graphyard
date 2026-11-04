@@ -72,7 +72,7 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
 /** Keep the cursor bounded without ever discarding an unresolved action. */
 export function pruneDaemonState(state: DaemonState) {
   const entries = Object.entries(state.actions);
-  const resolved = entries.filter(([, action]) => action.state === 'done' || action.state === 'failed');
+  const resolved = entries.filter(([key, action]) => action.state === 'done' || action.state === 'failed' && !key.startsWith('early-exit:'));
   if (resolved.length > retainedActions) {
     for (const [key] of resolved.sort((a, b) => Date.parse(a[1].at) - Date.parse(b[1].at)).slice(0, resolved.length - retainedActions)) delete state.actions[key];
   }
