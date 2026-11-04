@@ -23,7 +23,7 @@ test('real Playwright enumeration/execution produces attributable inventory and 
   const root = await temporaryDirectory('.graphyard-reporter-test', process.cwd());
   try {
     const config = join(root, 'playwright.config.ts'), spec = join(root, 'fixture.spec.ts');
-    await writeFile(config, `export default { testDir: '.', retries: 0, workers: 1, reporter: [[${JSON.stringify(resolve('src/playwright-reporter.ts'))}]] };`);
+    await writeFile(config, `export default { testDir: '.', retries: 0, workers: 1, reporter: [[${JSON.stringify(resolve('tests/helpers/playwright-report-fixture.ts'))}]] };`);
     await writeFile(spec, `import { test, expect } from '@playwright/test'; test('private-title-marker', async () => { console.log('private-stdout-marker'); await test.step('private-step-marker', async () => { expect(1).toBe(1); }); });`);
     async function capture(name: string, list: boolean) {
       const path = join(root, name);

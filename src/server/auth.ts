@@ -209,7 +209,6 @@ export function assembleServices(engine: Engine, credentials: Credential[], arti
   // Mutations authorize against the same canonical binding as authentication; embedders may leave it to the process default.
   engine.repository = repository;
   const validation = new Validation(engine, principals.map(p => p.actor), repository);
-  validation.artifactBackend = artifacts.backend; validation.artifactCapacityBytes = artifacts.capacityBytes;
   const delivery = new Delivery(validation);
   const operatorAgents = new OperatorAgents(engine.store, repository, credentials.map(credential => ({ id: credential.id, tokenHash: createHash('sha256').update(credential.token).digest('hex') })));
   engine.operatorAuthorizer = operatorAgents.revalidate.bind(operatorAgents);
