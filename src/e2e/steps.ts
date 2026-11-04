@@ -199,11 +199,20 @@ export interface GeneralStepContext { url: string; root: string; env: Record<str
   /** GY-2985: how a compare step's one judge call answers; the agent-browser judge when unnamed. */
   judge?: CompareJudge }
 
-/** A command step: pass on exit 0, fail otherwise, with the last lines of output kept. */
+/** A command step: pass on exit 0, fail otherwise, keeping failure identity/cause alongside the output tail. */
 export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
   const result = await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal });
-  const output = lastLines(redact(result.output, context.secrets));
-  const reason = result.timedOut ? `the command did not finish within ${step.timeoutSeconds} s` : result.code === 0 ? null : `the command exited ${result.code ?? 'by signal'}${output.length ? `: ${output.at(-1)!.slice(0, 500)}` : ''}`;
+  const sanitized = redact(result.output, context.secrets);
+  const lines = sanitized.replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\r\n?/g, '\n').split('\n');
+  const test = lines.find(line => /^\s*(?:✖ (?!failing tests:)|not ok \d+ - )/.test(line));
+  const error = lines.find(line => /\b\w*error(?: \[[^\]]+\])?:/i.test(line));
+  const diagnostics = result.code !== 0 || result.timedOut ? [test, error].filter((line): line is string => !!line) : [];
+  // Bound each selected line only after full-value redaction; reserve room for both test and cause.
+  const diagnostic = diagnostics.map(line => line.trim().slice(0, diagnostics.length > 1 ? 240 : 500)).join(': ') || lastLines(sanitized, 1)[0]?.trim().slice(0, 500);
+  const tail = lastLines(sanitized).filter(line => !diagnostics.includes(line));
+  const retained = diagnostics.map(line => line.trim().slice(0, 500));
+  const output = [...retained, ...tail.slice(-(keptOutputLines - retained.length))];
+  const reason = result.timedOut ? `the command did not finish within ${step.timeoutSeconds} s` : result.code === 0 ? null : `the command exited ${result.code ?? 'by signal'}${diagnostic ? `: ${diagnostic}` : ''}`;
   return { record: { kind: 'command', outcome: reason ? 'fail' : 'pass', output }, reason };
 }
 
