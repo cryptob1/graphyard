@@ -56,7 +56,7 @@ The retired `POST /api/production-environment` route returns 404. Configure the 
 
 ## Backup, upgrade, rollback
 
-Back up with `graphyard db backup`, verify with `db verify`, and fence before a move with `db fence`. Restore with `db migrate` then `db restore`.
+Back up with `graphyard db backup`, verify with `db verify`, and fence before a move with `db fence`. Restore with `db migrate` then `db restore`. Older backups still verify after tables are retired; restore skips those tables and reports their names in `tablesRetired`, matching the migration's removal.
 
 [Upgrade](install.md#upgrading-an-existing-installation) installs dependencies in separate `deploy/build/.graphyard/cli-releases/<commit>` worktrees. The existing `install --plan`/apply flow builds and restarts the exact source. Only after `/healthz?strict` passes does an atomic symlink rename publish `deploy/build/.graphyard/cli-published`. Launchers resolve it before loading tsx; the watched checkout and legacy `deploy/build` retain their code and dependencies.
 

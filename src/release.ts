@@ -120,6 +120,8 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:72e499b9d63b92e474fa67e9ba27b7b89db644b5f9e18d3adf9b911d4e364e06',
   // GY-3013: migrate retired document fields once instead of stripping them on reads and writes.
   'sha256:e9966540eb026ae6f07a7abbd5ceacfc8dd90ffe41f8adbbb1f965aacd70457b',
+  // GY-3017: retire job holds, unused work-index columns and legacy observation tables.
+  'sha256:d1fad9115075e03bf688396b51c2aa4470a2bd66c1e54138787ba0b33b43acbb',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

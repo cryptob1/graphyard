@@ -11,7 +11,6 @@ import { conflictReworkBoundMs, conflictReworkDue } from '../model/base-refresh.
 
 /** The control-plane facts `GET /api/status` reports that are not about any one work item. */
 export interface ControlPlaneStatus {
-  heldJobs?: number;
   /** Observation jobs that saved no observation three or more times in a row (GY-506); a server before it reports none. */
   starvedJobs?: { key: string; unobserved: number; error?: string | null; deferred_reason?: string | null }[];
   /** Capacity variables against the configured roster; a server before GY-59 reports none. */
@@ -36,12 +35,9 @@ export interface AttentionItem extends AttentionOwner { subject: string; text: s
 export const agentOwner = (role: 'master' | 'reviewer' | 'control plane', next: string): AttentionOwner => ({ role, human: false, humanOnly: null, next });
 export const humanOwner = (humanOnly: typeof humanOnlyDecisions[number], next: string): AttentionOwner => ({ role: 'human', human: true, humanOnly, next });
 /** The sources of installation attention. */
-export const installationSources = ['held-jobs', 'delegation-limits', 'production'] as const;
-/** Recovery for an older control plane still reporting its retired App integration. */
-export const retiredAppRemedy = "Run graphyard install --repo OWNER/NAME --plan, then --apply to install the merge writer's deploy key in place of the retired GitHub App integration";
+export const installationSources = ['delegation-limits', 'production'] as const;
 /** The owner of one installation attention line, by the source that raised it. */
 export function installationOwner(source: typeof installationSources[number], text: string): AttentionOwner {
-  if (source === 'held-jobs') return agentOwner('master', retiredAppRemedy);
   if (source === 'delegation-limits') { const assignment = /Set (\S+=\S+)/.exec(text)?.[1]; return agentOwner('master', assignment ? `Set ${assignment} on the deployment (Railway: railway variables --set ${assignment} --service graphyard), then redeploy` : 'Set the named capacity variable on the deployment, then redeploy'); }
   // The failing deployment is on the base branch production deploys; the fix is its redeploy.
   return agentOwner('master', 'Fix the failing deployment of the base branch, which production tracks, with the configured provider');
@@ -105,21 +101,20 @@ export function workAttentionOwner(work: Work, cause: WorkAttentionCause, now = 
   return agentOwner('master', `graphyard diagnose ${key}`);
 }
 /**
- * Attention that belongs to the installation rather than to a work item: held jobs, a
+ * Attention that belongs to the installation rather than to a work item: a
  * capacity variable that no longer covers the roster, and a base branch that production has
  * not deployed.
  */
 export function controlPlaneAttention(status: ControlPlaneStatus | undefined) {
   const items: AttentionItem[] = [];
   const raise = (source: Parameters<typeof installationOwner>[0], text: string) => items.push({ subject: 'installation', text, ...installationOwner(source, text) });
-  if (status?.heldJobs) raise('held-jobs', `${status.heldJobs} integration job${status.heldJobs === 1 ? ' is' : 's are'} held on that permission shortfall rather than retried; they resume on their own once the installation reports the permission`);
   for (const text of status?.delegationLimits?.attention ?? []) raise('delegation-limits', text);
   // A job that keeps finishing without an observation holds the merge queue behind its item (GY-506).
   for (const job of status?.starvedJobs ?? []) { const text = starvedJobText(job); items.push({ subject: job.key, text, ...agentOwner('master', `graphyard diagnose ${job.key}: the recorded reason names what keeps the observation from being saved; the next saved observation clears this`) }); }
   const production = status?.production ? productionSummary(status.production) : null;
   for (const text of production?.attention ?? []) raise('production', text);
   const attention = items.map(item => item.text);
-  return { attention, attentionItems: items, heldJobs: status?.heldJobs ?? 0,
+  return { attention, attentionItems: items,
     delegationLimits: status?.delegationLimits ? { limits: status.delegationLimits.limits ?? null, deployed: status.delegationLimits.deployed ?? null, drift: (status.delegationLimits.drift ?? []).map(entry => ({ variable: entry.variable, deployed: entry.deployed, required: entry.required, reason: entry.reason })) } : null,
     build: status?.build ? { commit: status.build.commit ?? null, protocol: status.build.protocol ?? null } : null, production };
 }
