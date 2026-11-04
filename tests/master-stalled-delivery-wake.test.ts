@@ -256,12 +256,17 @@ test('integration:master-large-transcript-wake — real recovery failure retains
 });
 
 
-test('integration:master-large-transcript-wake — failed recovery of an absent master cannot launch a cold replacement', async () => {
+test('integration:master-large-transcript-wake — failed recovery of an absent master launches a factual replacement and retains provenance', async () => {
   const f = await fixture(false);
   f.state.master.startedAt = at;
   f.effects.masterSession!.initialize = async () => { throw new Error('Native history is unavailable'); };
   await f.cycle();
-  assert.equal(f.launches.length, 0);
+  assert.equal(f.launches.length, 1);
+  assert.match(f.launches[0], /NOT been recovered.*Native history is unavailable/);
+  assert.match(f.launches[0], /Queued delivery/);
   assert.equal(f.state.master.continuity, null);
+  assert.equal(f.state.master.recoveryFailures[0].master.startedAt, at);
   assert.match(f.state.actions['master:continuity'].detail, /Native history is unavailable/);
+  f.restart(); await f.cycle();
+  assert.equal(f.launches.length, 1);
 });
