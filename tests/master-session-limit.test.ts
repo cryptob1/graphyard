@@ -1,11 +1,13 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { masterConfigSchema, type MasterConfig } from '../src/master.js';
 import { daemonSummary } from '../src/daemon/run.js';
 import { masterSummary } from '../src/daemon/state.js';
 import { writeFile } from 'node:fs/promises';
-import { daemonStatePath } from '../src/master-daemon.js';
+import { daemonStatePath } from '../src/daemon/state.js';
 import { masterStatusReport } from '../src/cli/master-status.js';
 import { herdrSubcommand, isHerdrCommand } from '../src/master/herdr.js';
 import { masterProfile } from '../src/master/master-session.js';

@@ -10,9 +10,11 @@ import { graphyardTools, type EvidencePayload } from '../src/runner/payloads.js'
 import { cancelScratchRuns, cgroupService, detachedLaunch, piRunner, processIdentity, readRunMeta, runAlive, runContainment, scratchBoundMarginSeconds, scratchRunsDirectory, signalRun, sweepScratchRuns } from '../src/runner/pi.js';
 import { adoptRuns, applyOnce, clearRuns, detachRuns, liveRun, runsDirectory, unendedRunOnDisk, type Applied } from '../src/runner/registry.js';
 import { producerRunOptions, runConfinement, startNarrowRun } from '../src/runner/roles.js';
-import { sessionMountNamespaceWorks } from '../src/master/profiles.js';
+import { sessionMountNamespaceWorks } from '../src/master/confinement.js';
 import { lostRun, lostRunReason, sessionRetry } from '../src/producer.js';
-import { emptyDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { runDaemon } from '../src/daemon/run.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { EventEmitter } from 'node:events';
 import type { RunResult } from '../src/runner/types.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';

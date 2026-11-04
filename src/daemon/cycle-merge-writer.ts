@@ -1,9 +1,10 @@
+import { timedMergePorts, trialStepMedians } from './trial-timings.js';
 import { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, serveRevertsKept, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
 export { mergeWriterKeptQueue, mergeWriterKeptRefusals, mergeWriterKeptReworks, mergeWriterKeptTimeouts, mergeWriterTrialTimeoutRefusals, mergeWriterKeptUnconfirmed, mergeWriterUnconfirmedReplays, serveRevertsKept, pendingReworkSchema, unconfirmedRecordSchema, mergeWriterStateSchema, emptyMergeWriterState, type PendingRework, type UnconfirmedRecord, type MergeWriterState, type RevertFlight } from './merge-writer-state.js';
 // Concern: the control-plane merge executor's cycle step (GY-1524) — reconcile open intents, pick the next head, run one merge beside the cycle and record what it did.
 import { randomUUID } from 'node:crypto';
 import type { ChildRun } from '../child-runner.js';
-import type { MasterConfig } from '../master.js';
+import type { MasterConfig } from '../master/profiles.js';
 import type { Work } from '../model.js';
 import type { MergeLedgerState } from '../model/merge-ledger.js';
 import { mergeWriterTrialGround, trialFailurePrefix } from '../model/rework-ground.js';
@@ -83,11 +84,11 @@ export function mergeWriterReads(config: Pick<MasterConfig, 'baseBranch' | 'run'
       if ('conflict' in merged) return merged;
       return { mergeSha: merged.mergeSha, files: (await git('diff', '--name-only', baseTip, merged.mergeSha)).split('\n').map(line => line.trim()).filter(Boolean) };
     },
-    trial: async (mergeSha, files, item, baseTip, onStep) => {
+    trial: async (mergeSha, files, item, baseTip, onStep, onTiming) => {
       const proofs = criterionProofs(item);
       // Discovered inside each retried attempt (GY-1832), so a git grep that fails or times out is timed and retried like the trial's other reads.
       const discoverProofFiles = (runOptions: { timeoutMs?: number }) => proofTestFiles(run, root, mergeSha, proofs, runOptions);
-      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}) });
+      return (options.trial ?? runMergeTrial)({ root, base: options.base, mergeSha, changedFiles: files, proofs, e2eProofs: e2eProofsOf(item), proofFiles: [], discoverProofFiles, timeoutMs: trialTimeoutMinutes * 60_000, key: item.key, bug: item.type === 'bug', run, environment: options.environment, hidden, ...(baseTip ? { baseTip } : {}), ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}) });
     },
     // GY-1718: a repository naming a static UAT previews every passing trial whose delta is more than docs or tests.
     preview: async (mergeSha, files) => {
@@ -452,11 +453,12 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
   let baseTip: string;
   try { baseTip = fetched ?? (await reads.fetch()).toLowerCase(); } catch { return false; }
   let onStep: ((step: string) => void) | undefined;
+  const timed = timedMergePorts(reads, writer, () => cycle.effects.persist(state));
   try {
     const result = await runServeRevert({
       git,
-      trial: (sha, files, item) => reads.trial(sha, files, item, baseTip, onStep),
-      push: reads.push,
+      trial: (sha, files, item) => timed.trial(sha, files, item, baseTip, onStep, undefined, [{ key: item.key, head: sha }]),
+      push: timed.push,
       // The persisted pushed-revert record owns filing and its retries (fileOwedRelands).
       file: async () => null,
     }, {
@@ -661,7 +663,7 @@ export async function mergeWriterStep(cycle: Cycle) {
           void effects.persist(state).catch(() => {});
           void recorder(due, { kind: 'trial-step', head, step, at: at() }).catch(() => {});
         };
-        void mergeBatch({ ...reads, record: recorder, onStep }, batch).then(results => { entry.settled = { results }; }, error => { entry.settled = { error }; });
+        void mergeBatch(timedMergePorts({ ...reads, record: recorder, onStep }, writer, () => effects.persist(state)), batch).then(results => { entry.settled = { results }; }, error => { entry.settled = { error }; });
       }
     }
   }
@@ -675,6 +677,7 @@ export async function mergeWriterStep(cycle: Cycle) {
  * the stall bound without a step advancing.
  */
 export type MergeWriterSummary = {
+  trials?: MergeWriterState['trials']; stepMedians?: Record<string, number>;
   queue: MergeWriterState['queue']; inFlight: (MergeWriterState['inFlight'] & { stepMs?: number; stalled?: boolean }) | null; lastMergeAt: string | null;
   refusals: MergeWriterState['refusals']; reworks: MergeWriterState['reworks'];
   progress?: MergeWriterState['progress']; motionBoundMs?: MergeWriterState['motionBoundMs'];
@@ -687,6 +690,6 @@ export const mergeWriterSummary = (writer: MergeWriterState | null | undefined, 
   const inFlight = writer.inFlight && Number.isFinite(at) && now !== undefined
     ? { ...writer.inFlight, stepMs: Math.max(0, now - at), stalled: now - at >= mergeStallMs }
     : writer.inFlight;
-  return { queue: writer.queue, inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals, reworks: writer.reworks, progress: writer.progress, motionBoundMs: writer.motionBoundMs, serveRevert: writer.serveRevert };
+  return { trials: writer.trials, stepMedians: trialStepMedians(writer.trials ?? []), queue: writer.queue, inFlight, lastMergeAt: writer.lastMergeAt, refusals: writer.refusals, reworks: writer.reworks, progress: writer.progress, motionBoundMs: writer.motionBoundMs, serveRevert: writer.serveRevert };
 };
 export type { MergeRecordEvent };

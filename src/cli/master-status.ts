@@ -2,7 +2,9 @@
 import { type MasterConfig, inspectWorkerCredentials, observeHerdrAgents, readSessionScreen } from '../master.js';
 import type { Work } from '../model/work.js';
 import { type ChildRun, defaultChildRun } from '../child-runner.js';
-import { daemonSummary, emptyMasterSession, masterSummary, profileHealth, readDaemonState } from '../master-daemon.js';
+import { daemonSummary } from '../daemon/run.js';
+import { emptyMasterSession, masterSummary, readDaemonState } from '../daemon/state.js';
+import { profileHealth } from '../daemon/sessions.js';
 import { attemptBoundSummary } from '../master/attempt-bound.js';
 import { mergeWriterSummary } from '../daemon/cycle-merge-writer.js';
 import { servingReport } from '../deploy-watch.js';
@@ -77,7 +79,7 @@ export async function masterStatusReport(root: string, master: MasterConfig, mas
       : { state: state?.mergeWriter.inFlight ? 'validating' : 'no shared base failure', reason: null, nextAction: null },
     items: open.map((item, index) => itemLine(item, now, launched[index])),
     ...(personalScopes > 0 ? { personalScopes: `${personalScopes} items in personal scopes` } : {}),
-    mergeWriter: (({ queue, inFlight, lastMergeAt, refusals, serveRevert }) => ({ queue, inFlight, lastMergeAt, lastRefusal: refusals.at(-1) ?? null,
+    mergeWriter: (({ queue, inFlight, lastMergeAt, refusals, serveRevert, trials, stepMedians }) => ({ queue, inFlight, lastMergeAt, trials: trials ?? [], stepMedians: stepMedians ?? {}, lastRefusal: refusals.at(-1) ?? null,
       // GY-2990: a revert that failed its own trial is held here, with the serve and reason that held it.
       serveRevert: serveRevert?.held ?? null }))(mergeWriterSummary(state?.mergeWriter, now)),
     trialTests,

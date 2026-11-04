@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { profileHealth } from '../src/daemon/sessions.js';
 import { masterConfigSchema, type HerdrAgent, type MasterConfig, type WorkerProfile } from '../src/master.js';
 import type { Work } from '../src/model.js';
