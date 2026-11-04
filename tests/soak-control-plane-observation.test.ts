@@ -152,15 +152,15 @@ test('soak:control-plane-observation — the App-less observation job, run acros
   const racedHead = git(join(checkout, '.graphyard', 'worktrees', 'GY-4-1'), 'rev-parse', 'HEAD');
   await store.pool.query('UPDATE jobs SET available_at=now() - interval \'1 hour\' WHERE work_id=$1', [pending.w.id]);
   await store.pool.query(`UPDATE jobs SET available_at=now() + interval '1 hour' WHERE work_id<>$1`, [pending.w.id]);
-  const fleet = store.fleet.bind(store);
-  store.fleet = async (options?: Parameters<Store['fleet']>[0]) => {
-    const all = await fleet(options);
-    store.fleet = fleet;
+  const observationWork = store.observationWork.bind(store);
+  store.observationWork = async () => {
+    const all = await observationWork();
+    store.observationWork = observationWork;
     await engine.execute(worker, 'submit', pending.w.id, { epoch: 1, head: racedHead }, randomUUID());
     return all;
   };
   try { assert.equal(await processControlPlaneJob(engine), true, 'the job woken by the submission is claimed and observed'); }
-  finally { store.fleet = fleet; }
+  finally { store.observationWork = observationWork; }
   const raced = (await store.workDocument(pending.w.id))!;
   assert.equal(raced.observation?.source, 'control-plane'); assert.equal(raced.observation?.candidate.sha, racedHead, 'the submission landed in the race is observed in the same claim');
   const racedJob = (await jobs()).find(row => row.work_id === pending.w.id);
