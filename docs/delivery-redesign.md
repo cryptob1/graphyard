@@ -11,7 +11,7 @@ A worker submits its commit, Graphyard checks gates, the merge writer trials and
 
 ## Merge writer
 
-Up to four oldest heads share a trial and push; failed batches retry individually. Ledger order: `merge.intent`, tested merge commit, `merge.pushed`, `merge.reconciled`. Push uses `git push --force-with-lease`; a moved tip retrials. Lost replies replay idempotently. A superseded intent is refused and the current head queued again. Status: `mergeWriter.queue`.
+Up to four oldest heads share a trial and push; failed batches retry individually. Ledger order: `merge.intent`, tested merge commit, `merge.pushed`, `merge.reconciled`. Push uses `git push --force-with-lease`; a moved tip retrials. Lost replies replay idempotently. A superseded intent is refused and the current head queued again. Status: `mergeWriter.queue`. Master status also shows `mergeWriter.trials`: the last 20 completed trials, their covered item/head pairs and step durations in milliseconds (including scan, test shards, preview and push when run). Batch fallbacks and retrials have separate records. `mergeWriter.stepMedians` reports each step’s median milliseconds across those records; older state starts with no timings. Timings are diagnostic, not gate evidence.
 
 ## The merger
 
