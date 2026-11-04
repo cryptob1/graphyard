@@ -23,7 +23,9 @@ import { anchorSessionCheckout as anchorCheckout, cliUnreachableRefusal, Launche
 import { withVerificationPath } from './master/verification-slots.js';
 import { credentialMaskFor } from './master/confinement.js';
 import { runtimeLoginHomes } from './master/profiles.js';
-import { writeSpecCheckBinding } from './spec-check-post.js';
+import { z } from 'zod';
+import { postSpecCheck, writeSpecCheckBinding } from './spec-check-post.js';
+import { defaultHeadlessExec, headlessKind, jsonAnswer, startHeadlessSession, type HeadlessExec } from './headless-session.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchMs } from './model/spec-check.js';
 import type { Work } from './model.js';
 
@@ -42,7 +44,7 @@ export async function readVendorPrompts(): Promise<{ comprehension: string; read
  * report to post. `worktree` and `baseTip` name the detached checkout the session makes of the
  * base branch tip, where the item's named files are read as they stand before any worker starts.
  */
-export function specCheckPrompt(config: { repository: string; cliPath?: string; baseBranch: string }, work: Work, vendor: { comprehension: string; readiness: string }, worktree?: string, baseTip?: string): string {
+export function specCheckPrompt(config: { repository: string; cliPath?: string; baseBranch: string }, work: Work, vendor: { comprehension: string; readiness: string }, worktree?: string, baseTip?: string, answer?: string): string {
   const criteria = work.criteria.map(criterion => `[${criterion.id}] ${criterion.text} (proofs: ${criterion.proofs.join(', ')})`).join(' ');
   const read = worktree && baseTip
     ? `The item names files and docs; read them from a detached checkout of the base branch tip, created only at the path Graphyard allocated for this session under its managed worktree root and never under a temporary directory: git worktree add --detach ${worktree} ${baseTip}. That commit is already in the local repository, so fetch nothing: origin may be unreachable from this session. Read there and change nothing; Graphyard removes its checkout when this session ends. `
@@ -52,17 +54,25 @@ export function specCheckPrompt(config: { repository: string; cliPath?: string; 
     + read
     + `Judge by these two Elephant-Goldfish Model reviewer prompts, vendored from github.com/google/elephant-goldfish-model (Apache-2.0), applied to the item as the document under audit:\n\n===== vendored: egm-comprehension =====\n${vendor.comprehension.trim()}\n\n===== vendored: egm-implementation-readiness =====\n${vendor.readiness.trim()}\n\n`
     + `Answer in exactly one report: (1) the comprehension test — your paraphrase of what will be built and how each acceptance criterion will be proven; (2) the implementation-readiness gaps — ambiguous or contradictory criteria, a proof that cannot fail or cannot run, a missing dependency, a file the change will need that the item does not name; (3) the verdict — ready when a worker can start as the item stands, gaps when any gap stands. `
-    + `Post it as this session's one action, only through Graphyard: node ${config.cliPath} spec-check post --verdict ready|gaps --paraphrase "YOUR PARAPHRASE" [--gap "ONE GAP" ...]. A gaps verdict needs at least one --gap; a ready verdict takes none. If node cannot find that CLI (MODULE_NOT_FOUND: a self-deploy is replacing it), wait a minute and run the same post again. The paraphrase and gaps become the item's spec check and show on its dashboard panel. `
-    + 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. '
+    + (answer ? readOnly + simplicityParagraph + answer
+    : `Post it as this session's one action, only through Graphyard: node ${config.cliPath} spec-check post --verdict ready|gaps --paraphrase "YOUR PARAPHRASE" [--gap "ONE GAP" ...]. A gaps verdict needs at least one --gap; a ready verdict takes none. If node cannot find that CLI (MODULE_NOT_FOUND: a self-deploy is replacing it), wait a minute and run the same post again. The paraphrase and gaps become the item's spec check and show on its dashboard panel. `
+    + readOnly
     + `Posting that report is granted to this session's role, not a permission to request: post it as soon as you have judged the item, without asking for confirmation. `
     + `The post sends it to the Graphyard control plane at GRAPHYARD_URL with this launch's one-time token from GH_CONFIG_DIR. `
     + 'Once posted, stop; Graphyard closes this session once it observes your report. '
     + `${simplicityParagraph}`
-    + autonomousSession('post the report yourself, --verdict ready or --verdict gaps, as soon as you have judged the item', 'record a blocker as a final line starting BLOCKED:');
+    + autonomousSession('post the report yourself, --verdict ready or --verdict gaps, as soon as you have judged the item', 'record a blocker as a final line starting BLOCKED:'));
 }
+const readOnly = 'This session is read-only: do not edit, stage, commit, push, rebase, or merge anything, do not run the project\'s build, tests, or servers, do not claim Graphyard work, and do not submit evidence. ';
+/** A headless spec check's answer, in place of `spec-check post`: the launcher posts it as this launch's report. */
+export const headlessSpecCheckAnswer = 'Answer in one JSON object, the last thing you print: {"verdict": "ready" or "gaps", "paraphrase": "YOUR PARAPHRASE", "gaps": ["ONE GAP", …]}, with gaps empty for ready and at least one for gaps. '
+  + 'Graphyard posts that answer as this launch\'s spec check, so run no spec-check post. Decide on your own: never ask a human or wait on input.';
+export const headlessSpecCheckSchema = z.object({ verdict: z.enum(['ready', 'gaps']), paraphrase: z.string().trim().min(1).max(20_000), gaps: z.array(z.string().trim().min(1).max(2_000)).max(50).default([]) });
 
 /** What a launch hands the loop back, recorded beside the launch action. */
-export interface SpecCheckLaunchResult { launch: string; work: string; profile: string; agentName: string; reviewer: string; pane: string | null; checkout: string | null; tokenExpiresAt: string }
+export interface SpecCheckLaunchResult { launch: string; work: string; profile: string; agentName: string; reviewer: string; pane: string | null; checkout: string | null; tokenExpiresAt: string;
+  /** A headless check's end: null once its report is posted, else why no answer was accepted. */
+  settled?: Promise<string | null> }
 
 /**
  * `launchSpecCheck` — the loop's one fresh-context reviewer session for a released feature item's
@@ -73,7 +83,10 @@ export interface SpecCheckLaunchResult { launch: string; work: string; profile: 
 export async function launchSpecCheck(root: string, work: Work, profileName: string | undefined, agents: { name?: string }[], observedAt: string, dependencies: {
   run?: ChildRun; probe?: FleetProbe; prompt?: PromptDelivery; start?: StartBounds; sandbox?: SandboxExec;
   registerLaunch?: (work: Work, launch: { reviewer: string; tokenHash: string; expiresAt: string; policyRevision: number }) => Promise<{ launch: string }>;
+  /** How a headless check's one child runs (headless-session.ts); the host's by default. */
+  headless?: HeadlessExec | null;
 } = {}): Promise<SpecCheckLaunchResult> {
+  const headless = dependencies.headless !== undefined ? dependencies.headless : defaultHeadlessExec();
   const now = Date.parse(observedAt);
   if (!Number.isFinite(now)) throw new Error('A spec-check launch requires a valid Graphyard snapshot clock');
   if (!needsSpecCheck(work)) throw new Error(`${work.key} owes no spec check: bugs and chores skip it`);
@@ -118,16 +131,33 @@ export async function launchSpecCheck(root: string, work: Work, profileName: str
       const writable = await sessionWritable(root, config, checkout.directory);
       const launch = accountLaunch(profile, selected.account, { writable });
       const harness = await prepareSessionHarness(root, config, { role: 'reviewer', kind: launch.kind, profile: profile.name, checkout: checkout.worktree });
+      // A headless check (headless-session.ts) holds no binding: the launcher posts its answer.
+      const runHeadless = headless && headlessKind(launch.kind) ? headless : null;
       // The same mask every reviewer launch runs under: the operator's config home and the loop's credentials stay hidden.
       // GY-2995: the session's own binding directory under the config home is kept readable, and with it the deploy checkout the CLI it must run lives in.
-      const credentialMask = credentialMaskFor(config, { credentialFile: sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
+      const credentialMask = credentialMaskFor(config, { credentialFile: runHeadless ? null : sessionDirectory, runtimeHomes: runtimeLoginHomes(launch.environment, launch.contract?.homeVariable) });
       await verifySessionSandbox('reviewer', { ...launch, args: [...launch.args, ...harness.args] }, checkout.directory, writable, dependencies.sandbox, true, credentialMask);
-      const environment = { ...withVerificationPath(harness.environment, launch.environment), GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
+      const own = withVerificationPath(harness.environment, launch.environment);
+      const environment = { ...own, GH_CONFIG_DIR: sessionDirectory, GRAPHYARD_URL: config.url, GRAPHYARD_SPEC_CHECK: work.key };
+      const vendor = await readVendorPrompts();
+      if (runHeadless) {
+        const { settled } = await startHeadlessSession({ name: agentName, work: work.key, subject: registered.launch, kind: launch.kind!, args: [...launch.args, ...harness.args], environment: own, directory: checkout.directory,
+          contract: launch.contract, credentialMask, role: harness.role, exec: runHeadless,
+          prompt: specCheckPrompt(config, work, vendor, checkout.worktree, baseTip, headlessSpecCheckAnswer),
+          answer: async output => postSpecCheck({ ...jsonAnswer(output, headlessSpecCheckSchema), cliPath: config.cliPath, environment }) });
+        // The binding and the registry slot go with the run, whatever it answered.
+        const ended = settled.then(() => null, (failure: unknown) => failure instanceof Error ? failure.message : String(failure)).then(async failure => {
+          await rm(sessionDirectory, { recursive: true, force: true }).catch(() => {});
+          await selected.release?.(`the headless spec check of ${work.key} ended${failure ? `: ${failure}` : ''}`.slice(0, 400)).catch(() => false);
+          return failure;
+        });
+        return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane: null, checkout: checkout.directory, tokenExpiresAt: expiresAt, settled: ended };
+      }
       const created = createdHerdrTab(await herdrJson(['tab', 'create', ...(config.herdrWorkspace ? ['--workspace', config.herdrWorkspace] : []), '--cwd', checkout.directory,
         '--label', `${work.key} spec check · ${agentName}`, ...Object.entries(environment).flatMap(([name, value]) => ['--env', `${name}=${value}`]), '--no-focus'], run));
       pane = created.pane;
       await startAgentSession(agentName, launch.kind!, created.pane, [...launch.args, ...harness.args],
-        specCheckPrompt(config, work, await readVendorPrompts(), checkout.worktree, baseTip), run,
+        specCheckPrompt(config, work, vendor, checkout.worktree, baseTip), run,
         { ...dependencies.prompt, ...dependencies.start, timeoutMs: dependencies.start?.timeoutMs ?? launchStartMs(config), directory: checkout.directory, cwd: checkout.directory, environment, ownGitHubCredential: true, role: harness.role, contract: launch.contract, credentialMask });
       return { launch: registered.launch, work: work.key, profile: profile.name, agentName, reviewer: profile.agentName, pane, checkout: checkout.directory, tokenExpiresAt: expiresAt };
     } catch (error) {
