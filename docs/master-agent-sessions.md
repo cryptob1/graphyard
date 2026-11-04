@@ -89,6 +89,8 @@ Idle workers get one reminder after `run.inactivityMinutes` (10); another idle w
 
 ### Resume and attempt bounds
 
+Applied master rework guidance also reaches retries before their first submission, in both fresh and resumed requests: the brief names the item, current attempt and applied time. A verification-only handoff needs no new source commit or prior change number. A later submission suppresses the reason it answered.
+
 Claude records session ID, runtime, account and worktree in `.graphyard/dispatch/dispatched-KEY.json`. The next attempt on that account/runtime uses `--resume ID`, with its new epoch, worktree and brief. Missing/unsupported/unavailable resumes launch fresh and log why; failed starts retry under the same lease. Status names the resumed attempt. Measure `pipeline.attempts.length` and `pipeline.reworkRounds`.
 
 `run.attemptBoundMinutes` defaults to 130; commits or file changes within 20 minutes extend it while leases renew. `run.attemptCeilingMinutes` defaults to 480 and never extends. The loop records progress; stops preserve a WIP commit and successor diff. Status shows time remaining. Open human scope requests are exempt from the no-submission backstop.
