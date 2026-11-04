@@ -4,7 +4,7 @@ import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -329,4 +329,63 @@ test('integration:trial-step-timings — parallel test shards report their own d
   assert.equal(result.groups?.length, 2);
   assert.deepEqual(timings.filter(entry => entry.step.startsWith('tests: shard')).map(entry => entry.step).sort(), ['tests: shard 1', 'tests: shard 2']);
   assert.ok(timings.filter(entry => entry.step.startsWith('tests: shard')).every(entry => entry.durationMs >= 20));
+});
+
+
+test('integration:trial-step-timings — bound E2E success and failure have separate persisted durations and a median', async () => {
+  const repo = await fixtureRepo();
+  await mkdir(join(repo.root, 'e2e/cases'), { recursive: true });
+  await writeFile(join(repo.root, 'e2e/cases/timed.json'), '{}');
+  await writeFile(join(repo.root, 'graphyard.json'), JSON.stringify({
+    e2e: { serve: { command: 'node server.js', url: 'http://127.0.0.1:8080', readySeconds: 10 } },
+    delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test' }], perCandidate: [] } },
+  }));
+  gitIn(repo.root, 'add', '-A');
+  gitIn(repo.root, 'commit', '-q', '-m', 'bound E2E fixture');
+  const mergeSha = gitIn(repo.root, 'rev-parse', 'HEAD');
+  const scratch = await temporaryDirectory('timed-e2e');
+  const state = emptyDaemonState(config);
+  let clock = start, failed = false;
+  const run = (async (command: string, args: string[], options: never) => {
+    if (command === 'npm') { clock += 10; return ''; }
+    if (command === 'node' && args.at(-1)?.endsWith('/run.mjs')) {
+      clock += failed ? 900 : 300;
+      if (failed) throw new Error('E2E runner failed');
+      await writeFile(join(dirname(args.at(-1)!), 'result.json'), JSON.stringify([
+        { proof: 'e2e:timed', case: 'timed', executed: 1, failed: 0 },
+      ]));
+      return '';
+    }
+    return defaultChildRun(command, args, options);
+  }) as never;
+  const ports = timedMergePorts({ now: () => clock,
+    trial: async (_sha, files, _item, _base, onStep, onTiming) => ({
+      ...await runTrial({ root: repo.root, base: scratch, mergeSha, changedFiles: files,
+        timeoutMs: 120_000, run, now: () => clock, retries: 0, e2eProofs: ['e2e:timed'],
+        environment: { PATH: process.env.PATH! }, temporaryRoots: [scratch], checkoutRoots: [scratch],
+        ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}),
+      }), files: [...files],
+    }),
+  } as MergePorts, state.mergeWriter, async () => {});
+  const heads = [{ key: 'GY-1', head: mergeSha }];
+  for (const failure of [false, true]) {
+    failed = failure;
+    const result = await ports.trial(mergeSha, ['src.ts'], item(mergeSha), repo.baseTip, undefined, undefined, heads);
+    assert.equal(result.e2e?.[0]?.failed, failure ? 1 : 0);
+  }
+  const credentials = await temporaryDirectory('timed-e2e-status');
+  const savedConfig = { ...config, credentialFile: join(credentials, 'token') };
+  await writeDaemonState(savedConfig, state);
+  const report = await masterStatusReport(repo.root, savedConfig, async () => ({ work: [], now: iso(clock) }), async () => repo.baseTip);
+  assert.equal(report.mergeWriter.trials.length, 2);
+  for (const [index, trial] of report.mergeWriter.trials.entries()) {
+    assert.deepEqual(trial.heads, heads);
+    assert.deepEqual(trial.steps, [
+      { step: 'checkout', durationMs: 0 }, { step: 'install', durationMs: 0 },
+      { step: 'build', durationMs: 10 }, { step: 'tests: e2e', durationMs: index === 0 ? 300 : 900 },
+      { step: 'tests: test', durationMs: 10 },
+    ]);
+  }
+  assert.equal(report.mergeWriter.stepMedians['tests: e2e'], 600);
+  assert.equal(report.mergeWriter.stepMedians.build, 10);
 });

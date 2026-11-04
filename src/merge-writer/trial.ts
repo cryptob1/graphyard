@@ -999,6 +999,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
       // GY-2965: the item's bound E2E cases run against the head served here in the trial checkout, whatever test checks follow; a missing or failing case refuses the head (trialFailureReason).
       if (input.e2eProofs?.length) {
         enter('tests');
+        enterStep('tests: e2e');
         const ran = await containerTrialE2e({
           worktree, mergeSha: input.mergeSha, proofs: input.e2eProofs, env, wrapper,
           networkWrapper: network => trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root), undefined, network),
