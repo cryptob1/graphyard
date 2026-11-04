@@ -119,8 +119,8 @@ export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', rou
  * decisions only a human may make are answered in that browser with one click. A link is single
  * use and expires in minutes; the session it opens lasts 30 days (GY-2171). Session digests, actors and expiry
  * are persisted in Postgres; pending link digests stay in memory. Both
- * tables are bounded: past the cap the entry nearest expiry goes first, so repeated
- * `graphyard login` calls cannot grow them between prunes.
+ * tables are bounded: links evict the oldest entry, while session capacity refuses new
+ * sign-ins until an existing session expires or signs out.
  */
 export const signInLinkTtlMs = 10 * 60_000;
 export const signInSessionTtlMs = 30 * 86_400_000;
@@ -161,7 +161,8 @@ export class HumanSignIn {
       // Serialize pruning and insertion across server instances to keep the global size bound.
       await db.query('LOCK TABLE human_sign_in_sessions IN EXCLUSIVE MODE');
       await db.query('DELETE FROM human_sign_in_sessions WHERE expires_at <= $1', [new Date(now)]);
-      await db.query('DELETE FROM human_sign_in_sessions WHERE token_hash IN (SELECT token_hash FROM human_sign_in_sessions ORDER BY expires_at DESC, token_hash OFFSET $1)', [maxSignInSessions - 1]);
+      const { rows } = await db.query('SELECT count(*)::int AS count FROM human_sign_in_sessions');
+      demand(rows[0].count < maxSignInSessions, 'The 32-session sign-in limit is reached; sign out an existing session or wait for one to expire, then request a new sign-in link', 409);
       await db.query('INSERT INTO human_sign_in_sessions (token_hash, actor, expires_at) VALUES ($1, $2, $3)', [digest(token), actor, new Date(now + signInSessionTtlMs)]);
     }, { coordinationLock: false });
     return { token, actor, expiresAt: new Date(now + signInSessionTtlMs).toISOString() };

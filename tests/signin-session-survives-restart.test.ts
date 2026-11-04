@@ -51,11 +51,25 @@ test('integration:signin-session-survives-restart — persisted digests authenti
     now++;
     // Concurrent redeemers share the database cap, even from separate server instances.
     const other = new HumanSignIn(database.store, () => now);
-    await Promise.all(Array.from({ length: maxSignInSessions }, (_, i) => {
+    const attempts = await Promise.allSettled(Array.from({ length: maxSignInSessions }, (_, i) => {
       const owner = i % 2 ? table : other;
       return owner.redeem(owner.issue(issuer, true).code);
     }));
+    assert.equal(attempts.filter(result => result.status === 'fulfilled').length, maxSignInSessions - 1);
+    const refused = attempts.filter(result => result.status === 'rejected');
+    assert.equal(refused.length, 1);
+    assert.match(refused[0].reason.message, /session sign-in limit/);
     assert.equal((await database.store.pool.query('SELECT * FROM human_sign_in_sessions')).rowCount, maxSignInSessions);
-    assert.equal(await other.authenticate(first.token), null);
+    assert.deepEqual(await other.authenticate(first.token), first.actor);
+    for (const result of attempts) if (result.status === 'fulfilled')
+      assert.deepEqual(await other.authenticate(result.value.token), result.value.actor);
+    await other.signOut(first.token);
+    const replacement = await table.redeem(table.issue(issuer, true).code);
+    assert.deepEqual(await other.authenticate(replacement.token), replacement.actor);
+    now += signInSessionTtlMs;
+    assert.equal(await other.authenticate(replacement.token), null);
+    const fresh = await other.redeem(other.issue(issuer, true).code);
+    assert.deepEqual(await table.authenticate(fresh.token), fresh.actor);
+    assert.equal((await database.store.pool.query('SELECT * FROM human_sign_in_sessions')).rowCount, 1);
   } finally { await http.close(); await database.close(); }
 });
