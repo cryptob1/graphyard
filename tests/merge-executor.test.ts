@@ -4,7 +4,7 @@ import { createHash, randomUUID } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import EmbeddedPostgres from 'embedded-postgres';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
@@ -17,13 +17,17 @@ import { trialFailedGround, trialFailurePrefix } from '../src/model/rework-groun
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
 import { masterConfigSchema } from '../src/master.js';
 import { mergeLedgerRefusals, pushRefusal, trialRefusal, type Principal, type Work } from '../src/model.js';
-import { Store } from '../src/store.js';
+import { Store, save } from '../src/store.js';
+import { lockedWork } from '../src/store/locked-read.js';
 import { Engine } from '../src/engine.js';
 import { server } from '../src/server.js';
 import { gitRunnerFor } from '../src/merge-writer/local-observation.js';
 import { completionBody } from '../src/cli/complete.js';
 import { defaultChildRun, type ChildRun } from '../src/child-runner.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
+import { isolatedTestEnvironment } from '../src/cli/test-isolation.js';
+import { trialPhases, type TrialPhaseDurations } from '../src/merge-writer/trial.js';
+import { runCommandStep, runProcess } from '../src/e2e/steps.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
 import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
@@ -532,12 +536,12 @@ async function request(credential: string, path: string, body?: unknown, key: st
   return { status: response.status, body: await response.json() as any };
 }
 /** An item the worker claimed, registered on its branch and submitted with `complete --head`, as GY-1523 submits it. */
-async function submittedItem(n: number) {
-  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs: ['unit:app-works', 'e2e:fixture'] }] }, randomUUID());
+async function submittedItem(n: number, proofs = ['unit:app-works', 'e2e:fixture'], workspace = n) {
+  let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs }] }, randomUUID());
   w = await engine.execute(admin, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
-  await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/exec-${n}`, branch: `graphyard/gy-${n}-1` }, randomUUID());
+  await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/exec-${workspace}`, branch: `graphyard/gy-${workspace}-1` }, randomUUID());
   const body = completionBody(['1', '--head', heads[n]!], () => heads[n]!);
   assert.deepEqual(body, { epoch: 1, head: heads[n] });
   return engine.execute(worker, 'submit', w.id, body, randomUUID());
@@ -547,7 +551,7 @@ const ledgerKinds = async (id: string) => (await store.pool.query("SELECT kind F
 /** The coordinator's record port: the route, under the step's own key, as effects.ts posts it. */
 const record: MergePorts['record'] = async (work, event) => {
   const answer = await request(token(coordinator), `work/${work.id}/merge-record`, event, mergeRecordKey(work, event));
-  if (answer.status !== 200) throw new Error(`merge-record ${event.kind} refused (${answer.status}): ${JSON.stringify(answer.body)}`);
+  if (answer.status !== 200) throw Object.assign(new Error(`merge-record ${event.kind} refused (${answer.status}): ${JSON.stringify(answer.body)}`), { status: answer.status });
   return answer.body;
 };
 /** The real reads over the fixture checkout, with the trial stubbed to pass and every git call counted. */
@@ -892,4 +896,219 @@ test('unit:oldest-item-first — among non-hotfix heads the item filed first mer
   assert.deepEqual(mergeQueue([fresh, redone], {}, start).queue.map(entry => entry.key), ['GY-2', 'GY-1']);
   const fix = submitted(3, 1, ['src/app.ts'], { title: 'Hotfix: x', createdAt: iso(start - minute) });
   assert.equal(nextToMerge([fresh, redone, fix], {}, start)?.key, 'GY-3', 'a hotfix still goes first');
+});
+
+
+for (const advanceBase of [false, true])
+test(`${advanceBase ? 'integration:refused-intent-base-advance' : 'integration:refused-intent-push-recovery'} — restart delivers the original proven push${advanceBase ? ' after later main and its observation advance' : ''}`, async () => {
+  const n = advanceBase ? 41 : 11;
+  const refresh = async (id: string) => {
+    const current = await document(id);
+    const observation = await engine.observeControlPlaneCandidate(current);
+    assert.ok(observation);
+    return engine.observe(id, current.revision, observation);
+  };
+  const approve = async (id: string) => {
+    const current = await document(id);
+    return engine.observe(id, current.revision, { ...current.observation!, reviews: [
+      { id: 101, reviewer: 'independent-reviewer', sha: current.candidate!.sha, state: 'APPROVED', source: 'control-plane' },
+    ] });
+  };
+  const branch = join(checkout, '.graphyard', 'worktrees', `GY-${n}-1`);
+  git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${n}-1`, branch, baseTip);
+  await commit(branch, 'tests/recovery.test.ts', "import { test } from 'node:test';\nimport assert from 'node:assert/strict';\ntest('integration:recovery-fixture', () => assert.equal(2 + 2, 4));\n", 'recovery proof');
+  if (advanceBase) await commit(branch, 'src/store/recovery.ts', 'export const repaired = true;\n', 'sensitive repair');
+  const boundCase = { kind: 'command' as const, name: 'bound recovery fixture', run: 'node --test tests/recovery.test.ts', timeoutSeconds: 30 };
+  heads[n] = await commit(branch, 'e2e/cases/fixture.json', JSON.stringify({ id: 'fixture', title: 'Fixture', target: 'any', required: false, steps: [boundCase] }), 'bound case');
+  const filed = await submittedItem(n, ['integration:recovery-fixture', 'e2e:fixture']);
+  if (advanceBase) await approve(filed.id);
+  let begin!: () => void, release!: () => void;
+  const began = new Promise<void>(resolve => { begin = resolve; });
+  const waiting = new Promise<void>(resolve => { release = resolve; });
+  const measured = fixtureReads({
+    record: async (w, event) => { if (event.kind === 'pushed') throw new Error('interrupted final record'); return record(w, event); },
+    trial: async input => {
+      begin(); await waiting;
+      const trialStarted = Date.now();
+      const scratch = await temporaryDirectory('refused-recovery-trial');
+      const tree = join(scratch, 'tree');
+      git(checkout, 'worktree', 'add', '--detach', '-q', tree, input.mergeSha);
+      try {
+        const tap = String(await defaultChildRun('node', ['--test', '--test-reporter=tap', 'tests/app.test.ts', 'tests/recovery.test.ts'], { cwd: tree, env: isolatedTestEnvironment() }));
+        await defaultChildRun('node', ['--check', 'src/app.ts'], { cwd: tree });
+        const bound = JSON.parse(await readFile(join(tree, 'e2e/cases/fixture.json'), 'utf8'));
+        const result = await runCommandStep(bound.steps[0], { url: 'http://127.0.0.1:9', root: tree, env: { PATH: `${dirname(process.execPath)}:${process.env.PATH!}` }, secrets: {}, run: runProcess, artifacts: scratch, session: 'recovery' });
+        assert.equal(result.record.outcome, 'pass', JSON.stringify(result));
+        const { executed, failed } = countProofCases(tap, 'integration:recovery-fixture');
+        assert.ok(executed > 0 && failed === 0);
+        return { build: 'pass', tests: { passed: 2, failed: [], files: 2 }, files: ['tests/app.test.ts', 'tests/recovery.test.ts'], durationMs: Date.now() - trialStarted, logTail: tap,
+          proofs: { 'integration:recovery-fixture': { executed, failed }, 'e2e:fixture': { executed: 1, failed: 0 } },
+          e2e: [{ proof: 'e2e:fixture', case: 'fixture', executed: 1, failed: 0 }] };
+      } finally { git(checkout, 'worktree', 'remove', '--force', tree); }
+    },
+  });
+  const running = mergeOne(measured.reads, await document(filed.id));
+  const stopped = assert.rejects(running, /interrupted final record/);
+  await began;
+  const original = await document(filed.id);
+  const originalBase = original.mergeLedger!.baseTip!;
+  const mergeSha = original.mergeLedger!.mergeSha!;
+  const stale = fixtureReads();
+  await reconcileIntents(stale.reads, [original], snapshotLedger([original]));
+  assert.equal((await document(filed.id)).mergeLedger?.state, 'refused', 'old loop falsely refuses while the real trial runs');
+  release(); await stopped;
+  const refused = await document(filed.id);
+  assert.ok(firstParents().includes(mergeSha), 'the actual push succeeded');
+  assert.equal(refused.mergeLedger?.state, 'refused');
+  const trialsBefore = (await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='merge.trial' ORDER BY seq", [filed.id])).rows;
+  const evidenceBefore = refused.evidence;
+  const healthy = fixtureReads();
+  let observedBase = refused.candidate!.baseSha;
+  if (advanceBase) {
+    // Minimal sanitized facts from the actual flight: only the observed base moves.
+    git(checkout, 'checkout', '-q', '--detach', mergeSha);
+    const later = await commit(checkout, 'src/later-main.ts', 'export const later = true;\n', 'unrelated later main');
+    assert.equal(await healthy.reads.push(later, mergeSha), 'pushed');
+    await healthy.reads.fetch();
+    healthy.pushes.length = 0;
+    const refreshed = await refresh(filed.id);
+    observedBase = later;
+    assert.equal(refreshed.candidate!.baseSha, later);
+    assert.notEqual(refreshed.candidate!.baseSha, original.candidate!.baseSha);
+    assert.deepEqual(refreshed.observation!.reviews, original.observation!.reviews);
+    assert.deepEqual(refreshed.mergeLedger, refused.mergeLedger);
+    assert.deepEqual(refreshed.evidence, evidenceBefore);
+  }
+  const state = emptyDaemonState(config), now = () => start;
+  const effects = effectsFor({ work: async () => [await document(filed.id)], now, mergeWriter: healthy.reads });
+  await runCycle(config, state, effects, now);
+  const done = await document(filed.id);
+  assert.deepEqual([done.stage, done.delivery?.mergeSha, done.mergeLedger?.baseTip], ['done', mergeSha, originalBase]);
+  assert.equal(done.candidate!.baseSha, observedBase, 'recovery preserves the current observation binding');
+  assert.deepEqual(done.mergeLedger?.trial, refused.mergeLedger?.trial);
+  assert.deepEqual(done.evidence, evidenceBefore);
+  assert.deepEqual((await store.pool.query("SELECT payload FROM events WHERE work_id=$1 AND kind='merge.trial' ORDER BY seq", [filed.id])).rows, trialsBefore);
+  await runCycle(config, state, effects, now);
+  assert.equal((await ledgerKinds(filed.id)).filter(kind => kind === 'merge-writer.delivered').length, 1);
+  assert.deepEqual([healthy.trials.length, healthy.pushes.length, measured.pushes.length], [0, 0, 1]);
+  // The same real, measured flight supplies adversarial records; none may deliver a held
+  // commit just because it is on main. Every mutation still goes through the typed route.
+  const actualTrial = trialsBefore[0]!.payload;
+  // A real second-parent ancestor satisfies ordinary reconciliation, but cannot
+  // establish that a refused flight landed on main's first-parent chain.
+  const sideNumber = n + 20, sideBranch = join(checkout, '.graphyard', 'worktrees', `GY-${sideNumber}-1`);
+  git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${sideNumber}-1`, sideBranch, originalBase);
+  const sideSha = heads[sideNumber] = await commit(sideBranch, `src/side-parent-${n}.ts`, 'export const side = true;\n', 'side parent');
+  const mainTip = git(checkout, 'rev-parse', 'refs/remotes/origin/main');
+  const tree = git(checkout, 'merge-tree', '--write-tree', mainTip, sideSha).split('\n')[0]!;
+  const containing = git(checkout, 'commit-tree', tree, '-p', mainTip, '-p', sideSha, '-m', 'include side parent');
+  assert.equal(await healthy.reads.push(containing, mainTip), 'pushed');
+  await healthy.reads.fetch();
+  assert.equal(await healthy.reads.holds(sideSha), false);
+  assert.equal(git(checkout, 'merge-base', '--is-ancestor', sideSha, containing), '');
+  const ordinary = await submittedItem(sideNumber);
+  const ordinaryRecord = (event: MergeRecordEvent) => record({ ...ordinary, mergeAttempt: { id: randomUUID(), write: 0 } }, event);
+  await ordinaryRecord({ kind: 'intent', head: sideSha, baseTip: originalBase, mergeSha: sideSha, risk: 'normal', at: iso(start) });
+  await ordinaryRecord({ kind: 'pushed', mergeSha: sideSha, pushedAt: iso(start) });
+  await ordinaryRecord({ kind: 'reconciled', mergeSha: sideSha, observedTip: containing });
+  assert.equal((await document(ordinary.id)).stage, 'done');
+  for (const [index, variant] of (['failed-build', 'failed-tests', 'latest-failed', 'latest-timeout', 'trial-refusal', 'unheld', 'second-parent', 'wrong-merge', 'wrong-base', 'wrong-head', 'missing-proof', 'policy', 'review', 'superseded', ...(advanceBase ? ['original-binding-base', 'approval-superseded', 'changes-requested', 'rework'] as const : [])] as const).entries()) {
+    // Independent items retain the measured head but reserve distinct workspaces.
+    const workspace = n + index + 1;
+    git(checkout, 'branch', `graphyard/gy-${workspace}-1`, heads[n]!);
+    const w = await submittedItem(n, ['integration:recovery-fixture', 'e2e:fixture'], workspace);
+    if (advanceBase) await approve(w.id);
+    const send = (event: MergeRecordEvent) => record({ ...w, mergeAttempt: { id: randomUUID(), write: 0 } }, event);
+    const intended = variant === 'unheld' ? sha('unheld-recovery') : variant === 'second-parent' ? sideSha : mergeSha;
+    await send({ kind: 'intent', head: heads[n]!, baseTip: originalBase, mergeSha: intended, risk: 'normal', at: iso(start) });
+    await send({ kind: 'refused', head: heads[n]!, reason: unpushedIntentReason(intended, 'main') });
+    if (variant === 'original-binding-base') {
+      const current = await document(w.id);
+      await engine.observe(w.id, current.revision, { ...current.observation!,
+        candidate: { ...current.candidate!, baseSha: originalBase } });
+    }
+    const trial = structuredClone(actualTrial);
+    if (variant === 'failed-build') trial.build = 'fail';
+    if (variant === 'failed-tests') trial.tests.failed = ['tests/unrelated.test.ts'];
+    if (variant === 'wrong-base') trial.baseTip = sha('wrong-base');
+    if (variant === 'wrong-merge') trial.mergeSha = sha('wrong-merge');
+    if (variant === 'missing-proof') delete trial.proofs['integration:recovery-fixture'];
+    if (variant === 'unheld' || variant === 'second-parent') trial.mergeSha = intended;
+    if (variant === 'wrong-head') {
+      trial.head = sha('wrong-head');
+      assert.equal((await request(token(coordinator), `work/${w.id}/merge-record`, { kind: 'trial', ...trial })).status, 409);
+    } else await send({ kind: 'trial', ...trial });
+    if (variant === 'latest-failed') await send({ kind: 'trial', ...actualTrial, tests: { ...actualTrial.tests, failed: ['tests/unrelated.test.ts'] } });
+    if (variant === 'latest-timeout') {
+      // Use the production phase names, so a final no-verdict supersedes the older pass.
+      const durations = Object.fromEntries(trialPhases.map(phase => [phase, 0])) as TrialPhaseDurations;
+      await send({ kind: 'trial', head: heads[n]!, baseTip: originalBase, mergeSha, outcome: 'timeout', phase: 'tests', reason: 'timed out', durationMs: 0,
+        phases: durations, attempts: [{ outcome: 'timeout', phase: 'tests', reason: 'timed out', phases: durations }] });
+    }
+    if (variant === 'trial-refusal') await send({ kind: 'refused', head: heads[n]!, reason: `${trialFailurePrefix}: tests tests/recovery.test.ts` });
+    if (variant === 'policy') {
+      const current = await document(w.id);
+      await engine.execute(admin, 'requirements', w.id, {
+        expectedPolicyRevision: current.policyRevision, reason: 'revised requirements', owner: current.owner,
+        criteria: current.criteria, dependencies: current.dependencies, exclusiveResources: current.exclusiveResources ?? [], producerProofs: current.producerProofs,
+      }, randomUUID());
+    }
+    if (advanceBase) await refresh(w.id);
+    if (variant === 'approval-superseded' || variant === 'changes-requested') {
+      const current = await document(w.id);
+      await engine.observe(w.id, current.revision, { ...current.observation!, reviews: [
+        ...(variant === 'changes-requested' ? current.observation!.reviews : []),
+        { id: 102, reviewer: 'replacement-reviewer', sha: current.candidate!.sha,
+          state: variant === 'changes-requested' ? 'CHANGES_REQUESTED' : 'APPROVED', source: 'control-plane' },
+      ] });
+    }
+    if (variant === 'review' || variant === 'superseded' || variant === 'rework') {
+      // Model changed review/candidate facts under the same locking and save path. An HTTP
+      // caller has no arbitrary state endpoint; this fixture only changes the rejection input.
+      await store.transaction(async (db, now) => {
+        const changed = (await lockedWork(db, [w.id])).find(entry => entry.id === w.id)!;
+        if (variant === 'superseded') changed.candidate = { ...changed.candidate!, sha: sha('superseded') };
+        else if (variant === 'rework') changed.reworkRequested = true;
+        else changed.observation = { ...changed.observation!, scopeFiles: undefined, landing: undefined, files: ['src/store/schema.ts'], reviews: [] };
+        engine.evaluate(changed, [changed], now);
+        await save(db, changed, admin.id, 'fixture.binding-changed', now);
+      });
+    }
+    for (const event of [{ kind: 'pushed', mergeSha: intended, pushedAt: iso(start) }, { kind: 'reconciled', mergeSha: intended, observedTip: mergeSha }] as const) {
+      const rejected = await request(token(coordinator), `work/${w.id}/merge-record`, event);
+      assert.equal(rejected.status, 409, `${variant}: ${JSON.stringify(rejected.body)}`);
+    }
+    const held = await document(w.id);
+    assert.notEqual(held.stage, 'done', variant);
+    assert.equal(held.delivery ?? null, null, variant);
+    assert.equal(held.mergeLedger?.state, 'refused', variant);
+    if (variant === 'policy') {
+      // Canonical restart: an actual route 409 for the on-main recovery must leave
+      // its original flight held while a second, eligible head still lands.
+      const nextNumber = n + 19, nextBranch = join(checkout, '.graphyard', 'worktrees', `GY-${nextNumber}-1`);
+      git(checkout, 'worktree', 'add', '-q', '-b', `graphyard/gy-${nextNumber}-1`, nextBranch, containing);
+      heads[nextNumber] = await commit(nextBranch, `src/after-recovery-${n}.ts`, 'export const next = true;\n', 'unrelated queued change');
+      const next = await submittedItem(nextNumber);
+      const eventsBefore = await ledgerKinds(w.id);
+      const healthy = fixtureReads(), cycleState = emptyDaemonState(config);
+      const effects = effectsFor({ work: async () => [await document(w.id), await document(next.id)], now: () => start, mergeWriter: healthy.reads });
+      const restarted = await runCycle(config, cycleState, effects, () => start);
+      assert.ok(restarted.actions.some(action => action.work === w.key && action.state === 'failed' && /remains held/.test(action.detail)));
+      assert.equal(inFlightKey(cycleState), next.key);
+      await mergeWriterIdle(cycleState);
+      await runCycle(config, cycleState, effects, () => start);
+      assert.equal((await document(next.id)).stage, 'done');
+      assert.equal(firstParents()[0], (await document(next.id)).delivery?.mergeSha);
+      // Restart again to show the held source cannot be retrialled against itself.
+      await runCycle(config, emptyDaemonState(config), effects, () => start);
+      assert.deepEqual([healthy.trials.length, healthy.pushes.length], [1, 1]);
+      assert.equal(healthy.trials[0]!.mergeSha, (await document(next.id)).delivery?.mergeSha);
+      assert.deepEqual(await ledgerKinds(w.id), eventsBefore);
+      const stillHeld = await document(w.id);
+      assert.deepEqual(stillHeld.mergeLedger, held.mergeLedger);
+      assert.deepEqual(stillHeld.evidence, held.evidence);
+      assert.equal(stillHeld.delivery ?? null, null);
+    }
+  }
+
 });

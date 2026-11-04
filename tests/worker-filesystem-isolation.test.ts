@@ -72,6 +72,64 @@ for (const directory of [home, unrelated, root]) {
 console.log('host writes denied');
 `;
 
+test('integration:worker-reparenting — cache publication, hardlinks and local Git receive-pack migration work inside the composed ordinary worker boundary', async () => {
+  const f = await fixture();
+  const worker = await coordinatorConfinement({ kind: 'codex', args: ['--sandbox', 'workspace-write'],
+    coordinatorRoot: f.root, sessionDirectory: f.worktree, credentialMask: f.mask,
+    secretsBus: null, writable: [f.slots] });
+  assert.ok(worker);
+  const operations = `
+    const fs = require('node:fs'), path = require('node:path'), assert = require('node:assert/strict');
+    const { spawnSync, execFileSync } = require('node:child_process');
+    const [mode, worktree, ...storage] = process.argv.slice(1);
+    const denied = mode === 'previous';
+    for (const [index, directory] of [worktree, ...storage].entries()) {
+      const base = path.join(directory, 'reparent-' + mode + '-' + index);
+      const source = path.join(base, 'temporary'), archive = path.join(base, 'archive');
+      fs.mkdirSync(source, { recursive: true }); fs.mkdirSync(archive);
+      fs.writeFileSync(path.join(source, 'file'), 'cache');
+      fs.mkdirSync(path.join(source, 'package'));
+      fs.writeFileSync(path.join(source, 'package', 'metadata'), 'published');
+      const moves = [
+        () => fs.linkSync(path.join(source, 'file'), path.join(archive, 'linked')),
+        () => fs.renameSync(path.join(source, 'file'), path.join(archive, 'file')),
+        () => fs.renameSync(path.join(source, 'package'), path.join(archive, 'package')),
+      ];
+      for (const move of moves) {
+        if (denied) assert.throws(move, { code: 'EXDEV' }); else move();
+      }
+      if (!denied) {
+        assert.equal(fs.readFileSync(path.join(archive, 'package', 'metadata'), 'utf8'), 'published');
+        assert.equal(fs.statSync(path.join(archive, 'file')).ino, fs.statSync(path.join(archive, 'linked')).ino);
+      }
+    }
+    const source = path.join(worktree, 'push-' + mode), target = source + '.git';
+    const git = (...args) => execFileSync('git', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+    git('init', '-q', '-b', 'main', source); git('init', '-q', '--bare', target);
+    fs.writeFileSync(path.join(source, 'payload'), 'new objects');
+    git('-C', source, 'add', 'payload');
+    git('-C', source, '-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'payload');
+    const pushed = spawnSync('git', ['-C', source, 'push', target, 'HEAD:refs/heads/main'], { encoding: 'utf8' });
+    if (denied) {
+      assert.notEqual(pushed.status, 0);
+      assert.match(pushed.stderr, /Invalid cross-device link/);
+      assert.match(pushed.stderr, /unable to migrate objects/);
+    } else {
+      assert.equal(pushed.status, 0, pushed.stderr);
+      assert.equal(git('--git-dir', target, 'show', 'main:payload').trim(), 'new objects');
+    }
+  `;
+  // Exercise the actual policy first: reverting the source must fail on EXDEV,
+  // before any assertion about how the legacy policy is reconstructed.
+  run(worker.wrapper, f.worktree, process.execPath, ['-e', operations, 'fixed', f.worktree, f.runtime, f.slots, '/tmp', '/var/tmp']);
+  run(worker.wrapper, f.worktree, process.execPath, ['-e', deniedOperations, f.home, f.unrelated, f.root, f.worktree]);
+  // Recreate the previous socket domain in the very same mount composition.
+  // Omitting REFER (including from each grant) implicitly denies reparenting.
+  const previous = worker.wrapper.map(word => word.replace('refer = 1 << 13', 'refer = 0'));
+  assert.notDeepEqual(previous, worker.wrapper);
+  run(previous, f.worktree, process.execPath, ['-e', operations, 'previous', f.worktree, f.runtime, f.slots, '/tmp', '/var/tmp']);
+});
+
 test('integration:worker-host-filesystem-isolation — all runtimes, terminal roles, headless roles, master and merge trials deny host creation, overwrite, rename and deletion', async () => {
   const f = await fixture();
   for (const role of ['worker', 'reviewer', 'producer', 'approver', 'spec-checker']) {
@@ -254,27 +312,10 @@ test('integration:worker-host-filesystem-isolation — runTrialAttempt excludes 
   assert.equal(readFileSync(join(f.unrelated, 'sentinel'), 'utf8'), 'protected\n');
 });
 
-test('integration:worker-home-deletion-regression — cold-cache dashboard trials install and run browser checks inside allocated state', async () => {
+test('integration:worker-home-deletion-regression — cold-cache dashboard trials use installed browsers and run browser checks inside allocated state', async () => {
   const f = await fixture(true);
-  // Exercise the real npm/npx commands and namespace without a network download. The fixture
-  // installer performs the cache writes required by Playwright, and the browser check uses them.
-  const modules = join(f.root, 'node_modules');
-  mkdirSync(join(modules, '.bin'), { recursive: true });
-  mkdirSync(join(modules, 'playwright'));
-  writeFileSync(join(modules, 'playwright', 'package.json'), JSON.stringify({ name: 'playwright', version: '1.0.0', bin: { playwright: 'cli.cjs' } }));
-  writeFileSync(join(modules, 'playwright', 'cli.cjs'), `#!/usr/bin/node
-    const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
-    assert.deepEqual(process.argv.slice(2), ['install', 'chromium']);
-    assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, path.join(process.env.HOME, '.cache', 'ms-playwright'));
-    assert.equal(process.env.npm_config_cache, path.join(process.env.HOME, '.npm'));
-    assert.equal(fs.existsSync(process.env.PLAYWRIGHT_BROWSERS_PATH), false, 'cold browser cache');
-    fs.mkdirSync(process.env.PLAYWRIGHT_BROWSERS_PATH, { recursive: true });
-    fs.writeFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'installed');
-    fs.mkdirSync(process.env.npm_config_cache, { recursive: true });
-    fs.writeFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'cached');
-  `);
-  chmodSync(join(modules, 'playwright', 'cli.cjs'), 0o755);
-  symlinkSync('../playwright/cli.cjs', join(modules, '.bin', 'playwright'));
+  // Exercise the real npm command and namespace without a network download. The
+  // installed browser path stays read-only; npm caches and browser profiles use allocated state.
   writeFileSync(join(f.root, 'package-lock.json'), '{}');
   writeFileSync(join(f.root, 'package.json'), JSON.stringify({ scripts: {
     build: 'node -e "require(\'fs\').writeFileSync(\'built\', \'built\')"',
@@ -283,8 +324,17 @@ test('integration:worker-home-deletion-regression — cold-cache dashboard trial
   writeFileSync(join(f.root, 'browser.cjs'), `
     const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
     assert.equal(fs.readFileSync('built', 'utf8'), 'built');
-    assert.equal(fs.readFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'utf8'), 'installed');
-    assert.equal(fs.readFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'utf8'), 'cached');
+    assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, '/opt/graphyard-browsers');
+    assert.throws(() => fs.writeFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'write-probe'), 'bad'), error => error.code === 'EROFS');
+    assert.equal(process.env.npm_config_cache, path.join(process.env.HOME, '.npm'));
+    const profile = path.join(process.env.XDG_CACHE_HOME, 'browser-profile');
+    assert.equal(fs.existsSync(profile), false, 'cold private browser profile');
+    fs.mkdirSync(profile, { recursive: true });
+    fs.writeFileSync(path.join(profile, 'state'), 'private profile');
+    fs.mkdirSync(process.env.npm_config_cache, { recursive: true });
+    fs.writeFileSync(path.join(process.env.npm_config_cache, 'cache-probe'), 'cached');
+    assert.equal(fs.readFileSync(path.join(profile, 'state'), 'utf8'), 'private profile');
+    assert.equal(fs.readFileSync(path.join(process.env.npm_config_cache, 'cache-probe'), 'utf8'), 'cached');
     { ${deniedOperations.replace('const protectedVisible = true', 'const protectedVisible = false').replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
     console.log('browser cache consumed');
   `);

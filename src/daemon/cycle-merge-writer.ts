@@ -14,7 +14,7 @@ import { itemPreviewStep, previewSiteOf, previewSkip, runPreview, type ItemPrevi
 import { relandItemFor, relandTitle, runServeRevert, type RelandInput } from '../merge-writer/serve-revert.js';
 import { loadProjectDelivery } from '../project-applications.js';
 import { defaultMergeBatch, mergeBatch, type BatchResult } from '../merge-writer/batch.js';
-import { baseFailureHoldMs, criterionProofs, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { baseFailureHoldMs, criterionProofs, e2eProofsOf, firstParentHolds, keyReusedRefusal, mergeRecordStatus, mergeQueue, previewRecordEvent, proofTestFiles, pushArgs, pushEnvironment, pushFailureWithStderr, reconcileIntents, runMergeTrial, staleLeaseRejection, trialRefusalHeld, type MergePorts, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { message, storeAction, type DaemonState } from './state.js';
 import type { Cycle } from './cycle.js';
 
@@ -246,18 +246,8 @@ function countTrialTimeout(writer: MergeWriterState, flight: { key: string; id: 
 // ---- Record writes that converge (GY-1852) ------------------------------------------------------------
 
 const errorText = (error: unknown) => error instanceof Error ? error.message : String(error);
-/** A failed write's HTTP status: the error's own, or the `Graphyard refused PATH (NNN)` its message names; null for a transport failure or a kill. */
-const statusOf = (error: unknown) => {
-  const status = (error as { status?: unknown } | null)?.status;
-  if (typeof status === 'number') return status;
-  // GY-3039: the loop's mutation path throws a bare Error carrying only `confirmedRefusal` for a 4xx
-  // the control plane judged (cli/master/session.ts), so the numeric status never arrives here. A
-  // merge-record refusal is a 409 — the server's answer, adopted at once, never replayed.
-  if ((error as { confirmedRefusal?: unknown } | null)?.confirmedRefusal === true) return 409;
-  return Number(/\brefused \S+ \((\d{3})\)/.exec(errorText(error))?.[1]) || null;
-};
 /** Whether a failed write's reply is unknown, so the server may hold it: no status, a 5xx, 408 or 429. Any other answer is the server's decision on that input. */
-const replyUnknown = (error: unknown) => { const status = statusOf(error); return status === null || status >= 500 || status === 408 || status === 429; };
+const replyUnknown = (error: unknown) => { const status = mergeRecordStatus(error); return status === null || status >= 500 || status === 408 || status === 429; };
 
 /**
  * GY-2053: the writer's configured worst case for one flight — every retrial its settings allow, each one trial timeout, plus one cycle — the
@@ -690,8 +680,9 @@ export async function mergeWriterStep(cycle: Cycle) {
     catch (error) { if (writer.unconfirmed?.length) await effects.persist(state); throw error; }
     for (const entry of reconciled) {
       if (entry.outcome === 'reconciled') writer.lastMergeAt = at();
-      performed.push(storeAction(state, `merge-writer-reconcile:${entry.key}:${entry.mergeSha}`, { kind: 'merge', work: entry.key, principal: null, state: 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
-        detail: entry.outcome === 'reconciled' ? `Reconciled an open intent of ${entry.key}: ${reads.baseBranch} holds ${entry.mergeSha}, so it is recorded pushed and reconciled and the item delivered without a second push`
+      performed.push(storeAction(state, `merge-writer-reconcile:${entry.key}:${entry.mergeSha}`, { kind: 'merge', work: entry.key, principal: null, state: entry.outcome === 'held' ? 'failed' : 'done', attempts: 1, epoch: null, cycle: state.cycle, at: at(),
+        detail: entry.outcome === 'held' ? `Recovery of ${entry.key} for ${entry.mergeSha} remains held: ${entry.reason}; original intent and trial retained, head excluded from fresh merges`
+          : entry.outcome === 'reconciled' ? `Reconciled an open intent of ${entry.key}: ${reads.baseBranch} holds ${entry.mergeSha}, so it is recorded pushed and reconciled and the item delivered without a second push`
           : `Settled an open intent of ${entry.key} for ${entry.mergeSha}: it is refused and the current head queued again` }));
       changed = true;
     }
@@ -712,8 +703,9 @@ export async function mergeWriterStep(cycle: Cycle) {
       counted.reason = null;
       changed = true;
     }
-    if (!reconciled.length) {
-      const queue = mergeQueue(snapshot.work, ledger, now());
+    if (reconciled.every(entry => entry.outcome === 'held')) {
+      const held = new Set(reconciled.map(entry => entry.key));
+      const queue = mergeQueue(snapshot.work.filter(item => !held.has(item.key)), ledger, now());
       // GY-2079: the heads yielding their queue turn keep the oldest-first order only behind every head not yielding, and the next merge is the first head in that order.
       const yielding = new Set(writer.timeouts.map(entry => `${entry.key}:${entry.head}`));
       const ordered = yielding.size

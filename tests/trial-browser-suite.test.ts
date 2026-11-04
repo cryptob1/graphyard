@@ -5,7 +5,7 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { defaultChildRun } from '../src/child-runner.js';
-import { browserSuite, runTrial, trialAttempts, trialMerge } from '../src/merge-writer/trial.js';
+import { browserSuite, runTrial, trialMerge } from '../src/merge-writer/trial.js';
 import { trialFailureReason } from '../src/merge-writer/executor.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
@@ -39,10 +39,10 @@ test('unit:trial-runs-browser-suite — a trial of a change touching web/ runs n
     const verdict = await runTrial({ root, base: await temporaryDirectory('trial-browser-root', tmpdir()), mergeSha: merged.mergeSha, changedFiles: [path], timeoutMs: 120_000, key: 'GY-9', environment: { PATH: process.env.PATH! }, run, retries: 0 });
     return { verdict, npm };
   };
-  const ran = ['npm run build', 'npx playwright install chromium', 'npm run test:browser'];
+  const ran = ['npm run build', 'npm run test:browser'];
 
   const dashboard = await trialOf('web/app.tsx', true);
-  assert.deepEqual(dashboard.npm, ran, 'a change to web/ provisions Chromium and runs the browser suite after the build');
+  assert.deepEqual(dashboard.npm, ran, 'a change to web/ uses installed Chromium and runs the browser suite after the build');
   assert.deepEqual(dashboard.verdict.tests.failed, [browserSuite]);
   assert.match(trialFailureReason({ run: dashboard.verdict })!, /tests browser-tests\//, 'a failing browser test refuses the merge');
   assert.match(dashboard.verdict.logTail, /dashboard\.spec\.ts:12/, 'the failing browser test is in the log');
@@ -51,12 +51,8 @@ test('unit:trial-runs-browser-suite — a trial of a change touching web/ runs n
   assert.deepEqual(passing.npm, ran);
   assert.equal(trialFailureReason({ run: passing.verdict }), null, 'a passing browser suite lets the merge through');
 
-  await assert.rejects(trialOf('web/app.tsx', true, true), error => {
-    const [attempt] = trialAttempts(error);
-    assert.equal(attempt.outcome, 'host-failure', 'a Chromium install that fails is the host\'s, retried, never a failing test of the merge');
-    assert.equal(attempt.phase, 'tests');
-    return true;
-  });
+  const offline = await trialOf('web/app.tsx', false, true);
+  assert.deepEqual(offline.npm, ran, 'installed image browsers require no download or write to the read-only asset path');
 
   const daemon = await trialOf('src/daemon/cycle.ts', true);
   assert.deepEqual(daemon.npm, ['npm run build'], 'a change touching only src/daemon/ never runs the browser suite');
