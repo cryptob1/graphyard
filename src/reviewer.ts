@@ -1,7 +1,7 @@
 import type { ReviewCriterion } from './review-prompt.js';
 export type { ReviewCriterion } from './review-prompt.js';
 import { reviewStandard, repetitionReviewSection } from './review-prompt.js';
-import { simplicityParagraph, blockingStandardSection, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection } from './review-prompt.js';
+import { simplicityParagraph, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection } from './review-prompt.js';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
@@ -38,8 +38,6 @@ import { LauncherUnavailableError } from './master/config.js';
 export { controlPlaneFindingSection } from './review-prompt.js';
 export { reviewStandard, repetitionReviewSection, repeatingPaths, touchesRepeatingPath } from './review-prompt.js';
 export { simplicityParagraph, blockingStandardSection, postDeployReviewSection, singleCaseReviewSection, criteriaRuleSection } from './review-prompt.js';
-/** The most threads one pull-request-era launch listed, and the most comment IDs one thread's record kept; bounds the fields old ledger records still carry. */
-const listedThreadLimit = 100, threadAliasLimit = 50;
 
 const sha40 = z.string().regex(/^[0-9a-f]{40}$/i);
 /** The most BLOCKING lines of a post-merge verdict that are each filed as their own follow-up item (GY-1525 AC-4). */
