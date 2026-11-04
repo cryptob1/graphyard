@@ -60,6 +60,8 @@ Back up with `graphyard db backup`, verify with `db verify`, and fence before a 
 
 [Upgrade](install.md#upgrading-an-existing-installation) installs dependencies in separate `deploy/build/.graphyard/cli-releases/<commit>` worktrees. The existing `install --plan`/apply flow builds and restarts the exact source. Only after `/healthz?strict` passes does an atomic symlink rename publish `deploy/build/.graphyard/cli-published`. Launchers resolve it before loading tsx; the watched checkout and legacy `deploy/build` retain their code and dependencies.
 
+A watcher started before immutable CLI releases keeps its old upgrade code loaded even after its source changes. The generated deploy unit now includes an implementation marker. Run `graphyard up` from the updated CLI: existing supervisor alignment rewrites the stale deploy unit, reloads systemd and restarts that watcher onto the current implementation. Matching units stay untouched. Do this before the next deployment; replacing source alone does not migrate a running watcher.
+
 Confined sessions keep the stable build tree and future releases read-only, with credentials hidden. Published artifacts remain for running processes and rollback. Dependency-install failure leaves the healthy CLI/server pair untouched; restart or health failure uses schema-aware rollback. Coordinator pin and installation gates stay unchanged. During server/CLI handover, launchers retry refused version checks three times, 500 ms apart, reloading the pointer. Persistent mismatch refuses before an API request. Lease commands (`heartbeat`, `claim`, `complete`, `blocked`, `defer`) retain warning-and-proceed behavior. Ordinary deployment needs no manual upgrade or trust change.
 
 ## Manual fallback

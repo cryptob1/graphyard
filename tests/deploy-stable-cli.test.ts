@@ -86,7 +86,7 @@ function watcher(root: string, run: ChildRun) {
   let ready!: () => void, deployed!: () => void;
   const started = new Promise<void>(done => { ready = done; });
   const serving = new Promise<void>(done => { deployed = done; });
-  child.stderr.on('data', data => { stderr += data; if (stderr.includes('[graphyard-deploy] serving ')) deployed(); });
+  child.stderr!.on('data', data => { stderr += data; if (stderr.includes('[graphyard-deploy] serving ')) deployed(); });
   child.on('message', async (message: any) => {
     if (message.kind !== 'run') return;
     try {
@@ -111,11 +111,13 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
   await mkdir(checkout); await mkdir(directory, { recursive: true });
   for (const name of ['src', 'bin']) await cp(join(source, name), join(checkout, name), { recursive: true });
   for (const name of ['package.json', 'package-lock.json']) await cp(join(source, name), join(checkout, name));
+  // Keep the test IPC channel until the real command finishes its graceful stop.
+  const entry = join(checkout, 'src/cli.ts');
+  await writeFile(entry, (await readFile(entry, 'utf8')).replace('main().catch(', 'main().finally(() => { if (process.connected) process.disconnect(); }).catch('));
   await cp(join(checkout, 'src/child-runner.ts'), join(checkout, 'src/child-runner-real.ts'));
   await writeFile(join(checkout, 'src/child-runner.ts'), `
     export * from './child-runner-real.js';
     import { defaultChildRun as real } from './child-runner-real.js';
-    if (process.send) process.once('SIGTERM', () => process.disconnect());
     let sequence = 0;
     const pending = new Map();
     if (process.send) process.on('message', message => {
@@ -231,7 +233,8 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     } });
     assert.ok(pending, 'alignment must restart the predecessor, even with unchanged ExecStart');
     assert.equal(calls.filter(call => call.includes(' restart ')).length, 1, 'only the deploy watcher restarts');
-    await installStarted;
+    await Promise.race([installStarted, pending]);
+    assert.equal(installs[0], cliReleasePath(directory, b), 'the restarted watcher installs into the candidate, never the active legacy tree');
     assert.equal(git(legacy, 'rev-parse', 'HEAD'), a, 'the active legacy CLI source stays unchanged throughout install');
     for (let index = 0; index < 3; index++) await check();
     assert.equal(git(legacy, 'rev-parse', 'HEAD'), a); assert.equal(git(checkout, 'rev-parse', 'HEAD'), a);
@@ -245,6 +248,8 @@ test('integration:deploy-stable-cli — real CLI loading survives delayed instal
     assert.equal(await activeCliRoot(legacy), cliReleasePath(directory, b)); await check(); await check(checkout);
     assert.match(restartCause({ credentialFile: join(base, 'token'), cliPath: join(legacy, 'bin/graphyard.mjs') }, checkout, a) ?? '', /deploy unit serves/);
     assert.equal(await ports.head(), b); assert.deepEqual(previews, [b]);
+    const aligned = await alignLoopUnit(unitInput, { home, run: () => { throw new Error('unchanged units must not restart'); } });
+    assert.equal(aligned.wrote, 'unchanged');
 
     const release = cliReleasePath(directory, b);
     sessions.set(release, await maskedSession(release, checkout, configHome, secret));
