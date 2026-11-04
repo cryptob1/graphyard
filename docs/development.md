@@ -71,4 +71,4 @@ Edit handwritten guides and their `<!-- page: Section | order | summary -->` met
 
 Diagram specs live in `scripts/render-docs-diagrams.mjs`. The opening video has a separate HTML source and renderer under `scripts/walkthrough/`; [rendering instructions](walkthrough.md) cover both committed media assets.
 
-Schema generation 12 retires job holds and their status fields, the unused work-index owner, epoch and next-action columns, and the legacy merger pin and production observation tables. Startup migrates existing databases and rebuilds the work index; fresh databases omit those fields. Job scheduling still uses wake generations, due times and lease tokens.
+Schema generation 12 retires job holds and their status fields, the unused work-index owner, epoch and next-action columns, and the legacy merger pin and production observation tables. Startup migrates existing databases and rebuilds the work index; fresh databases omit those fields. Repeating the migration skips column removal when the index projection is unchanged, so live writers do not block startup. Job scheduling still uses wake generations, due times and lease tokens.

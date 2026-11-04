@@ -73,11 +73,11 @@ export const workIndex = defineTable({
   pr numeric, pr_state text, due_at timestamptz,
   settled boolean NOT NULL DEFAULT false, summary jsonb, trimmed jsonb
 );
-ALTER TABLE work_index DROP COLUMN IF EXISTS owner, DROP COLUMN IF EXISTS epoch, DROP COLUMN IF EXISTS next_action;
 ${projection}
 DO $work_index$ BEGIN
   IF obj_description('work_index'::regclass, 'pg_class') IS DISTINCT FROM '${workIndexDigest}' THEN
     LOCK TABLE work_items IN SHARE ROW EXCLUSIVE MODE;
+    ALTER TABLE work_index DROP COLUMN IF EXISTS owner, DROP COLUMN IF EXISTS epoch, DROP COLUMN IF EXISTS next_action;
     CREATE INDEX IF NOT EXISTS work_index_due ON work_index(due_at) WHERE due_at IS NOT NULL;
     CREATE INDEX IF NOT EXISTS work_index_number ON work_index(number);
     DROP TRIGGER IF EXISTS work_index_sync ON work_items;

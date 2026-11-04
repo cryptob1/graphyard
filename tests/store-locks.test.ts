@@ -220,16 +220,16 @@ function expectedIndex(work: Work, position: number) {
     return times.length ? Math.max(...times) : 0;
   });
   return {
-    number: position, key: work.key ?? null, stage: work.stage ?? null, priority: number(work.priority), owner: work.lease?.owner ?? null,
-    epoch: number(work.epoch), revision: number(work.revision), pr: number(work.candidate?.pr),
-    pr_state: work.observation?.merged === true ? 'merged' : work.observation?.prState ?? null, next_action: work.nextAction?.kind ?? null,
+    number: position, key: work.key ?? null, stage: work.stage ?? null, priority: number(work.priority),
+    revision: number(work.revision), pr: number(work.candidate?.pr),
+    pr_state: work.observation?.merged === true ? 'merged' : work.observation?.prState ?? null,
     due_at: due.length ? new Date(Math.min(...due)).toISOString() : null, settled: deliverySettled(work),
   };
 }
 const numeric = (value: unknown) => value === null ? null : Number(value);
 const stored = (row: any) => ({
-  number: Number(row.number), key: row.key, stage: row.stage, priority: numeric(row.priority), owner: row.owner, epoch: numeric(row.epoch),
-  revision: numeric(row.revision), pr: numeric(row.pr), pr_state: row.pr_state, next_action: row.next_action,
+  number: Number(row.number), key: row.key, stage: row.stage, priority: numeric(row.priority),
+  revision: numeric(row.revision), pr: numeric(row.pr), pr_state: row.pr_state,
   due_at: row.due_at ? (row.due_at as Date).toISOString() : null, settled: row.settled,
 });
 
@@ -275,7 +275,7 @@ test('integration:index-matches-documents — the index equals the documents aft
   assert.ok(claimed.action); await check('action claimed');
   await settleFixture(store, executor, claimed.action!.id, { result: 'failed', reason: 'no worker free' }); await check('action failed');
   w = await engine.execute(worker, 'claim', w.id, {}, randomUUID()); await check('leased');
-  assert.equal((await store.pool.query('SELECT owner FROM work_index WHERE id=$1', [w.id])).rows[0].owner, worker.id);
+  assert.equal((await reload(w)).lease?.owner, worker.id);
   w = await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: '/tmp/indexed', branch: 'graphyard/indexed' }, randomUUID());
   w = await engine.execute(worker, 'submit', w.id, { epoch: 1, pr: 901 }, randomUUID()); await check('submitted');
   const observation = (): Observation => ({ clockOffset: { min: 0, max: 0 }, candidate: { sha: head, baseSha: base, pr: 901, branch: 'graphyard/indexed', author: 'implementer' },
