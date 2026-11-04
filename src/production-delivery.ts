@@ -1,4 +1,4 @@
-import { once, digest } from './store/mutations.js';
+import { once } from './store/mutations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Store } from './store.js';

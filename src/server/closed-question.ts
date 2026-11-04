@@ -98,6 +98,6 @@ export async function judgeClosedQuestion(services: Services, actor: Principal, 
     await (services.engine as unknown as { recordDispatch(db: Db, work: Work, now: Date): Promise<void> }).recordDispatch(db, item, now);
     await save(db, item, actor.id, verdict.verdict === 'decided' ? 'closed-question.answered' : 'closed-question.escalated', now, { evidence, requestedBy: actor.id });
     const result = { work: item.key, evidence, verdict: verdict.verdict, escalation: verdict.escalation ?? null, gates: item.gates, stage: item.stage };
-      return result;
+    return result;
   }));
 }
