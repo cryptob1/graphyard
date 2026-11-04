@@ -536,12 +536,12 @@ async function request(credential: string, path: string, body?: unknown, key: st
   return { status: response.status, body: await response.json() as any };
 }
 /** An item the worker claimed, registered on its branch and submitted with `complete --head`, as GY-1523 submits it. */
-async function submittedItem(n: number, proofs = ['unit:app-works', 'e2e:fixture']) {
+async function submittedItem(n: number, proofs = ['unit:app-works', 'e2e:fixture'], workspace = n) {
   let w = await engine.execute(admin, 'create', null, { type: 'chore',  title: `Executor fixture ${n}`, criteria: [{ id: 'AC-1', text: 'Behaves', proofs }] }, randomUUID());
   w = await engine.execute(admin, 'ready', w.id, {}, randomUUID());
   const pulled = await engine.pullAssignment(worker, { work: w.id }, randomUUID());
   assert.equal(pulled.assigned?.id, w.id, JSON.stringify(pulled.refused)); w = pulled.assigned!;
-  await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/exec-${n}`, branch: `graphyard/gy-${n}-1` }, randomUUID());
+  await engine.execute(worker, 'workspace', w.id, { epoch: 1, host: 'test', path: `/tmp/exec-${workspace}`, branch: `graphyard/gy-${workspace}-1` }, randomUUID());
   const body = completionBody(['1', '--head', heads[n]!], () => heads[n]!);
   assert.deepEqual(body, { epoch: 1, head: heads[n] });
   return engine.execute(worker, 'submit', w.id, body, randomUUID());
@@ -962,8 +962,11 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
   // The same real, measured flight supplies adversarial records; none may deliver a held
   // commit just because it is on main. Every mutation still goes through the typed route.
   const actualTrial = trialsBefore[0]!.payload;
-  for (const variant of ['failed-build', 'failed-tests', 'latest-failed', 'latest-timeout', 'trial-refusal', 'unheld', 'wrong-merge', 'wrong-base', 'wrong-head', 'missing-proof', 'policy', 'review', 'superseded'] as const) {
-    const w = await submittedItem(n, ['integration:recovery-fixture', 'e2e:fixture']);
+  for (const [index, variant] of (['failed-build', 'failed-tests', 'latest-failed', 'latest-timeout', 'trial-refusal', 'unheld', 'wrong-merge', 'wrong-base', 'wrong-head', 'missing-proof', 'policy', 'review', 'superseded'] as const).entries()) {
+    // Independent items retain the measured head but reserve distinct workspaces.
+    const workspace = n + index + 1;
+    git(checkout, 'branch', `graphyard/gy-${workspace}-1`, heads[n]!);
+    const w = await submittedItem(n, ['integration:recovery-fixture', 'e2e:fixture'], workspace);
     const send = (event: MergeRecordEvent) => record({ ...w, mergeAttempt: { id: randomUUID(), write: 0 } }, event);
     const intended = variant === 'unheld' ? sha('unheld-recovery') : mergeSha;
     await send({ kind: 'intent', head: heads[n]!, baseTip: originalBase, mergeSha: intended, risk: 'normal', at: iso(start) });
