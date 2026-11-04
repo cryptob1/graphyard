@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { DEPLOYMENT_GRACE_MS, ENDPOINT_FRESH_MS, productionProvider, ProductionWatch } from '../src/production-watch.js';
 import { buildIdentity } from '../src/protocol-version.js';
 import { Engine } from '../src/engine.js';

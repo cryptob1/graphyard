@@ -6,7 +6,7 @@ import { readFileSync } from 'node:fs';
 import { mkdir, readFile, realpath, rm, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { daemonStateSchema, daemonSummary, emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { daemonEffects } from '../src/daemon/effects.js';
 import { emptyMergeWriterState, mergeRecordKey, mergeWriterIdle, mergeWriterReads, mergeWriterReworkKey, mergeWriterStateSchema, mergeWriterSummary, replayUnconfirmed, snapshotLedger, trialFailureRework, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';

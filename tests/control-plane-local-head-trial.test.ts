@@ -4,7 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { mkdir, realpath, rm, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
 import { mergeWriterIdle, mergeWriterReads, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import { runMergeTrial, type MergeTrialRun } from '../src/merge-writer/executor.js';

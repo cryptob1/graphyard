@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 import pg from 'pg';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { z } from 'zod';
 import { Store } from '../src/store.js';
 import { Engine, RenewalFault, renewalFaultEvent, renewalFaultOf } from '../src/engine.js';

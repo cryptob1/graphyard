@@ -1,4 +1,4 @@
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './warm-postgres.js';
 import { Store } from '../../src/store.js';
 import { temporaryDirectory } from './temp-dirs.js';
 
