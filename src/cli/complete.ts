@@ -298,6 +298,25 @@ export async function judgeRerun(root: string, work: { key: string; criteria?: {
  * The report never changes what is submitted — the gates decide from trusted evidence alone — but a
  * head whose proof failed here is the head the control plane returns before review.
  */
+/** Run the refused trial files inside the caller's private checkout. */
+export async function completionRerun(root: string, work: any) {
+    const failing = trialFailureTests(work.mergeLedger?.refusal, root);
+    let rerun: { flaked: RerunCase[]; baseFailures: RerunCase[]; note?: RerunNote } = { flaked: [], baseFailures: [] };
+    if (failing.length) {
+      console.error(`complete re-runs the merge trial's failing tests on this head before submitting: ${failing.join(', ')}`);
+      const first = await rerunTrialFiles(root, failing);
+      // GY-2968: a failing case outside the item's proofs retries once on the head and once on the
+      // base before anything is refused — a flake or a base failure is recorded, not a refusal.
+      // GY-2980: a fault of the rerun itself is no refusal either — the note travels with the
+      // submission and the merge trial judges the head.
+      if (!first.ok) rerun = await judgeRerun(root, work, failing, first);
+      if (rerun.note) console.error(rerun.note.note);
+      if (rerun.flaked.length) console.error(`complete records the flaked ${rerun.flaked.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
+      if (rerun.baseFailures.length) console.error(`complete records the base failures ${rerun.baseFailures.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
+    }
+    return rerun;
+}
+
 export const completeCommand: CliCommand = {
   name: 'complete',
   scope: 'work',
@@ -315,20 +334,9 @@ export const completeCommand: CliCommand = {
     // before anything is submitted, so a head that still fails them no longer costs the
     // serial merge writer another trial slot. Only the item's latest refusal of exactly that shape
     // names files; every other item runs nothing.
-    const failing = trialFailureTests(work.mergeLedger?.refusal, context.repositoryRoot());
-    let rerun: { flaked: RerunCase[]; baseFailures: RerunCase[]; note?: RerunNote } = { flaked: [], baseFailures: [] };
-    if (failing.length) {
-      console.error(`complete re-runs the merge trial's failing tests on this head before submitting: ${failing.join(', ')}`);
-      const first = await rerunTrialFiles(context.repositoryRoot(), failing);
-      // GY-2968: a failing case outside the item's proofs retries once on the head and once on the
-      // base before anything is refused — a flake or a base failure is recorded, not a refusal.
-      // GY-2980: a fault of the rerun itself is no refusal either — the note travels with the
-      // submission and the merge trial judges the head.
-      if (!first.ok) rerun = await judgeRerun(context.repositoryRoot(), work, failing, first);
-      if (rerun.note) console.error(rerun.note.note);
-      if (rerun.flaked.length) console.error(`complete records the flaked ${rerun.flaked.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
-      if (rerun.baseFailures.length) console.error(`complete records the base failures ${rerun.baseFailures.map(locateRerunCase).join(', ')} on ${work.key}'s history`);
-    }
+    const { requestWorkerVerification } = await import('./worker-verification.js');
+    const checked = await requestWorkerVerification(context, work, { mode: 'complete', head: body.head, epoch: body.epoch });
+    const rerun = checked.rerun;
     let verification: Awaited<ReturnType<typeof selfVerification>> | { state: 'unavailable'; reason: string };
     try { verification = await selfVerification(context.repositoryRoot(), work.key); } catch (error: any) { verification = { state: 'unavailable', reason: `the worktree could not be read: ${error.message}` }; }
     // GY-2968: what the rerun set aside travels with the submission, for the control plane to

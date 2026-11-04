@@ -134,7 +134,7 @@ export async function createContext(command: string, id: string | undefined, arg
     await checkRelease();
     const token = await individualToken();
     if (!token) throw new Error('Set GRAPHYARD_TOKEN to your individual credential');
-    const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(cliRequestTimeoutMs) });
+    const response = await fetch(`${base}/api/${path}`, { method: data === undefined ? 'GET' : 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'Idempotency-Key': requestId }, body: data === undefined ? undefined : JSON.stringify(data), signal: AbortSignal.timeout(path.endsWith('/worker-verification') ? 60 * 60_000 : cliRequestTimeoutMs) });
     const body = await response.json();
     if (!response.ok) {
       // 'Invalid input' is what a request this server's schema predates reads as. When the server
