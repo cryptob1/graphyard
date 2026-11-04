@@ -21,6 +21,8 @@ Optional item `owner` names a human, separate from the worker lease. Set with cr
 
 When live registry sessions fill a worker role's capacity, its launch stays queued and status shows why. Each cycle retries; a freed slot launches it. Waiting claims no lease, adds no failed-launch cooldown and sends no incident wake. Real launch and registry failures still wake the master; open-work heartbeats continue.
 
+A runtime that starts then exits unsuccessfully within 60 seconds without committing or submitting counts as a failed launch. Before closing its pane, the loop saves a bounded, credential-masked error excerpt and an incident for that item/epoch. The profile cools off while healthy profiles remain available; repeated failures back off to at most 30 minutes. Another started pane does not clear the incident; useful or longer-lived work does. Unchanged incidents wake the configured master once across retries and loop restarts. Session runtime names follow the selected launch, including registry fallback.
+
 The loop follows the master's live Herdr pane after a move. Weekly/session limits or exhausted credits hold that account, close its pane and launch the next account in the same cycle. Status names the live pane, reports `screen unreadable` on read failure and `unknown` for missing runtime status.
 
 `master restart` restarts the install's loop unit; confined masters record a request. The loop reloads newly served code. [Unit names](delivery.md#continuous-deployment) are per install, with legacy aliases.
