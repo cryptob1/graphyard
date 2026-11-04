@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { existsSync, readFileSync } from 'node:fs';
-import { writeFile } from 'node:fs/promises';
+import { mkdir, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { acquireVerificationSlot, declareSlotFiles, heldSlots, othersDeclaredFiles } from '../src/master/verification-slots.js';
@@ -109,5 +109,46 @@ test('integration:verification-owner-identity — private container PID collisio
     const held = await acquireVerificationSlot({ directory, slots: 1, label: 'host successor' });
     assert.equal(held.slot, 0); held.release();
     assert.equal(heldSlots(directory).length, 0);
+  } finally { await stop(); }
+});
+
+
+test('integration:verification-owner-identity — interrupted declaration preserves ownership and reclamation', async () => {
+  const directory = await temporaryDirectory('verification-declaration');
+  const ready = join(directory, 'ready');
+  const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', `
+    import { acquireVerificationSlot, declareSlotFiles } from ${JSON.stringify(join(root, 'src/master/verification-slots.ts'))};
+    import { readFileSync, writeFileSync } from 'node:fs';
+    import assert from 'node:assert/strict';
+    const held = await acquireVerificationSlot({ directory: ${JSON.stringify(directory)}, slots: 1, label: 'interrupted declaration', files: 2 });
+    const owner = readFileSync(held.path + '/owner.json', 'utf8');
+    declareSlotFiles(held, 7);
+    assert.equal(readFileSync(held.path + '/owner.json', 'utf8'), owner);
+    // Pause at the failure boundary: next declaration truncated, before rename.
+    writeFileSync(held.path + '/files.json.next', '');
+    writeFileSync(${JSON.stringify(ready)}, 'ready');
+    setInterval(() => {}, 1000);
+  `], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
+  const stop = ownedGroupStop(child);
+  let output = ''; child.stderr!.on('data', chunk => output += chunk);
+  try {
+    await waitFor(ready, child, () => output);
+    assert.equal(await othersDeclaredFiles(directory), 7, 'last complete declaration remains visible');
+    for (const interrupted of ['', '{']) {
+      await writeFile(join(directory, 'slot-0', 'files.json'), interrupted);
+      assert.equal(await othersDeclaredFiles(directory), 2, 'malformed declaration retains initial budget');
+      assert.equal(heldSlots(directory).length, 1, 'live owner remains reserved');
+    }
+    await stop();
+    assert.equal(await othersDeclaredFiles(directory), 0, 'dead owner reclaimed despite interrupted metadata');
+    assert.equal(heldSlots(directory).length, 0);
+    const held = await acquireVerificationSlot({ directory, slots: 1, label: 'successor' });
+    held.release();
+    await mkdir(join(directory, 'slot-0'));
+    for (const legacy of ['', '{', JSON.stringify({ pid: process.pid, files: 3 })]) {
+      await writeFile(join(directory, 'slot-0', 'owner.json'), legacy);
+      await othersDeclaredFiles(directory);
+      assert.equal(heldSlots(directory).length, 1, 'unknown or PID-only ownership must not be reclaimed');
+    }
   } finally { await stop(); }
 });

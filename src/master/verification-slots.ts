@@ -66,7 +66,15 @@ async function lock(fd: number): Promise<boolean> {
     throw error;
   }
 }
-const readOwner = (path: string): SlotOwner | null => { try { return JSON.parse(readFileSync(join(path, 'owner.json'), 'utf8')); } catch { return null; } };
+const readOwner = (path: string): SlotOwner | null => {
+  let owner: SlotOwner;
+  try { owner = JSON.parse(readFileSync(join(path, 'owner.json'), 'utf8')); } catch { return null; }
+  try {
+    const files = JSON.parse(readFileSync(join(path, 'files.json'), 'utf8'));
+    if (Number.isInteger(files) && files >= 1) return { ...owner, files };
+  } catch { /* an absent or interrupted declaration leaves the initial budget intact */ }
+  return owner;
+};
 
 /** The slots held now, with their owners. */
 export function heldSlots(directory: string): { slot: number; owner: SlotOwner | null }[] {
@@ -79,14 +87,17 @@ export function heldSlots(directory: string): { slot: number; owner: SlotOwner |
 /**
  * Record on the holder's own slot how many suite files it runs at once (GY-1821): a run that starts
  * later takes only what the host's memory floor affords beyond what these runs declared. Best-effort —
- * a declaration that cannot be written leaves the slot as it was, and the next run plans on nothing.
+ * a declaration that cannot be written leaves the previous declaration or initial budget intact.
  */
 export function declareSlotFiles(held: HeldSlot, files: number, pid: number = process.pid): void {
   if (!(files >= 1)) return;
   try {
     const owner = readOwner(held.path);
     if (!owner || owner.identity !== identity || owner.pid !== pid) return;
-    writeFileSync(join(held.path, 'owner.json'), JSON.stringify({ ...owner, files: Math.floor(files) }));
+    // Never replace or truncate the locked inode or its ownership evidence.
+    const pending = join(held.path, 'files.json.next');
+    writeFileSync(pending, JSON.stringify(Math.floor(files)));
+    renameSync(pending, join(held.path, 'files.json'));
   } catch { /* the slot still holds the run; only the budget sharing is lost */ }
 }
 
@@ -106,10 +117,11 @@ async function reclaimStale(path: string) {
     if (!await lock(fd)) return false;
     const opened = fstatSync(fd), current = statSync(join(path, 'owner.json'), { throwIfNoEntry: false });
     if (!current || opened.ino !== current.ino || opened.dev !== current.dev) return false;
-    const owner = JSON.parse(readFileSync(fd, 'utf8')) as SlotOwner;
+    let owner: SlotOwner | null;
+    try { owner = JSON.parse(readFileSync(fd, 'utf8')); } catch { return false; }
     // Old PID-only records cannot safely be judged from another namespace. Keep
     // them: there is no kernel ownership evidence to distinguish live from stale.
-    if (!owner.locked) return false;
+    if (!owner?.locked) return false;
     const tomb = `${path}.stale-${randomUUID()}`;
     try { renameSync(path, tomb); } catch { return false; }
     rmSync(tomb, { recursive: true, force: true });
