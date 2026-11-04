@@ -9,7 +9,7 @@ import { reconciliationRefusalPrefix } from '../model/merge-authorization.js';
 import { save, eventWorkSql } from '../store.js';
 import { evaluateLandability } from '../model/landability.js';
 import { exactApproval } from '../model/review.js';
-import { lockedWork } from '../store/locked-read.js';
+import { decisionWork } from '../store/decision-read.js';
 import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.js';
 import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
 import { defaultMergeBatch } from '../merge-writer/batch.js';
@@ -154,7 +154,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
   return engine.store.transaction(async (db: pg.PoolClient, now: Date) => {
     const replay = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
     if (replay) { demand(replay.fingerprint === fingerprint, 'Idempotency key reused with different input'); return replay.result; }
-    const all = await lockedWork(db, [id]);
+    const all = await decisionWork(db, [id]);
     const work = all.find(item => item.id === id || item.key === id); demand(work, 'Work item not found', 404);
     const receipt = async (result: unknown) => { await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result; };
     const answer = () => ({ recorded: true, key: work!.key, kind: data.kind, stage: work!.stage, mergeLedger: work!.mergeLedger ?? null, delivery: work!.delivery ?? null });

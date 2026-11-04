@@ -1,4 +1,4 @@
-import { after, before, test } from 'node:test';
+import { after, before, describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import type { AddressInfo } from 'node:net';
@@ -72,6 +72,8 @@ function document(index: number, settled: boolean, now: number): Work {
   return { ...base, stage: 'build', lease: null, evidence: [evidence(1)], sessions: [session(1, 'finished')], observation: null, candidate: null, submission: null, pipeline: { ...base.pipeline, attempts: [] } } as unknown as Work;
 }
 
+// Keep individual proof names and bind the complete suite to GY-3035's regression proof.
+describe('unit:server-scale', () => {
 before(async () => {
   const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 422;
   database = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('scale'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
@@ -189,4 +191,6 @@ test('unit:snapshot-bounded — the work snapshot sends open items whole and set
   for (const view of views) assert.doesNotThrow(() => renderToStaticMarkup(createElement('div', null, view.render(dashboard(work, now, { view: view.id })))), `the ${view.id} page renders`);
   const page = renderToStaticMarkup(createElement(WorkDetails, { ...dashboard(work, now), item: history.body as Work }));
   assert.match(page, new RegExp(delivered.key));
+});
+
 });
