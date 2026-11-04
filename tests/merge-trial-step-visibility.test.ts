@@ -1,4 +1,6 @@
 import { test } from 'node:test';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { masterConfigSchema } from '../src/master/config.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
@@ -12,8 +14,6 @@ import { foldMergeLedger } from '../src/model/merge-ledger.js';
 import { mergePipeline, withMergePipeline } from '../src/pipeline-speed.js';
 import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { emptyDaemonState } from '../src/daemon/state.js';
-import { masterConfigSchema } from '../src/master.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { firstParentHolds, runTrial, trialCheckoutPrefix, trialMerge } from '../src/merge-writer/trial.js';
 import { mergeRecordKinds, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
