@@ -919,14 +919,14 @@ test('integration:refused-intent-push-recovery — restart delivers an actually 
       const tree = join(scratch, 'tree');
       git(checkout, 'worktree', 'add', '--detach', '-q', tree, input.mergeSha);
       try {
-        const tap = String(await defaultChildRun('node', ['--test', '--test-reporter=tap', 'tests/recovery.test.ts'], { cwd: tree, env: isolatedTestEnvironment() }));
+        const tap = String(await defaultChildRun('node', ['--test', '--test-reporter=tap', 'tests/app.test.ts', 'tests/recovery.test.ts'], { cwd: tree, env: isolatedTestEnvironment() }));
         await defaultChildRun('node', ['--check', 'src/app.ts'], { cwd: tree });
         const bound = JSON.parse(await readFile(join(tree, 'e2e/cases/fixture.json'), 'utf8'));
         const result = await runCommandStep(bound.steps[0], { url: 'http://127.0.0.1:9', root: tree, env: { PATH: process.env.PATH! }, secrets: {}, run: runProcess, artifacts: scratch, session: 'recovery' });
         assert.equal(result.record.outcome, 'pass');
         const { executed, failed } = countProofCases(tap, 'integration:recovery-fixture');
         assert.ok(executed > 0 && failed === 0);
-        return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, files: ['tests/recovery.test.ts'], durationMs: Date.now() - trialStarted, logTail: tap,
+        return { build: 'pass', tests: { passed: 2, failed: [], files: 2 }, files: ['tests/app.test.ts', 'tests/recovery.test.ts'], durationMs: Date.now() - trialStarted, logTail: tap,
           proofs: { 'integration:recovery-fixture': { executed, failed }, 'e2e:fixture': { executed: 1, failed: 0 } },
           e2e: [{ proof: 'e2e:fixture', case: 'fixture', executed: 1, failed: 0 }] };
       } finally { git(checkout, 'worktree', 'remove', '--force', tree); }
