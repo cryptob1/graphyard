@@ -12,6 +12,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import type { Observation, Principal, Work } from '../src/model.js';
 import { nextAction } from '../src/model/next-action.js';
+import { verifyWorkingTree } from '../src/cli/verify.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.
@@ -99,16 +100,21 @@ async function fixtureRepository(files: Record<string, string>) {
     for (const [path, text] of Object.entries(next)) { await mkdir(join(root, path, '..'), { recursive: true }); await writeFile(join(root, path), text); }
     git('add', '-A'); git('commit', '-q', '-m', message); return git('rev-parse', 'HEAD');
   };
-  const base = await commit(files, 'base');
+  const base = await commit({ '.gitignore': '.graphyard/\n', ...files }, 'base');
   return { root, base, commit };
 }
-async function stubControlPlane(work: Record<string, unknown>) {
+async function stubControlPlane(work: any, root: string) {
   const submitted: unknown[] = [];
   const server: Server = createServer((request, response) => {
     let body = ''; request.on('data', chunk => body += chunk);
-    request.on('end', () => {
+    request.on('end', async () => {
       response.setHeader('Content-Type', 'application/json');
       if (request.method === 'GET' && (request.url === `/api/work/${work.id}` || request.url === `/api/work/${work.key}`)) return response.end(JSON.stringify(work));
+      // Stub only the transport here; real container placement is covered separately.
+      if (request.method === 'POST' && request.url === `/api/work/${work.id}/worker-verification`) {
+        const record = await verifyWorkingTree(work, root);
+        return response.end(JSON.stringify({ record, rerun: { flaked: [], baseFailures: [] } }));
+      }
       if (request.method === 'POST' && request.url === `/api/work/${work.id}/submit`) { submitted.push(JSON.parse(body)); return response.end(JSON.stringify({ key: work.key, stage: 'build', submission: JSON.parse(body) })); }
       response.statusCode = 404; response.end('{}');
     });
@@ -120,7 +126,7 @@ async function stubControlPlane(work: Record<string, unknown>) {
 const cli = async (cwd: string, url: string, ...args: string[]) => {
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name)));
   try { const { stdout } = await run(process.execPath, [launcher, ...args], { cwd, env: { ...env, GRAPHYARD_URL: url, GRAPHYARD_TOKEN: 'worker-token' }, maxBuffer: 16 * 1024 * 1024 }); return { code: 0, output: JSON.parse(stdout) }; }
-  catch (error: any) { return { code: error.code as number, output: JSON.parse(error.stdout) }; }
+  catch (error: any) { return { code: error.code as number, output: error.stdout?.trim() ? JSON.parse(error.stdout) : { error: error.stderr } }; }
 };
 const passing = (title: string) => `test(${JSON.stringify(title)}, () => {});\n`;
 const failing = (title: string) => `test(${JSON.stringify(title)}, () => { throw new Error('criterion not met'); });\n`;
@@ -133,7 +139,7 @@ test('integration:worker-self-verifies — graphyard verify runs exactly the aut
     { id: 'AC-3', text: 'Browser', proofs: ['e2e:vbr-browser'] },
   ] };
   const repository = await fixtureRepository({ 'package.json': '{"type":"module"}\n' });
-  const control = await stubControlPlane(work);
+  const control = await stubControlPlane(work, repository.root);
   try {
     // The implementation: one proof passes, one fails; a case with a longer name sharing the prefix and
     // the manual proof's own case would both fail if they were run, and neither may be.
@@ -149,23 +155,22 @@ test('integration:worker-self-verifies — graphyard verify runs exactly the aut
     assert.match(verified.output.outstanding[0].reason, /manual proof is judged by an independent producer/);
     assert.equal(verified.output.head, execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository.root, encoding: 'utf8' }).trim());
 
-    // complete submits and reports what verify ran on HEAD, with each outcome.
+    // Complete repeats verification and refuses the still-failing required proof.
     const completed = await cli(repository.root, control.url, 'complete', 'GY-7', '1');
-    assert.equal(completed.code, 0); assert.deepEqual(control.submitted, [{ epoch: 1, head: verified.output.head }]);
-    const report = completed.output.selfVerification;
-    assert.equal(report.state, 'failing'); assert.match(report.reason, /integration:vbr-flow did not pass on HEAD/);
-    assert.deepEqual(report.ran.map((entry: any) => [entry.proof, entry.result, entry.executed]), [['unit:vbr-parse', 'pass', 2], ['integration:vbr-flow', 'fail', 1]]);
-    assert.deepEqual(report.outstanding.map((entry: any) => entry.proof), ['manual:vbr-docs', 'e2e:vbr-browser']);
+    assert.equal(completed.code, 1);
+    assert.match(completed.output.error, /complete refused: required proofs failed/);
+    assert.deepEqual(control.submitted, []);
 
-    // Fixed and re-verified, the report passes; a commit after verification is reported as stale.
+    // Fixed and re-verified, the report passes; complete also verifies a newer head.
     await repository.commit({ 'tests/item.test.ts': suite(passing('unit:vbr-parse — parses one'), passing('integration:vbr-flow — flows'), failing('manual:vbr-docs — never run here')) }, 'fix');
     assert.equal((await cli(repository.root, control.url, 'verify', 'GY-7')).code, 0);
     assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification.state, 'passing');
     await repository.commit({ 'README.md': 'later\n' }, 'after verification');
-    const stale = (await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification;
-    assert.equal(stale.state, 'stale'); assert.match(stale.reason, /run graphyard verify GY-7 again/);
-    // Nothing was verified in a fresh worktree: complete says so rather than staying silent.
+    const refreshed = (await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output;
+    assert.equal(refreshed.selfVerification.state, 'passing');
+    assert.equal(refreshed.submission.head, execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repository.root, encoding: 'utf8' }).trim());
+    // A missing local record is recreated by the remote verification.
     await rm(join(repository.root, '.graphyard'), { recursive: true });
-    assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification.state, 'not-run');
+    assert.equal((await cli(repository.root, control.url, 'complete', 'GY-7', '1')).output.selfVerification.state, 'passing');
   } finally { await control.close(); await rm(repository.root, { recursive: true, force: true }); }
 });
