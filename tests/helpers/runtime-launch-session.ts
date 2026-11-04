@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { readOnlyMountWrapper } from '../../src/master/confinement.js';
 import { accountLaunch } from '../../src/master/environments.js';
 import { proposedRuntimes } from '../../src/model/registry.js';
@@ -56,13 +56,15 @@ export async function runtimeLaunchSession(base: string, resolver: boolean) {
       // the install's other credentials. CODEX_HOME alone is not a write grant.
       const credentialMask = { configHome: accounts, extraPaths: [], own: [account], cli: [] };
       const contract = { ...proposedRuntimes.find(runtime => runtime.name === 'codex')!.launch,
-        args: provider.args, environment: { PATH: `${dirname(installed)}:/usr/local/bin:/usr/bin:/bin`, MISE_NO_CONFIG: '1' } };
+        args: provider.args, environment: {} };
       const launch = accountLaunch({ kind: 'codex', approvals: 'auto', agentArgs: [], environment: { PROFILE_ONLY: 'ignored' } }, {
         name: `${role}-account`, kind: 'codex', home: account,
         fleet: { runtime: 'codex', contract, model: 'test', modelId: null, session: `${role}-session`, role: role as 'worker' | 'reviewer', reason: 'fixture', revision: 7 },
       });
       const selected = launch.environment;
       assert.equal(selected.PROFILE_ONLY, undefined, 'only the chosen registry runtime environment applies');
+      assert.equal(selected.PATH, process.env.PATH, 'the native install PATH survives without a registry workaround');
+      assert.equal(selected.MISE_NO_CONFIG, '1');
       const terminal = await runtimeLaunchTerminal(worktree, rc, { ...process.env, ...selected, TERM: 'dumb' });
       try {
         const options = { directory: worktree, coordinatorRoot: root, cwd: worktree, secretsBus: null, credentialMask,
@@ -87,6 +89,7 @@ export async function runtimeLaunchSession(base: string, resolver: boolean) {
         assert.ok(actual.includes(JSON.stringify(request).slice(1, -1)), 'provider receives the exact initial request');
         provider.release();
         await recovered.until(() => recovered.screen().includes('runtime-request-completed') && recovered.screen().trimEnd().endsWith('GY-PTY>'), 'installed runtime completed response and exited successfully');
+        assert.ok(provider.requests.some((request: any) => request.input?.some((item: any) => item.type === 'function_call_output' && JSON.stringify(item.output).includes('runtime-tool-completed'))), 'the installed runtime actually executed its shell tool and returned the result');
         assert.equal(await readFile(join(home, 'sentinel'), 'utf8'), 'protected');
         console.log(`${role}: installed Codex received its first request and completed the provider response`);
       } catch (error) { throw new Error(`${error instanceof Error ? error.message : error}\nFull recovered-launch PTY output:\n${recovered.screen()}`, { cause: error }); }
