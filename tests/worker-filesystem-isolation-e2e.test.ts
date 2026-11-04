@@ -15,7 +15,7 @@ test('e2e:worker-filesystem-isolation — the bound command case runs the real h
   const definition = parseCase(file, readFileSync(join(root, file), 'utf8'));
   const scratch = await temporaryDirectory('fs-container', root);
   const environment = { ...trialEnvironment(), HOME: scratch, TMPDIR: '/tmp', PATH: '/usr/local/bin:/usr/bin:/bin' };
-  const session = confinedSession(trialContainerWords([root, scratch], trialContainerDependencies(root)), environment);
+  const session = confinedSession(trialContainerWords([scratch, root], trialContainerDependencies(root)), environment);
   let report;
   try { report = await runCases([{ file, definition }], {
     root, url: 'http://unused.invalid', token: 'fixture-token',

@@ -254,27 +254,10 @@ test('integration:worker-host-filesystem-isolation — runTrialAttempt excludes 
   assert.equal(readFileSync(join(f.unrelated, 'sentinel'), 'utf8'), 'protected\n');
 });
 
-test('integration:worker-home-deletion-regression — cold-cache dashboard trials install and run browser checks inside allocated state', async () => {
+test('integration:worker-home-deletion-regression — cold-cache dashboard trials use installed browsers and run browser checks inside allocated state', async () => {
   const f = await fixture(true);
-  // Exercise the real npm/npx commands and namespace without a network download. The fixture
-  // installer performs the cache writes required by Playwright, and the browser check uses them.
-  const modules = join(f.root, 'node_modules');
-  mkdirSync(join(modules, '.bin'), { recursive: true });
-  mkdirSync(join(modules, 'playwright'));
-  writeFileSync(join(modules, 'playwright', 'package.json'), JSON.stringify({ name: 'playwright', version: '1.0.0', bin: { playwright: 'cli.cjs' } }));
-  writeFileSync(join(modules, 'playwright', 'cli.cjs'), `#!/usr/bin/node
-    const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
-    assert.deepEqual(process.argv.slice(2), ['install', 'chromium']);
-    assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, path.join(process.env.HOME, '.cache', 'ms-playwright'));
-    assert.equal(process.env.npm_config_cache, path.join(process.env.HOME, '.npm'));
-    assert.equal(fs.existsSync(process.env.PLAYWRIGHT_BROWSERS_PATH), false, 'cold browser cache');
-    fs.mkdirSync(process.env.PLAYWRIGHT_BROWSERS_PATH, { recursive: true });
-    fs.writeFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'installed');
-    fs.mkdirSync(process.env.npm_config_cache, { recursive: true });
-    fs.writeFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'cached');
-  `);
-  chmodSync(join(modules, 'playwright', 'cli.cjs'), 0o755);
-  symlinkSync('../playwright/cli.cjs', join(modules, '.bin', 'playwright'));
+  // Exercise the real npm command and namespace without a network download. The
+  // installed browser path stays read-only; npm caches and browser profiles use allocated state.
   writeFileSync(join(f.root, 'package-lock.json'), '{}');
   writeFileSync(join(f.root, 'package.json'), JSON.stringify({ scripts: {
     build: 'node -e "require(\'fs\').writeFileSync(\'built\', \'built\')"',
@@ -283,8 +266,17 @@ test('integration:worker-home-deletion-regression — cold-cache dashboard trial
   writeFileSync(join(f.root, 'browser.cjs'), `
     const assert = require('node:assert/strict'), fs = require('node:fs'), path = require('node:path');
     assert.equal(fs.readFileSync('built', 'utf8'), 'built');
-    assert.equal(fs.readFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'chromium'), 'utf8'), 'installed');
-    assert.equal(fs.readFileSync(path.join(process.env.npm_config_cache, 'installer-cache'), 'utf8'), 'cached');
+    assert.equal(process.env.PLAYWRIGHT_BROWSERS_PATH, '/opt/graphyard-browsers');
+    assert.throws(() => fs.writeFileSync(path.join(process.env.PLAYWRIGHT_BROWSERS_PATH, 'write-probe'), 'bad'), error => error.code === 'EROFS');
+    assert.equal(process.env.npm_config_cache, path.join(process.env.HOME, '.npm'));
+    const profile = path.join(process.env.XDG_CACHE_HOME, 'browser-profile');
+    assert.equal(fs.existsSync(profile), false, 'cold private browser profile');
+    fs.mkdirSync(profile, { recursive: true });
+    fs.writeFileSync(path.join(profile, 'state'), 'private profile');
+    fs.mkdirSync(process.env.npm_config_cache, { recursive: true });
+    fs.writeFileSync(path.join(process.env.npm_config_cache, 'cache-probe'), 'cached');
+    assert.equal(fs.readFileSync(path.join(profile, 'state'), 'utf8'), 'private profile');
+    assert.equal(fs.readFileSync(path.join(process.env.npm_config_cache, 'cache-probe'), 'utf8'), 'cached');
     { ${deniedOperations.replace('const protectedVisible = true', 'const protectedVisible = false').replace('process.argv.slice(1)', JSON.stringify([f.home, f.unrelated, f.root, '.']))} }
     console.log('browser cache consumed');
   `);

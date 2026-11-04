@@ -1,6 +1,6 @@
 // The outer trial has a private filesystem, rather than a host Landlock domain:
 // its tests can establish their own mount namespaces before applying Landlock.
-import { existsSync, realpathSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdtempSync, realpathSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { checkoutGitDirectory } from '../master/checkout-git.js';
@@ -31,7 +31,6 @@ args = docker + ['create', '--name', container_name, '-i', '--init',
         '--security-opt=seccomp=unconfined', '--security-opt=systempaths=unconfined', '--network=' + spec['network'],
         '--user', str(os.getuid()) + ':' + str(os.getgid()),
         '--tmpfs', '/tmp:rw,nosuid,nodev,exec,mode=1777',
-        '--tmpfs', '/var/tmp:rw,nosuid,nodev,exec,mode=1777',
         '--tmpfs', '/run:rw,nosuid,nodev,mode=1777', '--workdir', os.getcwd()]
 for source, target, readonly in spec['mounts']:
     args += ['--mount', 'type=bind,src=' + source + ',dst=' + target + (',readonly' if readonly else '')]
@@ -82,13 +81,20 @@ finally:
         pass
 `;
 
+/** The first writable directory is the disposable allocation that owns boundary scratch. */
 export function trialContainerWords(writable: readonly (string | null)[], dependencies: readonly string[] = [], image = process.env.GRAPHYARD_TRIAL_IMAGE ?? trialContainerImage, network = 'bridge'): string[] {
+  // The managed allocation is durable. Give this boundary its own empty, sticky
+  // /var/tmp, reclaimed with that allocation; never mount the host's /var/tmp.
+  const allocation = writable.find((path): path is string => !!path)!;
+  const scratch = mkdtempSync(join(allocation, 'var-tmp-'));
+  chmodSync(scratch, 0o1777);
   const mounts: [string, string, boolean][] = [];
   const add = (path: string, readonly: boolean, target = path) => {
     // Linked installs and harness dependencies can name the same target. Docker
     // rejects duplicate destinations; keep the writable allocation added first.
     if (existsSync(path) && !mounts.some(mount => mount[1] === target)) mounts.push([realpathSync(path), target, readonly]);
   };
+  add(scratch, false, '/var/tmp');
   for (const directory of writable) if (directory) add(directory, false);
   for (const directory of dependencies) { add(directory, true); if (existsSync(directory) && realpathSync(directory) !== directory) add(directory, true, realpathSync(directory)); }
   // Only trusted source and dependencies, never the install's home or credentials.
@@ -99,14 +105,22 @@ export function trialContainerWords(writable: readonly (string | null)[], depend
     // Nested trial tests have no Docker socket. Reconstruct a private root from
     // the container's toolchain and explicit allocations. No host-root bind or
     // filesystem Landlock domain is inherited, so further sandbox mounts work.
+    // A checkout bind already exposes its dependency symlink. Bubblewrap cannot
+    // bind onto that link; mount only its real tree. Aliases outside bound
+    // directories (including the harness) still need their explicit mounts.
+    const nestedMounts = mounts.filter(([source, target, readonly], index) => !readonly || source === target ||
+      !mounts.slice(0, index).some(([parentSource, parentTarget]) =>
+        target.startsWith(parentTarget + '/') &&
+        lstatSync(join(parentSource, target.slice(parentTarget.length)), { throwIfNoEntry: false })?.isSymbolicLink() &&
+        realpathSync(join(parentSource, target.slice(parentTarget.length))) === source));
     return ['bwrap', '--die-with-parent', '--unshare-user', '--unshare-pid', '--unshare-net',
       '--tmpfs', '/', '--ro-bind', '/usr', '/usr', '--ro-bind', '/etc', '/etc',
       '--ro-bind', '/opt/graphyard-browsers', '/opt/graphyard-browsers',
       ...(existsSync('/opt/graphyard-hard-math-oracle') ? ['--ro-bind', '/opt/graphyard-hard-math-oracle', '/opt/graphyard-hard-math-oracle'] : []),
       '--symlink', 'usr/bin', '/bin', '--symlink', 'usr/sbin', '/sbin',
       '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64',
-      '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/var/tmp', '--tmpfs', '/run',
-      ...mounts.flatMap(([source, target, readonly]) => [readonly ? '--ro-bind' : '--bind', source, target]),
+      '--dev', '/dev', '--proc', '/proc', '--tmpfs', '/tmp', '--tmpfs', '/run',
+      ...nestedMounts.flatMap(([source, target, readonly]) => [readonly ? '--ro-bind' : '--bind', source, target]),
       '--remount-ro', '/', '--'];
   }
   return ['/usr/bin/python3', '-I', '-S', '-c', launch, JSON.stringify({ image, mounts, network })];
