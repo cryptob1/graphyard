@@ -80,3 +80,14 @@ Per attested head, `graphyard validation reuse decision.json`; fresh settled pas
 ```
 
 `graphyard validation replay REQUEST ATTEMPT` (authorizes nothing) keeps each attempt's time, evaluator, outcome; `evaluator-error` reruns ≤2×, `fail` never. `graphyard validation analytics`: outcomes, faults, cost.
+
+## Host verification capacity
+
+Host verification reservations hold a kernel `flock` on their existing owner file.
+The owning process retains the descriptor; exit or interruption releases it across
+PID namespaces, so a reused numeric PID cannot retain capacity. Budget reads reclaim
+unlocked reservations before subtracting declared files, including trial declarations.
+Live locks stay reserved; slot limits and the memory floor remain unchanged. Legacy
+PID-only records lack this evidence and remain reserved until explicitly cleared.
+`tests/verification-owner-identity.test.ts` covers host release and interrupted
+private-root ownership; `e2e/cases/verification-owner-identity.json` binds the regression.

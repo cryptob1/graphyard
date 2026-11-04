@@ -1,0 +1,14 @@
+{
+  "id": "verification-owner-identity",
+  "title": "Interrupted private-root verification releases host capacity",
+  "description": "A live private-root owner survives a colliding host PID; interrupting it restores the next host trial plan and ordinary slot acquisition.",
+  "tags": ["isolation"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Exercise kernel ownership across private PID namespaces",
+    "run": "node --import tsx --test tests/verification-owner-identity.test.ts",
+    "timeoutSeconds": 90
+  }]
+}

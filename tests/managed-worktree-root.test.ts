@@ -496,8 +496,8 @@ test('unit:host-verification-slots — heavy verification runs started by a sess
 
     // A slot whose owner died is taken back by the next run rather than held forever.
     await mkdir(join(directory, 'slot-0'));
-    await writeFile(join(directory, 'slot-0', 'owner.json'), JSON.stringify({ pid: 999_999_999, label: 'npm test', cwd: '/gone', at: new Date().toISOString() }));
-    const taken = await acquireVerificationSlot({ directory, slots: 1, label: 'npm test', alive: pid => pid === process.pid, pollMs: 10 });
+    await writeFile(join(directory, 'slot-0', 'owner.json'), JSON.stringify({ locked: true, pid: 999_999_999, label: 'npm test', cwd: '/gone', at: new Date().toISOString() }));
+    const taken = await acquireVerificationSlot({ directory, slots: 1, label: 'npm test', pollMs: 10 });
     assert.equal(taken.slot, 0);
     assert.equal(heldSlots(directory)[0].owner?.pid, process.pid);
     taken.release();
