@@ -1,5 +1,5 @@
 // Concern: the wording of a loop action's detail — bounded, compared and listing paths.
-import { actionDetailMax } from './state.js';
+export const actionDetailMax = 2000;
 
 /**
  * An action detail within its bound. A detail that lists paths — or quotes an error that does — is cut, never left to fail record()

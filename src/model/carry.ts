@@ -1,6 +1,6 @@
 import { pathScopesOverlap } from './documentation-glob.js';
 import type { Evidence } from './evidence.js';
-import { exactApproval, reviewerProfileFor, type ReviewProvider } from './review.js';
+import { exactApproval, type ReviewProvider } from './review.js';
 import type { Work } from './work.js';
 
 /**
@@ -192,9 +192,6 @@ export function evidenceBindsCandidate(work: CarryBearer, evidence: Pick<Evidenc
 export function carriedApproval(work: Work): CarriedApproval | null {
   const carry = currentCarry(work), approval = carry?.approval;
   if (!approval?.carried || approval.provider !== (work.policy.reviewProvider ?? 'github')) return null;
-  // An agent approval is an identity the policy still dispatches to; a profile removed or failed
-  // over since the original review is not carried either.
-  if (approval.provider === 'agent' && reviewerProfileFor(work)?.reviewerApp !== approval.reviewerApp) return null;
   return approval;
 }
 /**

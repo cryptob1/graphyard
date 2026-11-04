@@ -7,13 +7,13 @@ const proofPattern = '(unit|integration|e2e|manual):[a-zA-Z0-9._/-]+';
 const split = (value: FormDataEntryValue | null) => String(value ?? '').split(',').map(s => s.trim()).filter(Boolean);
 
 /** The new-work form: a goal, one or more criteria each with its proofs, and the delivery rules. */
-export default function CreateWork({ work, error, busy, codexAvailable, setCreating, setBusy, setError, setSelected, api, refresh, sessionEpoch }: Dashboard) {
+export default function CreateWork({ work, error, busy, setCreating, setBusy, setError, setSelected, api, refresh, sessionEpoch }: Dashboard) {
   const [rows, setRows] = useState([0]);
   return <Dialog onClose={() => setCreating(false)}><section className="modal" role="dialog" aria-modal="true" aria-label="New work item"><button className="close" aria-label="Close form" onClick={() => setCreating(false)}>×</button><h2>New work item</h2><form onSubmit={async e => {
     e.preventDefault(); const f = new FormData(e.currentTarget); const epoch = sessionEpoch.current; setBusy(true);
     try {
       const criteria = rows.map((row, i) => ({ id: `AC-${i + 1}`, text: String(f.get(`criterion-${row}`)), proofs: split(f.get(`proof-${row}`)) }));
-      const created = await api('work', { title: f.get('title'), description: f.get('description'), criteria, dependencies: f.get('dependency') ? [f.get('dependency')] : [], exclusiveResources: split(f.get('exclusiveResources')), policy: { review: true, reviewProvider: f.get('reviewProvider'), checks: split(f.get('checks')) } });
+      const created = await api('work', { title: f.get('title'), description: f.get('description'), criteria, dependencies: f.get('dependency') ? [f.get('dependency')] : [], exclusiveResources: split(f.get('exclusiveResources')), policy: { review: true, checks: split(f.get('checks')) } });
       if (epoch !== sessionEpoch.current) return; setCreating(false); await refresh(epoch); if (epoch === sessionEpoch.current) setSelected(created.id);
     } catch (e) { if (epoch === sessionEpoch.current) setError((e as Error).message); } finally { if (epoch === sessionEpoch.current) setBusy(false); }
   }}>
@@ -29,7 +29,6 @@ export default function CreateWork({ work, error, busy, codexAvailable, setCreat
       <button type="button" className="text-button" onClick={() => setRows([...rows, Math.max(...rows) + 1])}>＋ Add another criterion</button>
     </fieldset>
     <label><span><Term term="exclusive resource">Exclusive resources</Term> (comma separated)</span><input name="exclusiveResources" placeholder="staging:sms-test-account"/></label>
-    <label><span>Code <Term term="review provider">review provider</Term></span><select name="reviewProvider" defaultValue="github"><option value="codex" disabled={!codexAvailable}>Codex cloud review{codexAvailable ? '' : ' (unavailable)'}</option><option value="github">Formal GitHub approval</option></select></label>{!codexAvailable && <p className="muted">Codex review is unavailable. Verify the GitHub App connection and accept its required permission updates.</p>}
     <label><span>Required <Term term="automated checks">CI checks</Term></span><input name="checks" defaultValue="test, typecheck" required/></label>
     <label><span><Term term="dependency">Depends on</Term></span><select name="dependency"><option value="">No dependency</option>{work.map(w => <option key={w.id} value={w.id}>{w.key} · {w.title}</option>)}</select></label>
     <p className="muted">Created as not started. Someone else must approve the code before it merges. More dependencies can be added through the CLI.</p>

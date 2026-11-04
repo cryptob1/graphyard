@@ -50,7 +50,7 @@ const registry = [scenario('checkout-pays', 'Checkout takes payment'), scenario(
 function dashboard(work: Work[]): Dashboard {
   return { token: 'fixture', work, status: fixtureStatus('admin'), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
-    operatorAgents: [], operatorAgentsError: null, features: {} as any, events: [], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
+    operatorAgents: [], operatorAgentsError: null, features: {} as any, events: [], editingRequirements: false, setEditingRequirements: noop,
     sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, 'admin'), refresh: async () => {}, action: async () => {},
     setError: noop, signOut: noop } as unknown as Dashboard;
 }

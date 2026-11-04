@@ -1,3 +1,4 @@
+import { once, receipt } from './store/mutations.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import { isDeepStrictEqual } from 'node:util';
@@ -203,14 +204,7 @@ export class Delivery {
   get repository() { return this.validation.repository; }
   private async event(db: pg.PoolClient, actor: string, kind: string, payload: unknown, workId?: string) { await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES($1,$2,$3,$4)', [workId ?? null, actor, `delivery.${kind}`, JSON.stringify(payload)]); }
   private async withReceipt<T>(actor: Principal, command: string, data: unknown, key: string, fn: (db: pg.PoolClient, now: Date) => Promise<T>): Promise<T> {
-    demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const fingerprint = hash({ command: `delivery.${command}`, data });
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result as T; }
-      const result = await fn(db, now);
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result;
-    });
+    return this.store.transaction((db, now) => once(db, actor, key, { command: `delivery.${command}`, data }, () => fn(db, now)));
   }
   private async environment(db: pg.PoolClient, selected: { id: string; revision: number }, current = true) {
     const environment = await this.validation.definition(db, 'environment', selected, current) as Environment;
@@ -622,8 +616,8 @@ export class Delivery {
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const parsed = shaObservationSchema.parse(input);
     const data = { ...parsed, sha: parsed.sha.toLowerCase(), observedAt: new Date(parsed.observedAt).toISOString() };
-    const receipt = (await this.store.pool.query('SELECT fingerprint,result FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-    if (receipt) { demand(receipt.fingerprint === hash({ command: 'delivery.observe-sha', data }), 'Idempotency key reused with different input'); return receipt.result as ShaObservationResult; }
+    const previous = await receipt(this.store.pool, actor, key, { command: 'delivery.observe-sha', data });
+    if (previous) return previous.result as ShaObservationResult;
     await this.store.transaction(async db => this.shaEnvironment(db, data));
     type Cursor = { mergedAt: string; id: string };
     const candidates: { id: string; mergeSha: string }[] = [], byMerge = new Map<string, boolean | null>();

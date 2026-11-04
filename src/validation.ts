@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { once } from './store/mutations.js';
 import { z } from 'zod';
 import type pg from 'pg';
 import { admin, demand, proofSchema, type Principal } from './model.js';
@@ -30,8 +30,6 @@ export type Registration = Definition & { kind: 'registration' };
 export const deliveryPolicy = (environment: Environment) => ({ freshnessSeconds: 300, approvalRequired: true, automaticRollback: false, ...environment.delivery });
 export type RollbackFencing = 'provider' | 'serialized' | 'none';
 
-const hash = (v: unknown) => createHash('sha256').update(JSON.stringify(v)).digest('hex');
-
 /** Shared deployment definitions retained after retiring the validation runner. */
 export class Validation {
   constructor(readonly engine: Engine, readonly principals: Principal[], readonly repository: string) {}
@@ -53,17 +51,10 @@ export class Validation {
   }
   async withReceipt(actor: Principal, command: string, data: unknown, key: string, fn: (db: pg.PoolClient, now: Date) => Promise<unknown>) {
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
-    const fingerprint = hash({ command: `validation.${command}`, data });
-    return this.store.transaction(async (db, now) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) {
-        demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input');
-        return receipt.result;
-      }
-      const result = await fn(db, now);
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]); return result;
-    });
+    const receiptInput = { command: `validation.${command}`, data };
+    return this.store.transaction(async (db, now) => once(db, actor, key, receiptInput, () => fn(db, now)));
   }
+
   async define(actor: Principal, input: unknown, key: string) {
     admin(actor); const data = definitionSchema.parse(input);
     return this.withReceipt(actor, 'define', data, key, async (db, now) => {

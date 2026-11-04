@@ -42,7 +42,7 @@ function dashboard(overrides: Partial<Dashboard> = {}, role = 'admin', features:
   const d: Dashboard = {
     token: 'fixture', work, status: fixtureStatus(role), error: '', connected: true, lastUpdated: '12:00:00', view: 'work', setView: noop, filter: null, setFilter: noop,
     selected: null, setSelected: noop, creating: false, setCreating: noop, busy: false, setBusy: noop, observedAt: NOW, jobs: [], query: '', setQuery: noop,
-    operatorAgents: [], operatorAgentsError: null, features, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop, codexAvailable: false,
+    operatorAgents: [], operatorAgentsError: null, features, events: fixtureApi('events') as any[], editingRequirements: false, setEditingRequirements: noop,
     sessionEpoch: { current: 0 }, api: async (path: string) => fixtureApi(path, role), refresh: async () => {}, action: async () => {},
     setError: noop, signOut: noop, ...overrides,
   };
@@ -232,7 +232,7 @@ test('integration:item-view-structure — state, why, who acts next and the pull
   assert.match(lines, /AC-1 More than ten failed logins from one address in a minute are refused\. integration:login-rate-limit passed/);
   assert.match(view, /<li class="marker-pass">✓ <abbr class="term"[^>]*>integration:login-rate-limit<\/abbr> passed<\/li>/);
   // Policy-changing actions sit in a closed, admin-only Edit menu.
-  assert.match(view, /<details class="edit-menu"><summary>Edit<\/summary>[\s\S]*Use Codex cloud review[\s\S]*Revise requirements[\s\S]*<\/details>/);
+  assert.match(view, /<details class="edit-menu"><summary>Edit<\/summary>[\s\S]*Revise requirements[\s\S]*<\/details>/);
   assert.ok(!visible.includes('Use Codex cloud review') && !visible.includes('Revise requirements'));
   for (const role of ['reader', 'worker']) { const other = itemView('GY-16', role); assert.doesNotMatch(other, /edit-menu|Use Codex cloud review|Revise requirements/, role); }
 });
@@ -273,7 +273,7 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   // The item view keeps every datum and action, under Technical details or the Edit menu.
   const item = find('GY-16');
   const view = itemView('GY-16');
-  for (const needle of ['Policy v1', 'Revision 1', 'P2', 'Worker ID: worker-2', 'Owner', 'Blocking now:', 'Coordination', 'Code review', 'Gate decisions', 'Evidence (2)', 'Work history', 'Use Codex cloud review', 'Revise requirements', 'build-1:/work/gy-16-1', 'In this step for'])
+  for (const needle of ['Policy v1', 'Revision 1', 'P2', 'Worker ID: worker-2', 'Owner', 'Blocking now:', 'Coordination', 'Code review', 'Gate decisions', 'Evidence (2)', 'Work history', 'Revise requirements', 'build-1:/work/gy-16-1', 'In this step for'])
     assert.ok(view.includes(needle), needle);
   for (const gate of item.gates) for (const reason of gate.reasons) assert.ok(view.includes(reason.replace(/&/g, '&amp;').replace(/>/g, '&gt;')), `raw reason kept: ${reason}`);
   for (const ac of item.criteria) assert.ok(view.includes(ac.text), `full criterion kept: ${ac.id}`);
