@@ -11,11 +11,10 @@ import { createdHerdrTab, isHerdrCommand, herdrSubcommand } from '../../src/mast
 import { runCertifiedCycle } from './cycle.js';
 import { stopRun, stopImplementation, watchBudget } from './lifecycle.js';
 import { setTimeout as delay } from 'node:timers/promises';
-import type { ChildRun } from '../../src/child-runner.js';
 import { MERGE_PROTOCOL } from '../../src/protocol-version.js';
 import { mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../../src/child-runner.js';
-import { command, git } from './process.js';
+import { boundedChildRun, command, git } from './process.js';
 import { oracleDigest, oracleSource, digest, oracle } from './oracle.js';
 import { generate } from './generator.js';
 import { configSchema, validateReceipt, overlappingWorkers, comparison, usageSchema, type RunConfig, type Receipt } from './receipt-schema.js';
@@ -115,12 +114,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       try {const parsed=JSON.parse(stdout),created=createdHerdrTab(parsed.result??parsed);panes.add(created.pane);receipt.runtimeReceipts.push({file:'created-pane',record:created});} catch {/* failure before a handle was returned */}
     }
   };
-  const boundedRun:ChildRun=async(program,args,options={})=>{
-    enforce();
-    const words=[...(options.wrapper??[]),program,...args];
-    try {const result=await command(words[0],words.slice(1),{cwd:options.cwd,env:options.env,timeoutMs:Math.min(options.timeoutMs??90_000,Math.max(1,deadline-Date.now())),signal:abort.signal});capture(program,args,result.stdout);return result.stdout;}
-    catch(error:any) {if(error.stdout) capture(program,args,error.stdout);throw error;}
-  };
+  const boundedRun=boundedChildRun({deadline,signal:abort.signal,enforce,capture});
   let pendingTick:Promise<unknown>|undefined;
   let watchdog:Promise<void>|undefined,stopping=false,emergencyStop:Promise<void>|undefined;
   abort.signal.addEventListener('abort',()=>{

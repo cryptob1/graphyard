@@ -40,6 +40,10 @@ The bound case `e2e:hard-math-smoke` runs the same head's smoke file. It starts 
 scratch Postgres, a control plane and a local Git remote, then uses controlled
 executors to exercise claims, independent review/proof records, pushed merges,
 injected failure/repair, cleanup and external CLI/API/browser certification.
+The focused `tests/hard-math-process.test.ts` regression also creates a real Git
+conflict through the real daemon's bounded process adapter and checks native
+refusal, conflicting paths and rework without retrying the refused head. Process
+errors preserve exit status, signal, timeout and captured stdout/stderr.
 Fixtures use finite lookup artifacts, never an implementation solver. Missing
 delivery, incorrect artifacts and zero-count proofs must fail. The seed test
 command emits TAP so canonical trials observe positive execution counts.
