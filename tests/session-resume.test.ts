@@ -1,5 +1,11 @@
 import { test } from 'node:test';
+import { randomUUID } from 'node:crypto';
 import assert from 'node:assert/strict';
+import EmbeddedPostgres from 'embedded-postgres';
+import { Engine } from '../src/engine.js';
+import { Store } from '../src/store.js';
+import type { Principal, Work } from '../src/model.js';
+import { repositoryPolicy, setRepositoryPolicy } from '../src/model/repository-policy.js';
 import { execFileSync } from 'node:child_process';
 import { mkdir, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -76,12 +82,12 @@ async function fixture() {
   };
   const endSessions = () => { registry = { ...registry, sessions: [] }; };
   /** Dispatch `work` as attempt `epoch` in its own worktree; `release` records any claim given back. */
-  const dispatch = async (work: any, epoch: number, herdr = world()) => {
+  const dispatch = async (work: any, epoch: number, herdr = world(), claim?: () => Promise<Work>) => {
     endSessions();
     const at = new Date().toISOString(), log: string[] = [], released: number[] = [], path = join(root, `GY-1-${epoch}`);
     await mkdir(path, { recursive: true });
     let claims = 0;
-    const prepare = async () => { claims++; return { epoch, path, base: 'c'.repeat(40) }; };
+    const prepare = async () => { claims++; return { epoch, path, base: 'c'.repeat(40), ...(claim ? { work: await claim() } : {}) }; };
     const dispatched = await dispatchWork(root, { ...work, epoch: epoch - 1 }, profile, [], herdr.run, [work], prepare, async (_root, _key, claimed) => { released.push(claimed); }, 5_000, at,
       { start: herdr.bounds(log), probe: { registry: client, quota: false, cacheMs: 0, now: () => Date.parse(at) } as never });
     // Snapshot shell expansion at launch: a fallback can overwrite the same stem’s .launch file.
@@ -171,6 +177,16 @@ test('unit:rework-resumes-with-findings-and-falls-back — a CHANGES_REQUESTED r
     const line = itemLine({ ...rework, epoch: 2 }, Date.now(), await readAttemptLaunch(root, 'GY-1'));
     assert.equal(line.attempt, 'attempt 2 (resumed from 1)');
     assert.equal(itemLine({ ...rework, epoch: 2 }, Date.now(), null).attempt, 'attempt 2');
+    // A later submission answers that reason: neither resumed nor fresh requests repeat it.
+    const answered = { ...rework, pipeline: { ...rework.pipeline, resubmittedAt: new Date(Date.parse(at) + 1_000).toISOString() } };
+    for (const herdr of [world(), world(true)]) {
+      const later = await dispatch(answered, 3, herdr);
+      for (const launch of later.launches) {
+        const request = requestOf('claude', launch.args)!;
+        assert.ok(!request.includes(finding), 'a later hand-in suppresses the stale finding');
+        assert.doesNotMatch(request, /This attempt is a rework round/);
+      }
+    }
   }
   {
     const { dispatch } = await fixture();
@@ -205,5 +221,55 @@ test('unit:rework-resumes-with-findings-and-falls-back — a CHANGES_REQUESTED r
     };
     assert.deepEqual(await exitAtOnce(resumeExitWindowMs), [], 'a resume that exits at once keeps the lease');
     assert.equal((await exitAtOnce()).length, 1, 'a fresh launch that exits releases it, as before');
+  }
+});
+
+for (const proof of ['integration:pre-submit-master-guidance', 'e2e:pre-submit-master-guidance']) test(`${proof} — applied guidance reaches a real never-submitted retry through fresh and resumed launch requests`, async () => {
+  const port = Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 112;
+  const pg = new EmbeddedPostgres({ databaseDir: await temporaryDirectory('pre-submit-guidance'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
+  let store: Store | undefined;
+  const policy = repositoryPolicy();
+  setRepositoryPolicy({ ...policy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
+  try {
+    await pg.initialise(); await pg.start(); await pg.createDatabase('guidance');
+    store = new Store(`postgres://graphyard:testing-only@127.0.0.1:${port}/guidance`); await store.init();
+    const engine = new Engine(store, 7200, 'owner/project');
+    engine.operatorAuthorizer = async (_db, _now, actor) => actor;
+    const master: Principal = { id: 'graphyard-master-project-operator', role: 'operator-agent', scope: { repositories: ['owner/project'], workItems: ['*'] } };
+    const worker: Principal = { id: 'graphyard-worker-1', role: 'worker' };
+    let work = await engine.execute(master, 'create', null, { reason: 'Exercise retry guidance', title: 'Verify preserved work', type: 'chore', criteria: [{ id: 'AC-1', text: 'Guidance reaches retries', proofs: ['integration:pre-submit-master-guidance', 'e2e:pre-submit-master-guidance'] }] }, randomUUID());
+    work = await engine.execute(master, 'ready', work.id, { reason: 'Ready for retry guidance regression', expectedRevision: work.revision }, randomUUID());
+    const { dispatch, limited } = await fixture();
+    const claim = () => engine.execute(worker, 'claim', work.id, {}, randomUUID());
+    const first = await dispatch(work, 1, world(), claim);
+    assert.equal(first.claims, 1);
+    const guidance = 'Verify the preserved source head; operator handles private-container test placement. Do not repeat the scratch Git push.';
+    work = await engine.execute(master, 'rework', work.id, { reason: 'Superseded operational instruction', previousWorkerStopped: true }, randomUUID());
+    work = await engine.execute(master, 'rework', work.id, { reason: guidance, previousWorkerStopped: true }, randomUUID());
+    work = (await store.list()).find(item => item.id === work.id)!;
+    assert.equal(work.submission, null, 'guidance is recorded before any submission');
+    const appliedAt = work.lastRework!.at;
+    const resumed = await dispatch(work, 2, world(), claim);
+    assert.ok(resumed.launches[0].args.includes('--resume'));
+    const assertGuidance = (launch: typeof resumed.launches[number], epoch: number) => {
+      const request = requestOf('claude', launch.args)!;
+      assert.equal(request.split(guidance).length - 1, 1, 'the actual runtime request includes the latest applied instruction exactly once');
+      assert.ok(request.includes(appliedAt), 'the guidance names its applied time');
+      assert.ok(request.includes(`Applied master guidance for ${work.key} before its first submission`));
+      assert.ok(request.includes(`complete ${work.key} ${epoch} --head`), 'the request names its own attempt');
+      assert.ok(request.includes('a new source commit is not required'));
+      assert.ok(!request.includes('Superseded operational instruction'));
+      assert.doesNotMatch(request, /rework round of change #|resubmitting the same head answers nothing|Answer every point it names with a new commit/);
+    };
+    assertGuidance(resumed.launches[0], 2);
+    // Another account forces the canonical launcher's fresh form, with the same applied guidance.
+    work = await engine.execute(worker, 'release', work.id, { epoch: 2 }, randomUUID());
+    limited.add('claude-a');
+    const fresh = await dispatch(work, 3, world(), claim);
+    assert.ok(!fresh.launches[0].args.includes('--resume'));
+    assertGuidance(fresh.launches[0], 3);
+  } finally {
+    setRepositoryPolicy(policy);
+    await store?.close(); await pg.stop();
   }
 });

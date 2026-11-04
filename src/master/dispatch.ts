@@ -176,7 +176,7 @@ export async function dispatchWork(root: string, work: Work, profile: WorkerProf
     // A profile that cannot launch without a human at its prompts is refused before any account is chosen.
     assertNoApprovalOptOut(profile.kind ?? 'unnamed', profile.approvals);
     // A rework round's grounds are read before anything is claimed, too (GY-1569).
-    rework = work.submission ? appliedReworkBrief(work) : null;
+    rework = appliedReworkBrief(work);
     // The profile and the item are reserved before anything is claimed, and Herdr's agents are read
     // again under the reservation: the snapshot this dispatcher chose from may already be stale (GY-273).
     const unreserve = await reserveDispatch(root, work, profile, observedAt);
