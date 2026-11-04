@@ -57,7 +57,7 @@ test('integration:worker-verification-placement — confined verify/complete cro
   const root = await temporaryDirectory('verification-http', process.cwd());
   const repository = await temporaryDirectory('repository', root);
   const git = (...args: string[]) => execFileSync('git', args, { cwd: repository, encoding: 'utf8' }).trim();
-  git('init', '-q', '-b', 'worker'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
+  git('init', '-q', '-b', 'graphyard/verification'); git('config', 'user.name', 'Fixture'); git('config', 'user.email', 'fixture@example.invalid');
   await writeFile(join(repository, '.gitignore'), '.graphyard/\nnode_modules/\n');
   await writeFile(join(repository, 'package.json'), '{"type":"module"}');
   await mkdir(join(repository, 'tests'));
@@ -82,10 +82,10 @@ test('integration:placed-http', () => {
   const worker = { id: 'worker', role: 'worker' as const }, operator = { id: 'operator', role: 'admin' as const, sessionKind: 'human' as const };
   const credentials = [ { ...worker, token: 'worker-test-token' }, { id: 'host', role: 'coordinator' as const, token: 'host-test-token' } ];
   engine.principals = [operator, ...credentials];
-  let work = await engine.execute(operator, 'create', null, { type: 'chore', title: 'Host verification', criteria: [{ id: 'AC-1', text: 'Runs privately', proofs: ['integration:placed-http'] }] }, randomUUID());
+  let work = await engine.execute(operator, 'create', null, { type: 'chore', title: 'Host verification', criteria: [{ id: 'AC-1', text: 'Runs privately', proofs: ['integration:placed-http', 'e2e:fixture'] }] }, randomUUID());
   work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
   work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
-  work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'test', path: repository, branch: 'worker' }, randomUUID());
+  work = await engine.execute(worker, 'workspace', work.id, { epoch: 1, host: 'test', path: repository, branch: 'graphyard/verification' }, randomUUID());
   const http = server(engine, credentials);
   await new Promise<void>(resolve => http.listen(0, '127.0.0.1', resolve));
   t.after(() => new Promise<void>(resolve => http.close(() => resolve())));
