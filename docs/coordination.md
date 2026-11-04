@@ -11,7 +11,7 @@ Single-fixture proofs warn: cover three cases or explain why one suffices. Revie
 
 ## Dispatch optimistically
 
-Only exclusiveResources, files included, hold release and dispatch until landing. Trials integrate undeclared overlaps. Sessions receive matching verification maps. Failed dispatch retries next cycle.
+Overlapping plannedFiles and exclusiveResources hold release and dispatch until landing. Trials integrate undeclared overlaps. Sessions receive matching verification maps. Failed dispatch retries next cycle.
 
 ## Review gate: verdicts, not threads
 
@@ -27,7 +27,7 @@ Use `Nit: PATH:LINE — FINDING`, ending with `(mechanical: …)` or `(substanti
 
 ## Scope is a plan, not a lock
 
-`plannedFiles` is accepted but ignored; no file-widening permission is needed. `graphyard sync GY-N` merges shared `origin/BASE` and regenerates generated files; only merge conflicts hold it.
+`plannedFiles` declares paths that serialize implementation through landing; it is not a scope-permission gate. No file-widening permission is needed. `graphyard sync GY-N` merges shared `origin/BASE` and regenerates generated files; only merge conflicts hold it.
 
 Workers run `graphyard verify GY-N` for their proofs; CI owns the full suite. A failed, skipped or unexecuted own proof blocks submission. `leftToCi` with exit 0 and `passing` means the selected tests passed before an abnormal runner end. Name unrelated sandbox failures in the commit message.
 
@@ -55,3 +55,5 @@ The reader audit for GY-3035 distinguishes decision inputs from board presentati
 Claim checks readiness/blocker, dependency stage and resource leases. Submit checks epoch, workspace, PR ownership and candidate observation. Evaluation, review, evidence, waits and merge recording read the focus's requirements, evidence, candidate, sessions and action state; their cross-item inputs are dependency identities/stages, inherited bootstrap contracts/proofs and follow-up delivery bindings. Close additionally reads its named duplicate/superseding item. Requirement edits validate dependency existence/cycles; workspace registration compares branches and host/path reservations. Reconciliation and fleet scheduling still inspect the board to discover work and propagate changed inputs.
 
 The audit leaves no unused derived field to remove: gates drive next-action/refusal decisions, stage drives dependency readiness and terminal behavior, and next action drives dispatch and snapshots. Display keeps the existing evaluated result. `snapshot-delta` still serves event/history readers, `onlyActionsMovedSince` still distinguishes observation races from queue bookkeeping, and reconciliation's face moves still determine affected items. These remain until those consumers change. `decision-reads-peers.test.ts` counts documents (including SQL projections) for a cold claim, submit and evaluation on 2,000 items; `server-scale` and `healthz-bounded` retain the board and probe bounds.
+
+Queued heads retain their positions and the in-flight item ahead even when its trial stalls; the stalled flight and recorded blockers remain Blocked. Exited Graphyard panes in removed implementation or managed review/proof checkouts are closed, including custom `run.worktreeRoot` locations.

@@ -74,19 +74,19 @@ export function actionlessCards(work: Work[], now: number): ActionlessCard[] {
 /** The items nothing is moving: no action, no other item to wait for, nobody building them. */
 export const stalledCards = (work: Work[], now: number) => actionlessCards(work, now).filter(card => !card.movedBy);
 
-/** A head waiting its turn in the merge writer's serial queue behind a trial still advancing: its 1-based place among the waiting heads, and the flight ahead. */
+/** A head waiting its turn in the merge writer's serial queue behind a trial: its 1-based place among the waiting heads, and the flight ahead. */
 export interface QueuedBehind { position: number; of: number; ahead: string; step: string }
 /**
  * The heads the merge writer's queue holds behind the merge in flight (`mergeQueue` over the
- * items' folded ledgers), by item id. Only while the flight's trial advances (`fresh`): a queue
- * behind a stalled flight is not moving, so it stays a stall.
+ * items' folded ledgers), by item id. A stalled flight keeps its waiting heads queued; the
+ * flight itself reports the stall.
  */
 export function mergeQueuePositions(work: Work[], now: number): Map<string, QueuedBehind> {
   const ledger: Record<string, MergeLedgerState> = Object.fromEntries(work.flatMap(item => item.mergeLedger ? [[item.key, item.mergeLedger]] : []));
   const queue = mergeQueue(work, ledger, now);
   const flight = queue.blockedBy ? work.find(item => item.key === queue.blockedBy) : undefined;
   const step = flight && currentMergeStep(flight, now);
-  if (!flight || !step?.fresh) return new Map();
+  if (!flight || !step) return new Map();
   const waiting = queue.queue.filter(entry => entry.key !== flight.key);
   return new Map(waiting.map((entry, index) => [entry.id, { position: index + 1, of: waiting.length, ahead: flight.key, step: step.step }]));
 }

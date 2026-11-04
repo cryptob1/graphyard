@@ -16,7 +16,7 @@ setRepositoryPolicy({ ...repositoryPolicy(), e2e: { pendingOutcomes: 'non-blocki
 
 // 2026-11-04: refactor items editing the same core files ran in parallel and every merge sent the
 // heads queued behind it back to conflict (GY-3019: 108 attempts). A file an item declares in
-// exclusiveResources now holds its release and dispatch while another item on it is in flight —
+// plannedFiles now holds its release and dispatch while another item on it is in flight —
 // claimed, or submitted through review and merge — and it goes once that item lands.
 
 const repository = 'owner/overlap-sequence';
@@ -41,9 +41,9 @@ const ok = async (bearer: string, method: 'GET' | 'POST', path: string, body?: u
   assert.equal(result.status, 200, JSON.stringify(result.body));
   return result.body;
 };
-const file = (title: string, exclusiveResources?: string[]) => ok(token(operator.id), 'POST', 'work', {
+const file = (title: string, plannedFiles?: string[]) => ok(token(operator.id), 'POST', 'work', {
   title, type: 'chore', priority: 1, criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:overlapping-items-run-in-sequence', 'e2e:fixture'] }],
-  policy: { checks: ['test'], review: true }, ...(exclusiveResources ? { exclusiveResources } : {}),
+  policy: { checks: ['test'], review: true }, ...(plannedFiles ? { plannedFiles } : {}),
 }) as Promise<Work>;
 const update = (id: string, patch: Record<string, unknown>) => store.pool.query('UPDATE work_items SET document = document || $1::jsonb WHERE id = $2', [JSON.stringify(patch), id]);
 
@@ -80,6 +80,12 @@ test('integration:overlapping-items-run-in-sequence — of two backlog items dec
   const second = await file('Refactor engine B', ['src/engine.ts', 'src/release.ts']);
   const other = await file('Refactor close', ['src/server/close.ts']);
   const undeclared = await file('Declares nothing');
+  assert.deepEqual(first.plannedFiles, ['src/engine.ts']);
+  const revised = await ok(token(operator.id), 'POST', `work/${second.id}/requirements`, {
+    expectedPolicyRevision: second.policyRevision, reason: 'Keep the declared overlap through requirement changes',
+    criteria: second.criteria, dependencies: [], exclusiveResources: [], plannedFiles: ['src/engine.ts', 'src/release.ts'],
+  });
+  assert.deepEqual(revised.plannedFiles, ['src/engine.ts', 'src/release.ts']);
 
   const herdr = { agents: [] as HerdrAgent[] };
   const config = masterConfig();
@@ -111,10 +117,22 @@ test('integration:overlapping-items-run-in-sequence — of two backlog items dec
   assert.deepEqual(released, [first.key, other.key, undeclared.key], 'the second item on src/engine.ts stays in the backlog; the rest are released together');
   assert.deepEqual(new Set(claims), new Set([first.key, other.key, undeclared.key]), 'non-overlapping items are dispatched in parallel');
 
+  await update(second.id, { ready: true });
+  const refusedClaim = await call(token(workers[3].id), 'POST', `work/${second.id}/claim`, {});
+  assert.equal(refusedClaim.status, 409);
+  assert.match(JSON.stringify(refusedClaim.body), /Exclusive resources held/);
+  await update(second.id, { ready: false });
+
   // The first item submits: its lease ends, and its standing submission through review and merge still holds the file.
   await update(first.id, { lease: null, stage: 'review', submission: { epoch: 1, pr: 1 } });
   await runCycle(config, state, effects);
   assert.deepEqual(released, [first.key, other.key, undeclared.key], 'a submitted item past build still holds its file');
+
+  await update(second.id, { ready: true });
+  const submittedConflict = await call(token(workers[3].id), 'POST', `work/${second.id}/claim`, {});
+  assert.equal(submittedConflict.status, 409);
+  assert.match(JSON.stringify(submittedConflict.body), /Exclusive resources held/);
+  await update(second.id, { ready: false });
 
   // It lands: the second item is released and dispatched.
   await update(first.id, { stage: 'done', submission: null });
@@ -126,11 +144,11 @@ test('integration:overlapping-items-run-in-sequence — of two backlog items dec
 
 test('unit:overlapping-items-run-in-sequence — two released items declaring the same file, neither in flight, dispatch one at a time in one cycle', async () => {
   const at = new Date(Date.now() - 3_600_000).toISOString();
-  const ready = (key: string, exclusiveResources: string[]) => ({
+  const ready = (key: string, plannedFiles: string[]) => ({
     id: `id-${key}`, key, title: key, description: '', type: 'chore', priority: 2, dependencies: [], criteria: [{ id: 'AC-1', text: 'Works', proofs: ['integration:x'] }],
     policy: { checks: ['test'], review: true }, stage: 'ready', revision: 1, policyRevision: 1, createdAt: at, updatedAt: at, stageEnteredAt: at, ready: true, epoch: 0, lease: null,
     workspaces: [], candidate: null, submission: null, reworkRequested: false, scenarioRequirements: [], evidence: [], observation: null, blocker: null,
-    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], exclusiveResources,
+    gates: [{ name: 'ready', passed: true, reasons: [] }], violations: [], plannedFiles,
   }) as unknown as Work;
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: '/outside/c.token', cliPath: '/outside/bin/graphyard.mjs', repository, baseBranch: 'main', githubAppId: 1234,
     hostId: 'h', masterAgentName: 'graphyard-master-unit', autoMerge: true, mergeMethod: 'merge', workers: [profile('one', 'w1'), profile('two', 'w2'), profile('three', 'w3')] });

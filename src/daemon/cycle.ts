@@ -1,5 +1,7 @@
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
 import { existsSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
+import { dataDirectory } from '../install/worktree-root.js';
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
@@ -282,7 +284,9 @@ async function closeStep(cycle: Cycle) {
   if (cycle.herdr.available) for (const agent of cycle.herdr.agents) {
     const cwd = (agent.cwd ?? '').replace(/ \(deleted\)$/, '');
     if (!agent.pane_id || !launched.has(agent.pane_id) || (agent.agent && !endedRuntimeStates.includes(agent.agent_status ?? ''))) continue;
-    if (!cwd.includes('/.graphyard/worktrees/') || existsSync(cwd)) continue;
+    const managedRoots = [resolve(dataDirectory(), 'worktrees'), ...(config.run.worktreeRoot ? [resolve(config.run.worktreeRoot)] : [])];
+    const managed = managedRoots.some(root => cwd.startsWith(root + sep));
+    if ((!cwd.includes('/.graphyard/worktrees/') && !managed) || existsSync(cwd)) continue;
     try { await Promise.resolve(effects.closeSession(agent.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; }); await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'done', `Closed pane ${agent.pane_id}: its runtime exited and its worktree ${cwd} is removed`); }
     catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
   }

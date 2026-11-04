@@ -143,8 +143,6 @@ export const laneProducerScope: RouteModule = { name: 'lane-producer-scope', rou
  */
 export const signInLinkTtlMs = 10 * 60_000;
 export const signInSessionTtlMs = 90 * 86_400_000;
-/** A used session's expiry moves forward at most this often, so reads do not write on every request. */
-export const signInRenewalMs = 3_600_000;
 export const maxSignInLinks = 16;
 export const maxSignInSessions = 32;
 const digest = (value: string) => createHash('sha256').update(value).digest('hex');
@@ -193,9 +191,9 @@ export class HumanSignIn {
   async authenticate(token: string): Promise<Principal | null> {
     if (!token.startsWith('gyh_')) return null;
     const now = this.clock(), key = digest(token), expiresAt = new Date(now + signInSessionTtlMs);
-    const { rows } = await this.store.pool.query('SELECT actor, expires_at FROM human_sign_in_sessions WHERE token_hash=$1 AND expires_at > $2', [key, new Date(now)]);
-    if (rows[0] && rows[0].expires_at.getTime() <= expiresAt.getTime() - signInRenewalMs)
-      await this.store.pool.query('UPDATE human_sign_in_sessions SET expires_at=$2 WHERE token_hash=$1', [key, expiresAt]);
+    const { rows } = await this.store.pool.query(
+      'UPDATE human_sign_in_sessions SET expires_at=GREATEST(expires_at, $3) WHERE token_hash=$1 AND expires_at > $2 RETURNING actor',
+      [key, new Date(now), expiresAt]);
     return rows[0]?.actor ?? null;
   }
 

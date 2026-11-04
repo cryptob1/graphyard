@@ -88,12 +88,15 @@ test('unit:signin-session-renews-on-use — a session used within 90 days stays 
     // Used every 80 days, the session outlives its first 90.
     for (let use = 0; use < 3; use++) { now += 80 * 86_400_000; assert.equal((await table.authenticate(session.token))?.id, 'operator'); }
     assert.equal(await expiry(), new Date(now + signInSessionTtlMs).toISOString());
-    // A use within the hour does not write again.
+    // Even a use within the hour preserves a full 90-day inactivity window.
     now += 30 * 60_000;
     assert.equal((await table.authenticate(session.token))?.id, 'operator');
-    assert.equal(await expiry(), new Date(now - 30 * 60_000 + signInSessionTtlMs).toISOString());
+    assert.equal(await expiry(), new Date(now + signInSessionTtlMs).toISOString());
+    now += signInSessionTtlMs - 15 * 60_000;
+    const restarted = new HumanSignIn(database.store, () => now);
+    assert.equal((await restarted.authenticate(session.token))?.id, 'operator');
     now += signInSessionTtlMs;
-    assert.equal(await table.authenticate(session.token), null);
+    assert.equal(await restarted.authenticate(session.token), null);
   } finally { await database.close(); }
 });
 

@@ -23,9 +23,7 @@
         { "path": "groups.moving", "includes": { "key": "GY-QUEUED-2", "group": "moving", "overdue": false, "queue": { "position": 2, "ahead": "GY-QFLIGHT" } } }
       ]
     },
-    { "kind": "browser", "name": "sign in to the dashboard", "action": "open", "path": "/" },
-    { "kind": "browser", "action": "fill", "label": "Access token", "value": "{{token}}" },
-    { "kind": "browser", "action": "click", "role": "button", "text": "Open control plane", "exact": false },
+    { "kind": "browser", "name": "open the local dashboard without signing in", "action": "open", "path": "/" },
     {
       "kind": "browser",
       "name": "the Work page names the queued head's place behind the merge in flight",

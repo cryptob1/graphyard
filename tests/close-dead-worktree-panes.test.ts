@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
 import { masterConfigSchema } from '../src/master.js';
 import type { Work } from '../src/model.js';
+import { defaultWorktreeRoot, sessionCheckout } from '../src/install/worktree-root.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 
 const clock = Date.parse('2030-01-01T00:00:00Z');
@@ -18,11 +19,16 @@ test('integration:close-dead-worktree-panes — an exited Graphyard pane in a re
   await mkdir(live, { recursive: true });
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile, cliPath: fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url)),
     repository: 'owner/project', baseBranch: 'main', githubAppId: 1234, hostId: 'machine-a', masterAgentName: 'graphyard-master-project', workers: [] });
+  config.run.worktreeRoot = join(directory, 'custom-checkouts');
+  const managed = sessionCheckout(defaultWorktreeRoot(directory, config.repository), 'review', 'GY-1', 'a'.repeat(40), 'b'.repeat(32)).worktree;
+  const custom = sessionCheckout(config.run.worktreeRoot, 'proof', 'GY-1', 'a'.repeat(40), 'c'.repeat(32)).worktree;
   const state = emptyDaemonState(config);
   state.master.pane = 'pane-master';
   const handle = (id: string, pane: string) => ({ id, kind: 'implementation', principal: 'worker', epoch: 2, runtime: 'claude', host: 'other-host', pane, subject: 'x', state: 'finished' });
-  const work = [{ id: 'w1', key: 'GY-1', stage: 'done', sessions: [handle('worker:2', 'pane-dead'), handle('worker:3', 'pane-running')] }] as unknown as Work[];
+  const work = [{ id: 'w1', key: 'GY-1', stage: 'done', sessions: [handle('worker:2', 'pane-dead'), handle('worker:3', 'pane-running'), { ...handle('review:1', 'pane-review'), kind: 'review' }, { ...handle('proof:1', 'pane-proof'), kind: 'proof' }] }] as unknown as Work[];
   const agents = [
+    { pane_id: 'pane-review', agent: 'codex', agent_status: 'exited', cwd: `${managed} (deleted)` },
+    { pane_id: 'pane-proof', agent: null, agent_status: 'unknown', cwd: custom },
     { pane_id: 'pane-dead', agent: null, agent_status: 'unknown', cwd: `${removed} (deleted)` },
     { pane_id: 'pane-running', agent: 'claude', agent_status: 'working', cwd: `${removed} (deleted)` },
     { pane_id: 'pane-master', agent: null, agent_status: 'unknown', cwd: `${removed} (deleted)` },
@@ -34,7 +40,7 @@ test('integration:close-dead-worktree-panes — an exited Graphyard pane in a re
     closeSession: pane => { closed.push(pane); }, dispatch: async () => {}, persist: async () => {}, dispatchTick: async () => {},
   };
   await runCycle(config, state, effects, () => clock);
-  assert.deepEqual(closed, ['pane-dead']);
+  assert.deepEqual(closed, ['pane-review', 'pane-proof', 'pane-dead']);
 
   // A Graphyard pane whose worktree still exists stays open even after its runtime exited.
   closed.length = 0;

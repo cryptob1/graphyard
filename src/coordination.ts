@@ -5,15 +5,11 @@ import { baseRefreshConflict, currentBaseRefreshCarry, pendingBaseRefresh } from
 
 export interface IntegrationJob { work_id: string; available_at: string; locked_until: string | null; error: string | null; deferred_reason?: string | null; unobserved?: number }
 export interface Diagnostic { kind: string; message: string; next: string }
-/**
- * The exclusive resources `work` and `other` contend for: a resource either declares that the
- * other declares too or whose observed candidate changes it — a declared file path is a resource
- * (GY-1992 retired plannedFiles). Two observed diffs alone hold nothing: the merge queue integrates
- * them. An item that declares nothing is held by nobody's diff.
- */
+/** Declared resources and planned files serialize against other declarations or observed changes. */
+export const declaredResources = (work: Work) => [...work.exclusiveResources ?? [], ...work.plannedFiles ?? []];
 export function sharedResources(work: Work, other: Work) {
-  const meets = (resources: string[], w: Work) => resources.filter(r => [...w.exclusiveResources ?? [], ...exclusionPaths(w)].some(t => pathScopesOverlap(r, t)));
-  return [...new Set([...meets(work.exclusiveResources ?? [], other), ...meets(other.exclusiveResources ?? [], work)])];
+  const meets = (resources: string[], w: Work) => resources.filter(r => [...declaredResources(w), ...exclusionPaths(w)].some(t => pathScopesOverlap(r, t)));
+  return [...new Set([...meets(declaredResources(work), other), ...meets(declaredResources(other), work)])];
 }
 /**
  * The resources holding `work`'s dispatch or release: those it shares with an item in flight — a
@@ -58,7 +54,7 @@ export function exclusionPaths(work: Work): string[] {
  * fleet (2026-09-24/25: ten workers idle behind items changing the same large files) to avoid a
  * conflict the merge queue and a sync round resolve anyway: whichever of two overlapping items
  * lands second is re-integrated by base refresh, or sent back for a sync on a real conflict.
- * Only exclusive resources, file paths included, hold dispatch (`resourceConflicts`).
+ * Declared resources and planned files hold dispatch (`resourceConflicts`).
  */
 export function concurrentOverlap(work: Work, all: Work[], now: number): OverlapAhead[] {
   if (work.stage === 'done') return [];

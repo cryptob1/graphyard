@@ -44,8 +44,14 @@ test('integration:board-queue-not-blocked — a head queued behind the merge in 
   assert.equal(row('GY-13').group, 'blocked');
   assert.deepEqual(board.counts, { 'needs-you': 0, blocked: 1, moving: 3, 'up-next': 0, backlog: 0 });
 
-  // A queue behind a flight whose trial stopped advancing is not moving: those heads stay stalls.
+  // A stale flight reports its own stall, while the waiting heads keep their positions.
   const stale = { ...flight, mergeLedger: { ...flight.mergeLedger!, trialStep: { step: 'tests', at: iso(now - 45 * minute) } } } as Work;
   const stuck = buildBoard([stale, head(11), head(12), blocked], now);
-  assert.equal(stuck.groups.blocked.some(entry => entry.key === 'GY-11'), true);
+  assert.equal(stuck.groups.blocked.some(entry => entry.key === 'GY-10'), true);
+  assert.equal(stuck.groups.blocked.some(entry => entry.key === 'GY-13'), true);
+  for (const [key, position] of [['GY-11', 1], ['GY-12', 2]] as const) {
+    const queued = stuck.groups.moving.find(entry => entry.key === key)!;
+    assert.deepEqual(queued.queue, { position, of: 3, ahead: 'GY-10', step: 'tests' });
+    assert.equal(queued.overdue, false);
+  }
 });
