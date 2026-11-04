@@ -76,7 +76,7 @@ test('integration:verification-owner-identity — private container PID collisio
   `;
   const child = spawn(wrapper[0], [...wrapper.slice(1), 'bwrap', '--unshare-user', '--unshare-pid', '--as-pid-1', '--ro-bind', '/', '/',
     '--proc', '/proc', '--dev', '/dev', '--bind', directory, directory, '--', 'node', '--import', '/graphyard-harness/node_modules/tsx/dist/loader.mjs', '--input-type=module', '-e', script],
-    { cwd: directory, env: { ...trialEnvironment(), PATH: '/usr/local/bin:/usr/bin:/bin' }, stdio: ['ignore', 'ignore', 'pipe'] });
+    { cwd: directory, env: { ...trialEnvironment(), HOME: directory, TMPDIR: directory, PATH: '/usr/local/bin:/usr/bin:/bin' }, stdio: ['ignore', 'ignore', 'pipe'] });
   let output = ''; child.stderr!.on('data', chunk => output += chunk);
   try {
     await waitFor(ready, child, () => output);
