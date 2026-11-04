@@ -9,7 +9,10 @@ const at = args.indexOf('--durations');
 const durations = at >= 0 ? args.splice(at, 2)[1] : undefined;
 const timeoutMs = Number(args.find(arg => arg.startsWith('--file-timeout=')).split('=')[1]);
 const breadth = Number(args.find(arg => arg.startsWith('--test-concurrency='))?.split('=')[1] ?? availableParallelism());
-const flags = args.filter(arg => arg.startsWith('-') && !/^--(?:file-timeout|test-concurrency)=/.test(arg));
+// The caller's reporter flags (the trial passes --test-reporter=tap with its destination) are dropped:
+// each file prints spec output and this runner reports per-file ok/not ok itself, and Node refuses a
+// child whose reporters and destinations do not pair up.
+const flags = args.filter(arg => arg.startsWith('-') && !/^--(?:file-timeout|test-concurrency|test-reporter|test-reporter-destination)=/.test(arg));
 const files = args.filter(arg => !arg.startsWith('-'));
 if (durations) writeFileSync(durations, '');
 const children = new Set();
