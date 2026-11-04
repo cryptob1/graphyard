@@ -19,6 +19,8 @@ Worker storage moves: `integration:worker-reparenting` in `tests/worker-filesyst
 
 `tests/architecture.test.ts` enforces the Git network module allowlist and the ban on GitHub API calls. Keep behavioral regressions with their module tests; deleted-file inventories, resolution tables and module line budgets do not belong in the suite.
 
+Vite keeps its dependency optimizer cache in ignored `.graphyard/vite`, outside read-only shared `node_modules`. `tests/vite-private-cache.test.ts` uses the actual project config in the native private root: the previous cache location must fail with `EROFS`, then cold and warm starts serve client, entry and optimized dependency output. `e2e:vite-private-cache` runs that bound regression. Run it, the existing browser suite and full tests in the native trial; inherited worker mount restrictions are not a substitute for that placement.
+
 ### Verification maps
 
 `verification/AREA.md` maps (store, server, master): a `Paths:` line of globs plus `## Tests`, `## Drive`, `## Invariants`, `## Gotchas`, ≤250 words each (tests/verification-maps.test.ts). 
