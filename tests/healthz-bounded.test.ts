@@ -1,4 +1,4 @@
-import { test } from 'node:test';
+import { describe, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -28,6 +28,8 @@ function probe(query: () => Promise<unknown>, options: { queued?: boolean; hande
   return healthRoutes.routes[0].handle(context, []);
 }
 
+// Keep individual proof names and bind the complete suite to GY-3035's regression proof.
+describe('unit:healthz-bounded', () => {
 test('unit:healthz-select-bounded — /healthz answers within its bound while the pool is busy, naming the busy pool as the cause', async () => {
   const started = Date.now();
   const body = await probe(() => new Promise(() => {})) as any;
@@ -166,4 +168,6 @@ test('unit:healthz-unreadable-repository-root — a GRAPHYARD_REPOSITORY_ROOT th
   } finally {
     if (saved === undefined) delete process.env.GRAPHYARD_REPOSITORY_ROOT; else process.env.GRAPHYARD_REPOSITORY_ROOT = saved;
   }
+});
+
 });

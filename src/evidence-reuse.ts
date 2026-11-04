@@ -7,7 +7,7 @@ import { admin, demand, exerciseRefusal, proofSchema, type Evidence, type Princi
 import { producerIndependenceRefusal } from './delegation.js';
 import { candidateManifest, compatibilitySignature } from './attribution.js';
 import type { Attempt, BuildAttestation, Bundle, Environment, ReusePolicy, Validation, ValidationCandidate, ValidationRequest } from './validation.js';
-import { lockedWork } from './store/locked-read.js';
+import { decisionWork } from './store/decision-read.js';
 
 /**
  * D6 evidence reuse: the newest sequenced attempt for a proof may stand for a new head of
@@ -144,7 +144,7 @@ export class EvidenceReuse {
           if (dependent) refuse(dependent);
           // GY-135: a pass trusted before the exercise rule, or otherwise without a stripped run
           // that failed, is not carried onto a new head; the proof runs live instead.
-          const all = (await lockedWork(db, [w.id])).map(x => x.id === w.id ? w : x);
+          const all = (await decisionWork(db, [w.id])).map(x => x.id === w.id ? w : x);
           const unexercised = exerciseRefusal(w, all, evidence);
           if (unexercised) refuse(unexercised);
         }
