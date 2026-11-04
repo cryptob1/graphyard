@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import { mkdir } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { chromium } from '@playwright/test';
 import { trialConfinement, trialEnvironment } from '../../src/merge-writer/trial.js';
 import { freePort } from '../../src/cli/test-isolation.js';

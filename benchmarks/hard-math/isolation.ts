@@ -1,16 +1,15 @@
 import { masterRunSchema } from '../../src/master/profiles.js';
 import { randomBytes, randomUUID } from 'node:crypto';
-import { cp, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { cp, mkdir, writeFile } from 'node:fs/promises';
 import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { freePort } from '../../src/cli/test-isolation.js';
 import { trialEnvironment } from '../../src/merge-writer/trial.js';
 import { mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
-import { defaultChildRun } from '../../src/child-runner.js';
 import { operatorCapabilities } from '../../src/model.js';
 import { shellQuote } from '../../src/install/transport.js';
-import { git, command } from './process.js';
+import { command } from './process.js';
 export const benchmarkRoot=fileURLToPath(new URL('.',import.meta.url));
 export const codeRoot=resolve(benchmarkRoot,'../..');
 export interface Credential {id:string;role:'admin'|'coordinator'|'worker'|'producer';token:string;proofs?:string[];sessionKind?:'ai'}
