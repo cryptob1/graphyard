@@ -23,7 +23,7 @@ async function repository(branch: string) {
 const remoteHeads = (origin: string) => spawnSync('git', ['-C', origin, 'branch', '--list'], { encoding: 'utf8' }).stdout;
 
 test('unit:worktree-starts-from-registered-head — the rework start resolves the registered local head with no fetch and no push; nothing registered or missing from the store refuses', async () => {
-  const { registeredReworkHead } = await import('../src/master/worktrees.js');
+  const { registeredReworkHead } = await import('../src/master/branch-release.js');
   const { origin, work } = await repository('graphyard/gy-3-1');
   const network: string[] = [];
   const run = ((command: string, args: string[], options: { cwd: string }) => {

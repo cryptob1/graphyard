@@ -2,7 +2,7 @@
 import { randomUUID } from 'node:crypto';
 import { readFile } from 'node:fs/promises';
 import { agentToken, intentInput, autonomySubcommands, runAutonomyCommand, listHerdrAgents, promoteToAutonomy, assertPromotionRoute } from '../../master.js';
-import { readDaemonState } from '../../master-daemon.js';
+import { readDaemonState } from '../../daemon/state.js';
 import { wholeDocument } from '../../model/work-summary.js';
 import { postDeployCriterionRefusal, postDeployOnlyRefusal, type Work } from '../../model/work.js';
 import { readSecretFromStdin } from '../context.js';

@@ -8,7 +8,9 @@ import { fileURLToPath } from 'node:url';
 import { dispatchOrder, dispatchSort, dispatchStarvationMs, stageWaitMs } from '../src/coordination.js';
 import { hotFileSet, hotspots } from '../src/daemon/hotspots.js';
 import { masterConfigSchema, type MasterConfig, type WorkerProfile } from '../src/master.js';
-import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import type { Work } from '../src/model.js';
 
 // GY-882: hot-spot-aware scheduling. Dispatch stays optimistic — file overlap never holds an

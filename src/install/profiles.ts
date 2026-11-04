@@ -1,6 +1,6 @@
 import { writeFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
-import { loadMasterConfig, saveWorkerProfile, setupMaster } from '../master.js';
+import { loadMasterConfig, saveWorkerProfile, setupMaster } from '../master/config.js';
 import { setupRepository } from '../repository-setup.js';
 import type { ProfileRegistration, ProfileRequest } from './index.js';
 

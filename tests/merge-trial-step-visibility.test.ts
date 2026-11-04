@@ -1,10 +1,12 @@
 import { test } from 'node:test';
+import { emptyDaemonState } from '../src/daemon/state.js';
+import { masterConfigSchema } from '../src/master/profiles.js';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { existsSync, writeFileSync } from 'node:fs';
 import { mkdir, writeFile } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createElement } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
@@ -12,8 +14,9 @@ import { foldMergeLedger } from '../src/model/merge-ledger.js';
 import { mergePipeline, withMergePipeline } from '../src/pipeline-speed.js';
 import { actionlessCards, stalledCards } from '../src/model/actionless.js';
 import { mergeWriterIdle, mergeWriterStep, mergeWriterSummary, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
-import { emptyDaemonState } from '../src/master-daemon.js';
-import { masterConfigSchema } from '../src/master.js';
+import { masterStatusReport } from '../src/cli/master-status.js';
+import { writeDaemonState, readDaemonState } from '../src/daemon/state.js';
+import { timedMergePorts } from '../src/daemon/trial-timings.js';
 import { defaultChildRun } from '../src/child-runner.js';
 import { firstParentHolds, runTrial, trialCheckoutPrefix, trialMerge } from '../src/merge-writer/trial.js';
 import { mergeRecordKinds, type MergePorts, type MergeRecordEvent } from '../src/merge-writer/executor.js';
@@ -82,9 +85,12 @@ function harness(): StepHarness {
     baseBranch: 'main', retrials: 0, now: () => clock,
     fetch: async () => base,
     merge: async () => ({ mergeSha: sha('merge'), files: ['src/app.ts'] }),
-    trial: async (_mergeSha, _files, _picked, _baseTip, onStep) => {
-      made.report = step => onStep?.(step);
+    trial: async (_mergeSha, _files, _picked, _baseTip, onStep, onTiming) => {
+      let current: string | undefined, began = clock;
+      const close = () => { if (current) onTiming?.(current, clock - began); };
+      made.report = step => { close(); current = step; began = clock; onStep?.(step); };
       await new Promise<void>(resolve => { made.finish = () => settle?.(); settle = resolve; });
+      close();
       if (made.trialError) throw made.trialError;
       return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
     },
@@ -213,10 +219,10 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
     baseBranch: 'main', retrials: 0, now: () => Date.now(),
     fetch: async () => repo.baseTip,
     merge: (mergeHead, mergeBase) => trialMerge(repo.git, { head: mergeHead, baseTip: mergeBase }).then(merged => ('conflict' in merged ? merged : { mergeSha: merged.mergeSha, files: ['src.ts'] })),
-    trial: async (mergeSha, files, picked, _baseTip, onStep) => {
+    trial: async (mergeSha, files, picked, _baseTip, onStep, onTiming) => {
       const verdict = await runTrial({
-        root: repo.root, base: managedBase, mergeSha, changedFiles: files, timeoutMs: 120_000, key: picked.key, run,
-        environment: { PATH: process.env.PATH! }, temporaryRoots: [temporary], checkoutRoots: [trials], retries: 0, ...(onStep ? { onStep } : {}),
+        root: repo.root, base: managedBase, mergeSha, changedFiles: files, timeoutMs: 120_000, key: picked.key, run, secretScan: async () => ({ ok: true }),
+        environment: { PATH: process.env.PATH! }, temporaryRoots: [temporary], checkoutRoots: [trials], retries: 0, ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}),
       });
       return { ...verdict, files: [...files], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
     },
@@ -242,6 +248,18 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
   assert.ok(!existsSync(abandoned), 'the crashed trial\'s checkout was taken back beside this one, never before it');
   assert.equal(state.actions[`merge-writer:GY-1:${repo.head}`]?.state, 'done', JSON.stringify(state.actions));
 
+  const credentials = await temporaryDirectory('trial-status-credentials');
+  const savedConfig = { ...config, credentialFile: join(credentials, 'token') };
+  await writeDaemonState(savedConfig, state);
+  assert.deepEqual((await readDaemonState(repo.root, savedConfig))?.mergeWriter.trials, state.mergeWriter.trials);
+  const report = await masterStatusReport(repo.root, savedConfig, async () => ({ work: [], now: iso(Date.now()) }), async () => repo.baseTip);
+  assert.deepEqual(report.mergeWriter.trials[0]!.heads, [{ key: 'GY-1', head: repo.head }]);
+  assert.deepEqual(report.mergeWriter.trials[0]!.steps.map(entry => entry.step), ['checkout', 'scan', 'install', 'build', 'tests: test', 'push']);
+  for (const entry of report.mergeWriter.trials[0]!.steps) {
+    assert.ok(entry.durationMs >= 0);
+    assert.equal(report.mergeWriter.stepMedians[entry.step], entry.durationMs);
+  }
+
   // Every step's duration is in the trial's log, the last one included.
   const steps: string[] = [];
   const verdict = await runTrial({
@@ -250,4 +268,124 @@ test('unit:trial-checkout-starts-promptly — the trial\'s checkout step starts 
   });
   assert.deepEqual(steps, ['checkout', 'install', 'build', 'tests: test']);
   for (const step of steps) assert.match(verdict.logTail, new RegExp(`\\[step\\] ${step} took [0-9.]+s`), step);
+});
+
+
+test('integration:trial-step-timings — finished steps survive the flight and medians retain only the last 20 trials', async () => {
+  const made = harness();
+  await made.step();
+  while (!made.report) await new Promise(resolve => setTimeout(resolve, 1));
+  made.report('install'); made.advance(100);
+  made.report('build'); made.advance(300);
+  made.finish!(); await mergeWriterIdle(made.state); await made.step();
+  assert.equal(made.state.mergeWriter.inFlight, null);
+  const first = made.state.mergeWriter.trials![0]!;
+  assert.deepEqual(first.heads, [{ key: 'GY-1', head }]);
+  assert.deepEqual(first.steps, [{ step: 'install', durationMs: 100 }, { step: 'build', durationMs: 300 }, { step: 'push', durationMs: 0 }]);
+
+  let clock = start, duration = 0;
+  const ports = timedMergePorts({ baseBranch: 'main', retrials: 0, fetch: async () => base,
+    merge: async () => ({ mergeSha: head, files: [] }), holds: async () => false, record: async () => {}, now: () => clock, trial: async (_sha, _files, _item, _base, step, timing) => {
+    step?.('build'); duration += 10; clock += duration; timing?.('build', duration); timing?.('tests: shard 1', 7);
+    return {} as never;
+  }, push: async () => { clock += 20; return 'pushed'; }, preview: async () => { clock += 30; return null; } } as MergePorts,
+  made.state.mergeWriter, async () => {});
+  const heads = [{ key: 'GY-1', head }, { key: 'GY-2', head: sha('second') }];
+  for (let index = 0; index < 21; index++) {
+    await ports.trial(sha(String(index)), [], item(), base, undefined, undefined, heads);
+    await ports.preview!(sha(String(index)), [], item());
+    await ports.push(sha(String(index)), base);
+  }
+  const summary = mergeWriterSummary(made.state.mergeWriter);
+  assert.equal(summary.trials!.length, 20);
+  assert.equal(summary.trials![0]!.mergeSha, sha('1'));
+  assert.deepEqual(summary.trials![0]!.heads, heads);
+  assert.deepEqual(summary.stepMedians, { build: 115, 'tests: shard 1': 7, preview: 30, push: 20 });
+});
+
+test('integration:trial-step-timings — parallel test shards report their own durations', async () => {
+  const repo = await fixtureRepo();
+  await mkdir(join(repo.root, 'scripts'));
+  await writeFile(join(repo.root, 'scripts/ci-tests.mjs'), '// fixture selection\n');
+  gitIn(repo.root, 'add', 'scripts/ci-tests.mjs');
+  gitIn(repo.root, 'commit', '-q', '-m', 'test selector');
+  const mergeSha = gitIn(repo.root, 'rev-parse', 'HEAD');
+  const scratch = await temporaryDirectory('timed-shards');
+  const timings: { step: string; durationMs: number }[] = [];
+  let clock = start;
+  const run = (async (command: string, args: string[], options: never) => {
+    if (command === 'npm') { clock += 10; return ''; }
+    if (command === 'node') {
+      clock += 20;
+      return args[0] === 'scripts/ci-tests.mjs' ? 'tests/a.test.ts\ntests/b.test.ts\n' : '';
+    }
+    return defaultChildRun(command, args, options);
+  }) as never;
+  const result = await runTrial({ root: repo.root, base: scratch, mergeSha, changedFiles: ['scripts/ci-tests.mjs'],
+    timeoutMs: 120_000, run, now: () => clock, groupSize: 1, cores: 2, retries: 0,
+    environment: { PATH: process.env.PATH! }, temporaryRoots: [scratch], checkoutRoots: [scratch],
+    onTiming: (step, durationMs) => timings.push({ step, durationMs }) });
+  assert.equal(result.build, 'pass');
+  assert.equal(result.groups?.length, 2);
+  assert.deepEqual(timings.filter(entry => entry.step.startsWith('tests: shard')).map(entry => entry.step).sort(), ['tests: shard 1', 'tests: shard 2']);
+  assert.ok(timings.filter(entry => entry.step.startsWith('tests: shard')).every(entry => entry.durationMs >= 20));
+});
+
+
+test('integration:trial-step-timings — bound E2E success and failure have separate persisted durations and a median', async () => {
+  const repo = await fixtureRepo();
+  await mkdir(join(repo.root, 'e2e/cases'), { recursive: true });
+  await writeFile(join(repo.root, 'e2e/cases/timed.json'), '{}');
+  await writeFile(join(repo.root, 'graphyard.json'), JSON.stringify({
+    e2e: { serve: { command: 'node server.js', url: 'http://127.0.0.1:8080', readySeconds: 10 } },
+    delivery: { mergeGate: { preMerge: [{ check: 'test', command: 'npm run test' }], perCandidate: [] } },
+  }));
+  gitIn(repo.root, 'add', '-A');
+  gitIn(repo.root, 'commit', '-q', '-m', 'bound E2E fixture');
+  const mergeSha = gitIn(repo.root, 'rev-parse', 'HEAD');
+  const scratch = await temporaryDirectory('timed-e2e');
+  const state = emptyDaemonState(config);
+  let clock = start, failed = false;
+  const run = (async (command: string, args: string[], options: never) => {
+    if (command === 'npm') { clock += 10; return ''; }
+    if (command === 'node' && args.at(-1)?.endsWith('/run.mjs')) {
+      clock += failed ? 900 : 300;
+      if (failed) throw new Error('E2E runner failed');
+      await writeFile(join(dirname(args.at(-1)!), 'result.json'), JSON.stringify([
+        { proof: 'e2e:timed', case: 'timed', executed: 1, failed: 0 },
+      ]));
+      return '';
+    }
+    return defaultChildRun(command, args, options);
+  }) as never;
+  const ports = timedMergePorts({ now: () => clock,
+    trial: async (_sha, files, _item, _base, onStep, onTiming) => ({
+      ...await runTrial({ root: repo.root, base: scratch, mergeSha, changedFiles: files,
+        timeoutMs: 120_000, run, now: () => clock, retries: 0, e2eProofs: ['e2e:timed'],
+        environment: { PATH: process.env.PATH! }, temporaryRoots: [scratch], checkoutRoots: [scratch],
+        ...(onStep ? { onStep } : {}), ...(onTiming ? { onTiming } : {}),
+      }), files: [...files],
+    }),
+  } as MergePorts, state.mergeWriter, async () => {});
+  const heads = [{ key: 'GY-1', head: mergeSha }];
+  for (const failure of [false, true]) {
+    failed = failure;
+    const result = await ports.trial(mergeSha, ['src.ts'], item(mergeSha), repo.baseTip, undefined, undefined, heads);
+    assert.equal(result.e2e?.[0]?.failed, failure ? 1 : 0);
+  }
+  const credentials = await temporaryDirectory('timed-e2e-status');
+  const savedConfig = { ...config, credentialFile: join(credentials, 'token') };
+  await writeDaemonState(savedConfig, state);
+  const report = await masterStatusReport(repo.root, savedConfig, async () => ({ work: [], now: iso(clock) }), async () => repo.baseTip);
+  assert.equal(report.mergeWriter.trials.length, 2);
+  for (const [index, trial] of report.mergeWriter.trials.entries()) {
+    assert.deepEqual(trial.heads, heads);
+    assert.deepEqual(trial.steps, [
+      { step: 'checkout', durationMs: 0 }, { step: 'install', durationMs: 0 },
+      { step: 'build', durationMs: 10 }, { step: 'tests: e2e', durationMs: index === 0 ? 300 : 900 },
+      { step: 'tests: test', durationMs: 10 },
+    ]);
+  }
+  assert.equal(report.mergeWriter.stepMedians['tests: e2e'], 600);
+  assert.equal(report.mergeWriter.stepMedians.build, 10);
 });

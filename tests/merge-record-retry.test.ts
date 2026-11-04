@@ -1,7 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { emptyDaemonState, runCycle, type DaemonEffects, type DaemonState } from '../src/master-daemon.js';
+import { emptyDaemonState, type DaemonState } from '../src/daemon/state.js';
+import { runCycle } from '../src/daemon/cycle.js';
+import { type DaemonEffects } from '../src/daemon/effects.js';
 import { mergeRecordKey, mergeWriterIdle, type MergeWriterReads } from '../src/daemon/cycle-merge-writer.js';
 import type { MergePorts, MergeRecordEvent } from '../src/merge-writer/executor.js';
 import type { MergeLedgerState } from '../src/model/merge-ledger.js';
