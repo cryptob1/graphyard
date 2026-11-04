@@ -1,7 +1,6 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
@@ -73,7 +72,7 @@ async function delivered(mergeSha = 'e'.repeat(40)) {
   w = await engine.observe(w.id, w.revision, observation());
   w = await engine.execute(ci, 'evidence', w.id, { proof: 'integration:claim-safety', sha: head, baseSha: base, policyRevision: 1, result: 'pass', executed: 5, skipped: 0, exercise: { behaviour: 'the change under test', result: 'fail', executed: 1 } }, id());
   w = await engine.observe(w.id, (await reload(w)).revision, observation());
-  const committed = { revision: (await engine.store.workItem(w.id))!.revision };
+  await engine.store.workItem(w.id);
   await delay(5); const mergedAt = ((await store.pool.query('SELECT clock_timestamp() AS now')).rows[0].now as Date).toISOString(); await delay(5);
   // GY-2010: the merge writer's ledger delivers it, as production does; no GitHub merge is observed.
   w = await deliverThroughLedger(engine, w.id, mergeSha, mergedAt);

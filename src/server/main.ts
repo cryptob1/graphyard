@@ -5,8 +5,6 @@ import { Store } from '../store.js';
 import { waitForDatabase } from '../store/pools.js';
 import { Engine } from '../engine.js';
 import { demand } from '../model.js';
-import { Validation } from '../validation.js';
-import { Delivery } from '../delivery.js';
 import { principalSchema, server } from './index.js';
 import { buildIdentity } from '../protocol-version.js';
 import { ProductionWatch, observationLine, productionProvider, startProductionWatch } from '../production-watch.js';
@@ -49,14 +47,12 @@ export async function main(options: MainOptions = {}) {
   console.log(`Generated files: ${generatedFiles.length ? generatedFiles.join(', ') : 'none declared'}`);
   console.log(`Build ${build.commit ?? 'commit unknown'} (merge protocol ${build.protocol}); ${observationLine(provider, build)}`);
 
-  const validation = new Validation(engine, credentials.map(({ token, ...actor }) => actor), process.env.GITHUB_REPOSITORY ?? '');
-  const delivery = new Delivery(validation);
+  const { validation, delivery } = http.services;
 
   // Serve liveness while loading production state; mutations wait for readiness.
   let ready = false, validating = false, prepared = false, closing = false;
   let watching: ReturnType<typeof startProductionWatch> | null = null;
   let observing: ReturnType<typeof startObservationWorkers> | null = null;
-  let startupTask: Promise<void> | null = null;
   const services: typeof http.services & { readiness?: boolean } = http.services;
   services.readiness = false;
   const runStartup = async () => {
@@ -78,10 +74,8 @@ export async function main(options: MainOptions = {}) {
         if (!closing) console.error('startup initialization failed; the reconciliation tick retries it', error instanceof Error ? error.message : 'unknown');
       } finally {
         validating = false;
-        startupTask = null;
       }
     })();
-    startupTask = task;
     await task;
   };
   const startBackground = () => {

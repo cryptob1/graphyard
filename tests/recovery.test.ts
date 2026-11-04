@@ -2,7 +2,6 @@ import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, generateKeyPairSync, randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
-import { join } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';

@@ -18,7 +18,6 @@ import { launchProducer, producerIdleGraceMs, producerPrompt, readProducerLedger
 import { emptyDispatchCursor, readDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
 import { emptyDaemonState, noteConfigReload, readDaemonState, runDaemon, type DaemonEffects } from '../src/master-daemon.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { readMasterGuide } from './helpers/master-guide.js';
 // Time-bomb allowance (GY-1694): the 2026-09-19 at dates the fixture item (createdAt/stageEnteredAt, already past) and the 2026-10-09 lock start is only rendered; the launcher runs on the real clock with relative registerLaunch expiries.
 
 // Each test is named for the proof it produces (GY-69): integration:producer-session-retry,
@@ -235,7 +234,7 @@ test('integration:master-config-reload — a running loop adopts master.json cha
 });
 
 test('integration:master-profile-management — producer profiles can be replaced and removed, reviewer profiles removed, and status flags an unbound reviewer App and a Herdr workspace that no longer exists', async () => {
-  const { root, credentials, token, cleanup } = await installed({ herdrWorkspace: 'w1V' });
+  const { root, token, cleanup } = await installed({ herdrWorkspace: 'w1V' });
   try {
     const a = await token('producer-a'), b = await token('producer-b'), c = await token('producer-c');
     await saveProducerProfile(root, { name: 'producer-a', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: a }, producerVerify('proof-runner'));

@@ -259,7 +259,7 @@ test('integration:registry-driven-selection — an executor\'s action runs on th
 
   // The profile is a Graphyard identity and nothing else here: it says codex, with Codex-only
   // arguments, and names no account. The registry decides what actually runs.
-  const { root, config, credentialDirectory } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex', agentArgs: ['--model', 'gpt-codex-only'] }, { name: 'worker-b', principal: 'implementer-b', kind: 'codex' }, { name: 'worker-c', principal: 'implementer-c', kind: 'claude', agentArgs: ['--permission-mode', 'default'] }]);
+  const { root, config } = await master([{ name: 'worker-a', principal: 'implementer', kind: 'codex', agentArgs: ['--model', 'gpt-codex-only'] }, { name: 'worker-b', principal: 'implementer-b', kind: 'codex' }, { name: 'worker-c', principal: 'implementer-c', kind: 'claude', agentArgs: ['--permission-mode', 'default'] }]);
   assert.equal(config.environments, undefined); assert.ok(config.workers.every(entry => !entry.accounts));
   const calls: string[][] = [];
   const dispatched = await dispatch(root, config, 'worker-a', probe, calls);
@@ -610,7 +610,6 @@ test('integration:reviewer-provider-diversity — the select route reads the imp
   const unknown = await select('reviewer', 'GY-7003');
   assert.equal(unknown.session.account, 'codex-r'); assert.deepEqual(unknown.session.skipped, []);
 });
-
 
 // Both proofs traverse HTTP registry selection, worker dispatch, and the loop's master-wake decision.
 for (const proof of ['integration:normal-capacity-wait', 'e2e:normal-capacity-wait']) test(`${proof} — live role saturation stays queued until release; real failures still wake`, async () => {

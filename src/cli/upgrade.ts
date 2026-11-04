@@ -17,7 +17,7 @@ import type { ChildRun } from '../child-runner.js';
 import { deployRecordPath, watchMain, type DeployWatchPorts } from '../deploy-watch.js';
 import { caseDirectory, loadCases } from '../e2e/case.js';
 import { runCases } from '../e2e/runner.js';
-import { parseServeDeclaration, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveRecordPath, watchServe, type ServeCheck, type ServeDeclaration, type ServeRecord, type ServePorts } from '../serve-app.js';
+import { parseServeDeclaration, readServeRecord, serveBaselineCheckoutPath, serveCheckoutPath, serveRecordPath, watchServe, type ServeDeclaration, type ServePorts } from '../serve-app.js';
 import { defaultChildRun } from '../child-runner.js';
 import { loadMasterConfig } from '../master.js';
 import { cliReleasePath, activeCliRoot, prepareCliRelease, publishCliRelease } from '../install/cli-release.js';

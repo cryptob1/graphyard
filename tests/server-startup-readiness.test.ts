@@ -5,6 +5,7 @@ import { rm } from 'node:fs/promises';
 import EmbeddedPostgres from 'embedded-postgres';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { main, refusedBeforeReady } from '../src/server/main.js';
+import { Delivery } from '../src/delivery.js';
 import { ProductionWatch } from '../src/production-watch.js';
 
 const port = Number(process.env.GRAPHYARD_STARTUP_TEST_PORT ?? Number(process.env.GRAPHYARD_TEST_PORT ?? 15438) + 1127);
@@ -65,4 +66,20 @@ test('server serves liveness during initialization and gates mutations until pro
       assert.equal((await fetch(`${url}/healthz?ready`)).status, 200);
     } finally { release(); await instance.close(); }
   } finally { ProductionWatch.prototype.load = original; }
+});
+
+ test('unit:server-startup-readiness — routes and the reconciliation tick share the same services', async () => {
+  const originalSweep = Delivery.prototype.sweep;
+  const deliveries = new Set<Delivery>();
+  try {
+    Delivery.prototype.sweep = async function (...args) { deliveries.add(this); return originalSweep.apply(this, args); };
+    const instance = await main({ port: 0 });
+    try {
+      assert.equal(instance.validation, instance.http.services.validation);
+      assert.equal(instance.http.services.delivery.validation, instance.validation);
+      const deadline = Date.now() + 10_000;
+      while (!deliveries.size && Date.now() < deadline) await new Promise(resolve => setTimeout(resolve, 20));
+      assert.deepEqual([...deliveries], [instance.http.services.delivery]);
+    } finally { await instance.close(); }
+  } finally { Delivery.prototype.sweep = originalSweep; }
 });

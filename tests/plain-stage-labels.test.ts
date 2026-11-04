@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { itemLine } from '../src/cli/master-status.js';
 import type { PlainStage, ServeView } from '../src/model/plain-stage.js';
 import { prSteps } from '../src/model/pr-steps.js';
-import { noRelease, type ReleaseView } from '../src/model/release.js';
+import { type ReleaseView } from '../src/model/release.js';
 import type { Work } from '../src/model/work.js';
 import { stages, type Stage } from '../src/model/work.js';
 

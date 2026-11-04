@@ -562,7 +562,7 @@ async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: Da
  * dispatch offers the item.
  */
 async function releaseBacklog(cycle: Cycle) {
-  const { config, state, effects, snapshot, clock } = cycle;
+  const { config, effects, snapshot, clock } = cycle;
   let slots = config.workers.length - snapshot.work.filter(item => item.stage !== 'done' && (item.ready || inFlight(item, clock))).length;
   if (slots <= 0) return;
   const identity = config.operatorAgent ? { id: config.operatorAgent.id, role: 'operator-agent' as const } : undefined;

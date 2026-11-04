@@ -118,8 +118,10 @@ export const schemaGenerations: readonly (string | null)[] = [
   'sha256:dcefbd2e92eecbef78eb75f38e5798adcfaa3a228e7c8e59ddab7f4e95e02627',
   // GY-2986: a person's human: answer stays in the coordination view for its head whatever the base.
   'sha256:72e499b9d63b92e474fa67e9ba27b7b89db644b5f9e18d3adf9b911d4e364e06',
+  // GY-3013: migrate retired document fields once instead of stripping them on reads and writes.
+  'sha256:e9966540eb026ae6f07a7abbd5ceacfc8dd90ffe41f8adbbb1f965aacd70457b',
   // GY-3018: retire the unused validation runner and attribution tables.
-  'sha256:ce19216c27ad0ae95cfafc9ac1359bb60d72c1c8dc77e5c2738e142bfb876ba9',
+  'sha256:8d56d8f8b309c613697e4fdc6d44d853853c6cfeab5aa9dc317cd01fae1ee3ee',
 ];
 /** The schema generation the code in this process expects: its table definitions' place in the lineage. */
 export const schemaVersion = schemaGenerations.length - 1;

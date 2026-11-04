@@ -69,3 +69,9 @@ Set the variables, register a read-write deploy key, then run `doctor`. For Comp
 `master setup --apply` sets derivable variables and appends `.graphyard/setup-audit.jsonl`. Agents run host-doable steps; park refuses those asks. Personal sign-in, enrolment and browser profiles remain human.
 
 No main guard, revert approver or reviewer App remains. Old `GRAPHYARD_REVERT_APPROVER_*` and `GRAPHYARD_REVIEWER_APPS` variables are unread. Reviews use control-plane launch tokens.
+
+Startup migrates retired work-item fields once (GY-3013), including queue, planned-file scope,
+escalation, research and lane fields, and clears standing `Scope request refused` blockers.
+The migration preserves stages and event history; evaluations and status reads no longer strip fields.
+Daemon cursors still load retired keys and preserve unknown fields across reads and writes for
+forward compatibility, while validating active fields.

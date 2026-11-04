@@ -2,19 +2,18 @@ import { createHash, randomUUID } from 'node:crypto';
 import { jsonChanged, stableJson } from './model/stable-json.js';
 import { z } from 'zod';
 import type { PoolClient } from 'pg';
-import { Store, save, rewriteDocument, lockItem, wakeJob, eventWorkSql } from './store.js';
+import { Store, save, wakeJob, eventWorkSql } from './store.js';
 import { commitLockWaitMs, reconcileCommitBlockingSql, reconcileRereadSql, reconcileRowLockSql, reconcileRowsSql, reconcileVersionsSql } from './store/coordination-sql.js';
 import { advisoryLocks } from './store/locks.js';
 import { leaseCommands } from './store/pools.js';
 import { compactHeartbeatReceipt } from './store/receipts.js';
 import { authorizedForProof, grantsAuthorize, unauthorizedProofs } from './model/proof.js';
 import { workspacePath, pathsOverlap, validBranch } from './workspace.js';
-import { activeLease, dropRetiredQueueFields, dropRetiredScopeFields, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, criterionSchema, bindingApproval, carriedApproval, currentCarry, refreshedCarriedApproval, currentEvidence, attachedCriteria, exerciseRefusal, proofExerciseSchema, decideCarry, exactApproval, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopeContains, pathScopesOverlap, requiredProofs, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewerProfileSchema, reviewProviders, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewFailover, type Work, type Observation, type ReviewRequest, type OperatorCapability, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
+import { activeLease, admin, operatorCapability, operatorScopeIncludes, releaseLeadHold, submittedEpoch, stallCovering, type PlaneStall, requireCurrent, createSchema, criteriaSchema, currentCarry, refreshedCarriedApproval, attachedCriteria, exerciseRefusal, proofExerciseSchema, type CarriedApproval, deploySmokeProof, deploySmokeRequired, inheritedObligations, pathScopesOverlap, resourcesSchema, demand, evaluate, exhaustedReviewerProfiles, proofSchema, reviewerProfileFor, reviewProviderOf, type Criterion, type Evidence, type Lease, type Principal, type ReviewFailover, type Work, type Observation, type ReviewRequest, deferBoundMs, observationWindowHold, servingReleaseProof, singleCaseWarnings } from './model.js';
 import { filedFollowUpWindow, followUpRequest } from './model/observation-window.js';
 import { Refusal, demandWork } from './model/refusal.js';
 import { resourceConflicts } from './coordination.js';
-import { implementerIdentities, leadMay, producerIndependenceRefusal, sessionKind } from './delegation.js';
-import { onto } from './model/base-refresh.js';
+import { implementerIdentities, leadMay, producerIndependenceRefusal } from './delegation.js';
 import { gitRunnerFor, observeHead as observeLocalHead, type GitRunner } from './merge-writer/local-observation.js';
 import { allocateChangeNumber } from './merge-writer/change-numbers.js';
 import { buildIdentity } from './protocol-version.js';
@@ -1462,15 +1461,9 @@ export class Engine {
     // One request, one verdict (GY-124): two verdicts from one identity on one head for one request
     // are recorded as a conflict and withheld from the observation before any gate reads it.
     this.conflictTransitions.set(work, [...(this.conflictTransitions.get(work) ?? []), ...reconcileReviewConflict(work, now)]);
-    // Graphyard keeps no merge queue (GY-1236) and no planned-file scope (GY-1992): a document stored
-    // before then drops their fields, and a scope refusal it carried, before any gate reads them.
-    dropRetiredQueueFields(work); dropRetiredScopeFields(work);
     const result = evaluate(work, all, now);
     if (work.stage !== result.stage) work.stageEnteredAt = now.toISOString();
     Object.assign(work, result);
-    // GitHub merges on every passing gate (GY-1235): no merge authorization is recorded, and one a
-    // record carried from before is cleared.
-    if (work.mergeAuthorization) work.mergeAuthorization = null;
     // What the exact head still needs from a launched reviewer or producer, decided from the
     // gates just evaluated; the transitions reach the ledger with the document (recordDispatch).
     this.dispatchTransitions.set(work, reconcileAutoDispatch(work, all, now));

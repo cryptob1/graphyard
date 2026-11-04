@@ -1,5 +1,5 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { Refusal, demand, operatorScopeIncludes, type Principal } from '../model.js';
+import { demand, operatorScopeIncludes, type Principal } from '../model.js';
 import { laneOnlyProducer, type Credential, type PrincipalGrant } from './principals.js';
 import { readImports } from '../validation-import.js';
 import type { Engine } from '../engine.js';

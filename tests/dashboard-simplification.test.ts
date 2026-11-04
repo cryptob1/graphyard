@@ -8,7 +8,7 @@ import { apiRoutes } from '../src/server/index.js';
 // @ts-expect-error Dependency-free fixture and screenshot script.
 import { fixtureApi, fixtureStatus, fixtureWork as auditWork, NOW, unexplainedWords, visibleWords } from '../scripts/dashboard-fixture.mjs';
 import { live } from '../browser-tests/ui-board.js';
-import { jargon, phaseLabel, phaseOf, phases, plainReason, plainStatus } from '../src/model/plain-status.js';
+import { jargon, phaseOf, plainReason, plainStatus } from '../src/model/plain-status.js';
 import { classify, groupLabel, groups, summarySentence } from '../web/groups.js';
 import WorkersPage from '../web/pages/workers.js';
 import { glossary } from '../web/glossary.js';
@@ -307,7 +307,6 @@ test('integration:dashboard-capability-parity — nothing removed from a default
   assert.match(css, /\.sidebar-inner\{position:sticky;top:0;height:100vh/);
   assert.match(css, /\.main\{margin-left:0\}/);
 });
-
 
 test('unit:dashboard-simplification — the home page renders its numbers without web/home-numbers.ts: every tile is a group count drawn from web/groups.ts', () => {
   const page = home();
