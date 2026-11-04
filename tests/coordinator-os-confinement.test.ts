@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 /** Whether `path` is a directory; mirrors the launcher's own check for re-exposed paths. */
@@ -141,13 +141,22 @@ test('unit:coordinator-write-blocked-for-shell — every runtime kind launches c
       assert.ok(socketIdx > 0 && confinement.wrapper[socketIdx - 2] === '--ro-bind' && (replacement === '/dev/null' || (!!launchTargets.secretsBus && replacement === realpathSync(launchTargets.secretsBus))),
         `the namespace replaces the bus socket ${socket} with an unconnectable device or the keyring-only proxy`);
     }
-    assert.ok(processLaunchMaskWords({ directories: ['/run/user/4242/systemd', '/run/dbus', '/run/dbus'], busSockets: ['/run/user/4242/bus', '/run/user/4242/nested'] }, [root]).length > 0, 'the mask words are built for channels that exist');
-    if (isDirectory('/run/dbus')) {
-      const candidates = ['/run/dbus', '/var/run/dbus'];
-      const canonicalDirectories = [...new Set(candidates.filter(isDirectory).map(path => realpathSync(path)))];
-      assert.deepEqual(processLaunchMaskWords({ directories: candidates }, [root]), canonicalDirectories.flatMap(path => ['--tmpfs', path]),
-        'aliased launch-channel directories collapse into one mask named by the canonical real path');
-    }
+    // Private-root containers intentionally have no host bus. Create the channels we assert.
+    const channels = join(base, 'channels'), manager = join(channels, 'systemd');
+    mkdirSync(manager, { recursive: true });
+    const alias = join(channels, 'manager-alias'), bus = join(channels, 'bus');
+    symlinkSync(manager, alias);
+    const endpoint = createServer();
+    await new Promise<void>(resolve => endpoint.listen(bus, resolve));
+    try {
+      const words = processLaunchMaskWords({ directories: [manager, alias, manager], busSockets: [bus] }, [root]);
+      assert.deepEqual(words, ['--tmpfs', realpathSync(manager), '--ro-bind', '/dev/null', realpathSync(bus)],
+        'existing channels are masked and directory aliases collapse to the canonical path');
+      const masked = spawnSync('bwrap', ['--ro-bind', '/', '/', ...words, '--', 'sh', '-ec',
+        'test -z "$(ls -A "$1")"; test ! -S "$2"', 'probe', manager, bus], { encoding: 'utf8' });
+      assert.equal(masked.status, 0, masked.stderr);
+      assert.equal(statSync(bus).isSocket(), true, 'the original endpoint survives outside the namespace');
+    } finally { await new Promise<void>(resolve => endpoint.close(() => resolve())); }
     assert.ok(processLaunchMaskWords({ directories: [root, base] }, [root]).length === 0, 'a candidate that would hide a protected path is dropped');
     assert.ok(processLaunchMaskWords({ directories: [worktree] }, [worktree]).length === 0, 'the session\'s own directory is never hidden either');
     const probe = [

@@ -128,18 +128,21 @@ export const credentialTrialVariable = (name: string) =>
   || /(?:TOKEN|SECRET|PASSWORD|PASSWD|PRIVATE_KEY|API_KEY|ACCESS_KEY|CREDENTIAL)/i.test(name);
 /** The trial child's environment: the isolated test one, with every credential and Graphyard control removed and git's global configuration off. */
 export function trialEnvironment(environment: NodeJS.ProcessEnv = process.env): Record<string, string> {
-  const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR)_/.test(name) && !credentialTrialVariable(name)));
+  const kept = Object.fromEntries(Object.entries(isolatedTestEnvironment(environment)).filter(([name]) => !/^(GRAPHYARD|HERDR|LC)_/.test(name) && name !== 'LANG' && !credentialTrialVariable(name)));
   // Use the running Node installation before host version-manager shims: the trial's empty
   // home intentionally cannot supply the host's mise trust/configuration to those shims.
-  return { ...kept, PATH: [dirname(process.execPath), kept.PATH].filter(Boolean).join(delimiter), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
+  // The private image supplies C.UTF-8, not the service manager's host locales.
+  // Normalize every inherited category before builds, tests and E2E start.
+  return { ...kept, LANG: 'C.UTF-8', LC_ALL: 'C.UTF-8', PATH: [dirname(process.execPath), kept.PATH].filter(Boolean).join(delimiter), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: '/dev/null' };
 }
 
 /**
- * GY-2997: the trial child's home and caches belong to its allocation. Preserve
+ * GY-2997: the trial child's home and caches belong to its allocation. The
+ * installed Chromium lives in the read-only image, while its profiles use scratch. Preserve
  * explicit host mise resolution for launcher tooling; candidate commands use the
  * private container's toolchain without mounting the host home.
  */
-export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env): Record<string, string> {
+export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = process.env, installedBrowsers = existsSync('/etc/graphyard-trial')): Record<string, string> {
   const shared: Record<string, string> = {};
   for (const [kind, base, fallback] of [
     ['CONFIG', 'XDG_CONFIG_HOME', '.config'], ['CACHE', 'XDG_CACHE_HOME', '.cache'],
@@ -150,7 +153,7 @@ export function trialHomeVariables(home: string, host: NodeJS.ProcessEnv = proce
     if (host[name] !== undefined) shared[name] = host[name];
     else if (directory) shared[name] = join(directory, 'mise');
   }
-  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
+  return { ...shared, npm_config_cache: join(home, '.npm'), PLAYWRIGHT_BROWSERS_PATH: installedBrowsers ? '/opt/graphyard-browsers' : join(home, '.cache', 'ms-playwright'), HOME: home, XDG_CONFIG_HOME: join(home, '.config'), XDG_CACHE_HOME: join(home, '.cache'), XDG_DATA_HOME: join(home, '.local', 'share'), XDG_STATE_HOME: join(home, '.local', 'state') };
 }
 /** GY-2997: what a trial child must not read by its absolute path: the operator config home (coordinator credentials, the deploy key's default place), the deploy key wherever it is configured, and the loop's runtime directory (its session bus and sockets). */
 export const trialHiddenPaths = (deployKeyFile: string, environment: NodeJS.ProcessEnv = process.env, uid = process.getuid?.()): string[] =>
@@ -636,12 +639,34 @@ export function failureTail(outputs: readonly string[], length = tailLength): st
   return outputs.map(output => {
     if (output.length <= share) return output;
     const line = output.slice(0, output.indexOf('\n') + 1), command = line.length < share / 2 ? line : '';
-    const summary = failingSummary(output), exit = summary ? /\n(\[exit [^\n]*\])\s*$/.exec(output)?.[1] : undefined;
+    const summary = failingSummary(output), exit = /\n(\[exit [^\n]*\])\s*$/.exec(output)?.[1];
     const end = exit ? `\n${exit}` : '', room = Math.max(0, share - command.length - cut.length - end.length);
     if (summary && summary.length <= room) return `${command}${cut}${summary}${end}`;
-    // The cut output starts at a whole line after `trialCutLine`, so a summary whose heading was cut still names its tests.
-    const kept = (summary ?? output).slice(-room), whole = kept.slice(kept.indexOf('\n') + 1), entry = summary ? whole.search(/^test at /m) : -1;
-    return `${command}${cut}${entry > 0 ? whole.slice(entry) : whole}${end}`;
+    // Keep each test's name and first assertion/child error, before its long stack.
+    // Taking the end of the summary loses exactly the asset-startup diagnosis we need.
+    if (summary) {
+      const entries = summary.replace(ansiEscape, '').split(/(?=^test at )/m).filter(entry => /^test at /m.test(entry));
+      const perEntry = Math.floor((room - Math.max(0, entries.length - 1)) / Math.max(1, entries.length));
+      return `${command}${cut}${entries.map(entry => {
+        // node's spec reporter prints ChildProcessError's entire invocation before its
+        // stderr, then repeats the arguments in inspected properties after the stack.
+        // Read the stderr property independently so inline scripts cannot consume the share.
+        const childAt = entry.search(/\n  (?:ChildProcessError|Error \[ChildProcessError\]):/);
+        const stderr = /^    stderr: (?!'',?$)([\s\S]*?)(?=^    \w+:|^  }\s*$)/m.exec(entry)?.[1];
+        const useful = childAt >= 0 && stderr
+          ? `${entry.slice(0, childAt)}\n  ChildProcessError stderr: ${stderr.trim()}`
+          : entry;
+        return useful.slice(0, Math.max(0, perEntry)).trimEnd();
+      }).join('\n')}${end}`;
+    }
+    const errorAt = output.search(/^.*(?:Error(?: \[[^\]]+\])?:|error:|bwrap:).*$/m);
+    if (errorAt >= 0) {
+      const first = output.slice(errorAt, errorAt + Math.floor(room / 2));
+      const last = output.slice(-Math.max(0, room - first.length - 1));
+      return `${command}${cut}${first}\n${last}`;
+    }
+    const kept = output.slice(-room), whole = kept.slice(kept.indexOf('\n') + 1);
+    return `${command}${cut}${whole}${end}`;
   }).join('\n').slice(-length);
 }
 const testFile = /tests\/[\w./-]+\.test\.ts/g;
@@ -799,7 +824,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     const near = await trialCheckoutRoot(input.checkoutRoots ?? trialCheckoutRoots(), input.minFreeBytes ?? defaultWorktreeRootMinFreeGb * 1e9, input.probe, input.checkoutRoots ? [] : undefined);
     if (near) { place = await mkdtemp(join(near, trialCheckoutPrefix)); await writeTempOwner(place); worktree = join(place, 'checkout'); }
     const { XDG_RUNTIME_DIR: _runtime, DBUS_SESSION_BUS_ADDRESS: _bus, ...hostEnv } = trialEnvironment(input.environment);
-    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment) };
+    env = { ...hostEnv, ...trialTemporaryVariables(temporary!), ...trialHomeVariables(home, input.environment, true) };
     assertIsolatableHostControlEndpoints({ ...process.env, ...input.environment });
     wrapper = trialContainerWords([checkout.directory, place, temporary, home], trialContainerDependencies(input.root));
   }
@@ -873,7 +898,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
     return wrapperExecFailed.test(diagnostic) || /^(?:mise ERROR (?:Config files in .+ are not trusted|No version is set for tool (?:node|npm|npx))\s*$|.*(?:env:|sh:)\s+(?:(?:line )?\d+:\s+)?['‘"]?(?:node|npm|npx)['’"]?:\s+(?:command not found|not found|No such file or directory)\s*$)/m.test(diagnostic);
   };
   const runnerFailure = (phase: TrialRunnerError['phase'], ended: Ended, files: string[] = [], finished = 0) =>
-    new TrialRunnerError(phase, ended.status, ended.signal, files, finished, `${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`.slice(-runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
+    new TrialRunnerError(phase, ended.status, ended.signal, files, finished, failureTail([`${ended.out}\n${ending({ status: ended.status, signal: ended.signal, cause: ended.cause })}`], runnerDiagnosticTailLength), input.mergeSha, Math.max(0, now() - startedAt));
   const finish = (build: TrialRun['build'], tests: TrialRun['tests'], runnerExit: number | null = null, groups?: TrialGroup[], logTail?: string, detail?: { failingCase?: string | null; timedOut?: boolean }): TrialRun => {
     const closed = enter();
     const line = `[step] ${stepLabel} took ${stepSeconds(now() - stepAt)}`;
@@ -951,13 +976,11 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           if (hostEnded(built) || toolchainStartFailed(built)) throw runnerFailure('build', built);
           if (!built.ok) return finish('fail', { passed: 0, failed: [], files: 0 });
         }
-        // GY-2092: a change to the dashboard installs Chromium in the allocated trial home and runs the Playwright suite; a failing browser test refuses the merge like any failing test.
-        // An install that fails is the host's, retried, never the merge's.
+        // GY-2092: dashboard changes run the Playwright suite with the image's pinned Chromium.
+        // The image is read-only; profiles and caches belong to this allocation.
         if (hasBrowserTestCheck(packageScripts) && touchesDashboard(input.changedFiles)) {
           enter('tests');
           enterStep('tests: test:browser');
-          const chromium = await child('tests', 'npx', ['playwright', 'install', 'chromium']);
-          if (!chromium.ok) throw runnerFailure('tests', chromium);
           const browser = await child('tests', 'npm', ['run', 'test:browser']);
           if (hostEnded(browser)) throw runnerFailure('tests', browser);
           if (!browser.ok) return finish('pass', { passed: 0, failed: [browserSuite], files: 1 });
