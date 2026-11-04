@@ -45,3 +45,23 @@ test('integration:trial-reuses-identical-tree — the merge writer reuses its ow
   assert.equal(again.reused, undefined);
   assert.deepEqual(ran.slice(3), [sha('c1'), sha('c2')], 'the failed tree was trialled again');
 });
+
+test('integration:trial-reuses-identical-tree — passes finishing at once are all recorded', async () => {
+  const base = await temporaryDirectory('trial-reuse-concurrent');
+  const trees: Record<string, string> = { [sha('d1')]: sha('de'), [sha('e1')]: sha('ee'), [sha('d2')]: sha('de'), [sha('e2')]: sha('ee') };
+  const run = async (_command: string, args: readonly string[]) => args[2] === 'rev-parse' ? `${trees[args[3].replace('^{tree}', '')]}\n` : '';
+  const ran: string[] = [];
+  // Both trials read the empty record before either finishes, as stacked parallel trials do.
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const reads = () => mergeWriterReads(config, '/repo', run, { base, record: async () => ({}),
+    trial: async input => { ran.push(input.mergeSha); await gate; return verdict([], [...input.proofs]); } });
+  const both = Promise.all([reads().trial(sha('d1'), [], work('GY-3', ['unit:a']), sha('f1'), undefined, 2), reads().trial(sha('e1'), [], work('GY-4', ['unit:a']), sha('f1'), undefined, 2)]);
+  await new Promise(resolve => setTimeout(resolve, 10));
+  release();
+  await both;
+  const d = await reads().trial(sha('d2'), [], work('GY-3', ['unit:a']), sha('f2'));
+  const e = await reads().trial(sha('e2'), [], work('GY-4', ['unit:a']), sha('f2'));
+  assert.deepEqual([d.reused?.key, e.reused?.key], ['GY-3', 'GY-4'], 'both concurrent passes were recorded');
+  assert.deepEqual(ran, [sha('d1'), sha('e1')]);
+});
