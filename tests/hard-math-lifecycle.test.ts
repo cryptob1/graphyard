@@ -61,3 +61,21 @@ test('hard math overlap requires actual handles and three different implementati
   sessions[2].implementation.path=sessions[1].implementation.path;
   assert.deepEqual(overlappingWorkers(sessions),[]);
 });
+
+test('hard math comparison accepts equal existing time caps with unavailable money and rejects unequal bounds',async()=>{
+  const {comparison,receiptSchema}=await import('../benchmarks/hard-math/receipt-schema.js');
+  const receipt=(mode:'team'|'single')=>receiptSchema.parse({
+    version:1,id:`synthetic-${mode}`,kind:'real-agent',mode,configDigest:'a'.repeat(64),graphyardCommit:'a'.repeat(40),graphyardVersion:'unit',
+    profileVersion:'v1',profileDigest:'a'.repeat(64),generatorDigest:'a'.repeat(64),contractDigest:'a'.repeat(64),seed:1,startingCommit:'b'.repeat(40),oracleDigest:'a'.repeat(64),
+    startedAt:'2026-01-01T00:00:00Z',endedAt:'2026-01-01T00:00:01Z',outcome:'FAIL',reason:'Synthetic validation input; no agents ran',
+    budget:{authorization:'Synthetic validation only',maxAgentSeconds:60,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'Unavailable subscription allocation'}},
+    eligibleModels:['existing'],accountLimits:[],sourceCapacity:[],runtimeReceipts:[],cleanup:{complete:true,errors:[]},wallClockLimitSeconds:60,
+    work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costBudgetProven:false,costReason:'Unavailable subscription allocation',agentSeconds:0,wallClockMs:1000,comparativeSelection:'untested',speedupClaim:false,
+  });
+  const team=receipt('team'),single=receipt('single'),result=comparison(team,single);
+  assert.equal(result.team.correct,false);assert.equal(result.team.cost,null);
+  assert.equal(result.monetaryParityProven,false);assert.equal(result.costAdvantageProven,false);
+  assert.throws(()=>comparison(team,{...single,budget:{...single.budget,maxAgentSeconds:61}}),/bounds/);
+  assert.throws(()=>comparison(team,{...single,wallClockLimitSeconds:61}),/differs/);
+  assert.throws(()=>comparison(team,{...single,seed:2}),/differs/);
+});
