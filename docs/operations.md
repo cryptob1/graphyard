@@ -9,6 +9,8 @@ Check `/healthz` for the expected commit, `/api/status` for job errors and `mast
 
 Run `diagnose GY-N`; fix the named cause with requirements intact. Use lease recovery for expired workers and rework for failed implementations or producer-runnable manual proofs. The master handles routine recovery.
 
+CLI requests wait out connection failures during a deploy restart, retrying every second for up to 60 seconds with the same idempotency key and body. HTTP errors fail immediately. If the plane stays unreachable, the error names the requested URL.
+
 ## Recovery recipes
 
 ```sh
@@ -61,7 +63,7 @@ Rotate `GRAPHYARD_PRINCIPALS`; keep secrets outside Git. Operator agents have on
 
 ## Scale limits
 
-`GRAPHYARD_RECONCILE_BATCH_MS` defaults to 250; observation concurrency defaults to 8 per token.
+`GRAPHYARD_RECONCILE_BATCH_MS` defaults to 250; observation concurrency defaults to 8 per token. Idle observation workers check only the jobs table once per second. When a job is due, they read open items for the existing priority order, then claim with `SKIP LOCKED`; settled summaries are never read for observation scheduling. Successful observations remain due every 20 seconds.
 
 ### Concurrent reconciliation
 

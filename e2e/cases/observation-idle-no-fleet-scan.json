@@ -1,0 +1,14 @@
+{
+  "id": "observation-idle-no-fleet-scan",
+  "title": "Idle observation workers avoid fleet reads",
+  "description": "Exercise real Postgres with 1,000 settled items, idle worker loops, due-job priority and locking, then observe real submitted Git heads across repeated cycles and a submission race.",
+  "tags": ["observation", "performance"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Exercise idle and active observation workers",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/observation-idle-no-fleet-scan.test.ts tests/soak-control-plane-observation.test.ts",
+    "timeoutSeconds": 300
+  }]
+}

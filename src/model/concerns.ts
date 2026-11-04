@@ -45,9 +45,8 @@ export function humanNeeded(action: NextAction): HumanNeeded | null {
  *
  * An assignment is the one action whose subject is another item as much as this one: an
  * exclusive resource held by somebody else is not visible in this item's own refusals, and is not
- * something the worker such an action would launch could do anything about. Planned-file overlap
- * is not a hold: dispatch is optimistic, and the merge queue and a sync round integrate whichever
- * of two overlapping items lands second.
+ * something the worker such an action would launch could do anything about. Observed-file
+ * overlap is not a hold, but a file declared as an exclusive resource is.
  */
 export function dispatchHold(work: Work, all: Work[], now: Date): string | null {
   const resources = resourceConflicts(work, all, now.getTime());

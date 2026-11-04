@@ -23,7 +23,7 @@ async function fixture(page: Page) {
 test('integration:item-details — an item page opens on its plain summary and folds Details', async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await fixture(page);
-  await page.goto('/');
+  await page.goto('/?sign-in');
   await page.getByLabel('Access token').fill('browser-fixture');
   await page.getByRole('button', { name: 'Open control plane' }).click();
   await expect(page.getByRole('heading', { name: 'Work', exact: true })).toBeVisible();

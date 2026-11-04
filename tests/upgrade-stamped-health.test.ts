@@ -4,7 +4,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { readFile, symlink, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
-import EmbeddedPostgres from 'embedded-postgres';
+import EmbeddedPostgres from './helpers/warm-postgres.js';
 import { composeAdapter, type AdapterContext, type AdapterObservation } from '../src/install/adapters.js';
 import type { InstallRecord } from '../src/install/secrets.js';
 import { cliChangesOf, liveEffects, resolveTarget, runUpgrade, upgradePlan, type UpgradeInputs } from '../src/cli/upgrade.js';

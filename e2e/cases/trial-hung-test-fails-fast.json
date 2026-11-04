@@ -1,0 +1,14 @@
+{
+  "id": "trial-hung-test-fails-fast",
+  "title": "A hung merge-trial test fails by name within its file deadline",
+  "description": "Run a real trial with hung and slow finishing Node test files, checking the five-minute production bound with an accelerated test clock and the ordinary named failure verdict.",
+  "tags": ["trial"],
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Exercise the real trial runner and timeout reporter",
+    "run": "node --import tsx tests/helpers/run-tests.ts --test-name-pattern=integration:trial-hung-test-fails-fast tests/trial-merge.test.ts",
+    "timeoutSeconds": 180
+  }]
+}

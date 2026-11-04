@@ -29,6 +29,7 @@ import { readTempOwner, tempOwnerGone, tempOwnerMarker } from '../../src/tmp-rec
 //   --shard I/N         run only shard I of N, balanced by file count, in the shard's own order
 //                       (tests/helpers/ordered-tests.mjs)
 //   --durations FILE    also write each file's wall time to FILE (tests/helpers/file-durations.mjs)
+//   --file-timeout MS   kill a file's process group after MS, reporting a named test failure
 //
 // Every GRAPHYARD_* and HERDR_* variable the caller carries is withheld from the tests except the
 // harness controls in src/cli/test-isolation.ts; GRAPHYARD_TEST_PORT is a window of free ports this
@@ -111,8 +112,8 @@ export interface RunResult { code: number; base: number; environment: Record<str
 
 /** The runner's own options, taken out of the arguments `node --test` receives. */
 function runnerOptions(args: string[]) {
-  const rest: string[] = [], options: { filesFrom?: string; shard?: string; durations?: string } = {};
-  const flags = { '--files-from': 'filesFrom', '--shard': 'shard', '--durations': 'durations' } as const;
+  const rest: string[] = [], options: { filesFrom?: string; shard?: string; durations?: string; fileTimeout?: string } = {};
+  const flags = { '--files-from': 'filesFrom', '--shard': 'shard', '--durations': 'durations', '--file-timeout': 'fileTimeout' } as const;
   for (let at = 0; at < args.length; at++) {
     const [flag, inline] = args[at].split(/=(.*)/s, 2) as [string, string | undefined];
     const key = flags[flag as keyof typeof flags];
@@ -130,10 +131,14 @@ function runnerOptions(args: string[]) {
  * through in its order, as before those options existed.
  */
 export function nodeTestArgs(cwd: string, args: string[]) {
-  const { rest, filesFrom, shard, durations } = runnerOptions(args);
-  const reporters = durations ? ['--test-reporter=spec', '--test-reporter-destination=stdout', `--test-reporter=${fileURLToPath(new URL('./file-durations.mjs', import.meta.url))}`, `--test-reporter-destination=${resolve(cwd, durations)}`] : [];
+  const { rest, filesFrom, shard, durations, fileTimeout } = runnerOptions(args);
+  if (fileTimeout && (!Number.isFinite(Number(fileTimeout)) || Number(fileTimeout) <= 0)) throw new Error('--file-timeout needs positive milliseconds');
+  const bounded = fileTimeout ? { bounded: true } : {};
+  const reporters = fileTimeout
+    ? [`--file-timeout=${fileTimeout}`, ...(durations ? ['--durations', resolve(cwd, durations)] : [])]
+    : durations ? ['--test-reporter=spec', '--test-reporter-destination=stdout', `--test-reporter=${fileURLToPath(new URL('./file-durations.mjs', import.meta.url))}`, `--test-reporter-destination=${resolve(cwd, durations)}`] : [];
   const all = () => readdirSync(resolve(cwd, 'tests')).filter(name => name.endsWith('.test.ts')).sort().map(name => `tests/${name}`);
-  if (!filesFrom && !shard) return { args: [...reporters, ...rest, ...(rest.some(arg => !arg.startsWith('-')) ? [] : all())], empty: false, ordered: false };
+  if (!filesFrom && !shard) return { ...bounded, args: [...reporters, ...rest, ...(rest.some(arg => !arg.startsWith('-')) ? [] : all())], empty: false, ordered: false };
   const listed = filesFrom ? readFileSync(resolve(cwd, filesFrom), 'utf8').split(/\r?\n/).map(line => line.trim()).filter(Boolean) : [];
   const named = [...rest.filter(arg => !arg.startsWith('-')), ...listed];
   let files = named.length || filesFrom ? named : all();
@@ -142,9 +147,9 @@ export function nodeTestArgs(cwd: string, args: string[]) {
     const { index, count } = parseShard(shard); files = shardFiles(files, count)[index - 1];
     // A shard runs through ordered-tests.mjs, which starts its files in the order given, unless the
     // caller passes `node --test` flags of its own.
-    if (!flags.length) return { args: [...(durations ? ['--durations', resolve(cwd, durations)] : []), ...files], empty: !files.length, ordered: true };
+    if (!flags.length && !fileTimeout) return { args: [...(durations ? ['--durations', resolve(cwd, durations)] : []), ...files], empty: !files.length, ordered: true };
   }
-  return { args: [...reporters, ...flags, ...files], empty: !files.length, ordered: false };
+  return { ...bounded, args: [...reporters, ...flags, ...files], empty: !files.length, ordered: false };
 }
 
 /** How far above its parent's base a run started inside a test run begins: past every per-file port offset (the highest is 642). */
@@ -185,7 +190,7 @@ export async function runTests(options: RunOptions = {}): Promise<RunResult> {
     const environment = isolatedTestEnvironment(options.environment ?? process.env, set);
     const [command, commandArgs] = options.browser || !selection
       ? [process.execPath, [fileURLToPath(import.meta.resolve('@playwright/test/cli')), 'test', ...args]]
-      : [process.execPath, ['--import', import.meta.resolve('tsx'), ...(selection.ordered ? [fileURLToPath(new URL('./ordered-tests.mjs', import.meta.url))] : ['--test']),
+      : [process.execPath, ['--import', import.meta.resolve('tsx'), ...(selection.bounded ? [fileURLToPath(new URL('./bounded-tests.mjs', import.meta.url))] : selection.ordered ? [fileURLToPath(new URL('./ordered-tests.mjs', import.meta.url))] : ['--test']),
         // The breadth the host's memory affords (GY-1821). A caller's own flag stands; a shard's
         // order is ordered-tests.mjs's own concurrency, which stays node's default as CI has it.
         ...(selection.ordered || options.breadth === undefined || !Number.isFinite(options.breadth) || options.breadth < 1 || runnerOptions(args).rest.some(argument => argument.startsWith('--test-concurrency')) ? [] : [`--test-concurrency=${Math.floor(options.breadth)}`]),

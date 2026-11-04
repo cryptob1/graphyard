@@ -24,6 +24,8 @@ export type TrialMergeResult = { mergeSha: string; tree: string } | { conflict: 
 
 export const trialAuthor = 'graphyard-merge-writer';
 export const trialRef = (head: string) => `refs/graphyard/trial/${head}`;
+/** A trial's test outcome as the merge record accepts it (src/server/merge-record.ts): at most 100 failed files of at most 300 characters, so a mass failure is still recorded instead of refused. */
+export const recordedTests = (tests: { passed: number; failed: string[]; files: number }) => ({ ...tests, failed: tests.failed.slice(0, 100).map(file => file.slice(0, 300)) });
 const fullSha = /^[0-9a-f]{40}$/;
 
 // A trial keeps FORCE_COLOR, so the runner's summary may carry ANSI escapes before every line it prints.
@@ -1071,7 +1073,7 @@ export async function runTrialAttempt(input: RunTrialInput): Promise<TrialRun> {
           try {
             const list = join(checkout.directory, `tests-${index + 1}.txt`), records = join(checkout.directory, `tests-${index + 1}.jsonl`);
             await writeFile(list, `${group.join('\n')}\n`);
-            const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`], { entries });
+            const tests = await child('tests', 'node', ['--import', 'tsx', 'tests/helpers/run-tests.ts', '--files-from', list, '--durations', records, `--test-concurrency=${breadth}`, '--file-timeout=300000'], { entries });
             const recorded = runnerRecords(await readFile(records, 'utf8').catch(() => ''));
             // Only the shard's own files count: the records and the log may name a file a test ran or printed itself (GY-1645).
             const namedByRecords = recorded.filter(record => !record.passed && group.includes(record.file)).map(record => record.file);

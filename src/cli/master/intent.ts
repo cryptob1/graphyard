@@ -25,7 +25,7 @@ export async function derivedIntent(id: 'create' | 'requirements', args: string[
   // A settled delivery is a summary in the snapshot (GY-422); its requirements are read whole.
   const work = listed && await wholeDocument(listed, deps.coordinator);
   if (id === 'requirements' && !work) throw new Error(`Unknown work item ${args[0]}`);
-  const { plannedFiles: _retired, ...intent } = work ? intentInput('requirements', work, input) : input;
+  const intent = work ? intentInput('requirements', work, input) : input;
   const postDeploy = postDeployCriterionRefusal(intent.criteria ?? []) ?? postDeployOnlyRefusal(intent.criteria ?? []);
   if (postDeploy) throw new Error(postDeploy);
   return deps.mutate(work ? `work/${work.id}/requirements` : 'work', { ...intent, reason }, process.env.GRAPHYARD_REQUEST_ID ?? randomUUID(), await deps.token());

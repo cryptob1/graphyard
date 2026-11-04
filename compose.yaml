@@ -36,7 +36,8 @@ services:
     environment:
       DATABASE_URL: postgres://graphyard:graphyard@db:5432/graphyard
       HOST: 0.0.0.0
-    ports: ["127.0.0.1:4310:4310"]
+      GRAPHYARD_LOCAL_VIEW_PORT: "${GRAPHYARD_PORT:-4310}"
+    ports: ["127.0.0.1:${GRAPHYARD_PORT:-4310}:4310"]
     # Logical backups written by `docker compose exec server node bin/graphyard.mjs db backup /backups/NAME.json`.
     volumes: ["graphyard-backups:/backups"]
     depends_on:

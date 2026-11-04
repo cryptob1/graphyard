@@ -1,4 +1,7 @@
 // Concern: one coordination cycle — snapshot, close, dispatch, merge writer, persist, in that order.
+import { existsSync } from 'node:fs';
+import { resolve, sep } from 'node:path';
+import { dataDirectory } from '../install/worktree-root.js';
 import { sessionName } from '../session-name.js';
 import type { Work } from '../model.js';
 import type { MasterConfig, WorkerProfile, HerdrAgent } from '../master.js';
@@ -6,7 +9,7 @@ import { assertDispatchable } from '../master.js';
 import type { ExhaustionSignal } from '../model/capacity.js';
 import { endedRuntimeStates } from '../model/sessions.js';
 import { detectRuntimeExhaustion, classifyRuntimePrompt } from '../master/runtime-prompt.js';
-import { dispatchSort, inFlight } from '../coordination.js';
+import { dispatchSort, inFlight, resourceConflicts, sharedResources } from '../coordination.js';
 import { capacityRefusal } from '../fleet.js';
 import { needsSpecCheck, specCheckCurrent, specCheckLaunchLive } from '../model/spec-check.js';
 import { cliUnreachableRefusal } from '../reviewer.js';
@@ -275,6 +278,30 @@ async function closeStep(cycle: Cycle) {
       await note(cycle, key, 'close', item.key, 'done', `Released ${session.id}'s agent-registry session (${ended ?? 'none recorded'}): ${reason}`, session.principal ?? null);
     } catch (error) { await note(cycle, key, 'close', item.key, 'failed', `Could not release ${session.id}'s agent-registry session: ${message(error)}`, session.principal ?? null); }
   }
+  // A pane Graphyard launched whose runtime exited in a worktree since removed is a leftover shell: close it.
+  const launched = new Set([...snapshot.work.flatMap(item => (item.sessions ?? []).map(session => session.pane)), ...Object.values(state.actions).map(action => action.pane)]);
+  const masters = new Set([state.master, ...Object.values(state.personalMasters)].map(master => master.pane));
+  const recoveredItems = new Set<string>();
+  if (cycle.herdr.available) for (const agent of cycle.herdr.agents) {
+    const cwd = (agent.cwd ?? '').replace(/ \(deleted\)$/, '');
+    if (!agent.pane_id || masters.has(agent.pane_id) || (agent.agent && !endedRuntimeStates.includes(agent.agent_status ?? ''))) continue;
+    const managedRoots = [resolve(dataDirectory(), 'worktrees'), ...(config.run.worktreeRoot ? [resolve(config.run.worktreeRoot)] : [])];
+    const managed = managedRoots.some(root => cwd.startsWith(root + sep));
+    if ((!cwd.includes('/.graphyard/worktrees/') && !managed) || existsSync(cwd)) continue;
+    // Finished sessions disappear from coordination, and old launch actions are pruned.
+    // Read only the leftover's item, once per cycle; never fetch the fleet's full history.
+    if (!launched.has(agent.pane_id) && effects.sessionHistory) {
+      const key = [...cwd.matchAll(/(?:^|[/-])(GY-\d+)(?=[/-]|$)/gi)].at(-1)?.[1].toUpperCase();
+      const item = snapshot.work.find(work => work.key === key || work.workspaces?.some(space => space.path === cwd));
+      if (item && !recoveredItems.has(item.id)) {
+        for (const session of await effects.sessionHistory(item)) launched.add(session.pane);
+        recoveredItems.add(item.id);
+      }
+    }
+    if (!launched.has(agent.pane_id)) continue;
+    try { await Promise.resolve(effects.closeSession(agent.pane_id)).catch(error => { if (!paneAlreadyGone(error)) throw error; }); await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'done', `Closed pane ${agent.pane_id}: its runtime exited and its worktree ${cwd} is removed`); }
+    catch (error) { await note(cycle, `pane:${agent.pane_id}`, 'close', null, 'failed', `Could not close pane ${agent.pane_id}: ${message(error)}`); }
+  }
   await effects.sweepCheckouts?.();
 }
 
@@ -449,7 +476,10 @@ async function dispatchStep(cycle: Cycle) {
   const taken = cycle.reservedProfiles;
   const hot = new Set(hotspots(open, clock).map(entry => entry.file));
   const claimable = dispatchSort(open.filter(item => { try { assertDispatchable(item, snapshot.work, snapshot.now); return true; } catch { return false; } }), hot, clock);
+  const launched: Work[] = [];
   for (const item of claimable) {
+    // Two claimable items sharing an exclusive resource: the first goes, the other waits for it to land.
+    if (launched.some(other => sharedResources(item, other).length)) continue;
     const incident = state.actions[earlyExitKey(item)];
     if (incident?.state === 'failed' && incident.attempts >= actionStallThreshold && clock - Date.parse(incident.at) < actionStallDelay(incident.attempts)) continue;
     const key = dispatchKey(item);
@@ -458,6 +488,7 @@ async function dispatchStep(cycle: Cycle) {
     if (!free) break;
     taken.add(free.profile.name);
     launcher.submit(key, [free.profile.name], sink => launchWorker(cycle, item, key, free.profile, sink));
+    launched.push(item);
   }
   // The spec check a released feature owes before dispatch (GY-2992): one fresh-context reviewer
   // session per owed check. The hold itself is assertDispatchable's; the launch runs while the item
@@ -528,7 +559,7 @@ async function dispatchStep(cycle: Cycle) {
 }
 
 /** The record of a spec-check launch whose session ended without a report (GY-2994): master status names it, and it frees the item for a relaunch. */
-export const specCheckEndedKey = (item: Pick<Work, 'id' | 'specCheckLaunch'>) => `spec-check-ended:${item.id}:${item.specCheckLaunch?.id ?? ''}`;
+export const specCheckEndedKey = (item: { id: string; specCheckLaunch?: { id: string } | null }) => `spec-check-ended:${item.id}:${item.specCheckLaunch?.id ?? ''}`;
 
 /** Why a checker's session ended without posting, or null while it runs: Herdr no longer reports its pane, or its pane shows a BLOCKED: line. */
 async function specCheckEnded(cycle: Cycle, pane: string): Promise<string | null> {
@@ -547,6 +578,9 @@ async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: Da
   try {
     const launched = await effects.launchSpecCheck!(item);
     sink.push(await entry('done', `Launched ${item.key}'s spec check: a fresh-context reviewer restates the item and names its gaps before a worker starts`, launched?.pane, launched?.launch));
+    // A headless check that ended without an accepted report frees its item for a relaunch, as an ended pane does (GY-2994).
+    if (launched?.settled) void launched.settled.then(failure => failure ? record(state, specCheckEndedKey({ id: item.id, specCheckLaunch: { id: launched.launch } }), { kind: 'attention', work: item.key, principal: null, state: 'failed', attempts: 1, cycle: state.cycle,
+      detail: `${item.key}'s headless spec check ended without a report: ${failure}; it is relaunched` }, now(), effects.persist) : undefined).catch(() => {});
   } catch (error) {
     sink.push(await entry('failed', `Spec check launch of ${item.key} failed: ${message(error)}; it is retried next cycle`));
   }
@@ -558,7 +592,8 @@ async function launchSpecChecker(cycle: Cycle, item: Work, key: string, sink: Da
  * configured worker profile), it releases the backlog item with the highest priority, oldest first
  * on ties, whose dependencies are all done, recording the release decision under the loop's own
  * identity with the reason. A parked item — any standing blocker — never releases, nor an
- * owner-held or loop-owned item, whose release the control plane refuses. Items the master wants
+ * owner-held or loop-owned item, whose release the control plane refuses, nor one sharing an
+ * exclusive resource with an item in flight or released (`resourceConflicts`). Items the master wants
  * held are parked, not left in backlog, so backlog means "work this next"; `master release` stays
  * for an out-of-order pull. Each release takes its response's document, so the same cycle's
  * dispatch offers the item.
@@ -574,6 +609,8 @@ async function releaseBacklog(cycle: Cycle) {
     .sort((a, b) => a.priority - b.priority || Date.parse(a.createdAt) - Date.parse(b.createdAt));
   for (const item of candidates) {
     if (slots <= 0) break;
+    // An item sharing an exclusive resource (a file path included) with one in flight or released waits until that one lands.
+    if (resourceConflicts(item, snapshot.work, clock).length || snapshot.work.some(other => other.id !== item.id && other.stage !== 'done' && other.ready && sharedResources(item, other).length)) continue;
     const key = `release:${item.id}:${item.revision}`, inPipeline = snapshot.work.filter(entry => entry.stage !== 'done' && (entry.ready || inFlight(entry, clock))).length;
     try {
       const released = await effects.release!(item, `The loop keeps the pipeline full: ${inPipeline} item(s) in flight of concurrency ${config.workers.length}, every dependency of ${item.key} is done, and backlog means work this next`) as Work | undefined;

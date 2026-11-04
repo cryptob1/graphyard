@@ -1,0 +1,13 @@
+{
+  "id": "cli-waits-out-plane-restart",
+  "title": "CLI commands survive a control-plane deploy restart",
+  "description": "Run the CLI against an interrupted HTTP listener and a real temporary Postgres control plane. A read waits for restart; a mutation whose committed response is lost replays exactly once with the same key and body. HTTP refusals remain immediate and an exhausted retry names its URL.",
+  "target": "any",
+  "required": false,
+  "steps": [{
+    "kind": "command",
+    "name": "Exercise CLI restart recovery and idempotent mutation replay",
+    "run": "node --import tsx tests/helpers/run-tests.ts tests/cli-waits-out-plane-restart.test.ts",
+    "timeoutSeconds": 180
+  }]
+}
