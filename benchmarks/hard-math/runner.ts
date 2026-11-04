@@ -6,7 +6,7 @@ import { loadStoredMasterConfig, readCredentialFile, atomicPrivateWrite, atomicP
 import { masterConfigSchema, type MasterConfig } from '../../src/master/profiles.js';
 import { daemonEffects } from '../../src/daemon/effects-production.js';
 import { Launcher } from '../../src/daemon/cycle.js';
-import { emptyDaemonState, type DaemonState } from '../../src/daemon/state.js';
+import { emptyDaemonState, readDaemonState, type DaemonState } from '../../src/daemon/state.js';
 import { createdHerdrTab, isHerdrCommand, herdrSubcommand } from '../../src/master/herdr.js';
 import { runCertifiedCycle } from './cycle.js';
 import { stopRun, stopImplementation, watchBudget } from './lifecycle.js';
@@ -26,6 +26,8 @@ import { sourceCapacity } from './capacity.js';
 import { routeAccounts } from './routing.js';
 import { codeRoot, benchmarkRoot, isolatedRepository, startPlane, credential, operator } from './isolation.js';
 import { verifyArtifact } from './artifact.js';
+
+import { assertTrialHealth, enforceUsage, comparisonPreflight, assertUsageMeasurement } from './enforcement.js';
 
 export type Plane=Awaited<ReturnType<typeof startPlane>>;
 export interface RunContext {
@@ -50,8 +52,13 @@ export async function realPrerequisites(source:MasterConfig,commit:string) {
   if(status.build?.protocol!==MERGE_PROTOCOL || status.build?.commit!==commit) throw new Error('Real runs require healthy matching CLI/server commit and protocol');
   const work=await sourceCall(source,'work');
   for(const key of ['GY-3044','GY-3045','GY-3046','GY-3047','GY-3050','GY-3048']) if(!work.some((w:any)=>w.key===key && w.stage==='done' && w.delivery)) throw new Error(`Real run requires delivered ${key}`);
-  // Shared trial failures are authoritative merge-ledger failures, not worker reports.
-  if(work.some((w:any)=>w.stage!=='done' && (w.mergeLedger?.trial?.outcome==='host-failure' || w.mergeLedger?.trial?.build==='fail' && w.mergeLedger?.trial?.baseFailure))) throw new Error('Unresolved shared trial failure');
+  const state=await readDaemonState(codeRoot,source);
+  if(state.mergeWriter.inFlight) throw new Error('Unresolved shared trial flight');
+  for(const item of work.filter((w:any)=>w.stage!=='done')) {
+    const record=await sourceCall(source,`work/${item.id}`);
+    const trials=await sourceCall(source,`events?work=${item.id}&kind=merge.trial&limit=1&order=desc`);
+    assertTrialHealth(record,trials[0]?.payload);
+  }
 }
 export async function createItems(context:RunContext) {
   const ids=new Map<string,string>();
@@ -73,6 +80,7 @@ export async function createItems(context:RunContext) {
 }
 export async function execute(configInput:unknown,fixture?: (context:RunContext)=>Promise<void>):Promise<Receipt> {
   const config=configSchema.parse(configInput),directory=resolve(config.runDirectory),install=resolve(config.credentialDirectory);
+  assertUsageMeasurement(config);
   const frozen=await frozenInputs(),graphyardCommit=await git(codeRoot,'rev-parse','HEAD');
   const graphyardVersion=JSON.parse(await readFile(join(codeRoot,'package.json'),'utf8')).version;
   if(!fixture) {
@@ -97,7 +105,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     if(Date.now()>=deadline) limit('Wall-clock deadline reached');
     const seconds=receipt.sessions.reduce((sum,s)=>sum+(Date.parse(s.endedAt??new Date().toISOString())-Date.parse(s.startedAt))/1000,0);
     receipt.agentSeconds=seconds;
-    if(seconds>=config.budget.maxAgentSeconds || config.budget.maxCost!==null && receipt.cost!==null && receipt.cost>=config.budget.maxCost || config.budget.maxTokens!==null && receipt.usage.reduce((n,u)=>n+(u.inputTokens??0)+(u.outputTokens??0),0)>=config.budget.maxTokens) limit('Configured aggregate usage limit reached');
+    try {enforceUsage(config.budget,seconds,receipt.usage);} catch(error) {limit(error as Error);}
     abort.signal.throwIfAborted();
   };
   const panes=new Set<string>();
@@ -287,16 +295,17 @@ async function configureMaster(c:RunContext,source:MasterConfig,producers:{id:st
 
 export async function compareRuns(configInput:unknown) {
   const config=configSchema.parse(configInput);
+  const preflight=comparisonPreflight(config);
   const team=await execute({...config,mode:'team',id:`${config.id}-team`,runDirectory:`${config.runDirectory}-team`,credentialDirectory:`${config.credentialDirectory}-team`,oracleDirectory:`${config.oracleDirectory}-team`});
   const single=await execute({...config,mode:'single',id:`${config.id}-single`,runDirectory:`${config.runDirectory}-single`,credentialDirectory:`${config.credentialDirectory}-single`,oracleDirectory:`${config.oracleDirectory}-single`});
-  const result=comparison(team,single);await writeFile(`${config.runDirectory}-comparison.json`,JSON.stringify(result,null,2)+'\n');return result;
+  const result={...comparison(team,single),preflight};await writeFile(`${config.runDirectory}-comparison.json`,JSON.stringify(result,null,2)+'\n');return result;
 }
 if(process.argv[1] && import.meta.url===pathToFileURL(resolve(process.argv[1])).href) {
   const [mode,file]=process.argv.slice(2);
-  if(!file || !['run','post-deploy','compare'].includes(mode)) throw new Error('Usage: runner.ts run|post-deploy|compare CONFIG.json');
+  if(!file || !['run','post-deploy','compare','estimate'].includes(mode)) throw new Error('Usage: runner.ts run|post-deploy|compare|estimate CONFIG.json');
   const config=JSON.parse(await readFile(file,'utf8'));
   if(mode==='post-deploy' && config.mode!=='team') throw new Error('First post-deploy run must use team mode');
-  const result=mode==='compare'?await compareRuns(config):await execute(config);
+  const result=mode==='estimate'?comparisonPreflight(configSchema.parse(config)):mode==='compare'?await compareRuns(config):await execute(config);
   console.log(JSON.stringify(result,null,2));
   if('outcome' in result && result.outcome!=='PASS') process.exitCode=1;
 }

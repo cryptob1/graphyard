@@ -97,7 +97,7 @@ const syntheticReceipt=(mode:'team'|'single')=>receiptSchema.parse({
     work:[],sessions:[],overlaps:[],failures:[],artifact:null,usage:[],usageComplete:false,cost:null,costBudgetProven:false,costReason:'Unavailable subscription allocation',agentSeconds:0,wallClockMs:1000,comparativeSelection:'untested',speedupClaim:false,
   });
 
-test('hard math comparison accepts equal existing time caps with unavailable money and rejects unequal bounds',async()=>{
+test('hard math comparison accepts equal authorized allocation-second caps with unavailable money and rejects unequal bounds',async()=>{
   const team=syntheticReceipt('team'),single=syntheticReceipt('single'),result=comparison(team,single);
   assert.equal(result.team.correct,false);assert.equal(result.team.cost,null);
   assert.equal(result.monetaryParityProven,false);assert.equal(result.costAdvantageProven,false);
@@ -279,4 +279,19 @@ test('hard math credential-free command errors retain bounded structured stdout 
   await assert.rejects(command(process.execPath,args),error=>{
     assert.ok(!(error as Error).message.includes('stdout:\n'));return true;
   });
+});
+
+
+test('hard math receipt cannot certify PASS above a known partial cost or token cap',()=>{
+  for(const cap of [{maxCost:10},{maxTokens:8}]) {
+    const receipt=syntheticReceipt('single');
+    receipt.outcome='PASS';receipt.budget={...receipt.budget,...cap};
+    receipt.usage=[{role:'worker',session:'measured',cost:12,inputTokens:8,outputTokens:null,reason:'Output unavailable'}, {role:'reviewer',session:'unknown',cost:null,inputTokens:null,outputTokens:null,reason:'Usage unavailable'}];
+    assert.equal(receipt.cost,null);assert.equal(receipt.usageComplete,false);
+    assert.throws(()=>validateReceipt(receipt),/aggregate usage limit/);
+    receipt.outcome='FAIL';receipt.reason='Configured aggregate usage limit reached';
+    const retained=validateReceipt(receipt);
+    assert.equal(retained.outcome,'FAIL');assert.equal(retained.cost,null);assert.equal(retained.costBudgetProven,false);
+    assert.equal(retained.usage[1].inputTokens,null);
+  }
 });

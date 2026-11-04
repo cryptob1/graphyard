@@ -1,9 +1,10 @@
+import { enforceUsage } from './enforcement.js';
 import { z } from 'zod';
 import { currentEvidence } from '../../src/model/evidence.js';
 import { evidenceProves } from '../../src/model/mechanical-proofs.js';
 import type { Work } from '../../src/model.js';
 const sha=z.string().regex(/^[0-9a-f]{40}$/), hash=z.string().regex(/^[0-9a-f]{64}$/);
-export const budgetSchema=z.object({authorization:z.string().min(1),maxAgentSeconds:z.number().positive(),maxTokens:z.number().positive().nullable(),maxCost:z.number().positive().nullable(),currency:z.literal('USD'),priceSource:z.object({url:z.string().url().nullable(),date:z.string().nullable(),reason:z.string().nullable()})});
+export const budgetSchema=z.object({authorization:z.string().trim().min(1),maxAgentSeconds:z.number().positive(),maxTokens:z.number().positive().nullable(),maxCost:z.number().positive().nullable(),currency:z.literal('USD'),priceSource:z.object({url:z.string().url().nullable(),date:z.string().nullable(),reason:z.string().nullable()})});
 export const configSchema=z.object({id:z.string().regex(/^[a-zA-Z0-9._-]+$/),mode:z.enum(['team','single']),seed:z.union([z.literal(1),z.literal(2),z.literal(3)]),profileVersion:z.literal('v1'),wallClockSeconds:z.number().int().positive().max(3600).default(3600),budget:budgetSchema,eligibleModels:z.array(z.string().min(1)).min(1),sourceRoot:z.string().min(1),oraclePython:z.string().min(1),oracleDirectory:z.string().min(1),runDirectory:z.string().min(1),credentialDirectory:z.string().min(1),usageCommand:z.array(z.string()).min(1).optional()});
 export type RunConfig=z.infer<typeof configSchema>;
 export const usageSchema=z.object({role:z.string(),session:z.string(),inputTokens:z.number().nonnegative().nullable(),outputTokens:z.number().nonnegative().nullable(),cost:z.number().nonnegative().nullable(),reason:z.string().nullable()});
@@ -36,7 +37,8 @@ export function validateReceipt(value:unknown):Receipt {
   if(JSON.stringify(r.overlaps)!==JSON.stringify(overlappingWorkers(r.sessions))) throw new Error('Overlap receipt differs from implementation handles');
   if(r.outcome==='PASS') {
     if(!r.cleanup.complete || r.cleanup.errors.length || r.sessions.some(s=>!s.endedAt) || r.work.some(w=>(w.record as any)?.lease)) throw new Error('PASS requires all run-owned sessions and leases cleaned up');
-    if(r.agentSeconds>r.budget.maxAgentSeconds || r.wallClockMs>r.wallClockLimitSeconds*1000) throw new Error('PASS exceeds finite benchmark limits');
+    enforceUsage(r.budget,r.agentSeconds,r.usage);
+    if(r.wallClockMs>r.wallClockLimitSeconds*1000) throw new Error('PASS exceeds finite benchmark limits');
     if(r.mode==='single' && new Set(r.sessions.filter(s=>s.role==='worker').map(s=>s.principal)).size!==1) throw new Error('Single comparison requires one implementation principal');
     if(!r.endedAt || !r.artifact || !r.artifact.cli || !r.artifact.api || !r.artifact.ui || r.artifact.oracleDigest!==r.oracleDigest) throw new Error('PASS requires independently verified CLI/API/UI artifact');
     if(r.work.length!==(r.mode==='team'?8:1)) throw new Error('Missing delivered components');

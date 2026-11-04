@@ -49,7 +49,10 @@ command emits TAP so canonical trials observe positive execution counts.
 Run from the delivered Graphyard checkout using its matching healthy source
 CLI/server and configured accounts. GY-3044, GY-3045, GY-3046, GY-3047, GY-3050
 and the run-only docs prerequisite GY-3048 must be delivered. Shared trial failures
-must be resolved. Keep the source loop stopped and eligible source accounts free
+must be resolved: base failures use the folded refusal reason, while host failures,
+timeouts and cancellations use the latest actual `merge.trial` event; these
+no-verdict events have no folded trial. A later verdict/reconciled delivery clears
+historical failures. An outstanding source flight also refuses launch. Keep the source loop stopped and eligible source accounts free
 of live sessions throughout the run; copied account limits are not shared capacity.
 
 Create a config using existing authorized limits and actual configured model names.
@@ -87,11 +90,23 @@ it does not grant a new budget or account limit:
 ```sh
 node --import tsx benchmarks/hard-math/runner.ts post-deploy /path/to/run.json
 node --import tsx benchmarks/hard-math/runner.ts run /path/to/run.json
+node --import tsx benchmarks/hard-math/runner.ts estimate /path/to/run.json
 node --import tsx benchmarks/hard-math/runner.ts compare /path/to/run.json
 ```
 
 `post-deploy` requires team mode. `run` uses the configured team or single mode.
-`compare` explicitly runs both conditions sequentially, retaining separate
+`estimate` is read-only: it returns the shared per-condition authorization,
+aggregate cap in allocation-seconds, wall deadline, optional token/USD caps and a
+separate financial estimate with price source or explicit unavailable reason.
+It never creates run paths or launches sessions. `compare` checks this preflight
+before either condition launches and retains it in the comparison result.
+The existing authorization is 21,600 aggregate allocation-seconds and 3,600 wall
+seconds per condition on existing accounts. Registry intervals measure allocation
+seconds across every role; these seconds are a usage bound, never USD. Missing
+or unavailable authorized aggregate bounds refuse launch. Null token/USD caps
+permit this authorized allocation-budget comparison; monetary parity remains
+unproven. Configured token/USD caps require a `usageCommand` measurement adapter.
+`compare` runs both conditions sequentially, retaining separate
 `-team` and `-single` directories and a `-comparison.json` result. Ordinary checks
 never launch paid runs. Use fresh paths; existing run directories are never
 overwritten. Installation credentials have mode 0600 under
@@ -129,7 +144,9 @@ Unknown tokens or monetary usage remain null with a reason, never zero. Optional
 `usageCommand` is an argv array: it reads `{sessions,runDirectory}` JSON on stdin
 and returns usage entries with role, session, inputTokens, outputTokens, cost and
 reason. Without complete measured usage and an applicable cost cap, monetary
-parity, budget compliance and cost advantage remain unproven. Allocation seconds
+parity, monetary budget compliance and cost advantage remain unproven. Known
+partial token/cost lower bounds still stop the run at configured caps with terminal
+`FAIL`, even when missing usage keeps totals null. Allocation seconds
 are not a monetary estimate.
 
 ## Evidence and history
@@ -146,3 +163,23 @@ The rejected calibration is preserved in
 `benchmarks/hard-math/profiles/calibration-failed-1.json` (generator commit
 `60307e97c`); the final calibration measured oracle feasibility only. Preserve
 those artifacts and failed receipts when investigating or comparing later runs.
+
+## Response to review 3113523
+
+The enforcement rework addresses the three blocking findings without changing
+criteria, frozen mathematics or the delivery harness:
+
+- AC-8: `runner.ts` reads full authoritative work documents, the latest raw trial
+  event and the persisted source flight. `enforcement.ts` checks actual base
+  refusal reasons and no-verdict outcomes. Enforcement tests exercise real ledger
+  folds, failed and resolved records, and the prerequisite's HTTP/cursor reads.
+- AC-3/AC-11: runtime enforcement and PASS validation use known token/USD lower
+  bounds independently of total completeness. Tests exceed each cap with another
+  role's usage unknown, reject PASS and retain FAIL with null money and reasons.
+- AC-6/AC-7/AC-11: read-only `estimate` exposes the identical authorized caps and
+  unavailable financial estimate before launch. Tests retain the authorized
+  allocation-second comparison, reject absent aggregate bounds and unsupported
+  configured monetary/token caps, and verify estimate creates no run paths.
+
+These changes request fresh independent judgement; they do not supply a review
+verdict or waive technical, product, full-suite, bound E2E or actual-run obligations.
