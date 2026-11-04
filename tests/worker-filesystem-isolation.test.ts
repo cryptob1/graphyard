@@ -426,11 +426,13 @@ for (const kind of ['codex', 'claude'] as const) for (const inherited of [false,
   await setupMaster(f.root, { url: 'https://graphyard.example', token: 'fixture-token-'.padEnd(40, 'x'),
     cliPath: join(process.cwd(), 'bin/graphyard.mjs'), credentialDirectory: f.config },
     async () => new Response(JSON.stringify({ actor: { id: 'master', role: 'coordinator' }, repository: 'owner/project', baseBranch: 'main', githubAppId: 1234 })));
-  const previous = { HOME: process.env.HOME, [variable]: process.env[variable] };
+  const previous = { HOME: process.env.HOME, PATH: process.env.PATH, [variable]: process.env[variable] };
   let launched = 0;
   const environment: Record<string, string> = { PATH: `${bin}:${process.env.PATH}` };
   try {
     process.env.HOME = f.home;
+    // accountLaunch selects the install process PATH, then reapplies it after shell startup.
+    process.env.PATH = environment.PATH;
     if (inherited) process.env[variable] = login; else delete process.env[variable];
     await startMaster(f.root, kind, [], [], async (_program, args) => {
       if (args[0] === 'tab' && args[1] === 'create') {
@@ -482,7 +484,7 @@ for (const homeVariable of ['CUSTOM_AGENT_HOME', 'HOME', 'XDG_CACHE_HOME']) test
         launched++;
         execFileSync('/bin/bash', ['-ec', args[3]], { cwd: f.root, env: { ...process.env, ...environment }, timeout: 60_000 });
       }
-      return JSON.stringify({ result: { agent: { agent: process.execPath, agent_status: 'working' } } });
+      return startedAtOnce(args, 'working') ?? '{}';
     }, { directory: f.root, coordinatorRoot: f.root, confinement: 'master', environment,
       contract: { args: ['--auto', '{request}'], homeVariable },
       keyringWarning: async () => null, log: () => {} });

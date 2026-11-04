@@ -34,7 +34,7 @@ function world(resumeExits = false) {
     if (!command) return json({});
     const exits = resumeExits && expandTypedCommand(command).args.includes('--resume');
     if (args[0] === 'pane' && args[1] === 'process-info') return json({ process_info: { shell_pid: 10, foreground_process_group_id: exits ? 10 : 11, foreground_processes: [] } });
-    if (args[0] === 'pane' && args[1] === 'read') return exits ? `$ ${command}\nNo conversation found with session ID\n$\n` : 'claude ready\n';
+    if (args[0] === 'pane' && args[1] === 'read') return exits ? `$ ${command}\nNo conversation found with session ID\n$\n` : 'Claude Code ready\n';
     if (args[0] === 'agent' && args[1] === 'get') return exits ? json({}) : json({ agent: { agent: 'claude', agent_status: 'idle', pane_id: pane } });
     if (args[0] === 'agent' && args[1] === 'rename') return json({ agent: { agent: 'claude', name: args[3] } });
     return json({});

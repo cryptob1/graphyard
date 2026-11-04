@@ -183,7 +183,7 @@ test('unit:pr-era-history-loads — a work item whose history carries pull-reque
   const trials: string[] = [];
   const trial = async (input: Parameters<typeof runMergeTrial>[0]): Promise<MergeTrialRun> => {
     trials.push(input.mergeSha);
-    return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 5, logTail: 'ok', files: ['tests/a.test.ts'], proofs: Object.fromEntries(input.proofs.map(proof => [proof, { executed: 1, failed: 0 }])) };
+    return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 5, logTail: 'ok', files: ['tests/a.test.ts'], proofs: Object.fromEntries([...input.proofs, ...(input.e2eProofs ?? [])].map(proof => [proof, { executed: 1, failed: 0 }])) };
   };
   const record: MergePorts['record'] = async (item, event) => {
     const response = await request(coordinator, `work/${item.id}/merge-record`, event, mergeRecordKey(item, event));

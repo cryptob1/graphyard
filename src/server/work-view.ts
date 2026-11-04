@@ -49,7 +49,7 @@ export const coordinationRecordLimit = 3, coordinationSessionLimit = 5;
 export const coordinationViewHeader = 'X-Graphyard-View';
 
 /** What the coordination view keeps of an open item's dropped pipeline timeline: the rework-round count (GY-1389) and the last attempt's end (GY-2956). */
-export type CoordinationRounds = { reworkRounds?: number; attemptCount?: number; attemptEnd?: { epoch: number | null; end: string | null } };
+export type CoordinationRounds = { reworkRounds?: number; attemptCount?: number; attemptEnd?: { epoch: number | null; end: string | null; endedAt?: string | null; cause?: string } };
 
 export interface CoordinationOmissions { evidence: number; dispatchHistory: number; queueHistory: number; actionHistory: number; sessions: number }
 
@@ -101,14 +101,14 @@ export function coordinationWork(work: Work, omitted: CoordinationOmissions): Wo
   // The last attempt's end (GY-2956): how the item's newest attempt ended, kept beside the dropped
   // timeline because the loop preserves an attempt ended by a lapsed lease on exactly this reading.
   const attempts = !settled && pipeline && typeof pipeline === 'object' && Array.isArray((pipeline as any).attempts)
-    ? (pipeline as any).attempts as { epoch?: number; end?: string | null }[] : [];
+    ? (pipeline as any).attempts as { epoch?: number; end?: string | null; endedAt?: string | null; cause?: string }[] : [];
   const lastAttempt = attempts.at(-1);
   return {
     ...decisions, evidence, observation,
     ...(!settled && pipeline && typeof pipeline === 'object' && 'reworkRounds' in pipeline ? { reworkRounds: pipeline.reworkRounds } : {}),
     // The attempts already made (GY-1746): worker dispatch counts every ended epoch, not only rework rounds.
     ...(!settled && pipeline && typeof pipeline === 'object' && Array.isArray((pipeline as any).attempts) ? { attemptCount: (pipeline as any).attempts.length } : {}),
-    ...(lastAttempt ? { attemptEnd: { epoch: lastAttempt.epoch ?? null, end: lastAttempt.end ?? null } } : {}),
+    ...(lastAttempt ? { attemptEnd: { epoch: lastAttempt.epoch ?? null, end: lastAttempt.end ?? null, ...(lastAttempt.endedAt ? { endedAt: lastAttempt.endedAt } : {}), ...(lastAttempt.cause ? { cause: lastAttempt.cause } : {}) } } : {}),
     ...(dispatch ? { autoDispatch: { ...dispatch, history: recentHistory } } : {}),
     ...(queueHistory ? { queueHistory } : {}),
     ...(actions ? { actionQueue: { ...actions, history: actionHistory! } } : {}),

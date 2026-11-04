@@ -67,7 +67,7 @@ function harness(work: Work[], slowKeys: readonly string[]): Harness {
     trial: async (_mergeSha, _files, picked) => {
       made.trials.push(picked.key);
       if (slowKeys.includes(picked.key)) throw new TrialTimeoutError('tests', 1_200_000, timeoutTail);
-      return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: {} };
+      return { build: 'pass', tests: { passed: 1, failed: [], files: 1 }, durationMs: 1, logTail: '', files: ['src/app.ts'], proofs: { 'unit:item-works': { executed: 1, failed: 0 } } };
     },
     push: async () => 'pushed', holds: async () => false,
     record: async (target, event) => {
