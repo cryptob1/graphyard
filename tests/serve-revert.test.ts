@@ -735,7 +735,8 @@ test('unit:revert-only-the-failing-item — revert history is retained beyond th
   assert.equal(tried.length, 2);
 });
 
-for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-survives-reinstall — a ${outcome} revert survives archiving the daemon cursor`, async t => {
+for (const upgrade of ['current', 'legacy-owed', 'legacy-filed'] as const)
+for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-survives-reinstall — a ${outcome} revert survives archiving the daemon cursor (${upgrade})`, async t => {
   const { base, origin, coordinator, verified, served, work } = await fixture('revert-survives-reinstall');
   t.after(() => rm(base, { recursive: true, force: true }));
   const config = masterConfigSchema.parse({ version: 1, url: 'https://graphyard.example', credentialFile: join(base, 'coordinator.token'), cliPath: '/bin/graphyard',
@@ -766,6 +767,31 @@ for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-surviv
   assert.equal(reverted.outcome, outcome);
   assert.equal(reverted.revertSha, outcome === 'reverted' ? tipOf(origin) : null);
   assert.equal(reverted.reland, null);
+  if (upgrade !== 'current') {
+    // Reproduce the pre-upgrade cursor: all outcomes exist only on disk.
+    for (const entry of state.mergeWriter.serveRevert!.reverts) {
+      delete entry.recorded;
+      if (upgrade === 'legacy-filed') entry.reland = 'GY-4000';
+    }
+    if (state.mergeWriter.serveRevert!.held) delete state.mergeWriter.serveRevert!.held.recorded;
+    rows.length = 0;
+    for (const entry of work) entry.mergeLedger = structuredClone(initialLedger[entry.key]);
+    await writeDaemonState(config, state);
+    state = await readDaemonState(coordinator, config);
+    const record = reads.record;
+    reads.record = async () => { throw new Error('ledger unavailable'); };
+    await assert.rejects(step(), /ledger unavailable/);
+    // Even a failure-cycle persistence and another restart must keep the legacy receipt.
+    await writeDaemonState(config, state);
+    state = await readDaemonState(coordinator, config);
+    assert.equal(state.mergeWriter.serveRevert!.reverts.length, outcome === 'reverted' ? 1 : 0);
+    assert.equal(!!state.mergeWriter.serveRevert!.held, outcome === 'refused');
+    reads.record = record;
+    await step();
+    assert.equal(rows.length, 1);
+    assert.equal(work[1]!.mergeLedger!.serveReverts![0]!.outcome, outcome);
+    assert.equal(work[1]!.mergeLedger!.serveReverts![0]!.reland, outcome === 'reverted' && upgrade === 'legacy-filed' ? 'GY-4000' : null);
+  }
   await writeDaemonState(config, state);
   assert.ok(await archiveDaemonCursor(config));
   state = await readDaemonState(coordinator, config);
@@ -779,7 +805,7 @@ for (const outcome of ['reverted', 'refused'] as const) test(`unit:revert-surviv
   await mergeWriterIdle(state);
   await step();
   assert.equal(tried.length, 1);
-  assert.equal(filed.length, outcome === 'reverted' ? 1 : 0);
+  assert.equal(filed.length, outcome === 'reverted' && upgrade !== 'legacy-filed' ? 1 : 0);
   assert.equal(tipOf(origin), reverted.revertSha ?? served);
   assert.equal(work[1]!.mergeLedger!.serveReverts!.length, 1);
 });

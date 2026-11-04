@@ -355,11 +355,11 @@ async function settleServeRevertFlight(cycle: ServeRevertCycle, reads: MergeWrit
     failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason, at: at() });
   if (revertState.retry?.serve === revert.serve) revertState.retry = null;
   if (!settled.ok) {
-    revertState.held = { serve: revert.serve, culprit: flight.key, reason: settled.reason.slice(0, 2000), at: at() };
+    revertState.held = { recorded: true, serve: revert.serve, culprit: flight.key, reason: settled.reason.slice(0, 2000), at: at() };
     action('failed', `Held: ${settled.reason}`);
     return;
   }
-  const reverts = [...revertState.reverts.filter(entry => entry.mergeSha !== revert.mergeSha), { serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland: null,
+  const reverts = [...revertState.reverts.filter(entry => entry.mergeSha !== revert.mergeSha), { recorded: true, serve: revert.serve, culprit: flight.key, mergeSha: revert.mergeSha, revertSha: revert.revertSha, reland: null,
     failingCase: revert.failingCase, failingStep: revert.failingStep, failingReason: revert.failingReason, at: at() }];
   revertState.reverts = reverts;
   if (revertState.held?.serve === revert.serve) revertState.held = null;
@@ -502,7 +502,7 @@ async function serveRevertAttempt(cycle: ServeRevertCycle, reads: MergeWriterRea
     if (result.outcome === 'held') {
       await reads.record(result.culprit, { kind: 'serve-revert', ...failing, mergeSha: result.mergeSha,
         outcome: 'refused', revertSha: null, reason: result.reason.slice(0, 2000), reland: null, at: at() });
-      revertState.held = { serve, culprit: result.culprit.key, reason: result.reason.slice(0, 2000), at: at() };
+      revertState.held = { recorded: true, serve, culprit: result.culprit.key, reason: result.reason.slice(0, 2000), at: at() };
       performed.push(storeAction(state, mergeWriterActionKey(result.culprit.key, result.mergeSha), { kind: 'merge', work: result.culprit.key, principal: null, state: 'failed',
         detail: `Held: ${result.reason}`.slice(0, 1900), attempts: 1, epoch: null, cycle: state.cycle, at: at() }));
       return true;
@@ -534,16 +534,42 @@ export async function mergeWriterStep(cycle: Cycle) {
     try { await itemPreviewStep(live, snapshot.work, reads.itemPreviews); } catch (error) { console.error(`The item preview step failed: ${error instanceof Error ? error.message : String(error)}`); }
   }
   const writer = state.mergeWriter;
-  // Ledger outcomes survive a cursor archive; these fields are only a display/read cache.
+  // Ledger outcomes survive a cursor archive; legacy cursor receipts migrate before becoming a cache.
   const revertCache = serveRevertState(state);
+  // Upgrade cursor-only receipts before any cache can be discarded. A failed write leaves
+  // the original receipt (including an owed re-land) available for the next process.
+  for (const done of revertCache.reverts.filter(entry => !entry.recorded)) {
+    const culprit = snapshot.work.find(item => item.key === done.culprit);
+    if (!culprit) continue;
+    const recorded = culprit.mergeLedger?.serveReverts?.find(entry => entry.serve === done.serve && entry.mergeSha === done.mergeSha && entry.outcome === 'reverted');
+    if (!recorded || (done.reland && !recorded.reland)) {
+      await reads.record(culprit, { kind: 'serve-revert', serve: done.serve, mergeSha: done.mergeSha,
+        revertSha: done.revertSha, reland: done.reland, at: done.at, outcome: 'reverted', reason: null,
+        failingCase: done.failingCase, failingStep: done.failingStep, failingReason: done.failingReason });
+    }
+    done.recorded = true;
+  }
+  const held = revertCache.held;
+  if (held && !held.recorded) {
+    const culprit = snapshot.work.find(item => item.key === held.culprit);
+    const mergeSha = culprit?.delivery?.mergeSha ?? culprit?.mergeLedger?.mergeSha;
+    if (culprit && mergeSha) {
+      if (!culprit.mergeLedger?.serveReverts?.some(entry => entry.serve === held.serve && entry.outcome === 'refused')) {
+        await reads.record(culprit, { kind: 'serve-revert', serve: held.serve, mergeSha, at: held.at,
+          outcome: 'refused', reason: held.reason, revertSha: null, reland: null,
+          failingCase: '', failingStep: null, failingReason: null });
+      }
+      held.recorded = true;
+    }
+  }
   const cachedReverts = new Map(revertCache.reverts.map(entry => [entry.mergeSha, entry]));
   for (const item of snapshot.work) for (const entry of item.mergeLedger?.serveReverts ?? []) {
     if (entry.outcome === 'reverted' && entry.revertSha) {
       const existing = cachedReverts.get(entry.mergeSha);
-      if (!existing) revertCache.reverts.push({ serve: entry.serve, mergeSha: entry.mergeSha, revertSha: entry.revertSha, culprit: item.key, reland: entry.reland, failingCase: entry.failingCase, failingStep: entry.failingStep, failingReason: entry.failingReason, at: entry.at });
+      if (!existing) revertCache.reverts.push({ recorded: true, serve: entry.serve, mergeSha: entry.mergeSha, revertSha: entry.revertSha, culprit: item.key, reland: entry.reland, failingCase: entry.failingCase, failingStep: entry.failingStep, failingReason: entry.failingReason, at: entry.at });
       else if (entry.reland) existing.reland = entry.reland;
     } else if (entry.outcome === 'refused') {
-      revertCache.held = { serve: entry.serve, culprit: item.key, reason: entry.reason ?? '', at: entry.at };
+      revertCache.held = { recorded: true, serve: entry.serve, culprit: item.key, reason: entry.reason ?? '', at: entry.at };
     }
   }
   writer.refusals = snapshot.work.flatMap(item => item.mergeLedger?.state === 'refused' && item.mergeLedger.head && item.mergeLedger.refusal

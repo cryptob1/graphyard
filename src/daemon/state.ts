@@ -252,8 +252,9 @@ export async function writeDaemonState(config: MasterConfig, state: DaemonState)
     // Outcome history belongs to the control plane; keep only the loop's active coordination.
     stored.mergeWriter.refusals = [];
     if (stored.mergeWriter.serveRevert) {
-      stored.mergeWriter.serveRevert.reverts = [];
-      stored.mergeWriter.serveRevert.held = null;
+      // Legacy cursor outcomes survive every write until the ledger acknowledges them.
+      stored.mergeWriter.serveRevert.reverts = stored.mergeWriter.serveRevert.reverts.filter(entry => !entry.recorded);
+      if (stored.mergeWriter.serveRevert.held?.recorded) stored.mergeWriter.serveRevert.held = null;
     }
     await writeFile(temporary, JSON.stringify(stored, null, 2), { mode: 0o600, flag: 'wx' });
     await rename(temporary, file);

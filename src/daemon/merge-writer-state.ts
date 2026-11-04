@@ -62,9 +62,10 @@ export const mergeWriterStateSchema = z.object({
    */
   serveRevert: z.object({
     lastVerified: shaField.nullable().default(null),
-    reverts: z.array(z.object({ serve: shaField, culprit: z.string().max(100), mergeSha: shaField, revertSha: shaField, reland: z.string().max(100).nullable(),
+    /** `recorded` marks ledger-backed cache entries; unmarked legacy receipts stay on disk until migrated. */
+    reverts: z.array(z.object({ recorded: z.boolean().optional(), serve: shaField, culprit: z.string().max(100), mergeSha: shaField, revertSha: shaField, reland: z.string().max(100).nullable(),
       failingCase: z.string().max(500), failingStep: z.string().max(2000).nullable(), failingReason: z.string().max(2000).nullable(), at: instant }).strict()).default([]),
-    held: z.object({ serve: shaField, culprit: z.string().max(100), reason: z.string().max(2000), at: instant }).strict().nullable().default(null),
+    held: z.object({ recorded: z.boolean().optional(), serve: shaField, culprit: z.string().max(100), reason: z.string().max(2000), at: instant }).strict().nullable().default(null),
     /**
      * GY-2990 rework: the last revert attempt that needs another try (a trial failing only
      * where the base fails, a rejected push, a thrown trial): the failing serve, the culprit
