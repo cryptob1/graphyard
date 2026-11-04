@@ -42,7 +42,7 @@ test('integration:merge-current-candidate — typed rework and replacement owner
     const url = `http://127.0.0.1:${(http.address() as { port: number }).port}`;
     setRepositoryPolicy({ ...defaultRepositoryPolicy, e2e: { pendingOutcomes: 'non-blocking', serve: { command: 'true', url: 'http://127.0.0.1:9', readySeconds: 1 } } });
     let branchNumber = 0;
-    for (const mode of ['pending', 'fallback', 'unchanged'] as const) {
+    for (const mode of ['pending', 'fallback', 'unchanged', 'review-held'] as const) {
       const batch = mode === 'fallback';
       const directory = join(root, `${batch}-${mode}`), origin = join(directory, 'origin.git'), checkout = join(directory, 'checkout');
       await mkdir(directory);
@@ -70,13 +70,13 @@ test('unit:declared', () => assert.ok(!(fs.existsSync('change-0.txt') && fs.exis
         await write(`change-${n}.txt`, 'change'); git(checkout, 'add', '.'); git(checkout, 'commit', '-qm', 'change');
         const head = git(checkout, 'rev-parse', 'HEAD');
         const proof = 'unit:declared';
-        let work = await engine.execute(operator, 'create', null, { type: 'chore', title: `${batch}-${mode}-${n}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: [proof, 'e2e:fixture'] }, { id: 'AC-2', text: 'Observe after deployment', proofs: ['manual:post-deploy/observed'] }] }, randomUUID());
+        let work = await engine.execute(operator, 'create', null, { type: mode === 'review-held' ? 'feature' : 'chore', title: `${batch}-${mode}-${n}`, criteria: [{ id: 'AC-1', text: 'Works', proofs: [proof, 'e2e:fixture'] }, { id: 'AC-2', text: 'Observe after deployment', proofs: ['manual:post-deploy/observed'] }] }, randomUUID());
         work = await engine.execute(operator, 'ready', work.id, {}, randomUUID());
         work = await engine.execute(worker, 'claim', work.id, {}, randomUUID());
         await engine.execute(worker, 'workspace', work.id, { epoch: work.epoch, host: 'fixture', path: join(directory, branch), branch }, randomUUID());
         work = await engine.execute(worker, 'submit', work.id, { epoch: work.epoch, head }, randomUUID());
         assert.equal(work.gates.find(gate => gate.name === 'build')?.passed, true);
-        assert.equal(work.gates.find(gate => gate.name === 'review')?.passed, true);
+        assert.equal(work.gates.find(gate => gate.name === 'review')?.passed, mode !== 'review-held');
         works.push(work);
       }
       git(checkout, 'checkout', '-q', 'main');
@@ -117,6 +117,27 @@ test('unit:declared', () => assert.ok(!(fs.existsSync('change-0.txt') && fs.exis
             assert.equal(answer.status, 200, await answer.text());
           },
         });
+      if (mode === 'review-held') {
+        // Trial history belongs to a current candidate even while product review holds landing.
+        const target = works[0]!, head = target.candidate!.sha;
+        assert.match((await production.mergeWriter!.hold!(target))!, /build or review/);
+        const merged = await reads.merge(head, baseTip, target);
+        assert.ok('mergeSha' in merged);
+        const { mergeSha } = merged;
+        await reads.record(target, { kind: 'intent', head, baseTip, mergeSha, risk: 'normal', at: new Date().toISOString() });
+        release();
+        const run = await reads.trial(mergeSha, merged.files, target, baseTip);
+        assert.deepEqual(run.proofs['e2e:fixture'], { executed: 1, failed: 0 });
+        await reads.record(target, { kind: 'trial', head, baseTip, mergeSha, outcome: 'verdict', build: run.build,
+          tests: run.tests, files: run.files, proofs: run.proofs, durationMs: run.durationMs, attempts: [], e2e: run.e2e });
+        const current: Work = (await store.workDocument(target.id))!;
+        assert.ok(current.evidence.some(entry => entry.proof === 'e2e:fixture' && entry.sha === mergeSha && entry.result === 'pass'), 'current trial retains trusted case history while review is pending');
+        assert.equal(current.gates.find(gate => gate.name === 'review')?.passed, false);
+        assert.match((await production.mergeWriter!.hold!(target))!, /build or review/);
+        assert.equal(pushes, 0);
+        assert.equal(current.delivery ?? null, null);
+        continue;
+      }
       const running = mergeBatch(reads, works);
       await Promise.race([pending, running.then(result => { throw new Error(`writer ended before pending trial: ${JSON.stringify(result, (_key, value) => value instanceof Error ? value.message : value)}`); })]);
       const target = works[batch ? 1 : 0]!;

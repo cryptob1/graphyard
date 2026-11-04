@@ -14,7 +14,7 @@ import { gitRunnerFor, type GitRunner } from '../merge-writer/local-observation.
 import { firstParentHolds, trialAuthor } from '../merge-writer/trial.js';
 import { defaultMergeBatch } from '../merge-writer/batch.js';
 import { recordScenarioRun } from '../test-runs.js';
-import { mergeCandidateHold, mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
+import { mergeCandidateObsolete, mergeRecordKinds, orphanRefusal, unpushedIntentReason, type MergeRecordEvent } from '../merge-writer/executor.js';
 import { trialPhases, type TrialPhase } from '../merge-writer/trial.js';
 import type { Engine } from '../engine.js';
 import type { Services } from './routes.js';
@@ -200,7 +200,7 @@ export async function recordMergeEvent(services: Services, actor: Principal, id:
     // trial counts the acceptance gate reads.
     const original = data.kind === 'trial' && data.outcome === 'verdict' && data.e2e?.length
       ? (await db.query(`SELECT ${eventWorkSql()} AS work FROM events WHERE work_id=$1 AND kind='merge-writer.intent' ORDER BY seq DESC LIMIT 1`, [work!.id])).rows[0]?.work as Work | undefined : undefined;
-    if (data.kind === 'trial' && data.outcome === 'verdict' && data.e2e?.length && original && !mergeCandidateHold(work!, original)) {
+    if (data.kind === 'trial' && data.outcome === 'verdict' && data.e2e?.length && original && !mergeCandidateObsolete(work!, original)) {
       for (const entry of data.e2e) {
         if (entry.executed === 0) continue;
         const evidence: Evidence = { id: randomUUID(), proof: entry.proof, sha: data.mergeSha, baseSha: data.baseTip, policyRevision: work!.policyRevision,

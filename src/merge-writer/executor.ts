@@ -42,8 +42,8 @@ export function submittedAtOf(item: Pick<Work, 'stageEnteredAt' | 'candidate' | 
   return 0;
 }
 
-/** Revalidate only the candidate's authority, not incidental work revisions or trial progress. */
-export function mergeCandidateHold(current: Work | undefined, selected: Work = current!): string | null {
+/** Whether trial results still belong to this implementation and policy. */
+export function mergeCandidateObsolete(current: Work | undefined, selected: Work = current!): string | null {
   if (!current) return `${selected.key} is no longer available`;
   const reason = current.stage === 'done' || current.observation?.merged ? 'already delivered'
     : current.reworkRequested ? 'returned for rework'
@@ -51,9 +51,14 @@ export function mergeCandidateHold(current: Work | undefined, selected: Work = c
     : !current.candidate || !current.submission || current.observation?.source !== 'control-plane' ? 'no submitted control-plane candidate'
     : current.candidate.sha.toLowerCase() !== selected.candidate?.sha.toLowerCase()
       || current.candidate.baseSha !== selected.candidate?.baseSha ? 'candidate changed'
-    : current.policyRevision !== selected.policyRevision ? 'policy changed'
-    : !gate(current, 'build') || !gate(current, 'review') ? 'build or review gate no longer passes' : null;
+    : current.policyRevision !== selected.policyRevision ? 'policy changed' : null;
   return reason ? `${current.key}: ${reason}; obsolete merge stays queued` : null;
+}
+
+/** Opening and landing also require the current build and review gates. */
+export function mergeCandidateHold(current: Work | undefined, selected: Work = current!): string | null {
+  return mergeCandidateObsolete(current, selected)
+    ?? (!gate(current!, 'build') || !gate(current!, 'review') ? `${current!.key}: build or review gate no longer passes; obsolete merge stays queued` : null);
 }
 
 /** One queued control-plane candidate, oldest submission first. */
