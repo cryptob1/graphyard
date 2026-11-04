@@ -14,7 +14,7 @@ import { bounded, dispatchFailureReasonLimit, emptyDispatchCursor, runDispatchTi
 import { readMasterGuide } from './helpers/master-guide.js';
 import { autonomyContract } from '../src/autonomy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
-import { typedRuntime } from './helpers/launch-shell.js';
+import { expandTypedCommand, typedRuntime } from './helpers/launch-shell.js';
 import { launchProgram, outputAfterCommand } from '../src/master/launch.js';
 import { accountLaunch, registryLaunchArgs } from '../src/master/environments.js';
 import { knownRuntimes } from '../src/install/runtimes.js';
@@ -72,27 +72,10 @@ async function installed() {
   execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/owner/project.git'], { cwd: root });
   await setupMaster(root, { url: 'https://graphyard.example', token: 'coordinator-token-'.padEnd(40, 'x'), cliPath: launcher, credentialDirectory: credentials, herdrWorkspace: 'w1V' }, coordinatorStatus as typeof fetch);
   const credential = join(credentials, 'producer.token'); await writeFile(credential, 'producer-token-'.padEnd(40, 'x'), { mode: 0o600 });
-  await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1 }, producerVerify);
+  await saveProducerProfile(root, { name: 'claude-producer', principal: 'proof-runner', agentName: 'produce-a', kind: 'claude', credentialFile: credential, concurrency: 1, agentArgs: ['--setting-sources', 'user'] }, producerVerify);
   return { root, cleanup: async () => { await rm(root, { recursive: true, force: true }); await rm(credentials, { recursive: true, force: true }); } };
 }
 
-/**
- * What the pane's shell makes of the typed line: the stem binding, then words — bare or
- * single-quoted — with `"$GY.role"` and `"$(cat "$GY.request")"` expanded from the files, exactly
- * as bash or zsh would before the runtime starts.
- */
-function expandTypedCommand(command: string) {
-  const bound = /^GY=(\S+); (.*)$/s.exec(command);
-  const stem = bound ? bound[1].replace(/^'(.*)'$/s, '$1').replaceAll("'\\''", "'") : null;
-  const words: string[] = [];
-  for (const match of (bound ? bound[2] : command).matchAll(/'((?:[^']|'\\'')*)'|("\$GY\.role")|("\$\(cat "\$GY\.request"\)")|(\S+)/g)) {
-    if (match[1] !== undefined) words.push(match[1].replaceAll("'\\''", "'"));
-    else if (match[2]) words.push(`${stem}.role`);
-    else if (match[3]) words.push(execFileSync('cat', [`${stem}.request`], { encoding: 'utf8' }));
-    else words.push(match[4]);
-  }
-  return { stem, words };
-}
 /** The positional prompt Claude Code would read from its arguments. */
 function positionalOf(words: string[]) {
   const valued = new Set(['--permission-mode', '--setting-sources', '--settings', '--append-system-prompt', '--append-system-prompt-file', '--ask-for-approval', '--sandbox', '-c', '--add-dir', '--model']);
@@ -215,7 +198,7 @@ test('unit:launch-command-bounded — the typed launch command line is short and
       assert.ok(Buffer.byteLength(live.typed!) <= launchCommandLimit, `the producer launch typed ${Buffer.byteLength(live.typed!)} bytes`);
       const file = join(launched.checkout, '.graphyard/launch/produce-a.request');
       assert.equal(await readFile(file, 'utf8'), producerPrompt(config, { key: 'GY-121', pr: 121, sha: H, baseSha: B, policyRevision: 1, group: dispatch.group!, proofs: dispatch.proofs!, checkout: launched.checkout }, { principal: 'proof-runner' }), 'the request file inside the session checkout holds the producer\'s exact request');
-      assert.equal(positionalOf(expandTypedCommand(live.typed!).words.slice(1)), await readFile(file, 'utf8'));
+      assert.equal(positionalOf(expandTypedCommand(live.typed!).args), await readFile(file, 'utf8'));
       assert.equal((await readProducerLedger(root)).producers[0].delivery, 'request');
     } finally { await cleanup(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
@@ -266,7 +249,7 @@ test('unit:start-bound-reads-the-pane — before a start is declared failed the 
     // before it is ready sits at a dialog no launcher answers, and is refused at once naming the
     // dialog: Claude Code's folder-trust menu is a workspace-trust prompt by its options (GY-1561).
     for (const status of ['working', 'done', 'idle']) {
-      const quick = new FakePane(() => ({ agent: { agent: 'claude', agent_status: status } }));
+      const quick = new FakePane(() => ({ ...readyAtOnce(), agent: { agent: 'claude', agent_status: status } }));
       assert.equal((await awaitRuntimeStart('w1V:pR6', 'claude', 'GY=/s; claude', quick.run, quick.bounds())).waitedMs, 0, status);
     }
     const dialog = new FakePane(() => ({ agent: { agent: 'claude', agent_status: 'blocked' }, screen: ' ❯ No, exit\n   Yes, I trust this folder\n' }));
@@ -324,7 +307,7 @@ test('integration:launch-refusal-names-the-screen — a producer launch refused 
     assert.ok(refused.length >= 1, 'the producer launch was refused');
     for (const failure of refused) {
       // The launch failure records that its pane was closed (GY-413); the stored reason is bounded.
-      assert.equal(failure.reason, bounded(`the claude runtime never started within 30 s in pane w1V:pR6 (command still echoing); the pane last showed: "${echoLine}"; its Herdr pane w1V:pR6 was closed`, dispatchFailureReasonLimit));
+      assert.equal(failure.reason, bounded(`the claude runtime never started within 30 s in pane w1V:pR6 (no runtime under the pane); the pane last showed: "${echoLine}"; its Herdr pane w1V:pR6 was closed`, dispatchFailureReasonLimit));
       assert.equal(failure.reason.includes('not found'), false, 'Herdr\'s agent_not_found never reaches the record');
       assert.deepEqual(cursor.failures[failure.requestId].reason, failure.reason, 'the dispatcher\'s failure record carries the same reason');
     }
