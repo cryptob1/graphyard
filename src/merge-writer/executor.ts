@@ -715,6 +715,7 @@ export async function mergeOne(ports: MergePorts, item: Work): Promise<MergeOutc
 
     const merged = await ports.merge(head, baseTip, item);
     if ('conflict' in merged) {
+      if (ports.lands && !await ports.lands(baseTip)) { baseTip = await ports.fetch(); continue; }
       const reason = trialFailureReason({ conflict: merged.conflict })!;
       await ports.record(item, { kind: 'refused', head, reason });
       return { outcome: 'refused', reason, trial: null, conflict: merged.conflict };

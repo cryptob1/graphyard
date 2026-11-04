@@ -25,7 +25,7 @@ const alone = async (ports: MergePorts, items: readonly Work[]) => {
  * merge commit has the previous one as its first parent (or is the head itself, when its own
  * first-parent chain holds the previous tip, trial.ts `trialMerge`), so main's first-parent history
  * holds every head's own merge commit once the last is pushed. A head the queue's chain cannot merge (a
- * conflict) is refused as `mergeOne` refuses it and the rest still batch; a held head is left
+ * conflict) is retried individually after the rest settles and the rest still batch; a held head is left
  * queued. The chain's tip is trialled once (the build and the tests its combined change affects,
  * with every head's proofs) and previewed; every head records its intent before the trial and its verdict afterward,
  * the tip is pushed once with a lease on the tip it was tested on, and every head is recorded pushed
@@ -35,6 +35,12 @@ const alone = async (ports: MergePorts, items: readonly Work[]) => {
  * refused. A single head is `mergeOne`'s alone.
  */
 export async function mergeBatch(ports: MergePorts, items: readonly Work[], retrial = 0): Promise<BatchResult[]> {
+  const conflicts: Work[] = [];
+  const results = await mergeBatchReady(ports, items, retrial, conflicts);
+  return [...results, ...await alone(ports, conflicts)];
+}
+
+async function mergeBatchReady(ports: MergePorts, items: readonly Work[], retrial: number, conflicts: Work[]): Promise<BatchResult[]> {
   if (items.length < 2) return alone(ports, items);
   // GY-2984: a bug item's proofs are judged on the base tip alone, so it is never batched.
   const bugs = items.filter(work => work.type === 'bug');
@@ -48,9 +54,9 @@ export async function mergeBatch(ports: MergePorts, items: readonly Work[], retr
     if (held) { results.push({ work, outcome: { outcome: 'requeued', reason: held, pushes: 0 } }); continue; }
     const head = work.candidate!.sha.toLowerCase(), merged = await ports.merge(head, tip, work);
     if ('conflict' in merged) {
-      const reason = trialFailureReason({ conflict: merged.conflict })!;
-      await ports.record(work, { kind: 'refused', head, reason });
-      results.push({ work, outcome: { outcome: 'refused', reason, trial: null, conflict: merged.conflict } });
+      // Neither earlier positions nor this batch's earlier heads have necessarily landed.
+      // Retry conflicts individually after the rest settles, against the actual landed tip.
+      conflicts.push(work);
       continue;
     }
     batch.push({ work, head, baseTip: tip, mergeSha: merged.mergeSha });
