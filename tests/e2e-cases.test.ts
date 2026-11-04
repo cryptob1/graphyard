@@ -511,6 +511,30 @@ test('unit:e2e-command-step-runs — a command step runs through the shell in th
   assert.deepEqual(lastLines(''), []); assert.deepEqual(lastLines('a\r\nb\n\n'), ['a', 'b']);
 });
 
+test('unit:e2e-command-child-error — the reproduced initdb locale failure names the child error instead of its final Pipe stack frame', async () => {
+  const dir = await repository({});
+  const error = 'Error: Postgres init script failed (code: 1, signal: null). ERROR OUTPUT: initdb: error: invalid locale settings; check LANG and LC_* environment variables';
+  const failure = [
+    `  ${error}`, '',
+    '      at ChildProcess.<anonymous> (file:///home/vish/code/graphyard/node_modules/embedded-postgres/dist/index.js:176:36)',
+    '      at ChildProcess.emit (node:events:514:28)',
+    '      at maybeClose (node:internal/child_process:1172:16)',
+    '      at Socket.<anonymous> (node:internal/child_process:527:11)',
+    '      at Socket.emit (node:events:514:28)',
+    '      at Pipe.<anonymous> (node:net:362:12)',
+  ].join('\n');
+  await writeFile(join(dir, 'fail.cjs'), `process.stderr.write(${JSON.stringify(`${'startup progress\n'.repeat(60)}${failure}\n`)}); process.exitCode = 1;`);
+  const cases = await loadCases(await repository({ 'initdb.json': commandCase('initdb', `${JSON.stringify(process.execPath)} fail.cjs`) }));
+  const report = await runCases(cases, generalOptions(dir));
+  const failed = report.cases[0];
+  assert.equal(failed.outcome, 'fail');
+  assert.equal(failed.failingStep!.reason, `the command exited 1: ${error}`);
+  const output = failed.attemptResults[0].steps![0].output;
+  assert.equal(output.length, 50, 'the existing output bound remains');
+  assert.equal(output.at(-1), '      at Pipe.<anonymous> (node:net:362:12)', 'the stack remains available in recorded output');
+  assert.ok(summarize(report).includes(`the command exited 1: ${error}`), 'the operator sees the actual child startup error');
+});
+
 test('unit:e2e-agent-step-verdict — an agent step opens the target URL plus path, gives agent-browser the goal, the success criteria and the VERDICT instruction, records the verdict and screenshot path, and fails on a missing verdict or a timeout', async () => {
   const dir = await repository({});
   const fake = await fakeAgentBrowser(dir);

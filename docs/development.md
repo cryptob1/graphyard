@@ -37,6 +37,8 @@ Run `node --import tsx tests/helpers/run-tests.ts tests/private-root-trial-asset
 
 Canonical checkouts can reuse identical-lockfile dependencies through a `node_modules` symlink. Nested trials retain that link from the checkout bind and mount its real dependency tree read-only; binding onto the already visible symlink makes bubblewrap fail. External dependency aliases and harness mounts remain explicit. `tests/trial-container.test.ts` reproduces the exact symlink mount error, then checks a real nested launch, dependency resolution, read-only dependencies and writable checkout, profile and scratch. Run it and `tests/worker-filesystem-isolation-e2e.test.ts` in the actual outer container as well.
 
+Command E2E failures name the first error line in their redacted last 50 output lines, falling back to the final line when none is present. Exit status, timeouts and the recorded output remain unchanged, so a native startup error stays visible instead of just its final stack frame.
+
 ### Golden eval
 
 `eval/golden/` holds ten fixed items, each a small scaffold repository snapshot (`scaffold.tar`, under 1 MB) beside its `item.json` (criteria and proofs). They cover the fault classes the benchmark runs hit: a plain feature, a bug whose proof fails on the base, two items that touch the same file (merge conflict), a proof that fails on the item's first head (rework), an item longer than one attempt bound, a docs budget, a review that should request changes, a requirements gap a worker must report blocked, a flaky test outside the item, and a user-facing item with an e2e case.

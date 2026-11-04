@@ -203,7 +203,8 @@ export interface GeneralStepContext { url: string; root: string; env: Record<str
 export async function runCommandStep(step: Extract<E2eStep, { kind: 'command' }>, context: GeneralStepContext): Promise<{ record: Omit<StepRecord, 'index' | 'name'>; reason: string | null }> {
   const result = await context.run(step.run, [], { cwd: context.root, env: context.env, timeoutMs: step.timeoutSeconds * 1000, shell: true, signal: context.signal });
   const output = lastLines(redact(result.output, context.secrets));
-  const reason = result.timedOut ? `the command did not finish within ${step.timeoutSeconds} s` : result.code === 0 ? null : `the command exited ${result.code ?? 'by signal'}${output.length ? `: ${output.at(-1)!.slice(0, 500)}` : ''}`;
+  const diagnostic = output.find(line => /\b\w*error(?: \[[^\]]+\])?:/i.test(line)) ?? output.at(-1);
+  const reason = result.timedOut ? `the command did not finish within ${step.timeoutSeconds} s` : result.code === 0 ? null : `the command exited ${result.code ?? 'by signal'}${diagnostic ? `: ${diagnostic.trim().slice(0, 500)}` : ''}`;
   return { record: { kind: 'command', outcome: reason ? 'fail' : 'pass', output }, reason };
 }
 
