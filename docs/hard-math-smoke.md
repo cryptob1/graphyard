@@ -212,3 +212,31 @@ its handles and lease. Regression fixtures cover both marked and markerless
 settled projections; missing full claim history still fails. All existing
 claim/worktree/review/certification/trial-proof receipt requirements remain in
 force. The full native delivery/repair result remains pending its next rerun.
+
+
+The completed native `8b3c3a50f` run took 416.4 seconds: twelve of fourteen cases
+passed, including cleanup/limits. Both delivery-path failures were an unassigned
+pull after seven canonical controlled deliveries, before initial integration
+claim: GY-7 had landed but GY-8's cached dependency/action row had not reconciled.
+The fixture now uses the existing `runWorkerPull`, with 250 ms intervals, at most
+120 polls and the run's cancellation signal. Only the ordinary assignment API
+may grant the epoch; no claim, dependency, action or lifecycle gate is forced.
+
+Those seven merges each measured 21.6–22.2 seconds, so eight merges alone need
+about 175 seconds. The controlled repair fixture now has a finite 300-second
+runner deadline and a 330-second outer test deadline for cleanup, covering setup,
+eight real merge trials, negative certification, repair and final verification.
+Missing-delivery and incorrect-artifact negatives use one-item controlled runs
+with the same frozen contract/oracle, avoiding seven unrelated merges apiece;
+negative/cleanup fixture deadlines are 90 seconds. The incorrect artifact now
+actually retains the bad starter and must produce an independent failed oracle
+record, rather than failing an assertion about a correct artifact. The full
+E2E command is bounded to 900 seconds: the heavy per-test deadlines are 330,
+210 and 210 seconds (750 total), leaving 150 seconds for the measured short
+oracle/routing/provisioning checks and harness overhead. The former 600-second
+command bound could cut off a file whose individually bounded tests were still
+validly running. These are controlled test scheduling
+changes only: the frozen profile and real team/comparison one-hour and 21,600
+aggregate allocation-second caps remain unchanged. Failed 180-second runs and
+native diagnostics are not overwritten or removed by this change; new fixtures
+allocate fresh directories. No actual coding-agent success has been observed.

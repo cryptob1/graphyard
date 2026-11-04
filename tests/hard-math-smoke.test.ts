@@ -45,14 +45,17 @@ test('integration:hard-math-smoke — routing retains eligible models, capabilit
   assert.equal(selected.account?.name,'expensive');assert.ok(selected.skipped.some(s=>s.account==='affordable'));
 });
 
-async function runFixture(label:string,options:Parameters<typeof fixtureExecutor>[1]={},maxAgentSeconds=1000) {
+async function runFixture(label:string,options:Parameters<typeof fixtureExecutor>[1]={},maxAgentSeconds=1000,mode:'team'|'single'='team') {
   const testRoot=join(process.cwd(),'.graphyard','hard-math-fixtures');
   await mkdir(testRoot,{recursive:true});
   const parent=await temporaryDirectory(`hard-math-${label}`,testRoot);
-  return execute({id:`fixture-${label}`,mode:'team',profileVersion:'v1',seed:1,wallClockSeconds:180,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},c=>fixtureExecutor(c,options));
+  // Measured canonical trials take ~22s each: eight merges alone need ~175s.
+  // Only controlled scheduling changes; frozen math and actual-agent limits are unchanged.
+  const wallClockSeconds=options.injectRepair?300:90;
+  return execute({id:`fixture-${label}`,mode,profileVersion:'v1',seed:1,wallClockSeconds,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},c=>fixtureExecutor(c,options));
 }
 
-test('integration:hard-math-smoke — real scratch Postgres/control plane and Git deliver eight reviewed fixture components, reject an integration fault, repair and certify pushed CLI/API/UI', {timeout:180_000},async()=>{
+test('integration:hard-math-smoke — real scratch Postgres/control plane and Git deliver eight reviewed fixture components, reject an integration fault, repair and certify pushed CLI/API/UI', {timeout:330_000},async()=>{
   const receipt=await runFixture('repair',{injectRepair:true});
   assert.equal(receipt.outcome,'PASS',receipt.reason);assert.equal(receipt.kind,'controlled-fixture');
   assert.ok(receipt.overlaps.length);assert.equal(receipt.work.at(-1)?.repairs,1);
@@ -70,13 +73,15 @@ test('integration:hard-math-smoke — real scratch Postgres/control plane and Gi
   assert.throws(()=>comparison(receipt,{...receipt,mode:'single'}),/actual team/);
 });
 
-test('integration:hard-math-smoke — missing pushed delivery and incorrect artifacts cannot produce PASS', {timeout:180_000},async()=>{
-  const missing=await runFixture('missing',{missingDelivery:true});assert.equal(missing.outcome,'FAIL');assert.match(missing.reason,/Missing delivery/);
-  const incorrect=await runFixture('incorrect',{incorrectArtifact:true});assert.equal(incorrect.outcome,'FAIL');assert.equal(incorrect.artifact,null);
+test('integration:hard-math-smoke — missing pushed delivery and incorrect artifacts cannot produce PASS', {timeout:210_000},async()=>{
+  const missing=await runFixture('missing',{missingDelivery:true},1000,'single');assert.equal(missing.outcome,'FAIL');assert.match(missing.reason,/Missing delivery/);
+  const incorrect=await runFixture('incorrect',{incorrectArtifact:true},1000,'single');assert.equal(incorrect.outcome,'FAIL');assert.equal(incorrect.artifact,null);
+  assert.ok(incorrect.failures.some(f=>f.component==='integration' && /CLI exact oracle rejected/.test(f.reason)),incorrect.reason);
+  assert.ok((incorrect.work[0].record as any).evidence.some((e:any)=>e.proof==='manual:certified-artifact' && e.trusted && e.result==='fail'));
 });
 
 
-test('integration:hard-math-smoke — failed and usage-limited runs release actual scratch leases and sessions', {timeout:180_000},async()=>{
+test('integration:hard-math-smoke — failed and usage-limited runs release actual scratch leases and sessions', {timeout:210_000},async()=>{
   for(const [label,options,budget] of [
     ['early-stop',{haltAfterClaims:true},1000],['usage-stop',{waitAfterClaims:true},3],
   ] as const) {

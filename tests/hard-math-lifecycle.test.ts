@@ -182,3 +182,17 @@ test('hard math receipt independently requires approval, certification and posit
   const missingE2e=structuredClone(receipt);delete (missingE2e.work[0].record as any).mergeLedger.trial.proofs['e2e:workbench'];
   assert.throws(()=>validateReceipt(missingE2e),/Missing authoritative proof trial/);
 });
+
+test('hard math fixture polling waits for authoritative offers, stops at its poll bound and cancels its wait',async()=>{
+  const {runWorkerPull}=await import('../src/auto-dispatch.js');
+  let calls=0;
+  const offered=await runWorkerPull(async()=>({assigned:++calls===3?{id:'work',key:'GY-1'} as any:null,offered:calls===3?1:0}),{intervalMs:1,maxPolls:4});
+  assert.equal(offered.assigned?.id,'work');assert.equal(offered.polls,3);
+  const exhausted=await runWorkerPull(async()=>({assigned:null,offered:0}),{intervalMs:1,maxPolls:2});
+  assert.equal(exhausted.assigned,null);assert.equal(exhausted.polls,2);
+  const controller=new AbortController(),timer=setTimeout(()=>controller.abort(),10),started=Date.now();
+  try {
+    const cancelled=await runWorkerPull(async()=>({assigned:null,offered:0}),{intervalMs:10_000,maxPolls:120,signal:controller.signal});
+    assert.equal(cancelled.assigned,null);assert.equal(cancelled.polls,1);assert.ok(Date.now()-started<1000);
+  } finally {clearTimeout(timer);}
+});

@@ -1,4 +1,5 @@
 import { setTimeout as delay } from 'node:timers/promises';
+import { runWorkerPull } from '../../src/auto-dispatch.js';
 import { masterRunSchema } from '../../src/master/profiles.js';
 /** Controlled executors test the runner and real Graphyard gates; never model/agent evidence. */
 import { createHash, randomBytes } from 'node:crypto';
@@ -31,7 +32,8 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
   type Attempt={work:typeof c.receipt.work[number];item:any;worker:typeof c.workers[number];directory:string;branch:string;selection:any};
   const claim=async(work:typeof c.receipt.work[number],index:number):Promise<Attempt>=>{
     const worker=c.workers[index%c.workers.length];
-    const selected=await c.plane.call('assignments/claim',worker.token,{work:work.id});
+    const selected=await runWorkerPull(()=>c.plane.call('assignments/claim',worker.token,{work:work.id}),{intervalMs:250,maxPolls:120,signal:c.signal});
+    c.signal.throwIfAborted();
     assert.equal(selected.assigned?.id,work.id,JSON.stringify(selected));
     const item=await c.plane.call(`work/${work.id}`,c.coordinator),epoch=item.epoch;
     const previous=item.submission?item.workspaces.find((w:any)=>w.epoch===item.submission.epoch):null;
@@ -84,7 +86,7 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     assert.ok(reviewed.observation.reviews.some((r:any)=>r.sha===item.candidate.sha && r.state==='APPROVED' && r.reviewer==='controlled-independent-reviewer'),'fixture obtains independent exact-head approval before its canonical merge call');
     return reviewed;
   };
-  // Three claimed, registered, distinct worktrees remain open together before any submits.
+  // Team fixtures hold three independent worktrees together; negative single fixtures hold one.
   const first=await Promise.all(c.receipt.work.slice(0,3).map(claim));
   if(options.haltAfterClaims || options.waitAfterClaims) {
     await c.snapshot();
@@ -93,7 +95,7 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
   }
   for(let i=0;i<c.receipt.work.length;i++) {
     const work=c.receipt.work[i];let attempt=i<3?first[i]:await claim(work,i);
-    let item=await submit(attempt,!(options.injectRepair && work.component==='integration'));
+    let item=await submit(attempt,!(options.incorrectArtifact || options.injectRepair && work.component==='integration'));
     if(work.component==='integration'||work.component==='single') {
       if(options.injectRepair && work.component==='integration') {
         assert.equal(await c.certify(item),false,'known bad starter must fail the external producer');
