@@ -1,6 +1,5 @@
 import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import pg from 'pg';
 import EmbeddedPostgres from 'embedded-postgres';
@@ -18,9 +17,18 @@ before(async () => {
   const scratch = await temporaryDirectory('store-init');
   postgres = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await postgres.initialise(); await postgres.start();
-  for (const name of ['migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work', 'deadlock']) await postgres.createDatabase(name);
+  for (const name of ['fresh', 'migrated', 'changed', 'pending', 'tables', 'deadline', 'statements', 'watchdog', 'work', 'deadlock']) await postgres.createDatabase(name);
 });
 after(async () => { if (postgres) await postgres.stop(); });
+
+test('unit:store-init initialises a fresh schema with an empty work list', async () => {
+  const store = new Store(url('fresh'));
+  try {
+    await store.init();
+    assert.equal(await store.schema(), schemaVersion);
+    assert.deepEqual(await store.list(), []);
+  } finally { await store.close(); }
+});
 
 /** A second connection standing in for the live replica, holding its locks until released. */
 async function liveReplica(database: string, hold: (db: pg.Client) => Promise<void>) {

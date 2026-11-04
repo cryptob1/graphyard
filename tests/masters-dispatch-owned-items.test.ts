@@ -6,7 +6,7 @@ import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
 import { masterConfigSchema } from '../src/master.js';
 import { emptyDaemonState, runCycle, type DaemonEffects } from '../src/master-daemon.js';
-import type { Principal, Work } from '../src/model.js';
+import type { Principal } from '../src/model.js';
 import { relandItemFor } from '../src/merge-writer/serve-revert.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 

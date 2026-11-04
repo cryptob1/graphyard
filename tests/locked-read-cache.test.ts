@@ -32,7 +32,6 @@ const create = (title: string, plannedFiles: string[]) => engine.execute(operato
 /** `db` with every query's text recorded. */
 const recorded = (db: Queryable, texts: string[]): Queryable => ({ query: (text, values) => { texts.push(text); return db.query(text, values); } });
 const projects = (texts: string[]) => texts.filter(text => /CROSS JOIN LATERAL/.test(text)).length;
-const summarises = (texts: string[]) => texts.filter(text => /summary::text AS text FROM work_index/.test(text)).length;
 const readsWhole = (texts: string[]) => texts.filter(text => /^SELECT number, document FROM work_items/.test(text)).length;
 async function locked<T>(run: (db: Queryable) => Promise<T>) {
   const client = await store.pool.connect();

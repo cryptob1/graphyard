@@ -1,5 +1,4 @@
 import { z } from 'zod';
-import { demand } from './refusal.js';
 import type { Work } from './work.js';
 import type { ApprovalIdentity } from './carry.js';
 

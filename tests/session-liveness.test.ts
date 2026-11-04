@@ -14,7 +14,6 @@ import {
 import { runtimeEndedSessionStates, runtimeEndedStates } from '../src/harness.js';
 import { closureHandle, dispatchEffects, emptyDispatchCursor, launchedSessionHandle, reconcileSessionLiveness, runDispatchTick, sessionHandleKey, type DispatchEffects } from '../src/auto-dispatch.js';
 import { masterConfigSchema, profileSessions } from '../src/master.js';
-import { lostAfterReports, sessionLaunchGraceMs } from '../src/model/session-state.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { deliverThroughLedger } from './helpers/ledger-delivery.js';
 // GY-3037: the fixtures here file items, and every item owes an e2e proof; they declare the serve one needs.

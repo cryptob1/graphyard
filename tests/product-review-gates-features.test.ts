@@ -2,7 +2,6 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
 import { rm } from 'node:fs/promises';
-import { join } from 'node:path';
 import { emptyDispatchCursor, runDispatchTick } from '../src/auto-dispatch.js';
 import { reconcileAutoDispatch, productReviewNeed } from '../src/model/dispatch.js';
 import { evaluate } from '../src/model/gates.js';

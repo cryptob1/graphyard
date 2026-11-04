@@ -11,8 +11,6 @@ import { agentStartCeilingMs, agentStartTimeoutMs, awaitRuntimeStart, launchComm
 import { launchAuthorization } from '../src/repository-setup.js';
 import { launchProducer, producerPrompt, readProducerLedger } from '../src/producer.js';
 import { bounded, dispatchFailureReasonLimit, emptyDispatchCursor, runDispatchTick, type DispatchEffects } from '../src/auto-dispatch.js';
-import { readMasterGuide } from './helpers/master-guide.js';
-import { autonomyContract } from '../src/autonomy.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { expandTypedCommand, typedRuntime } from './helpers/launch-shell.js';
 import { launchProgram, outputAfterCommand } from '../src/master/launch.js';
@@ -30,7 +28,6 @@ import { proposedRuntimes } from '../src/model/registry-proposal.js';
 // manual:launch-delivery-docs-review, unit:typed-runtime-reads-a-sourced-launch.
 
 const launcher = fileURLToPath(new URL('../bin/graphyard.mjs', import.meta.url));
-const repositoryRoot = fileURLToPath(new URL('..', import.meta.url));
 const sha40 = (label: string) => label.replace(/[^a-f0-9]/g, '0').padEnd(40, 'f').slice(0, 40);
 const H = sha40('a1'), B = sha40('b1');
 const at = '2026-09-22T05:27:00.000Z';

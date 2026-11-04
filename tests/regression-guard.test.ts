@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { shippedBy } from '../src/regression-guard.js';
 import { parseLocalScopeDiff } from '../src/sync.js';
-import type { ScopeFile, Work } from '../src/model.js';
+import type { Work } from '../src/model.js';
 
 const blob = (label: string) => label.repeat(40).slice(0, 40);
 

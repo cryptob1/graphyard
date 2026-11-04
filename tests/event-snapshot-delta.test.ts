@@ -1,7 +1,6 @@
 import { after, before, test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash, randomUUID } from 'node:crypto';
-import { join } from 'node:path';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store, applyWorkDelta, documentBefore, type WorkDelta } from '../src/store.js';
 import { Engine } from '../src/engine.js';
