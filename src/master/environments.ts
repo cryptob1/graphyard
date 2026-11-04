@@ -1,3 +1,5 @@
+import { registryToolsArgs } from '../registry-tools.js';
+export { registryToolsArgs } from '../registry-tools.js';
 // Concern: agent environments and accounts — discovery, health, quota, selection and the launch plan.
 import { existsSync } from 'node:fs';
 import { readdir, stat, mkdir, readFile } from 'node:fs/promises';
@@ -10,21 +12,21 @@ import { launchPlan, assertNoApprovalOptOut, LaunchRefusedError } from '../harne
 import { type CapacityRole, type CapacityAccount, capacityRetryAt, quotaRoles } from '../model/capacity.js';
 import { type FleetClient, type FleetLaunchAccount, type FleetProbe, selectFleetSession, fleetRoleHealth, httpFleetClient, fleetRequestTimeoutMs } from '../fleet.js';
 import { type AgentEnvironment, agentEnvironmentSchema, type EnvironmentKind, environmentKinds, environmentVariable, type MasterConfig, masterConfigSchema, producerProfileSchema, reviewerProfileSchema, workerProfileSchema } from './profiles.js';
-import { atomicPrivateText, atomicPrivateWrite, externalCredential, loadStoredMasterConfig, readCredentialFile } from './config.js';
+import { externalCredential, loadStoredMasterConfig } from './config.js';
+import { atomicPrivateText, atomicPrivateWrite, readCredentialFile } from '../private-file.js';
 import { installDirectory, readInstallRecord } from '../install/secrets.js';
 import { installIdFor } from '../install/types.js';
-import { failureText } from './worktrees.js';
-import { shellQuote } from './dispatch.js';
+import { failureText } from '../disk-space.js';
+import { shellQuote } from '../shell-quote.js';
 import { describeObservedExhaustion, heldOverlay, heldTwin, providerIdentity, reconstructedHold, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
-export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 import { getCachedPlanUsage, setCachedPlanUsage } from '../provider-usage.js';
+export { describeObservedExhaustion, heldObservation, heldOverlay, heldTwin, providerIdentity, registryHoldObservations, registryLogin, spentHere } from './account-identity.js';
 // The per-provider login and quota probes live in ./environment-quota.ts, imported here exactly as
 // they were private in this module: nothing about them is part of this path's export.
 import { claudeAccount, codexAccount, readJsonFile, zaiAccount, type PlanReading } from './environment-quota.js';
 
 // A stopped session's provider limit notices are read off its output beside its runtime prompts (runtime-prompt.ts).
 export { providerLimitNotices, runtimeLimitNotices, detectRuntimeExhaustion } from './runtime-prompt.js';
-export { hostKeyPair, unsealToHost, writeProviderAuthFile, runSmokePrompt, processConnectAccounts, type ConnectWorkerReport, type ConnectAccountOptions } from './connect-accounts.js';
 
 /** Where agent environments live: one directory per account, named <agent>-<letter>. */
 export function agentEnvironmentRoot(input?: string) {
@@ -430,18 +432,6 @@ export function registryLaunchArgs(account: FleetLaunchAccount) {
   const { contract, policy, modelId } = account.fleet, args = [...contract.args, ...(policy?.args ?? [])];
   const model = contract.modelFlag && modelId && !args.includes(contract.modelFlag) ? [contract.modelFlag, modelId] : [];
   return [...args, ...model, ...registryToolsArgs(account)];
-}
-
-/**
- * The role policy's tool allowlist on the runtime's tools flag. A policy that limits tools on a
- * runtime whose contract names no tools flag is refused, on the Herdr path and the headless one alike
- * (GY-397): guessing a flag the runtime may not know would start the session with every tool.
- */
-export function registryToolsArgs(account: FleetLaunchAccount) {
-  const { contract, policy } = account.fleet, tools = policy?.tools ?? [];
-  if (!tools.length) return [];
-  if (!contract.toolsFlag) throw new LaunchRefusedError(account.kind, `Graphyard refuses to launch account ${account.name}: role ${account.fleet.role ?? 'unknown'} limits its sessions to ${tools.join(', ')}, but runtime ${account.fleet.runtime} names no tools flag, so the session would run with every tool. Set it with master registry runtime set ${account.fleet.runtime} --tools-flag=FLAG.`);
-  return [contract.toolsFlag, tools.join(',')];
 }
 
 /**

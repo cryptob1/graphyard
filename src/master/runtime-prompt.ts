@@ -1,6 +1,6 @@
 // Concern: what a blocked or stopped session's runtime shows — its prompts and its provider limit notices — and the loop's answer.
 import { exhaustionNoticeLabelWords, exhaustionNoticeMaxLength, exhaustionTailLines, limitSignalReset, parseResetTime, type ExhaustionSignal } from '../model/capacity.js';
-import { exhaustionTail, outOfCreditsScreen } from '../fleet.js';
+import { exhaustionTail, outOfCreditsScreen } from '../exhaustion-screen.js';
 /**
  * A runtime's own safety prompt, read off a blocked session's screen (GY-197).
  *

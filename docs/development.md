@@ -17,6 +17,8 @@ Typechecking enforces `noUnusedLocals` across source, web, and tests. Remove unu
 
 Claim work and use its assigned worktree before editing ([AGENTS.md](../AGENTS.md)).
 
+Keep runtime helpers below launch and coordination modules: environment-file parsing in `src/env-file.ts`, test-host detection in `src/runtime-environment.ts`, private file I/O in `src/private-file.ts`, loop-code readings in `src/loop-code.ts`, and review wording in `src/review-prompt.ts`. Daemon schemas live beside state, separate from cycle execution. `tests/import-cycles.test.ts` counts static imports, re-exports and literal dynamic imports, excluding type-only edges; no runtime component may exceed three modules.
+
 ## Validate a change
 
 ```sh

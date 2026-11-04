@@ -1,3 +1,4 @@
+import { readInstallLoopCode } from './loop-code.js';
 import { access, lstat, readFile, stat } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { execFileSync } from 'node:child_process';
@@ -163,7 +164,7 @@ export const setupLine = (check: SetupCheck) => check.status === 'pass' ? `PASS 
  */
 async function loopCodeCheck(root: string, injected: LoopCodeReading | null | undefined): Promise<SetupCheck | null> {
   // Read where the units run (up's readInstallLoopCode): a self-contained host's on that host, never this machine's.
-  const code = injected !== undefined ? injected : await (await import('./up.js')).readInstallLoopCode(root).catch(() => null);
+  const code = injected !== undefined ? injected : await readInstallLoopCode(root).catch(() => null);
   const check = (status: SetupCheck['status'], detail: string): SetupCheck => ({ id: 'loop-code', status, step: setupSteps.loopCode, detail });
   if (!code) return check('fail', 'the units this install runs could not be read');
   if (code.error) return check('fail', `the units this install records are unreadable: ${code.error}`);
