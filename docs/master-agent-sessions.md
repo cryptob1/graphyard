@@ -73,7 +73,11 @@ claude … --settings …/.graphyard/harness/ROLE.json --append-system-prompt-fi
 
 #### The start bound reads the pane
 
-Ready means active without a prompt, or a visible runtime banner while Herdr reports unknown. `run.launchStartSeconds` defaults to 60 seconds; starting gets 120 (`started.extended`). Refusals quote the pane's last nonempty line.
+Ready requires Herdr to identify the runtime through its screen or foreground process, without a prompt. An assigned agent name on an idle or working shell is insufficient. Registered absolute executable paths match the foreground executable; a `graphyard watch` supervisor alone does not identify a runtime. A different reported runtime is refused even when the requested runtime's old banner remains. `run.launchStartSeconds` defaults to 60 seconds; starting gets 120 (`started.extended`). Refusals quote the pane's last nonempty line.
+
+Launches default to the install process's `PATH` and `MISE_NO_CONFIG=1`; registry runtime settings override them. The typed command reapplies that environment after shell startup so activation cannot shadow the installed runtime. A mise configuration trust dialog immediately fails launch and names the runtime PATH repair; it never gets trust or waits as agent consent. Failed-launch cleanup closes the pane and releases its lease epoch and registry capacity. The normal acknowledgement window still requires request activity after start.
+
+When `/etc/resolv.conf` points into `/run`, confinement restores only its canonical public resolver file read-only after masking `/run`. Other host runtime files, control sockets and operator-home writes stay isolated. `e2e:runtime-launch-real-progress` checks failed and repaired `getent ahosts`, a wrapper trust dialog and installed-Codex worker/reviewer first requests, shell-tool results and completed responses through PTYs against a deterministic local provider, with Landlock intact and no provider credentials.
 
 #### First-run consent prompts
 
