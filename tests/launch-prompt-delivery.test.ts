@@ -130,10 +130,10 @@ test('e2e:worker-request-trial-only-tests — dispatched worker receives the tri
     const profile: WorkerProfile = { name: 'worker-oc', principal: 'worker-a', agentName: 'trial-worker', mode: 'launch', kind: 'opencode', credentialFile: await token('worker'), agentArgs: [], approvals: 'auto', environment: {} };
     await dispatchWork(root, ready(), profile, [], herdr.run, [ready()], async () => ({ epoch: 4, path: join(root, 'assigned'), base: 'c'.repeat(40) }), async () => {}, 5_000);
     const request = herdr.named('trial-worker').request!;
-    assert.match(request, /required test fails only because your sandbox lacks Docker, unnested bubblewrap or a trial-image fixture, do not record a blocker/);
-    assert.match(request, /name the command and environment error in the commit message, submit with complete and leave the verdict to the merge trial/);
-    assert.match(request, /This exception also applies to your own criteria's tests/);
-    assert.match(request, /Assertion failures, build errors and refusals of your own writes must still be fixed or recorded as blockers/);
+    assert.match(request, /including required criteria tests lacking Docker, unnested bubblewrap or a trial-image fixture/);
+    assert.match(request, /record command and environment error in the commit message, submit with complete instead of recording a blocker; the merge trial runs the test and decides/);
+    assert.match(request, /For sandbox-only test failures, including required criteria tests/);
+    assert.match(request, /Fix or block assertion failures, build errors and refusals of your own writes/);
     assert.match(request, /cannot succeed, other than a test failing only for the sandbox limitations described above, record a blocker/);
     assert.match(request, /complete GY-93 4 --head as your last action/);
     assert.doesNotMatch(request, /a failure of your own criteria's tests always blocks/);

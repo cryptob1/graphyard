@@ -106,8 +106,8 @@ test('unit:worker-submits-sandbox-failures-to-ci — every worker runtime\'s lau
     const prompt = workerPrompt(config, work, { principal: `graphyard-${kind}-worker` }, 6);
     assert.match(prompt, /full test suite is CI's gate/, `${kind}: the prompt states the full suite is CI's gate`);
     assert.match(prompt, /run the build and the tests for your own criteria/, `${kind}: the prompt names what the worker runs`);
-    assert.match(prompt, /submit with complete/, `${kind}: the prompt says to submit when its own criteria pass`);
-    assert.match(prompt, /naming in the commit message any full-suite failures that come only from your sandbox and lie outside the files you changed/, `${kind}: the prompt says to name sandbox-only failures in the pull request`);
+    assert.match(prompt, /[Ss]ubmit with complete/, `${kind}: the prompt says to submit when its own criteria pass`);
+    assert.match(prompt, /For sandbox-only test failures.*record command and environment error in the commit message/, `${kind}: the prompt says to record sandbox-only failures in the commit`);
     assert.match(prompt, /instead of recording a blocker/, `${kind}: the prompt rules out a blocker for sandbox-only failures`);
   }
   // The prompt's rule is the harness's own exported policy text, so the harness rules and the
@@ -119,10 +119,10 @@ test('unit:worker-submits-sandbox-failures-to-ci — every worker runtime\'s lau
 
 test('unit:worker-request-trial-only-tests — trial-environment failures permit submission without excusing implementation failures', () => {
   const prompt = workerPrompt({ cliPath: '/graphyard/bin/graphyard.mjs' }, { key: 'GY-3078', title: 'Trial-only tests' }, { principal: 'worker' }, 1);
-  assert.match(prompt, /If a required test fails only because your sandbox lacks Docker, unnested bubblewrap or a trial-image fixture, do not record a blocker/);
-  assert.match(prompt, /name the command and environment error in the commit message, submit with complete and leave the verdict to the merge trial, which runs the test/);
-  assert.match(prompt, /This exception also applies to your own criteria's tests/);
-  assert.match(prompt, /Assertion failures, build errors and refusals of your own writes must still be fixed or recorded as blockers/);
+  assert.match(prompt, /including required criteria tests lacking Docker, unnested bubblewrap or a trial-image fixture/);
+  assert.match(prompt, /record command and environment error in the commit message, submit with complete instead of recording a blocker; the merge trial runs the test and decides/);
+  assert.match(prompt, /For sandbox-only test failures, including required criteria tests/);
+  assert.match(prompt, /Fix or block assertion failures, build errors and refusals of your own writes/);
   assert.match(prompt, /If a command you need is refused or cannot succeed, other than a test failing only for the sandbox limitations described above, record a blocker with node .* blocked GY-3078 1 REASON/);
   assert.doesNotMatch(prompt, /a failure of your own criteria's tests always blocks/);
 });
