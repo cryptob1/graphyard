@@ -4,7 +4,6 @@ import { randomUUID } from 'node:crypto';
 import EmbeddedPostgres from 'embedded-postgres';
 import { Store } from '../src/store.js';
 import { Engine } from '../src/engine.js';
-import { decisionWork } from '../src/store/decision-read.js';
 import { resourceConflicts } from '../src/coordination.js';
 import type { Work, Principal } from '../src/model.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
@@ -73,6 +72,7 @@ test('unit:decision-reads-peers — a cold claim, submission and evaluation on 2
       checks: [], reviews: [], merged: false, mergeSha: null, mergeable: true, protected: true,
       files: [], scopeFiles: [], at, prState: 'open', draft: false,
     }); assertReads();
+    const { decisionWork } = await import('../src/store/decision-read.js');
     await store.transaction(async (db, now) => {
       const peers = await decisionWork(db, [focus.id]);
       engine.evaluate(peers.find(work => work.id === focus.id)!, peers, now);
@@ -87,6 +87,7 @@ test('unit:decision-reads-peers — a cold claim, submission and evaluation on 2
 });
 
 test('unit:decision-reads-peers — bootstrap issuers and proof deliveries remain visible without a dependency edge', async () => {
+  const { decisionWork } = await import('../src/store/decision-read.js');
   const issuer = item(2001), focus = item(2002), delivery = item(2003);
   issuer.criteria[0] = { id: 'AC-1', text: 'Deferred contract', proofs: ['unit:deferred-contract'], bootstrap: {
     reason: 'Introduces harness', contractPaths: ['src/contract.ts'], declaredBy: 'operator', declaredAt: at, policyRevision: 1,
