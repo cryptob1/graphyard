@@ -1,6 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
+import { timedMergePorts } from '../src/daemon/trial-timings.js';
+import { emptyMergeWriterState } from '../src/daemon/merge-writer-state.js';
 import { mergeBatch } from '../src/merge-writer/batch.js';
 import { trialFailurePrefix } from '../src/model/rework-ground.js';
 import type { MergePorts, MergeRecordEvent, MergeTrialRun } from '../src/merge-writer/executor.js';
@@ -131,4 +133,17 @@ test('integration:merge-requires-executed-proofs — absent, zero and failing co
       for (const { event } of trials) assert.ok(event.kind === 'trial' && event.outcome === 'verdict' && JSON.stringify(event.proofs[required]) === JSON.stringify(counts));
     }
   }
+});
+
+
+test('integration:trial-step-timings — batch fallbacks retain their own covered heads', async () => {
+  const run = recording({ failing: [2] });
+  const writer = emptyMergeWriterState();
+  const timed = timedMergePorts(run.ports, writer, async () => {});
+  await mergeBatch(timed, [1, 2].map(queued));
+  assert.deepEqual(writer.trials!.map(trial => trial.heads), [
+    [1, 2].map(n => ({ key: `GY-${n}`, head: head(n) })),
+    [{ key: 'GY-1', head: head(1) }], [{ key: 'GY-2', head: head(2) }],
+  ]);
+  assert.deepEqual(writer.trials!.map(trial => trial.steps.map(step => step.step)), [[], ['push'], []]);
 });
