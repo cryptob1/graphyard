@@ -5,10 +5,11 @@ import { pathToFileURL } from 'node:url';
 import { loadStoredMasterConfig, readCredentialFile, atomicPrivateWrite, atomicPrivateText, applyHerdrConfig } from '../../src/master/config.js';
 import { masterConfigSchema, type MasterConfig } from '../../src/master/profiles.js';
 import { daemonEffects } from '../../src/daemon/effects-production.js';
-import { runCycle, Launcher } from '../../src/daemon/cycle.js';
+import { Launcher } from '../../src/daemon/cycle.js';
 import { emptyDaemonState, type DaemonState } from '../../src/daemon/state.js';
 import { createdHerdrTab, isHerdrCommand, herdrSubcommand } from '../../src/master/herdr.js';
-import { stopRun, watchBudget } from './lifecycle.js';
+import { runCertifiedCycle } from './cycle.js';
+import { stopRun, stopImplementation, watchBudget } from './lifecycle.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import type { ChildRun } from '../../src/child-runner.js';
 import { MERGE_PROTOCOL } from '../../src/protocol-version.js';
@@ -58,10 +59,11 @@ export async function createItems(context:RunContext) {
   for(const component of definitions) {
     context.signal.throwIfAborted();
     const final=component.id==='integration'||component.id==='single';
+    const criterion=component.id==='single'?'Complete all eight component requirements in the full description and CONTRACT.md: exact arithmetic, square-free multiplicities, certified isolation, CLI, HTTP batch API, browser UI and integration tests.':component.brief;
     const item=await context.plane.call('work',context.operator,{
       reason:`Run ${context.config.id}: create ${component.id} for the ${context.config.mode} frozen-v1 certified real-root workbench rebuild, seed ${context.config.seed}.`,
       type:'chore',title:component.title,description:component.id==='single'?`${component.brief}\nOne implementation agent only; do not delegate.`:workDescription(component.id),
-      criteria:[{id:'AC-1',text:`${component.brief} Files: ${component.files.join(', ')}. Preserve CONTRACT.md.`,proofs:['unit:workbench-contract','e2e:workbench',...(final?['manual:certified-artifact']:[])]}],
+      criteria:[{id:'AC-1',text:`${criterion} Files: ${component.files.join(', ')}. Preserve CONTRACT.md.`,proofs:['unit:workbench-contract','e2e:workbench',...(final?['manual:certified-artifact']:[])]}],
       dependencies:component.depends.map(id=>ids.get(id)),producerProofs:final?['manual:certified-artifact']:[],policy:{checks:['test'],review:true},
     });
     ids.set(component.id,item.id);
@@ -191,7 +193,8 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     };
     const certify=async(item:any)=>{
       const head=item.candidate?.sha;if(!head) return false;
-      const target=join(directory,`certify-${head}`),scratch=join(directory,`scratch-${head}`);
+      const binding=`${head}-${item.candidate.baseSha}-${item.policyRevision}`;
+      const target=join(directory,`certify-${binding}`),scratch=join(directory,`scratch-${binding}`);
       await git(repository.root,'worktree','add','--detach','-q',target,head);
       let passed=false,reason='';
       try {await verifyArtifact({root:target,sha:head,seed:config.seed,python:config.oraclePython,oracleSource:join(oracleDirectory,'verify.py'),oracleDigest:receipt.oracleDigest,scratch,hidden:[install,repository.root,oracleDirectory,join(config.sourceRoot,'.graphyard')],signal:abort.signal});passed=true;}
@@ -210,13 +213,20 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       effects=daemonEffects(repository.root,master,{snapshot:async()=>({work:await plane!.call('work',coordinator.token),now:new Date().toISOString()}),mutate:(path,data)=>{enforce();return plane!.call(path,coordinator.token,data);},run:boundedRun,fetcher:(input,init)=>fetch(input,{...init,signal:AbortSignal.any([abort.signal,...(init?.signal?[init.signal]:[])])})});
       const dispatchTick=effects.dispatchTick!;
       effects.dispatchTick=snapshot=>{enforce();return pendingTick=dispatchTick(snapshot);};
-      const checked=new Set<string>();
+      const checked=new Map<string,boolean>();
       while(true) {
         const items=await snapshot(true);
-        const final=items.find((i:any)=>i.id===receipt.work.at(-1)!.id);
-        if(final.candidate && !checked.has(final.candidate.sha) && final.stage!=='done') {checked.add(final.candidate.sha);await certify(final);}
         if(receipt.work.every(w=>w.merge)) break;
-        enforce();await runCycle(master,state,effects,Date.now,launcher);enforce();
+        enforce();await runCertifiedCycle({config:master,state,effects,items,finalId:receipt.work.at(-1)!.id,checked,certify,launcher,
+          repair:async item=>{
+            await launcher!.idle();
+            const current=await plane!.call(`work/${item.id}`,coordinator.token);
+            if(current.stage==='done') throw new Error('Uncertified final candidate was delivered before repair');
+            if(current.candidate?.sha!==item.candidate?.sha || current.candidate?.baseSha!==item.candidate?.baseSha || current.policyRevision!==item.policyRevision || current.reworkRequested) return;
+            await stopImplementation(context!,current);
+            await effects!.rework!(current,`Run ${config.id}: independent exact CLI/API/UI certification rejected candidate ${item.candidate!.sha}; repair the implementation without changing the frozen contract, generator or oracle.`);
+          },
+        });enforce();
         await delay(1000,undefined,{signal:abort.signal});
       }
       await launcher.idle();

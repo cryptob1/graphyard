@@ -136,6 +136,13 @@ test('hard math real API creates/releases the frozen plan with revisions, binds 
     const plane={call},master=await operator(plane as any,admin.token);
     const c={root,plane,coordinator:coordinator.token,operator:master,signal:new AbortController().signal,config:{id:'api-contract',mode:'team',seed:1},receipt:{work:[]}} as any;
     await createItems(c);assert.equal(c.receipt.work.length,8);
+    const single={...c,config:{...c.config,id:'api-single-contract',mode:'single'},receipt:{work:[]}} as any;
+    await createItems(single);
+    const singleItem=await call(`work/${single.receipt.work[0].id}`,coordinator.token);
+    assert.ok(singleItem.criteria[0].text.length<=2000);
+    const {components,workDescription}=await import('../benchmarks/hard-math/work.js');
+    for(const component of components) assert.ok(singleItem.description.includes(workDescription(component.id)),'single description retains every full component requirement');
+    assert.deepEqual(singleItem.criteria[0].proofs,['unit:workbench-contract','e2e:workbench','manual:certified-artifact']);
     const claimed=[];
     for(let i=0;i<3;i++) {
       const item=(await call('assignments/claim',workers[i].token,{work:c.receipt.work[i].id})).assigned;
@@ -195,4 +202,46 @@ test('hard math fixture polling waits for authoritative offers, stops at its pol
     const cancelled=await runWorkerPull(async()=>({assigned:null,offered:0}),{intervalMs:10_000,maxPolls:120,signal:controller.signal});
     assert.equal(cancelled.assigned,null);assert.equal(cancelled.polls,1);assert.ok(Date.now()-started<1000);
   } finally {clearTimeout(timer);}
+});
+
+test('hard math real cycle cannot merge a final candidate arriving after the certified snapshot and repairs rejection before retry',async()=>{
+  const {runCertifiedCycle}=await import('../benchmarks/hard-math/cycle.js');
+  const {masterConfigSchema}=await import('../src/master.js');
+  const {emptyDaemonState}=await import('../src/daemon/state.js');
+  const {mergeWriterIdle}=await import('../src/daemon/cycle-merge-writer.js');
+  const {nextToMerge}=await import('../src/merge-writer/executor.js');
+  const now=()=>Date.parse('2026-01-01T00:00:00Z'),at=new Date(now()).toISOString(),head='c'.repeat(40),base='b'.repeat(40);
+  const config=masterConfigSchema.parse({version:1,url:'http://unused',credentialFile:'/fixture/coordinator.token',cliPath:'/bin/graphyard',repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:'fixture',masterAgentName:'fixture-master',workers:[]});
+  const submitted={id:'final',key:'GY-1',type:'chore',title:'Final workbench',description:'',createdAt:at,updatedAt:at,stageEnteredAt:at,stage:'build',ready:true,epoch:1,lease:null,dependencies:[],workspaces:[],sessions:[],criteria:[{id:'AC-1',text:'Works',proofs:['unit:workbench-contract']}],policy:{checks:['test'],review:true},policyRevision:1,evidence:[],violations:[],candidate:{sha:head,baseSha:base,pr:1,branch:'graphyard/gy-1-1',author:'worker'},submission:{epoch:1,pr:1},reworkRequested:false,
+    gates:['ready','build','review'].map(name=>({name,passed:true,reasons:[]})),
+    observation:{source:'control-plane',candidate:{sha:head,baseSha:base},files:['src/solver.mjs'],checks:[],reviews:[],merged:false,mergeSha:null,mergeable:true,baseTip:base,baseTipContained:true,at},
+  } as any;
+  assert.equal(nextToMerge([submitted],{},now())?.id,'final','normal candidate is otherwise eligible before its benchmark certificate');
+  const events:string[]=[];let freshReads=0;
+  const effects={snapshot:async()=>{freshReads++;return {work:[submitted],now:at};},agents:()=>[],herdr:()=>({agents:[],available:true}),credentials:async()=>({}),closeSession:()=>{},dispatch:async()=>{},persist:async()=>{},
+    mergeWriter:{baseBranch:'main',retrials:0,batch:1,now,fetch:async()=>base,merge:async(sha:string)=>({mergeSha:sha,files:['src/solver.mjs']}),
+      trial:async()=>({build:'pass',tests:{passed:1,failed:[],files:1},proofs:{'unit:workbench-contract':{executed:1,failed:0}},files:['tests/contract.test.mjs'],durationMs:1}),
+      push:async(sha:string)=>{events.push(`push:${sha}`);return 'pushed';},holds:async()=>false,record:async()=>{},
+    },
+  } as any;
+  const checked=new Map<string,boolean>(),state=emptyDaemonState(config);
+  const initial={...submitted,candidate:null,submission:null};
+  const certify=async(item:any)=>{events.push(`certify:${item.candidate.sha}`);return true;};
+  const repair=async()=>{events.push('repair');};
+  await runCertifiedCycle({config,state,effects,items:[initial],finalId:'final',checked,certify,repair,now});
+  assert.equal(freshReads,0);assert.equal(events.length,0,'a later provider snapshot cannot enter this cycle');
+  await runCertifiedCycle({config,state,effects,items:[submitted],finalId:'final',checked,certify,repair,now});
+  await mergeWriterIdle(state);
+  assert.deepEqual(events,[`certify:${head}`,`push:${head}`]);
+  const rejected={...submitted,candidate:{...submitted.candidate,sha:'d'.repeat(40)},observation:{...submitted.observation,candidate:{...submitted.observation.candidate,sha:'d'.repeat(40)}}},retryState=emptyDaemonState(config);
+  events.length=0;
+  await runCertifiedCycle({config,state:retryState,effects,items:[rejected],finalId:'final',checked,certify:async()=>{events.push('reject');return false;},repair,now});
+  assert.deepEqual(events,['reject','repair'],'a failed certificate requests repair without entering the merge cycle');
+  await runCertifiedCycle({config,state:retryState,effects,items:[{...rejected,reworkRequested:true}],finalId:'final',checked,certify,repair,now});
+  assert.deepEqual(events,['reject','repair'],'the previous rejected head cannot merge during rework');
+  const fixed={...submitted,candidate:{...submitted.candidate,sha:'e'.repeat(40)},observation:{...submitted.observation,candidate:{...submitted.observation.candidate,sha:'e'.repeat(40)}}};
+  await runCertifiedCycle({config,state:retryState,effects,items:[fixed],finalId:'final',checked,certify,repair,now});
+  await mergeWriterIdle(retryState);
+  assert.deepEqual(events,['reject','repair',`certify:${fixed.candidate.sha}`,`push:${fixed.candidate.sha}`]);
+  assert.equal(freshReads,0);
 });

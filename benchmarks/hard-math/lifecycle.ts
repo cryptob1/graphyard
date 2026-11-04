@@ -15,6 +15,16 @@ async function closePresentPane(pane:string) {
   if(inventory.panes.some((p:any)=>p.pane_id===pane)) await closeHerdrPane(pane,run);
 }
 
+/** Confirm this submitted item's implementation has stopped before attesting rework. */
+export async function stopImplementation(c:RunContext,item:Work) {
+  for(const s of item.sessions??[]) if(s.kind==='implementation') {
+    if(s.pane) await closePresentPane(s.pane);
+    if(s.state==='running') await c.plane.call(`work/${item.id}/session`,c.coordinator,{
+      id:s.id,kind:s.kind,principal:s.principal,runtime:s.runtime,host:s.host,subject:s.subject,state:'finished',outcome:'Independent certification rejected the submitted candidate',...(s.launch?{launch:s.launch}:{}),
+    });
+  }
+}
+
 /** Only handles belonging to this isolated installation are eligible for shutdown. */
 export async function stopRun(c:RunContext,state?:DaemonState,close: (pane:string)=>Promise<unknown>=closePresentPane) {
   const reason='Bounded benchmark ended; stop run-owned sessions and release leases';

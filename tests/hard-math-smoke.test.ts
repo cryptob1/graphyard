@@ -1,15 +1,17 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdir } from 'node:fs/promises';
+import { readFile, mkdir, cp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 import { trialEnvironment, trialHomeVariables } from '../src/merge-writer/trial.js';
 import { command } from '../benchmarks/hard-math/process.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { generate, profile } from '../benchmarks/hard-math/generator.js';
-import { oracle, oracleDigest } from '../benchmarks/hard-math/oracle.js';
+import { oracle, oracleDigest, oracleSource } from '../benchmarks/hard-math/oracle.js';
 import { execute } from '../benchmarks/hard-math/runner.js';
-import { fixtureExecutor } from '../benchmarks/hard-math/fixture.js';
+import { verifyArtifact } from '../benchmarks/hard-math/artifact.js';
+import { benchmarkRoot } from '../benchmarks/hard-math/isolation.js';
+import { fixtureExecutor, writeControlledArtifact } from '../benchmarks/hard-math/fixture.js';
 import { validateReceipt, comparison } from '../benchmarks/hard-math/receipt-schema.js';
 import { routeAccounts } from '../benchmarks/hard-math/routing.js';
 import { emptyRegistry, applyRegistryMutation } from '../src/model/registry.js';
@@ -57,7 +59,7 @@ async function runFixture(label:string,options:Parameters<typeof fixtureExecutor
 
 test('integration:hard-math-smoke — real scratch Postgres/control plane and Git deliver eight reviewed fixture components, reject an integration fault, repair and certify pushed CLI/API/UI', {timeout:330_000},async()=>{
   const receipt=await runFixture('repair',{injectRepair:true});
-  assert.equal(receipt.outcome,'PASS',receipt.reason);assert.equal(receipt.kind,'controlled-fixture');
+  assert.equal(receipt.outcome,'PASS',`${receipt.reason}\n${JSON.stringify(receipt.failures,null,2)}`);assert.equal(receipt.kind,'controlled-fixture');
   assert.ok(receipt.overlaps.length);assert.equal(receipt.work.at(-1)?.repairs,1);
   assert.ok(receipt.failures.some(f=>f.component==='integration'));assert.equal(receipt.cost,null);assert.equal(receipt.costBudgetProven,false);
   assert.ok(receipt.sessions.some(s=>s.reason.includes('passed over')));
@@ -109,4 +111,13 @@ except (PermissionError, OSError):
 print('pinned immutable oracle')
 `],{cwd:allocation,env:{...trialEnvironment(),...trialHomeVariables(allocation),PATH:'/usr/local/bin:/usr/bin:/bin'}});
   assert.match(result.stdout,/pinned immutable oracle/);
+});
+
+
+test('integration:hard-math-smoke — controlled lookup artifact independently passes CLI/API/UI certification', {timeout:60_000},async()=>{
+  const parent=await temporaryDirectory('hard-math-artifact',process.cwd()),root=join(parent,'repository'),scratch=join(parent,'scratch');
+  await cp(join(benchmarkRoot,'seed'),root,{recursive:true});
+  await writeControlledArtifact(root,python,oracleSource);
+  const result=await verifyArtifact({root,sha:'a'.repeat(40),seed:1,python,oracleSource,oracleDigest:await oracleDigest(),scratch,hidden:[join(process.cwd(),'.graphyard')]});
+  assert.equal(result.cli,true);assert.equal(result.api,true);assert.equal(result.ui,true);assert.equal(result.cases,generate(1).length);
 });

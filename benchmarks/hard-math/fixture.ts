@@ -15,6 +15,15 @@ import { oracle } from './oracle.js';
 import type { RunContext } from './runner.js';
 
 const app=`document.querySelector('#form').addEventListener('submit',async event=>{event.preventDefault();const error=document.querySelector('#error'),results=document.querySelector('#results');error.textContent='';results.textContent='';try{const request={coefficients:document.querySelector('#coefficients').value.trim().split(/\\s+/),precisionBits:Number(document.querySelector('#precisionBits').value)};const response=await fetch('/roots',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({jobs:[request]})});const body=await response.json(),result=body.results?.[0];if(body.error||result.error){error.textContent=(body.error||result.error).code;return;}results.textContent=result.roots.map(root=>root.lo.n+'/'+root.lo.d+' .. '+root.hi.n+'/'+root.hi.d+' multiplicity '+root.multiplicity).join('\\n');}catch(e){error.textContent=String(e);}});\n`;
+/** An oracle lookup fixture for controlled tests only; never an implementation solver. */
+export async function writeControlledArtifact(root:string,python:string,oracleFile:string,signal?:AbortSignal) {
+  const samples=[1,2,3].flatMap(seed=>generate(seed));
+  const refs=await oracle(python,samples.map(request=>({request,reference:true})),oracleFile,signal);
+  const table=Object.fromEntries(samples.map((sample,i)=>[sample.coefficients.map(BigInt).map(String).join(','),refs[i]]));
+  await writeFile(join(root,'src/solver.mjs'),`import {parseRequest} from './contract.mjs';\nconst table=${JSON.stringify(table)};\nexport function solve(value){const {coefficients}=parseRequest(value);if(coefficients.length===1)return {roots:[]};const result=table[coefficients.map(String).join(',')];if(!result)throw {code:'INVALID_REQUEST'};return result;}\n`);
+  await writeFile(join(root,'public/app.mjs'),app);
+}
+const certificationFailure=(c:RunContext)=>JSON.stringify(c.receipt.failures.filter(f=>f.component==='integration').at(-1),null,2);
 export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boolean;incorrectArtifact?:boolean;injectRepair?:boolean;haltAfterClaims?:boolean;waitAfterClaims?:boolean}={}) {
   const trials=join(c.directory,'trials');await mkdir(trials);
   await c.plane.call('agent-registry/apply',c.coordinator,{
@@ -57,12 +66,7 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     await writeFile(join(a.directory,'fixture',`${a.work.component}.txt`),`Controlled executor fixture: ${a.work.component}; correct=${correct}\n`);
     if(a.work.component==='integration'||a.work.component==='single') {
       if(correct) {
-        const samples=[1,2,3].flatMap(seed=>generate(seed));
-        const refs=await oracle(c.config.oraclePython,samples.map(request=>({request,reference:true})),c.oracleFile);
-        const table=Object.fromEntries(samples.map((sample,i)=>[sample.coefficients.map(BigInt).map(String).join(','),refs[i]]));
-        // An explicit lookup fixture, never an implementation solver or real-agent result.
-        await writeFile(join(a.directory,'src/solver.mjs'),`import {parseRequest} from './contract.mjs';\nconst table=${JSON.stringify(table)};\nexport function solve(value){const {coefficients}=parseRequest(value);if(coefficients.length===1)return {roots:[]};const result=table[coefficients.map(String).join(',')];if(!result)throw {code:'INVALID_REQUEST'};return result;}\n`);
-        await writeFile(join(a.directory,'public/app.mjs'),app);
+        await writeControlledArtifact(a.directory,c.config.oraclePython,c.oracleFile,c.signal);
       }
     }
     await git(a.directory,'add','.');await git(a.directory,'commit','-q','-m',`Controlled ${a.work.component} ${correct?'fixture':'negative fixture'}`);
@@ -98,14 +102,14 @@ export async function fixtureExecutor(c:RunContext,options:{missingDelivery?:boo
     let item=await submit(attempt,!(options.incorrectArtifact || options.injectRepair && work.component==='integration'));
     if(work.component==='integration'||work.component==='single') {
       if(options.injectRepair && work.component==='integration') {
-        assert.equal(await c.certify(item),false,'known bad starter must fail the external producer');
+        assert.equal(await c.certify(item),false,`known bad starter must fail the external producer: ${certificationFailure(c)}`);
         item=await c.plane.call(`work/${item.id}`,c.coordinator);
         assert.ok(item.evidence.some((e:any)=>e.proof==='manual:certified-artifact' && e.trusted && e.result==='fail'));
         assert.equal(item.delivery??null,null,'controlled failed certification is retained before rework and any canonical merge call');
         await c.plane.call(`work/${item.id}/rework`,c.operator,{reason:'External exact oracle rejected controlled integration fault',previousWorkerStopped:true});
         attempt=await claim(work,i);item=await submit(attempt,true);
       }
-      if(!options.incorrectArtifact) assert.equal(await c.certify(item),true,'correct fixture is independently certified');
+      if(!options.incorrectArtifact) assert.equal(await c.certify(item),true,`correct fixture is independently certified: ${certificationFailure(c)}`);
       else {assert.equal(await c.certify(item),false);return;}
       if(options.missingDelivery) return;
     }

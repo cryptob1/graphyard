@@ -240,3 +240,37 @@ changes only: the frozen profile and real team/comparison one-hour and 21,600
 aggregate allocation-second caps remain unchanged. Failed 180-second runs and
 native diagnostics are not overwritten or removed by this change; new fixtures
 allocate fresh directories. No actual coding-agent success has been observed.
+
+
+The completed native `ed80431b8` run took 250.1 seconds: thirteen of fifteen
+cases passed. Positive delivery reached integration certification, which rejected
+the purportedly correct controlled artifact; the previous assertion hid the
+retained cause. Certification assertions now include the latest original failure
+reason and stack, and the primary receipt assertion includes retained failures.
+The independent check is not waived. A standalone ordinary test named
+`integration:hard-math-smoke — controlled lookup artifact independently passes CLI/API/UI certification`
+uses the exact same sample-lookup writer as the eight-merge fixture. It runs in
+the normal full file/E2E too. The operator's untrusted diagnostic pattern can
+select it for a fast native investigation, never as a substitute for verification
+or full proofs. Its local worker diagnostic stopped at bubblewrap's
+`Failed to make / slave: Operation not permitted`; native artifact verification
+remains pending. Its finite 60-second test bound fits the E2E command's 150-second
+allowance beyond the three heavy fixture cases.
+
+Single-mode creation now keeps all unchanged component descriptions in the task
+description and uses a concise criterion referring to that complete scope and
+`CONTRACT.md`, within the API's 2,000-character limit. The actual HTTP regression
+creates both modes and checks every full component requirement and all proof
+names remain present.
+
+The real-run certification/cycle race was concrete: the old precheck and daemon
+cycle fetched different snapshots, allowing a newly submitted normal final head
+to enter merge selection without its oracle check. The runner now gives the
+actual daemon cycle the same authoritative snapshot the oracle examined. Rejected
+certification stops the submitted implementation and requests ordinary scoped
+operator rework before another cycle; certification caching binds head, base and
+policy. A cycle regression injects the late head, verifies no newer snapshot is
+consumed, requires certification before a push, and verifies rejection leads to
+repair and certification of the repaired head before its push. These are unit
+orchestration effects, not real-agent outcome evidence. Production gates, risk
+classification, frozen inputs and actual run/comparison caps remain unchanged.
