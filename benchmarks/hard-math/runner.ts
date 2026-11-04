@@ -20,6 +20,7 @@ import { generate } from './generator.js';
 import { configSchema, validateReceipt, overlappingWorkers, comparison, usageSchema, type RunConfig, type Receipt } from './receipt-schema.js';
 import { components, workDescription } from './work.js';
 import { listRunDirectories, runsDirectory } from '../../src/runner/registry.js';
+import { trackedDocuments, lifecycleCounts, failureStack } from './snapshot.js';
 import { sourceCapacity } from './capacity.js';
 import { routeAccounts } from './routing.js';
 import { codeRoot, benchmarkRoot, isolatedRepository, startPlane, credential, operator } from './isolation.js';
@@ -85,7 +86,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
   const checkpoint=async()=>{receipt.wallClockMs=Date.now()-started;await atomicPrivateWrite(join(directory,'receipt.json'),receipt);};
   await checkpoint();await writeFile(join(directory,'config.json'),JSON.stringify(config,null,2)+'\n',{mode:0o600});
   const abort=new AbortController(),deadline=started+config.wallClockSeconds*1000;
-  const limit=(reason:string)=>{if(!abort.signal.aborted) abort.abort(new Error(reason));};
+  const limit=(reason:string|Error)=>{if(!abort.signal.aborted) abort.abort(reason instanceof Error?reason:new Error(reason));};
   const interrupted=()=>limit('Benchmark interrupted by process signal');
   process.once('SIGTERM',interrupted);process.once('SIGINT',interrupted);
   const timer=setTimeout(()=>limit('Wall-clock deadline reached'),config.wallClockSeconds*1000);
@@ -141,13 +142,13 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     const operatorToken=await operator(plane,admin.token);await atomicPrivateText(join(install,'operator.token'),operatorToken);
     let reading:Promise<any[]>|undefined;
     const readSnapshot=()=>reading??=(async()=>{
-      const items=await plane!.call('work',coordinator.token);
+      const items=await trackedDocuments(await plane!.call('work',coordinator.token),receipt.work,path=>plane!.call(path,coordinator.token));
       let gateFailure:string|undefined;
       for(const w of receipt.work) {
         const record=items.find((i:any)=>i.id===w.id);if(!record) throw new Error(`Missing authoritative item ${w.key}`);
-        Object.assign(w,{epoch:record.epoch,candidate:record.candidate?.sha??null,merge:record.delivery?.mergeSha??null,attempts:record.pipeline.attempts.length,reviews:record.observation?.reviews?.length??0,repairs:record.pipeline.reworkRounds,record});
+        Object.assign(w,{epoch:record.epoch,candidate:record.candidate?.sha??null,merge:record.delivery?.mergeSha??null,...lifecycleCounts(record),record});
         if(w.repairs>2 || w.attempts>3) gateFailure=`Repair bound exceeded for ${w.key}`;
-        if(record.blocker || record.humanRequest&&!record.humanRequest.answer) gateFailure=`${w.key}: unrecoverable gate failure: ${record.blocker??record.humanRequest.needed}`;
+        if(record.blocker || record.humanRequest&&!record.humanRequest.answer) gateFailure=`${w.key}: unrecoverable gate failure: ${record.blocker??record.humanRequest?.needed??'Unanswered operator request'}`;
       }
       const registry=await plane!.call('agent-registry/document',coordinator.token);
       const sessions=new Map(receipt.sessions.map(s=>[s.id,s]));
@@ -161,7 +162,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
         const attempt=item?.pipeline?.attempts?.find((a:any)=>a.epoch===handle?.epoch);
         const implementationEnd=[handle?.endedAt,attempt?.endedAt].filter(Boolean).sort()[0]??null;
         sessions.set(s.id,{id:s.id,role:s.role,work:s.work,principal:s.principal,runtime:s.runtime,account:s.account,model:s.model,reason:s.reason,startedAt:s.selectedAt,endedAt:s.endedAt,record:s,
-          implementation:handle && workspace?{id:handle.id,epoch:handle.epoch,branch:workspace.branch,path:workspace.path,pane:handle.pane,agentName:handle.agentName,startedAt:handle.startedAt,endedAt:implementationEnd}:null});
+          implementation:handle && workspace?{id:handle.id,epoch:workspace.epoch,branch:workspace.branch,path:workspace.path,pane:handle.pane,agentName:handle.agentName,startedAt:handle.startedAt,endedAt:implementationEnd}:null});
       }
       receipt.sessions=[...sessions.values()];
       receipt.agentSeconds=receipt.sessions.reduce((sum,s)=>sum+(Date.parse(s.endedAt??new Date().toISOString())-Date.parse(s.startedAt))/1000,0);
@@ -194,13 +195,13 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       await git(repository.root,'worktree','add','--detach','-q',target,head);
       let passed=false,reason='';
       try {await verifyArtifact({root:target,sha:head,seed:config.seed,python:config.oraclePython,oracleSource:join(oracleDirectory,'verify.py'),oracleDigest:receipt.oracleDigest,scratch,hidden:[install,repository.root,oracleDirectory,join(config.sourceRoot,'.graphyard')],signal:abort.signal});passed=true;}
-      catch(error){reason=String(error);receipt.failures.push({at:new Date().toISOString(),component:'integration',head,reason});}
+      catch(error){reason=String(error);receipt.failures.push({at:new Date().toISOString(),component:'integration',head,reason,stack:failureStack(error)});}
       await plane!.call(`work/${item.id}/evidence`,producer.token,{proof:'manual:certified-artifact',sha:head,baseSha:item.candidate.baseSha,policyRevision:item.policyRevision,result:passed?'pass':'fail',executed:generate(config.seed).length,skipped:0,exercise:{behaviour:'Empty-root starter solver, independently rejected before implementation',result:'fail',executed:1}});
       await checkpoint();return passed;
     };
     context={config,receipt,directory,...repository,install,plane,admin:admin.token,coordinator:coordinator.token,producer:producer.token,operator:operatorToken,workers,oracleFile:join(oracleDirectory,'verify.py'),signal:abort.signal,panes,checkpoint,snapshot,certify};
     enforce();await createItems(context);
-    watchdog=watchBudget(abort.signal,async()=>{enforce();await snapshot();}).catch(error=>{limit(String(error));});
+    watchdog=watchBudget(abort.signal,async()=>{enforce();await snapshot();}).catch(error=>{limit(error instanceof Error?error:new Error(String(error)));});
     if(fixture) await fixture(context);
     else {
       master=await configureMaster(context,source!,producers);
@@ -231,7 +232,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     enforce();receipt.outcome='PASS';receipt.reason=fixture?'Controlled executor fixture passed isolated delivery and certification; this is not a real-agent rebuild.':'Independently verified CLI/API/UI built from the pushed final merge.';
     receipt.endedAt=new Date().toISOString();
   } catch(error) {
-    receipt.outcome='FAIL';receipt.reason=error instanceof Error?error.message:String(error);receipt.failures.push({at:new Date().toISOString(),component:'runner',head:receipt.artifact?.sha??null,reason:receipt.reason});
+    receipt.outcome='FAIL';receipt.reason=error instanceof Error?error.message:String(error);receipt.failures.push({at:new Date().toISOString(),component:'runner',head:receipt.artifact?.sha??null,reason:receipt.reason,stack:failureStack(error)});
   } finally {
     clearTimeout(timer);process.removeListener('SIGTERM',interrupted);process.removeListener('SIGINT',interrupted);stopping=true;abort.abort();await watchdog;await emergencyStop;
     // Refuse new launches, drain already started launches, then close their actual handles.
@@ -240,7 +241,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
       try {await stopRun(context,state);receipt.cleanup.complete=true;}
       catch(error) {receipt.cleanup.errors.push(String(error));receipt.outcome='FAIL';receipt.reason=String(error);}
       try {await context.snapshot();}
-      catch(error) {receipt.failures.push({at:new Date().toISOString(),component:'final-snapshot',head:null,reason:String(error)});receipt.outcome='FAIL';receipt.reason=String(error);}
+      catch(error) {receipt.failures.push({at:new Date().toISOString(),component:'final-snapshot',head:null,reason:String(error),stack:failureStack(error)});receipt.outcome='FAIL';receipt.reason=String(error);}
       for(const file of ['reviews.json','producers.json']) {
         try {receipt.runtimeReceipts.push({file,record:JSON.parse(await readFile(join(context.root,'.graphyard',file),'utf8'))});} catch(error:any) {if(error.code!=='ENOENT') receipt.runtimeReceipts.push({file,error:String(error)});}
       }
@@ -254,7 +255,7 @@ export async function execute(configInput:unknown,fixture?: (context:RunContext)
     try {await plane?.stop();} catch(error) {receipt.cleanup.errors.push(String(error));receipt.cleanup.complete=false;receipt.outcome='FAIL';receipt.reason=`Control plane cleanup failed: ${error}`;}
     receipt.endedAt=new Date().toISOString();await checkpoint();
     if(receipt.outcome==='PASS') {
-      try {validateReceipt(receipt);} catch(error) {receipt.outcome='FAIL';receipt.reason=String(error);await checkpoint();}
+      try {validateReceipt(receipt);} catch(error) {receipt.outcome='FAIL';receipt.reason=String(error);receipt.failures.push({at:new Date().toISOString(),component:'receipt-validation',head:receipt.artifact?.sha??null,reason:receipt.reason,stack:failureStack(error)});await checkpoint();}
     }
   }
   return validateReceipt(receipt);

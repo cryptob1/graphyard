@@ -12,7 +12,7 @@ export const receiptSchema=z.object({
   work:z.array(z.object({component:z.string(),id:z.string(),key:z.string(),epoch:z.number(),candidate:sha.nullable(),merge:sha.nullable(),attempts:z.number(),reviews:z.number(),repairs:z.number(),record:z.unknown()})),
   sessions:z.array(z.object({id:z.string(),role:z.string(),work:z.string().nullable(),principal:z.string().nullable(),runtime:z.string(),account:z.string(),model:z.string(),reason:z.string(),startedAt:z.string().datetime(),endedAt:z.string().datetime().nullable(),record:z.unknown(),implementation:z.object({id:z.string(),epoch:z.number(),branch:z.string(),path:z.string(),pane:z.string().nullable(),agentName:z.string().nullable(),startedAt:z.string().datetime(),endedAt:z.string().datetime().nullable()}).nullable()})),
   overlaps:z.array(z.object({sessions:z.array(z.string()).length(3),milliseconds:z.number().positive()})),
-  failures:z.array(z.object({at:z.string(),component:z.string(),head:z.string().nullable(),reason:z.string()})),
+  failures:z.array(z.object({at:z.string(),component:z.string(),head:z.string().nullable(),reason:z.string(),stack:z.string().nullable().optional()})),
   artifact:z.object({sha,cli:z.boolean(),api:z.boolean(),ui:z.boolean(),cases:z.number().positive(),oracleDigest:hash}).nullable(),
   usage:z.array(usageSchema),usageComplete:z.boolean(),cost:z.number().nonnegative().nullable(),costBudgetProven:z.boolean(),costReason:z.string().nullable(),agentSeconds:z.number().nonnegative(),wallClockMs:z.number().nonnegative(),
   comparativeSelection:z.enum(['exercised','untested']),speedupClaim:z.literal(false),

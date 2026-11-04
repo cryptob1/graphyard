@@ -106,7 +106,12 @@ supply explicit run/component/goal reasons; the identity and reason guards remai
 unchanged. The isolated benchmark master also explicitly receives work creation
 scope within `scratch/hard-math`, matching the existing master setup pattern;
 the default empty work scope cannot create items. Those three cases still require
-the native rerun.
+the native rerun. That rerun advanced to snapshots and exposed missing pipeline
+handling for newly created work. Receipt snapshots now hydrate tracked settled
+summaries with `wholeDocument`, use zero attempt/repair counts only for known
+unclaimed epoch-zero documents, and reject missing claimed timelines. Final claim
+and worktree requirements remain enforced. Local failure receipts retain the
+original runner stack, including errors surfaced by the watchdog.
 
 The epoch 2/3 failure at the initial scratch Git push was an inherited Landlock
 REFER restriction (`Invalid cross-device link` during quarantine object migration).

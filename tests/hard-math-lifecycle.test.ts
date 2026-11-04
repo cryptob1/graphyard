@@ -79,3 +79,25 @@ test('hard math comparison accepts equal existing time caps with unavailable mon
   assert.throws(()=>comparison(team,{...single,wallClockLimitSeconds:61}),/differs/);
   assert.throws(()=>comparison(team,{...single,seed:2}),/differs/);
 });
+
+test('hard math snapshots distinguish unclaimed work from missing claim history and hydrate settled summaries',async()=>{
+  const {trackedDocuments,lifecycleCounts,failureStack}=await import('../benchmarks/hard-math/snapshot.js');
+  const {beginAttempt}=await import('../src/pipeline-speed.js');
+  const fresh={id:'item',key:'GY-1',epoch:0,lease:null,lastAssignment:null,candidate:null,submission:null,delivery:null,observation:null} as any;
+  assert.deepEqual(lifecycleCounts(fresh),{attempts:0,repairs:0,reviews:0});
+  assert.equal(fresh.pipeline,undefined,'receipt reads must not manufacture authoritative history');
+  assert.throws(()=>lifecycleCounts({...fresh,epoch:1}),/Missing authoritative claim timeline/);
+  const delivered=structuredClone(fresh);delivered.epoch=1;
+  beginAttempt(delivered,{epoch:1,owner:'worker'},new Date('2026-01-01T00:00:00Z'));
+  delivered.delivery={mergeSha:'a'.repeat(40)};
+  const reads:string[]=[],listed=[{id:'item',key:'GY-1',summary:true,epoch:1,pipeline:{submittedAt:null}}] as any;
+  const hydrated=await trackedDocuments(listed,[fresh],async path=>{reads.push(path);return delivered;});
+  assert.deepEqual(reads,['work/item']);assert.equal(hydrated[0],delivered);
+  assert.deepEqual(lifecycleCounts(hydrated[0]),{attempts:1,repairs:0,reviews:0});
+  assert.throws(()=>lifecycleCounts({...delivered,pipeline:{...delivered.pipeline,attempts:[]}}),/Incomplete authoritative claim timeline/);
+  assert.equal((await trackedDocuments([fresh],[fresh],async()=>{throw new Error('unexpected read');}))[0],fresh);
+  await assert.rejects(trackedDocuments([], [fresh],async()=>delivered),/Missing authoritative item/);
+  const error=new TypeError('located runner failure');
+  assert.match(failureStack(error)!,/TypeError: located runner failure/);
+  assert.ok(failureStack(error)!.includes('hard-math-lifecycle.test.ts'));
+});

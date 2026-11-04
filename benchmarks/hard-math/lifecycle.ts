@@ -5,6 +5,7 @@ import { closeHerdrPane, herdrJson } from '../../src/master.js';
 import { liveRun, listRunDirectories, runsDirectory } from '../../src/runner/registry.js';
 import type { RunContext } from './runner.js';
 import { childRunner } from '../../src/child-runner.js';
+import { wholeDocument } from '../../src/model/work-summary.js';
 import type { DaemonState } from '../../src/daemon/state.js';
 
 async function closePresentPane(pane:string) {
@@ -35,18 +36,20 @@ export async function stopRun(c:RunContext,state?:DaemonState,close: (pane:strin
     for(const records of Object.values(ledger)) if(Array.isArray(records)) for(const record of records) if(record.pane) await attempt(`ledger pane ${record.pane}`,()=>pane(record.pane));
   }
   const items=await c.plane.call('work',c.coordinator);
-  for(const item of items) {
+  for(const listed of items) {
+    const item=await wholeDocument(listed,path=>c.plane.call(path,c.coordinator));
     let workerStopped=errors.length===0;
     for(const s of item.sessions??[]) {
       // Finished handles can still have a live pane after submission or proof delivery.
       let stopped=true;
-      if(s.pane) await attempt(`pane ${s.pane}`,async()=>{try {await pane(s.pane);} catch(error) {stopped=false;if(s.kind==='implementation') workerStopped=false;throw error;}});
+      if(s.pane) await attempt(`pane ${s.pane}`,async()=>{try {await pane(s.pane!);} catch(error) {stopped=false;if(s.kind==='implementation') workerStopped=false;throw error;}});
       if(s.state==='running' && stopped) await attempt(`handle ${s.id}`,()=>c.plane.call(`work/${item.id}/session`,c.coordinator,{
         id:s.id,kind:s.kind,principal:s.principal,runtime:s.runtime,host:s.host,subject:s.subject,state:'finished',outcome:reason,...(s.launch?{launch:s.launch}:{}),
       }));
     }
-    if(item.lease && workerStopped) await attempt(`lease ${item.key}`,()=>c.plane.call(`work/${item.id}/capacity`,c.coordinator,{
-      event:'exhausted',role:'worker',epoch:item.lease.epoch,cause:'interrupted',profile:item.lease.owner,account:null,runtime:null,reason,resetsAt:null,
+    const lease=item.lease;
+    if(lease && workerStopped) await attempt(`lease ${item.key}`,()=>c.plane.call(`work/${item.id}/capacity`,c.coordinator,{
+      event:'exhausted',role:'worker',epoch:lease.epoch,cause:'interrupted',profile:lease.owner,account:null,runtime:null,reason,resetsAt:null,
       partialWork:{state:'not-applicable',detail:'Benchmark retains the entire run directory and all implementation worktrees'},
     }));
   }

@@ -59,7 +59,8 @@ test('integration:hard-math-smoke — real scratch Postgres/control plane and Gi
   assert.ok(receipt.failures.some(f=>f.component==='integration'));assert.equal(receipt.cost,null);assert.equal(receipt.costBudgetProven,false);
   assert.ok(receipt.sessions.some(s=>s.reason.includes('passed over')));
   for(const edit of [
-    (r:any)=>{r.work[0].record.delivery=null;},(r:any)=>{r.artifact.sha='f'.repeat(40);},
+    (r:any)=>{r.work[0].record.delivery=null;},
+    (r:any)=>{delete r.work[0].record.pipeline;},(r:any)=>{r.work[0].record.workspaces=[];},(r:any)=>{r.artifact.sha='f'.repeat(40);},
     (r:any)=>{r.work[0].record.observation.reviews=[];},(r:any)=>{r.overlaps=[];},(r:any)=>{r.cost=0;},
   ]) {const bad=structuredClone(receipt);edit(bad);assert.throws(()=>validateReceipt(bad));}
   assert.throws(()=>comparison(receipt,{...receipt,mode:'single'}),/actual team/);
