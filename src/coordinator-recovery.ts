@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto';
+import { once } from './store/mutations.js';
 import { z } from 'zod';
 import { demand, type Principal } from './model.js';
 import type { Store } from './store.js';
@@ -19,14 +19,11 @@ export class CoordinatorRecovery {
     demand(actor.role === 'admin', 'A coordinator recovery is recorded only with an admin credential', 403);
     demand(key && key.length <= 200, 'An Idempotency-Key is required', 400);
     const data = schema.parse(input);
-    const fingerprint = createHash('sha256').update(JSON.stringify({ action: 'coordinator-recovered', data })).digest('hex');
-    return this.store.transaction(async (db) => {
-      const receipt = (await db.query('SELECT * FROM receipts WHERE actor=$1 AND key=$2', [actor.id, key])).rows[0];
-      if (receipt) { demand(receipt.fingerprint === fingerprint, 'Idempotency key reused with different input'); return receipt.result; }
+    const receiptInput = { action: 'coordinator-recovered', data };
+    return this.store.transaction(async (db) => once(db, actor, key, receiptInput, async () => {
       const row = (await db.query('INSERT INTO events(work_id,actor,kind,payload) VALUES(NULL,$1,$2,$3) RETURNING seq', [actor.id, coordinatorRecoveredKind, JSON.stringify(data)])).rows[0];
       const result = { recorded: true, event: String(row.seq), ...data };
-      await db.query('INSERT INTO receipts(actor,key,fingerprint,result) VALUES($1,$2,$3,$4)', [actor.id, key, fingerprint, JSON.stringify(result)]);
       return result;
-    });
+    }));
   }
 }

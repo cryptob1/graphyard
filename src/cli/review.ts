@@ -1,7 +1,7 @@
 import { spawnSync } from 'node:child_process';
 import { defaultChildRun } from '../child-runner.js';
 import { postReview, ReviewPostRefusal, reviewPostExample } from '../review-post.js';
-import { reviewStandard } from '../reviewer.js';
+import { reviewStandard } from '../review-prompt.js';
 import { readVerificationMaps } from '../verification-maps.js';
 import { cliPath, resolveWork, type CliContext } from './context.js';
 import { defineCommands } from './registry.js';

@@ -44,7 +44,7 @@ before(async () => {
   scratch = await temporaryDirectory('backup');
   pg = new EmbeddedPostgres({ databaseDir: join(scratch, 'data'), user: 'graphyard', password: 'testing-only', port, persistent: false, onLog: () => {}, onError: () => {}, postgresFlags: ['-h', '127.0.0.1'] });
   await pg.initialise(); await pg.start();
-  for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer', 'authority', 'seeded', 'fenced']) await pg.createDatabase(name);
+  for (const name of ['source', 'restored', 'occupied', 'cli_restored', 'newer', 'authority', 'seeded', 'fenced', 'retired']) await pg.createDatabase(name);
 });
 after(async () => { if (pg) await pg.stop(); });
 
@@ -170,8 +170,7 @@ test('the documented backup and restore exercise preserves assignments, history,
   await restored.init();
   // A migrated target is empty except at the checkpoints the migration seeds; those are
   // replaced by the backup's rows rather than refused as occupied state.
-  // GY-1833: the merger pin's marker is seeded too, so a backup carries the merger an install ran with.
-  assert.deepEqual(ledgerSeeded, ['merger_default_pin']);
+  assert.deepEqual(ledgerSeeded, []);
   const result = await restoreBackup(restored.pool, backup);
   assert.equal(result.fromSchema, schemaVersion); assert.deepEqual(result.tablesLeftEmpty, []);
   assert.deepEqual(await ledgerCounts(restored.pool), await ledgerCounts(source.pool));
@@ -281,4 +280,34 @@ test('db fence ends every open writer and leaves the database read-only for new 
   const writable = new Store(url('fenced'));
   await write(writable.pool);
   await writable.close();
+});
+
+test('previous-generation backups verify and restore while retired tables stay absent', async () => {
+  const source = new Store(url('source'));
+  const target = new Store(url('retired')); await target.init();
+  try {
+    const current = await createBackup(source.pool);
+    const observationId = id();
+    const retired = [
+      { name: 'merger_default_pin', rows: [{ id: true, pinned: false, at: current.takenAt }] },
+      { name: 'production_observations', rows: [{ id: observationId, provider: 'test', deployment_id: 'old-deploy', status: 'succeeded', kind: 'deployment', deployed_at: current.takenAt, observed_at: current.takenAt, deployed_at_repository: current.takenAt, deployed_at_repository_max: current.takenAt, clock_offset_min_ms: 0, clock_offset_max_ms: 0, commit_sha: sha, artifact_digest: null, source_url: 'https://example.test/deploy', producer: 'observer', document: {} }] },
+      { name: 'production_observation_merges', rows: [{ observation_id: observationId, merge_sha: sha, deployed_at: current.takenAt, status: 'succeeded', kind: 'deployment', deployed_at_repository: current.takenAt, deployed_at_repository_max: current.takenAt }] },
+    ];
+    const body = { ...current, schemaVersion: schemaVersion - 1, tables: [...current.tables, ...retired] };
+    const previous = { ...body, digest: backupDigest(body) };
+    assert.equal(verifyBackup(previous).schemaVersion, schemaVersion - 1);
+    const tampered = structuredClone(verifyBackup(previous));
+    tampered.tables.at(-1)!.rows[0].merge_sha = base;
+    assert.throws(() => verifyBackup(tampered), /digest does not match/);
+    assert.throws(() => verifyBackup({ ...previous, tables: [...previous.tables, { name: 'unknown_table', rows: [] }] }));
+    const result = await restoreBackup(target.pool, previous);
+    assert.deepEqual(result.tablesRetired, retired.map(table => table.name));
+    assert.deepEqual(await snapshot(target), await snapshot(source));
+    assert.deepEqual(await ledgerCounts(target.pool), await ledgerCounts(source.pool));
+    for (const table of retired) {
+      assert.equal((await target.pool.query('SELECT to_regclass($1) AS name', [table.name])).rows[0].name, null);
+    }
+    const exported = await createBackup(target.pool);
+    assert.ok(exported.tables.every(table => !result.tablesRetired.includes(table.name)));
+  } finally { await source.close(); await target.close(); }
 });

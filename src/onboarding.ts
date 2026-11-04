@@ -560,7 +560,7 @@ export function buildProposal(input: ScanInput, options: { repository?: string |
     environment: topology,
     policy: { checks: policyChecks, review: true, reviewProvider: 'github',
       evidenceExpectations: 'Automated proofs are submitted only by a trusted producer credential in protected CI, for the exact candidate SHA with executed > 0 and skipped = 0. Manual proofs are inspected and submitted by a separate operator session. Implementation workers never hold producer or admin credentials.' },
-    profiles: { workers, reviewer: { provider: 'github', note: 'Reviews are GitHub approvals on the pull request from a reviewer independent of the author; a hosted Codex reviewer can be selected later with reviewpolicy.' } },
+    profiles: { workers, reviewer: { provider: 'github', note: 'An independent reviewer session records its verdict on the submitted code.' } },
     githubApp: options.repository && /^[\w.-]+\/[\w.-]+$/.test(options.repository) ? { name: `Graphyard ${repository.replace('/', '-')}`, repository, flow: 'github-setup' } : null,
     delivery,
   });
