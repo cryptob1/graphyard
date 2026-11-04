@@ -216,3 +216,5 @@ Missing, stale, unrelated or wrong-policy approvals cannot certify a receipt.
 
 Controlled review fixtures use the same synthetic runtime for launch, pane inventory
 and cleanup; real runs still inspect and close their actual runtime handles.
+
+The fresh repository retains `scratch/hard-math` as its origin identity. A checkout-local SSH fetch transport serves the run’s bare Git repository, and a local push URL keeps merge-writer pushes there too. Native worker preparation and CLI worktree creation retain their repository identity checks; deterministic coverage exercises real claims and three distinct worktrees through that path.

@@ -4,7 +4,11 @@ import { readFile, mkdir, cp } from 'node:fs/promises';
 import { join } from 'node:path';
 import { trialContainerWords } from '../src/merge-writer/trial-container.js';
 import { trialEnvironment, trialHomeVariables } from '../src/merge-writer/trial.js';
-import { command } from '../benchmarks/hard-math/process.js';
+import { command, git } from '../benchmarks/hard-math/process.js';
+import { prepareWorkerLaunch } from '../src/master/dispatch.js';
+import { masterConfigSchema } from '../src/master.js';
+import { atomicPrivateWrite } from '../src/master/config.js';
+import { discover } from '../src/onboarding.js';
 import { temporaryDirectory } from './helpers/temp-dirs.js';
 import { generate, profile } from '../benchmarks/hard-math/generator.js';
 import { oracle, oracleDigest, oracleSource } from '../benchmarks/hard-math/oracle.js';
@@ -57,15 +61,46 @@ test('integration:hard-math-smoke — routing retains eligible models, capabilit
   assert.equal(selected.account?.name,'expensive');assert.ok(selected.skipped.some(s=>s.account==='affordable'));
 });
 
-async function runFixture(label:string,options:Parameters<typeof fixtureExecutor>[1]={},maxAgentSeconds=1000,mode:'team'|'single'='team') {
+async function runFixture(label:string,options:Parameters<typeof fixtureExecutor>[1]={},maxAgentSeconds=1000,mode:'team'|'single'='team',executor:Parameters<typeof execute>[1]=c=>fixtureExecutor(c,options)) {
   const testRoot=join(process.cwd(),'.graphyard','hard-math-fixtures');
   await mkdir(testRoot,{recursive:true});
   const parent=await temporaryDirectory(`hard-math-${label}`,testRoot);
   // Measured canonical trials take ~22s each: eight merges alone need ~175s.
   // Only controlled scheduling changes; frozen math and actual-agent limits are unchanged.
   const wallClockSeconds=options.injectRepair?300:90;
-  return execute({id:`fixture-${label}`,mode,profileVersion:'v1',seed:1,wallClockSeconds,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},c=>fixtureExecutor(c,options));
+  return execute({id:`fixture-${label}`,mode,profileVersion:'v1',seed:1,wallClockSeconds,budget:{authorization:'Controlled fixtures, no model calls or spending',maxAgentSeconds,maxTokens:null,maxCost:null,currency:'USD',priceSource:{url:null,date:null,reason:'No real model usage in controlled executor fixtures'}},eligibleModels:['fixture-cheap','fixture-expensive'],sourceRoot:process.cwd(),oraclePython:python,oracleDirectory:join(parent,'oracle'),runDirectory:join(parent,'run'),credentialDirectory:join(parent,'install')},executor);
 }
+
+test('integration:hard-math-smoke — fresh local remote supports native preparation and real CLI claims/worktrees', {timeout:120_000},async()=>{
+  let prepared=0;
+  const receipt=await runFixture('native-preparation',{},1000,'team',async c=>{
+    const config=masterConfigSchema.parse({version:1,url:c.plane.url,credentialFile:join(c.install,'benchmark-coordinator.token'),cliPath:join(c.config.sourceRoot,'bin/graphyard.mjs'),repository:'scratch/hard-math',baseBranch:'main',githubAppId:0,hostId:'scratch',masterAgentName:'fixture-master',herdrWorkspace:'fixture',
+      workers:c.workers.map(w=>({name:w.id,principal:w.id,agentName:w.id,mode:'launch',kind:'pi',credentialFile:join(c.install,`${w.id}.token`)}))});
+    await mkdir(join(c.root,'.graphyard'),{recursive:true});
+    await atomicPrivateWrite(join(c.root,'.graphyard/master.json'),config);
+    assert.equal((await discover(c.root)).repository,'scratch/hard-math');
+    await git(c.root,'remote','set-url','origin','git@github.com:scratch/wrong.git');
+    await assert.rejects(prepareWorkerLaunch(c.root,c.receipt.work[0].key,c.workers[0].id),/different repositories/);
+    await git(c.root,'remote','set-url','origin','git@github.com:scratch/hard-math.git');
+    const results=await Promise.all(c.receipt.work.slice(0,3).map(async(work,i)=>{
+      const result=await prepareWorkerLaunch(c.root,work.key,c.workers[i].id);
+      const record=await c.plane.call(`work/${work.id}`,c.coordinator);
+      assert.equal(record.lease.owner,c.workers[i].id);
+      assert.equal(record.epoch,result.epoch);
+      assert.ok(record.workspaces.some((w:any)=>w.path===result.path && w.branch===result.branch));
+      assert.equal(await git(result.path,'rev-parse','HEAD'),c.receipt.startingCommit);
+      assert.equal((await discover(result.path)).repository,'scratch/hard-math');
+      await git(result.path,'fetch','origin','main');
+      prepared++;
+      return result;
+    }));
+    assert.equal(new Set(results.map(r=>r.path)).size,3);
+    assert.equal(new Set(results.map(r=>r.branch)).size,3);
+    await c.snapshot();
+  });
+  assert.equal(prepared,3,JSON.stringify(receipt.failures));
+  assert.equal(receipt.outcome,'FAIL','preparation alone is not a delivered artifact');
+});
 
 test('integration:hard-math-smoke — real scratch Postgres/control plane and Git merge eight normal-risk components before native review dispatch/completion, reject an integration fault, repair and certify pushed CLI/API/UI', {timeout:330_000},async()=>{
   const receipt=await runFixture('repair',{injectRepair:true,nativePostMerge:true});

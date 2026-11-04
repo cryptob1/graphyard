@@ -9,6 +9,7 @@ import { trialEnvironment } from '../../src/merge-writer/trial.js';
 import { mergeWriterReads } from '../../src/daemon/cycle-merge-writer.js';
 import { defaultChildRun } from '../../src/child-runner.js';
 import { operatorCapabilities } from '../../src/model.js';
+import { shellQuote } from '../../src/install/transport.js';
 import { git, command } from './process.js';
 export const benchmarkRoot=fileURLToPath(new URL('.',import.meta.url));
 export const codeRoot=resolve(benchmarkRoot,'../..');
@@ -23,7 +24,15 @@ export async function isolatedRepository(directory:string,signal?:AbortSignal) {
   // Identical initial tree/commit in both comparison conditions.
   await git(root,'add','.');
   await command('git',['-C',root,'commit','-q','-m','Frozen exact roots workbench v1 seed'],{env:{...process.env,GIT_AUTHOR_DATE:'2000-01-01T00:00:00Z',GIT_COMMITTER_DATE:'2000-01-01T00:00:00Z'},signal});
-  await mkdir(origin);await git(origin,'init','--bare','-q','-b','main');await git(root,'remote','add','origin',origin);
+  await mkdir(origin);await git(origin,'init','--bare','-q','-b','main');
+  // Native preparation and the worker CLI both check the repository identity.
+  // Keep that identity while serving fetches and pushes from this run's bare Git.
+  const transport=join(directory,'local-git-fetch.sh');
+  await writeFile(transport,`#!/bin/sh\nexec git-upload-pack ${shellQuote(origin)}\n`,{mode:0o700});
+  await git(root,'remote','add','origin','git@github.com:scratch/hard-math.git');
+  await git(root,'config','core.sshCommand',shellQuote(transport));
+  await git(root,'config','ssh.variant','simple');
+  await git(root,'config','remote.origin.pushurl',origin);
   const writer=mergeWriterReads({baseBranch:'main',repository:'scratch/hard-math',run:masterRunSchema.parse({mergeWriter:{deployKeyFile:join(directory,'unused')}})},root,run,{base:directory,record:async()=>{}});
   const startingCommit=await git(root,'rev-parse','HEAD');await writer.push(startingCommit,'0'.repeat(40));await writer.fetch();
   return {root,origin,startingCommit};
